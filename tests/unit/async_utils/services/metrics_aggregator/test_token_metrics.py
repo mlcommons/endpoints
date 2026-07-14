@@ -30,10 +30,10 @@ from inference_endpoint.async_utils.services.metrics_aggregator import (
 from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
     BatchTokenizer,
     TokenBatchQueue,
-    _encode_batch_lengths,
     _even_chunks,
     _terminate_procs,
     _worker_encode_lengths,
+    encode_lengths,
 )
 
 _MOCK_TARGET = "inference_endpoint.async_utils.services.metrics_aggregator.token_metrics.AutoTokenizer"
@@ -238,11 +238,30 @@ class _SlowBackend:
 
 @pytest.mark.unit
 class TestEncodeHelpers:
-    def test_encode_batch_lengths_prefers_fast(self):
-        assert _encode_batch_lengths(_FastBackend(), ["a b", "c"]) == [2, 1]
+    def test_encode_lengths_prefers_fast(self):
+        assert encode_lengths(_FastBackend(), ["a b", "c"]) == [2, 1]
 
-    def test_encode_batch_lengths_falls_back_to_encode_batch(self):
-        assert _encode_batch_lengths(_SlowBackend(), ["a b c", "d"]) == [3, 1]
+    def test_encode_lengths_falls_back_to_encode_batch(self):
+        assert encode_lengths(_SlowBackend(), ["a b c", "d"]) == [3, 1]
+
+    def test_load_reference_backend_passes_trust_remote_code(self, monkeypatch):
+        # trust_remote_code must be forwarded so tokenizers that ship custom code
+        # (e.g. DeepSeek-R1) load instead of silently disabling OSL.
+        captured: dict = {}
+
+        class _FakeTok:
+            backend_tokenizer = "BACKEND"
+
+        class _FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name, **kwargs):
+                captured.update(name=name, kwargs=kwargs)
+                return _FakeTok()
+
+        monkeypatch.setattr(token_metrics_module, "AutoTokenizer", _FakeAutoTokenizer)
+        assert token_metrics_module.load_reference_backend("m") == "BACKEND"
+        assert captured["name"] == "m"
+        assert captured["kwargs"].get("trust_remote_code") is True
 
     def test_worker_encode_lengths_raises_without_backend(self, monkeypatch):
         monkeypatch.setattr(token_metrics_module, "_WORKER_BACKEND", None)

@@ -34,17 +34,20 @@ class AuditResult:
 
 
 def write_result(result: AuditResult, report_dir: Path) -> None:
-    """Atomically write audit_result.json and verify_<TEST>.txt to report_dir.
+    """Atomically write audit_<test_id>.json and verify_<TEST>.txt to report_dir.
+
+    The JSON record is named per the audit (e.g. ``audit_output_caching_test.json``)
+    to match the MLPerf endpoints submission layout (mlcommons/inference #2628).
 
     Each file is written atomically (tmp → fsync(file) → rename →
     fsync(parent_dir)). The durable JSON record is written *before* the
     validator-facing verify_<TEST>.txt, so a crash between the two can never
     leave a "Performance check pass" signal that a validator would accept
-    without the backing audit_result.json record.
+    without the backing audit_<test_id>.json record.
     """
     test_upper = result.test_id.upper()
     _atomic_write_text(
-        report_dir / "audit_result.json",
+        report_dir / f"audit_{result.test_id}.json",
         json.dumps(
             {"test": result.test_id, "passed": result.passed, **result.details},
             indent=2,

@@ -88,9 +88,9 @@ documented prominently in the dataset README.
 
 ## Integration Points
 
-| Component                          | Role                                                   |
-| ---------------------------------- | ------------------------------------------------------ |
-| `commands/benchmark/execute.py`    | Builds scorer/extractor configs and runs scoring       |
-| `dataset_manager/predefined/`      | Provides ground truth labels alongside prompts         |
-| `evaluation/livecodebench/`        | Provides external execution path for LiveCodeBench     |
-| `results.json` / benchmark reports | Receives computed accuracy summary during finalization |
+| Component                        | Role                                                   |
+| -------------------------------- | ------------------------------------------------------ |
+| `commands/benchmark/execute.py`  | Builds scorer/extractor configs and runs scoring       |
+| `dataset_manager/predefined/`    | Provides ground truth labels alongside prompts         |
+| `evaluation/livecodebench/`      | Provides external execution path for LiveCodeBench     |
+| `accuracy/accuracy_results.json` | Receives computed accuracy summary during finalization |

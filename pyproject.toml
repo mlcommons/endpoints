@@ -21,7 +21,9 @@ conflicts = [
 ]
 # CVE floors for transitive deps we don't declare directly. click is pulled in
 # via transformers -> typer; 8.3.2 carries PYSEC-2026-2132 (fixed in 8.3.3).
-constraint-dependencies = ["click>=8.3.3"]
+# setuptools is pulled in via pbr/torch; 82.0.1 carries PYSEC-2026-3447 (fixed
+# in 83.0.0).
+constraint-dependencies = ["click>=8.3.3", "setuptools>=83.0.0"]
 
 [tool.uv.build-backend]
 module-root = "src"

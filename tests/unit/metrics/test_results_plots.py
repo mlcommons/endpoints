@@ -32,8 +32,9 @@ def _accuracy_results() -> dict:
     # values are left as strings to exercise the extractor's defensive coercion
     # (older artifacts serialized percentages as strings).
     return {
-        "accuracy_scores": {
-            "bfcl_v4::function_calling": {
+        "accuracy_scores": [
+            {
+                "dataset_name": "bfcl_v4::function_calling",
                 "score": 0.8623,
                 "breakdown": {
                     "overall_accuracy": 86.23,
@@ -47,7 +48,7 @@ def _accuracy_results() -> dict:
                     "total_samples": 995,
                 },
             }
-        }
+        ]
     }
 
 
@@ -103,8 +104,77 @@ def test_extract_accuracy_coerces_strings():
 
 @pytest.mark.unit
 def test_extract_accuracy_returns_none_without_scores():
-    assert extract_accuracy({"accuracy_scores": {}}) is None
+    assert extract_accuracy({"accuracy_scores": []}) is None
     assert extract_accuracy({}) is None
+
+
+@pytest.mark.unit
+def test_extract_accuracy_non_bfcl_breakdown_falls_back_to_overall():
+    """DeepSeek breakdowns carry neither the overall nor the normalized single-turn
+    score; extract_accuracy sources the headline from the entry's ``score`` and
+    falls back to it for ``normalized`` so they still plot."""
+    results = {
+        "accuracy_scores": [
+            {
+                "dataset_name": "dsr1",
+                "score": 83.0,
+                "breakdown": {
+                    "subset_scores": {"aime25": 80.0, "livecodebench": 60.0},
+                    "total_samples": 1283,
+                },
+            }
+        ]
+    }
+    b = extract_accuracy(results)
+    assert b is not None
+    assert b.overall == pytest.approx(83.0)  # from the entry's scalar score
+    assert b.normalized == pytest.approx(83.0)  # fell back to overall
+    assert b.subset_scores["aime25"] == pytest.approx(80.0)
+
+
+@pytest.mark.unit
+def test_extract_accuracy_scalar_fallback_when_no_breakdown():
+    """gpt-oss runs three single-metric datasets with no breakdown; without the
+    scalar fallback the plot is empty. One bar per dataset, overall = mean."""
+    results = {
+        "accuracy_scores": [
+            {"dataset_name": "aime25::gptoss", "score": 0.8, "total_samples": 30},
+            {"dataset_name": "gpqa::gptoss", "score": 0.9, "total_samples": 198},
+            {"dataset_name": "lcb::gptoss", "score": 0.7, "total_samples": 100},
+            {
+                "dataset_name": "perf",
+                "score": 0.0,
+                "dataset_type": "performance",
+            },  # excl
+        ]
+    }
+    b = extract_accuracy(results)
+    assert b is not None
+    # Fraction scores are scaled to the plot's 0-100 percentage axis.
+    assert b.subset_scores == {
+        "aime25::gptoss": pytest.approx(80.0),
+        "gpqa::gptoss": pytest.approx(90.0),
+        "lcb::gptoss": pytest.approx(70.0),
+    }
+    assert b.overall == pytest.approx((80.0 + 90.0 + 70.0) / 3)
+    assert b.total_samples == 328  # perf entry excluded
+
+
+@pytest.mark.unit
+def test_extract_accuracy_scalar_fallback_none_cases():
+    # accuracy_scores not a list -> None.
+    assert extract_accuracy({"accuracy_scores": "nope"}) is None
+    # Only a perf entry (no accuracy component) -> None.
+    assert (
+        extract_accuracy(
+            {
+                "accuracy_scores": [
+                    {"dataset_name": "p", "score": 0.0, "dataset_type": "performance"}
+                ]
+            }
+        )
+        is None
+    )
 
 
 @pytest.mark.unit
@@ -136,9 +206,15 @@ def test_extract_distribution_skips_empty_blocks():
 
 @pytest.mark.unit
 def test_load_run_assembles_artifacts(tmp_path):
-    (tmp_path / "results.json").write_text(json.dumps(_accuracy_results()))
+    (tmp_path / "accuracy").mkdir(exist_ok=True)
+    (tmp_path / "accuracy" / "accuracy_results.json").write_text(
+        json.dumps(_accuracy_results())
+    )
     (tmp_path / "scores.json").write_text(json.dumps(_perf_scores()))
-    (tmp_path / "result_summary.json").write_text(json.dumps(_result_summary()))
+    (tmp_path / "performance").mkdir(exist_ok=True)
+    (tmp_path / "performance" / "result_summary.json").write_text(
+        json.dumps(_result_summary())
+    )
 
     run = load_run(tmp_path)
     assert run.accuracy is not None
@@ -179,9 +255,15 @@ def test_plot_distribution_tolerates_bucket_count_mismatch(tmp_path, buckets, co
 @pytest.mark.unit
 def test_generate_plots_writes_pngs(tmp_path):
     pytest.importorskip("matplotlib")
-    (tmp_path / "results.json").write_text(json.dumps(_accuracy_results()))
+    (tmp_path / "accuracy").mkdir(exist_ok=True)
+    (tmp_path / "accuracy" / "accuracy_results.json").write_text(
+        json.dumps(_accuracy_results())
+    )
     (tmp_path / "scores.json").write_text(json.dumps(_perf_scores()))
-    (tmp_path / "result_summary.json").write_text(json.dumps(_result_summary()))
+    (tmp_path / "performance").mkdir(exist_ok=True)
+    (tmp_path / "performance" / "result_summary.json").write_text(
+        json.dumps(_result_summary())
+    )
 
     written = generate_plots(tmp_path)
     names = {p.name for p in written}

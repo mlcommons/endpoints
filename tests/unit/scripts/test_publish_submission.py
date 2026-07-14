@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -64,6 +65,44 @@ class TestPercentile:
         assert ps._percentile(None, "99.0") is None
 
 
+class TestVerifyAccuracy:
+    def test_empty_scores_reports_missing(self, tmp_path):
+        ps = _load_publish_submission()
+        run = tmp_path / "acc_run"
+        (run / "accuracy").mkdir(parents=True)
+        (run / "accuracy" / "accuracy_results.json").write_text("{}", encoding="utf-8")
+        findings = ps._verify_accuracy(run)
+        assert any("MISSING" in f for f in findings)
+
+    def test_populated_list_shape_reports_score_and_breakdown(self, tmp_path):
+        """A populated list-shaped accuracy_scores must yield score/overall_accuracy
+        findings without raising (the list shape has no ``.items()``)."""
+        ps = _load_publish_submission()
+        run = tmp_path / "acc_run"
+        (run / "accuracy").mkdir(parents=True)
+        results = {
+            "accuracy_scores": [
+                {
+                    "dataset_name": "bfcl_v4::multi_turn",
+                    "score": 0.83,
+                    "breakdown": {"overall_accuracy": "83.00"},
+                }
+            ]
+        }
+        (run / "accuracy" / "accuracy_results.json").write_text(
+            json.dumps(results), encoding="utf-8"
+        )
+        findings = ps._verify_accuracy(run)
+        assert any(
+            "accuracy_scores[bfcl_v4::multi_turn].score = 0.83" in f for f in findings
+        )
+        assert any(
+            "accuracy_scores[bfcl_v4::multi_turn].breakdown.overall_accuracy = 83.00"
+            in f
+            for f in findings
+        )
+
+
 class TestMainExitCode:
     def _run(self, argv):
         ps = _load_publish_submission()
@@ -95,9 +134,14 @@ class TestMainExitCode:
         assert rc == 1
 
     def test_run_with_artifact_returns_zero(self, tmp_path):
+        # A combined --run is verified as BOTH a perf and an accuracy run, so it
+        # needs a perf artifact (result_summary.json) and an accuracy artifact
+        # (accuracy/accuracy_results.json) for the tree to be complete.
         run = tmp_path / "good_run"
-        run.mkdir()
-        (run / "results.json").write_text("{}", encoding="utf-8")
+        (run / "performance").mkdir(parents=True)
+        (run / "performance" / "result_summary.json").write_text("{}", encoding="utf-8")
+        (run / "accuracy").mkdir(parents=True)
+        (run / "accuracy" / "accuracy_results.json").write_text("{}", encoding="utf-8")
         rc = self._run(
             [
                 "--run",

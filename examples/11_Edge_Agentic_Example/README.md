@@ -241,30 +241,26 @@ Results are written to `results/bfcl_v4_multi_turn/`.
 # Single-turn overall accuracy
 python3 -c "
 import json, pathlib
-r = json.loads(pathlib.Path('results/edge_agentic_full_run/results.json').read_text())
-print('Overall ST accuracy:',
-      r['accuracy_scores']['bfcl_v4::function_calling']['breakdown']['overall_accuracy'], '%')
+r = json.loads(pathlib.Path('results/edge_agentic_full_run/accuracy/accuracy_results.json').read_text())
+e = next(x for x in r['accuracy_scores'] if x['dataset_name'] == 'bfcl_v4::function_calling')
+print('Overall ST accuracy:', e['breakdown']['overall_accuracy'], '%')
 "
 
 # Multi-turn overall accuracy (only if you ran the optional Step 3)
 python3 -c "
 import json, pathlib
-r = json.loads(pathlib.Path('results/bfcl_v4_multi_turn/results.json').read_text())
-print('Overall MT accuracy:',
-      r['accuracy_scores']['bfcl_v4::multi_turn']['score']['overall_accuracy'], '%')
+r = json.loads(pathlib.Path('results/bfcl_v4_multi_turn/accuracy/accuracy_results.json').read_text())
+e = next(x for x in r['accuracy_scores'] if x['dataset_name'] == 'bfcl_v4::multi_turn')
+print('Overall MT accuracy:', e['breakdown']['overall_accuracy'], '%')
 "
 ```
 
-> Note: the single-turn pipeline writes `results.json` (accuracy nested under
-> `accuracy_scores['bfcl_v4::function_calling']`). There is no separate
-> `accuracy_scores.json`. A human-readable summary is also written to
+> Note: accuracy is written to `accuracy/accuracy_results.json`, whose
+> `accuracy_scores` is a **list** of per-dataset entries — index it by
+> `dataset_name` (as above). Each entry has a scalar `score` and, for
+> multi-subset scorers, a `breakdown` block with per-subset detail. A
+> human-readable summary is also written to
 > `results/edge_agentic_full_run/report.txt`.
->
-> Result shape differs between the two pipelines: the **single-turn** entry
-> stores `score` as a scalar fraction (0–1) with the per-subset dict under a
-> separate `breakdown` key (hence `['breakdown']['overall_accuracy']` above),
-> whereas the **multi-turn** CLI writes `score` as a dict (hence
-> `['score']['overall_accuracy']` in the multi-turn snippet).
 
 ---
 
@@ -325,26 +321,27 @@ print('Inline accuracy score:', s['score'], '| valid run:', missing == 0, '| mis
 # BFCL v4 single-turn accuracy (the gated metric)
 python3 -c "
 import json, pathlib
-r = json.loads(pathlib.Path('results/edge_agentic_full_run/results.json').read_text())
-print('Overall ST accuracy:',
-      r['accuracy_scores']['bfcl_v4::function_calling']['breakdown']['overall_accuracy'], '%')
+r = json.loads(pathlib.Path('results/edge_agentic_full_run/accuracy/accuracy_results.json').read_text())
+e = next(x for x in r['accuracy_scores'] if x['dataset_name'] == 'bfcl_v4::function_calling')
+print('Overall ST accuracy:', e['breakdown']['overall_accuracy'], '%')
 "
 ```
 
 Both scores land in `results/edge_agentic_full_run/`: the BFCL gate under
-`results.json` (`accuracy_scores['bfcl_v4::function_calling']`) and the inline
-performance checker in `scores.json`, alongside the performance metrics
-(throughput, TTFT, TPOT, per-turn latency, ISL/OSL).
+`accuracy/accuracy_results.json` (the `bfcl_v4::function_calling` entry in the
+`accuracy_scores` list) and the inline performance checker in `scores.json`,
+alongside the performance metrics (throughput, TTFT, TPOT, per-turn latency,
+ISL/OSL) in `performance/result_summary.json`.
 
 ### Publish for the MLPerf submission checker
 
 The MLPerf Inference submission checker (`tools/submission/submission_checker`
 in `mlcommons/inference`, v5.0+) reads endpoints results directly from the
-artifacts a run already writes — `result_summary.json`, `results.json`, and
-`config.yaml` — so no separate "log" format is needed. `scripts/publish_submission.py`
-copies that trio into the directory layout the checker walks and self-verifies
-the fields it reads (primary-metric QPS, p99 latency, TTFT/TPOT p99, and the
-accuracy score):
+artifacts a run already writes — `performance/result_summary.json`,
+`accuracy/accuracy_results.json`, and `config.yaml` — so no separate "log" format
+is needed. `scripts/publish_submission.py` copies those into the directory layout
+the checker walks and self-verifies the fields it reads (primary-metric QPS, p99
+latency, TTFT/TPOT p99, and the accuracy score):
 
 ```bash
 python scripts/publish_submission.py \
