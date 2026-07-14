@@ -34,6 +34,7 @@ from inference_endpoint.evaluation import scoring as scoring_mod
 from inference_endpoint.evaluation.scoring import (
     _PRED_CATEGORY_PAD,
     AgenticInferenceInlineScorer,
+    PassAt1Scorer,
     Scorer,
     ShopifyCategoryF1Scorer,
     VBenchScorer,
@@ -1013,3 +1014,69 @@ class TestVBenchScorer:
             ground_truth_column="prompt",
         )
         assert scorer.vbench_project_path == env_project
+
+
+@pytest.mark.unit
+class TestGetRawOutputs:
+    @staticmethod
+    def _write_events(report_dir: Path, records: list[EventRecord]) -> None:
+        report_dir.mkdir(parents=True, exist_ok=True)
+        encoder = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+        with (report_dir / "events.jsonl").open("wb") as f:
+            for record in records:
+                f.write(encoder.encode(record) + b"\n")
+
+    def _scorer(self, report_dir: Path) -> Scorer:
+        # get_raw_outputs is the base-class read; use an already-registered
+        # concrete scorer so the test does not add a class to Scorer.PREDEFINED.
+        # Bypass __init__ — get_raw_outputs only reads self.report_dir.
+        scorer = object.__new__(PassAt1Scorer)
+        scorer.report_dir = report_dir
+        return scorer
+
+    def test_wanted_uuids_bounds_the_frame(self, tmp_path):
+        self._write_events(
+            tmp_path,
+            [
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="u1",
+                    data=TextModelOutput(output="a b"),
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="u2",
+                    data=TextModelOutput(output="c"),
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="u3",
+                    data=TextModelOutput(output="d e f"),
+                ),
+            ],
+        )
+        scorer = self._scorer(tmp_path)
+        # Unbounded read returns every COMPLETE row.
+        assert set(scorer.get_raw_outputs()["sample_uuid"]) == {"u1", "u2", "u3"}
+        # wanted_uuids filters the frame to the requested population only.
+        bounded = scorer.get_raw_outputs({"u1", "u3"})
+        assert set(bounded["sample_uuid"]) == {"u1", "u3"}
+        assert set(bounded["output"]) == {"a b", "d e f"}
+
+    def test_empty_filter_returns_columned_frame(self, tmp_path):
+        # Filtering out every uuid must still yield a frame WITH the expected
+        # columns (not a column-less pd.DataFrame([])), so callers can index
+        # "sample_uuid"/"output" without a KeyError.
+        self._write_events(
+            tmp_path,
+            [
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="u1",
+                    data=TextModelOutput(output="a b"),
+                ),
+            ],
+        )
+        frame = self._scorer(tmp_path).get_raw_outputs({"absent"})
+        assert frame.empty
+        assert list(frame.columns) == ["sample_uuid", "output"]

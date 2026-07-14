@@ -20,10 +20,11 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
+import msgspec.json
 import pytest
 from inference_endpoint.commands.benchmark.execute import (
     AccuracyConfiguration,
-    _load_osl_tokenizer,
+    _accuracy_uuid_bound,
     _phase_osl_stats,
     _phase_response_counts,
     _score_accuracy,
@@ -31,9 +32,9 @@ from inference_endpoint.commands.benchmark.execute import (
 from inference_endpoint.config.schema import DatasetType
 
 # Module object for the tests that monkeypatch execute's own module-level symbols
-# (_load_osl_tokenizer / AutoTokenizer) so _score_accuracy resolves the patched
-# one. Taken from sys.modules to avoid importing execute under both the
-# ``from ... import`` and ``import ...`` styles.
+# (load_reference_backend) so _score_accuracy resolves the patched one. Taken from
+# sys.modules to avoid importing execute under both the ``from ... import`` and
+# ``import ...`` styles.
 execute_mod = sys.modules[_score_accuracy.__module__]
 
 
@@ -71,14 +72,14 @@ class _FakeBreakdownScorer(_FakeScorer):
 
 
 class _FakeOSLScorer(_FakeScorer):
-    """Scorer exposing the get_outputs()/sample_index_map the OSL path reads."""
+    """Scorer exposing the get_raw_outputs()/sample_index_map the OSL path reads."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Two completed samples: outputs of 2 and 4 "tokens" (words).
         self.sample_index_map = {"u1": 0, "u2": 1}
 
-    def get_outputs(self):
+    def get_raw_outputs(self, wanted_uuids=None):
         import pandas as pd
 
         return pd.DataFrame(
@@ -93,7 +94,7 @@ class _FakeOSLScorer(_FakeScorer):
 class _EmptyOSLScorer(_FakeOSLScorer):
     """Every completion empty (all requests failed): OSL yields None."""
 
-    def get_outputs(self):
+    def get_raw_outputs(self, wanted_uuids=None):
         import pandas as pd
 
         return pd.DataFrame(
@@ -111,7 +112,7 @@ class _MixedOSLScorer(_FakeOSLScorer):
         super().__init__(*args, **kwargs)
         self.sample_index_map = {"u1": 0, "u2": 1, "u3": 2}
 
-    def get_outputs(self):
+    def get_raw_outputs(self, wanted_uuids=None):
         import pandas as pd
 
         return pd.DataFrame(
@@ -121,6 +122,20 @@ class _MixedOSLScorer(_FakeOSLScorer):
                 # u3 has no COMPLETE row -> missing
             ]
         )
+
+
+class _AllMissingScorer(_FakeOSLScorer):
+    """No COMPLETE rows for this phase: get_raw_outputs returns an empty but
+    columned frame, as the real scorer does when the bound filters everything."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sample_index_map = {"u1": 0, "u2": 1, "u3": 2}
+
+    def get_raw_outputs(self, wanted_uuids=None):
+        import pandas as pd
+
+        return pd.DataFrame([], columns=["sample_uuid", "output"])
 
 
 def _cfg(name: str, n: int, score: float, tmp, scorer=_FakeScorer, repeats: int = 1):
@@ -143,18 +158,19 @@ def _by_name(scores: list[dict]) -> dict[str, dict]:
     return {e["dataset_name"]: e for e in scores}
 
 
-def _ctx(cfgs, tokenizer_name=None):
-    # tokenizer_name None => OSL is skipped (the fake scorers have no get_outputs).
-    return SimpleNamespace(eval_configs=cfgs, tokenizer_name=tokenizer_name)
+def _ctx(cfgs, tokenizer_name=None, report_dir=None):
+    # tokenizer_name None => OSL is skipped (fake scorers have no get_raw_outputs).
+    # report_dir None => the uuid bound falls back to an unbounded read (no map).
+    return SimpleNamespace(
+        eval_configs=cfgs, tokenizer_name=tokenizer_name, report_dir=report_dir
+    )
 
 
-class _WordTokenizer:
-    """Stand-in tokenizer: one token per whitespace-delimited word."""
+class _WordBackend:
+    """Stand-in tokenizers backend: one token per whitespace-delimited word."""
 
-    model_max_length = 0
-
-    def __call__(self, texts, add_special_tokens=False):
-        return {"input_ids": [t.split() for t in texts]}
+    def encode_batch(self, texts, add_special_tokens=False):
+        return [SimpleNamespace(ids=t.split()) for t in texts]
 
 
 _RESULT = SimpleNamespace(perf_results=[], phase_results=[])
@@ -221,7 +237,7 @@ class TestScoreAccuracy:
 
     def test_no_osl_without_tokenizer(self, tmp_path):
         # tokenizer_name None (the default) => no output_sequence_lengths attached,
-        # and the OSL path is never entered (fake scorers have no get_outputs).
+        # and the OSL path is never entered (fake scorers have no get_raw_outputs).
         cfg = _cfg("aime25::gptoss", 30, 0.8, tmp_path)
         entry = _by_name(_score_accuracy(_ctx([cfg]), _RESULT))["aime25::gptoss"]
         assert "output_sequence_lengths" not in entry
@@ -230,7 +246,7 @@ class TestScoreAccuracy:
         """With a tokenizer, each accuracy entry gets an output_sequence_lengths
         block (same shape as the perf report) from the phase's completions."""
         monkeypatch.setattr(
-            execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
+            execute_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
@@ -249,7 +265,7 @@ class TestScoreAccuracy:
 
     def test_osl_skipped_for_performance_entry(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
+            execute_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("performance", 2, 0.6, tmp_path, scorer=_FakeOSLScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
@@ -257,14 +273,14 @@ class TestScoreAccuracy:
         ]
         assert "output_sequence_lengths" not in entry
 
-    def test_osl_dropped_when_get_outputs_raises(self, tmp_path, monkeypatch):
+    def test_osl_dropped_when_get_raw_outputs_raises(self, tmp_path, monkeypatch):
         """A read/tokenize failure only drops OSL — scoring still succeeds."""
         monkeypatch.setattr(
-            execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
+            execute_mod, "load_reference_backend", lambda name: _WordBackend()
         )
 
         class _RaisingScorer(_FakeOSLScorer):
-            def get_outputs(self):
+            def get_raw_outputs(self, wanted_uuids=None):
                 raise RuntimeError("events.jsonl unreadable")
 
         cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_RaisingScorer)
@@ -292,7 +308,7 @@ class TestScoreAccuracy:
         """Masking regression: every response empty => OSL returns None, but
         response_counts must still publish scored=0 rather than omitting all."""
         monkeypatch.setattr(
-            execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
+            execute_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_EmptyOSLScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
@@ -310,7 +326,7 @@ class TestScoreAccuracy:
         """scored/empty/missing partition the issued samples; OSL tokenizes only
         the one scored (non-empty) response."""
         monkeypatch.setattr(
-            execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
+            execute_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_MixedOSLScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
@@ -329,40 +345,108 @@ class TestScoreAccuracy:
         entry = _by_name(_score_accuracy(_ctx([cfg]), _RESULT))["performance"]
         assert "response_counts" not in entry
 
+    def test_all_missing_still_publishes_response_counts(self, tmp_path, monkeypatch):
+        """An accuracy phase with no COMPLETE rows (empty, columned frame) must
+        still publish response_counts (all missing) rather than dropping them."""
+        monkeypatch.setattr(
+            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+        )
+        cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_AllMissingScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+            "ds"
+        ]
+        assert entry["response_counts"] == {
+            "issued": 3,
+            "scored": 0,
+            "empty": 0,
+            "missing": 3,
+        }
+        assert "output_sequence_lengths" not in entry  # nothing to tokenize
+
+    def test_no_fast_backend_disables_osl_keeps_counts(self, tmp_path, monkeypatch):
+        """A tokenizer with no fast backend (load_reference_backend -> None) skips
+        OSL but still publishes response_counts."""
+        monkeypatch.setattr(execute_mod, "load_reference_backend", lambda name: None)
+        cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+            "aime25::gptoss"
+        ]
+        assert "output_sequence_lengths" not in entry
+        assert entry["response_counts"]["scored"] == 2
+
+    def test_tokenizer_load_failure_disables_osl_not_scoring(
+        self, tmp_path, monkeypatch
+    ):
+        """A tokenizer load exception disables OSL but never fails scoring."""
+
+        def _boom(name):
+            raise OSError("no tokenizer")
+
+        monkeypatch.setattr(execute_mod, "load_reference_backend", _boom)
+        cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+            "aime25::gptoss"
+        ]
+        assert "output_sequence_lengths" not in entry
+        assert entry["response_counts"]["scored"] == 2
+        assert entry["score"] == pytest.approx(0.8)
+
+    def test_uuid_bound_passed_to_get_raw_outputs(self, tmp_path, monkeypatch):
+        """End-to-end: _score_accuracy computes the accuracy uuid bound from
+        sample_idx_map.json and passes it into get_raw_outputs."""
+        monkeypatch.setattr(
+            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+        )
+        (tmp_path / "sample_idx_map.json").write_bytes(
+            msgspec.json.encode({"aime25::gptoss": {"u1": 0, "u2": 1}})
+        )
+        captured: dict = {}
+
+        class _CaptureScorer(_FakeOSLScorer):
+            def get_raw_outputs(self, wanted_uuids=None):
+                captured["wanted"] = wanted_uuids
+                return super().get_raw_outputs(wanted_uuids)
+
+        cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_CaptureScorer)
+        _score_accuracy(
+            _ctx([cfg], tokenizer_name="fake", report_dir=tmp_path), _RESULT
+        )
+        assert captured["wanted"] == {"u1", "u2"}
+
 
 @pytest.mark.unit
 class TestPhaseOslStats:
     def test_returns_perf_shaped_block(self):
         uuid_to_text = {"a": "x y z", "b": "x", "c": "not in phase"}
-        block = _phase_osl_stats(["a", "b", "missing"], uuid_to_text, _WordTokenizer())
+        block = _phase_osl_stats(["a", "b", "missing"], uuid_to_text, _WordBackend())
         assert block["avg"] == 2.0
         assert block["min"] == 1
         assert block["max"] == 3
         assert block["total"] == 4  # 3 + 1 tokens
 
-    def test_batching_over_256(self):
-        # >256 texts exercises the multi-batch tokenization loop; all are counted.
+    def test_counts_large_population(self):
+        # >256 texts exercises the batched encode loop; all are counted.
         uuid_to_text = {str(i): "w" for i in range(300)}  # 1 token each
         block = _phase_osl_stats(
-            [str(i) for i in range(300)], uuid_to_text, _WordTokenizer()
+            [str(i) for i in range(300)], uuid_to_text, _WordBackend()
         )
         assert block["total"] == 300
         assert block["avg"] == 1.0
 
     def test_none_when_no_matching_outputs(self):
-        assert _phase_osl_stats([], {}, _WordTokenizer()) is None
-        assert _phase_osl_stats(["x"], {"y": "a b"}, _WordTokenizer()) is None
+        assert _phase_osl_stats([], {}, _WordBackend()) is None
+        assert _phase_osl_stats(["x"], {"y": "a b"}, _WordBackend()) is None
 
     def test_skips_empty_outputs(self):
         # A failed/empty completion (output == "") is excluded, matching the
         # perf-side OslTrigger — it is not counted as a 0-token sample.
-        block = _phase_osl_stats(["a", "b"], {"a": "", "b": "x y"}, _WordTokenizer())
+        block = _phase_osl_stats(["a", "b"], {"a": "", "b": "x y"}, _WordBackend())
         assert block["total"] == 2  # only "x y" counted
         assert block["min"] == 2
         assert block["avg"] == 2.0
 
     def test_none_when_all_outputs_empty(self):
-        assert _phase_osl_stats(["a"], {"a": ""}, _WordTokenizer()) is None
+        assert _phase_osl_stats(["a"], {"a": ""}, _WordBackend()) is None
 
 
 @pytest.mark.unit
@@ -393,39 +477,70 @@ class TestPhaseResponseCounts:
         uuid_to_text = {"a": "x y", "b": "", "c": "z"}
         uuids = ["a", "b", "c", "missing"]
         counts = _phase_response_counts(uuids, uuid_to_text)
-        osl = _phase_osl_stats(uuids, uuid_to_text, _WordTokenizer())
+        osl = _phase_osl_stats(uuids, uuid_to_text, _WordBackend())
         assert counts["scored"] == 2  # "a" and "c"
         assert osl is not None  # a non-empty population exists
 
 
 @pytest.mark.unit
-class TestLoadOslTokenizer:
-    def test_none_name_returns_none(self):
-        assert _load_osl_tokenizer(None) is None
+class TestAccuracyUuidBound:
+    def test_unions_accuracy_datasets_only(self, tmp_path):
+        (tmp_path / "sample_idx_map.json").write_bytes(
+            msgspec.json.encode(
+                {
+                    "aime25::gptoss": {"u1": 0, "u2": 1},
+                    "gpqa::gptoss": {"u3": 0},
+                    "performance": {"p1": 0},  # perf entry excluded from the bound
+                }
+            )
+        )
+        cfgs = [
+            _cfg("aime25::gptoss", 2, 0.8, tmp_path),
+            _cfg("gpqa::gptoss", 1, 0.9, tmp_path),
+            _cfg("performance", 1, 0.6, tmp_path),
+        ]
+        assert _accuracy_uuid_bound(tmp_path, cfgs) == {"u1", "u2", "u3"}
 
-    def test_load_failure_returns_none(self, monkeypatch):
-        class _BoomAutoTokenizer:
-            @staticmethod
-            def from_pretrained(name):
-                raise OSError("no such tokenizer")
+    def test_none_report_dir_returns_empty_without_warning(self, caplog):
+        with caplog.at_level("WARNING"):
+            assert _accuracy_uuid_bound(None, []) == set()
+        assert "uuid bound unavailable" not in caplog.text
 
-        monkeypatch.setattr(execute_mod, "AutoTokenizer", _BoomAutoTokenizer)
-        assert _load_osl_tokenizer("bad/model") is None
+    def test_missing_map_warns_and_falls_back(self, tmp_path, caplog):
+        with caplog.at_level("WARNING"):
+            assert (
+                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) == set()
+            )
+        assert "uuid bound unavailable" in caplog.text
 
-    def test_success_raises_model_max_length(self, monkeypatch):
-        class _FakeTok:
-            model_max_length = 5
+    def test_corrupt_map_warns_and_falls_back(self, tmp_path, caplog):
+        (tmp_path / "sample_idx_map.json").write_text("{not valid json")
+        with caplog.at_level("WARNING"):
+            assert (
+                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) == set()
+            )
+        assert "uuid bound unavailable" in caplog.text
 
-        class _FakeAutoTokenizer:
-            @staticmethod
-            def from_pretrained(name):
-                return _FakeTok()
+    def test_non_dict_map_warns_and_falls_back(self, tmp_path, caplog):
+        # Valid JSON of the wrong shape (a list) must not raise out of finalize.
+        (tmp_path / "sample_idx_map.json").write_bytes(msgspec.json.encode(["nope"]))
+        with caplog.at_level("WARNING"):
+            assert (
+                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) == set()
+            )
+        assert "not an object" in caplog.text
 
-        monkeypatch.setattr(execute_mod, "AutoTokenizer", _FakeAutoTokenizer)
-        tok = _load_osl_tokenizer("some/model")
-        # Cap raised so counting long outputs can't trip the length warning.
-        assert tok.model_max_length == int(1e12)
+    def test_non_dict_dataset_value_is_skipped(self, tmp_path):
+        # A dataset whose value is not an object (null) is skipped, not crashed on.
+        (tmp_path / "sample_idx_map.json").write_bytes(
+            msgspec.json.encode({"ds": None, "other": {"u1": 0}})
+        )
+        cfgs = [_cfg("ds", 1, 0.8, tmp_path), _cfg("other", 1, 0.9, tmp_path)]
+        assert _accuracy_uuid_bound(tmp_path, cfgs) == {"u1"}
 
+
+@pytest.mark.unit
+class TestPhaseDuration:
     def test_accuracy_entry_has_phase_duration(self, tmp_path):
         """Each entry carries its issue phase's wall-clock (seconds), matched by
         phase name == dataset_name."""

@@ -47,7 +47,6 @@ import msgspec.json
 import msgspec.structs
 from huggingface_hub import model_info
 from tqdm import tqdm
-from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -61,6 +60,10 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.subscriber import (
     MetricsSnapshotSubscriber,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
+    encode_lengths,
+    load_reference_backend,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.compliance import AuditRunSpec
@@ -1240,45 +1243,24 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         logger.debug(f"Copied {src_events} -> {dst_events}")
 
 
-def _load_osl_tokenizer(name: str | None) -> Any | None:
-    """Load the run's tokenizer for accuracy-phase OSL, or ``None`` to skip it.
-
-    OSL is a reporting nicety, so a missing or unloadable tokenizer disables it
-    rather than failing scoring — mirroring the aggregator's no-tokenizer ⇒ no
-    OSL behavior on the perf side.
-    """
-    if name is None:
-        return None
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(name)
-    except Exception as e:  # noqa: BLE001 - OSL is optional; never fail scoring
-        logger.warning(
-            "Accuracy OSL disabled: could not load tokenizer %r: %s", name, e
-        )
-        return None
-    # Counting tokens on long outputs would otherwise spam the
-    # "sequence longer than model_max_length" warning; raise the cap so it can't.
-    tokenizer.model_max_length = int(1e12)
-    return tokenizer
-
-
 def _phase_osl_stats(
     sample_uuids: Iterable[str],
     uuid_to_text: dict[str, str],
-    tokenizer: Any,
+    backend: Any,
     batch_size: int = 256,
 ) -> dict[str, Any] | None:
     """Output-token-length rollup over one accuracy phase's completions.
 
-    Re-tokenizes each sample's response text — the server's ``completion_tokens``
-    is not persisted, only the text is (in ``events.jsonl``) — then shapes the
-    lengths via ``series_metric_dict`` so the block matches the perf report's
+    Counts tokens on each sample's response text via the shared reference
+    tokenizer backend — the server's ``completion_tokens`` is not persisted, only
+    the text is (in ``events.jsonl``) — then shapes the lengths via
+    ``series_metric_dict`` so the block matches the perf report's
     ``output_sequence_lengths`` exactly. Returns ``None`` when the phase has no
     completed outputs.
 
-    ``batch_size`` bounds the memory of one batched tokenization pass over
-    accuracy outputs, which can be tens of thousands of tokens each (e.g.
-    gpt-oss lcb at 32768).
+    ``batch_size`` bounds each ``encode_batch`` pass: accuracy outputs can be tens
+    of thousands of tokens each (e.g. gpt-oss lcb at 32768), so counting the whole
+    population in one call would hold every Encoding in memory at once.
     """
     # Skip empty/failed completions (a failed request still logs a COMPLETE
     # event with output == ""). The perf-side OslTrigger does the same
@@ -1292,8 +1274,7 @@ def _phase_osl_stats(
         return None
     lengths: list[int] = []
     for i in range(0, len(texts), batch_size):
-        encoded = tokenizer(texts[i : i + batch_size], add_special_tokens=False)
-        lengths.extend(len(ids) for ids in encoded["input_ids"])
+        lengths.extend(encode_lengths(backend, texts[i : i + batch_size]))
     return series_metric_dict(lengths) or None
 
 
@@ -1326,6 +1307,43 @@ def _phase_response_counts(
     return {"issued": issued, "scored": scored, "empty": empty, "missing": missing}
 
 
+def _accuracy_uuid_bound(
+    report_dir: Path | None, eval_configs: list[AccuracyConfiguration]
+) -> set[str]:
+    """Union of the accuracy datasets' issued uuids from ``sample_idx_map.json``.
+
+    Bounds the finalize-side raw-output read to the accuracy population so it
+    never holds the whole run's (incl. perf) response-text corpus. Returns an
+    empty set (⇒ caller reads unbounded) when there is no report dir; a missing,
+    corrupt, or wrong-shape map is warned and also falls back to unbounded.
+    """
+    if report_dir is None:
+        return set()
+    try:
+        idx_map = msgspec.json.decode((report_dir / "sample_idx_map.json").read_bytes())
+    except (OSError, msgspec.DecodeError) as e:
+        logger.warning(
+            "Accuracy OSL uuid bound unavailable (%s); reading outputs unbounded", e
+        )
+        return set()
+    # A syntactically-valid map of the wrong shape must not crash finalize: this
+    # runs outside the per-dataset try, so a raised AttributeError/TypeError would
+    # fail scoring (OSL must never do that). Skip anything not dict-shaped.
+    if not isinstance(idx_map, dict):
+        logger.warning(
+            "Accuracy OSL uuid bound: sample_idx_map.json is not an object; "
+            "reading outputs unbounded"
+        )
+        return set()
+    bound: set[str] = set()
+    for ec in eval_configs:
+        if ec.dataset_type == DatasetType.ACCURACY:
+            per_dataset = idx_map.get(ec.dataset_name)
+            if isinstance(per_dataset, dict):
+                bound |= set(per_dataset)
+    return bound
+
+
 def _score_accuracy(
     ctx: BenchmarkContext, result: SessionResult
 ) -> list[dict[str, Any]]:
@@ -1349,16 +1367,44 @@ def _score_accuracy(
         )
 
     # Accuracy-phase output-token lengths (finalize-side, off the hot path): the
-    # aggregator only tokenizes perf-window samples, so re-tokenize the accuracy
-    # responses (already in events.jsonl) here. Tokenizer loaded once; the
-    # uuid→text map is read once from the first scorer's get_outputs (it returns
-    # every phase's COMPLETE events) and reused across datasets. Loaded only when
-    # a real accuracy dataset exists — a perf-only run (or one with just the
-    # inline "performance" entry) must not pay a tokenizer load/download here.
+    # aggregator only tokenizes perf-window samples, so count the accuracy
+    # responses (already in events.jsonl) here, using the same reference tokenizer
+    # as the perf side. (Counts still differ from perf for tool-call responses —
+    # client-side OSL is approximate for structured output.) Loaded only when a
+    # real accuracy dataset exists; a load failure or a tokenizer with no fast
+    # backend disables OSL rather than failing scoring.
     has_accuracy = any(
         ec.dataset_type == DatasetType.ACCURACY for ec in ctx.eval_configs
     )
-    osl_tokenizer = _load_osl_tokenizer(ctx.tokenizer_name) if has_accuracy else None
+    osl_backend: Any = None
+    if has_accuracy and ctx.tokenizer_name is not None:
+        try:
+            osl_backend = load_reference_backend(ctx.tokenizer_name)
+        except Exception as e:  # noqa: BLE001 - OSL is optional; never fail scoring
+            logger.warning(
+                "Accuracy OSL disabled: could not load tokenizer %r: %s",
+                ctx.tokenizer_name,
+                e,
+            )
+        else:
+            # A tokenizer with no fast (Rust) backend disables OSL rather than
+            # falling back to a slow Python-tokenizer count: the perf side
+            # (token_metrics._setup_shards) requires a fast backend too and raises
+            # without one, so OSL stays fast-only and consistent on both sides.
+            # Warn so the skip is visible instead of silently dropping the block.
+            if osl_backend is None:
+                logger.warning(
+                    "Accuracy OSL disabled: tokenizer %r has no fast (Rust) backend "
+                    "(token counting requires one, as on the perf side)",
+                    ctx.tokenizer_name,
+                )
+    # Bound the raw-output read to the accuracy population so finalize never holds
+    # the whole run's (incl. perf) response-text corpus.
+    accuracy_uuids = (
+        _accuracy_uuid_bound(ctx.report_dir, ctx.eval_configs)
+        if has_accuracy
+        else set()
+    )
     uuid_to_text: dict[str, str] | None = None
 
     for eval_cfg in ctx.eval_configs:
@@ -1426,25 +1472,25 @@ def _score_accuracy(
             try:
                 if uuid_to_text is None:
                     # Built once from the first scorer and reused for every
-                    # dataset: get_outputs() returns *all* phases' COMPLETE events
-                    # (not just this dataset's), so intersecting it with each
-                    # dataset's sample_index_map yields correct per-dataset counts.
-                    # A future scorer whose get_outputs() returned only its own
-                    # rows would misclassify other datasets' samples as missing.
-                    out_df = scorer_instance.get_outputs()
+                    # dataset. get_raw_outputs() returns the model's actual
+                    # completion text (not the scorer's scoring-normalized form)
+                    # for *all* phases' COMPLETE events, bounded to the accuracy
+                    # population; intersecting it with each dataset's
+                    # sample_index_map yields correct per-dataset counts.
+                    out_df = scorer_instance.get_raw_outputs(accuracy_uuids or None)
                     uuid_to_text = dict(
                         zip(out_df["sample_uuid"], out_df["output"], strict=False)
                     )
                     # Drop the DataFrame so finalize doesn't hold both it and the
-                    # dict (each carrying the full response-text corpus).
+                    # dict (each carrying the response-text corpus).
                     del out_df
                 entry["response_counts"] = _phase_response_counts(
                     scorer_instance.sample_index_map, uuid_to_text
                 )
-                if osl_tokenizer is not None:
+                if osl_backend is not None:
                     t0 = time.perf_counter()
                     osl = _phase_osl_stats(
-                        scorer_instance.sample_index_map, uuid_to_text, osl_tokenizer
+                        scorer_instance.sample_index_map, uuid_to_text, osl_backend
                     )
                     if osl is not None:
                         # Same shape/key as the perf report output_sequence_lengths.

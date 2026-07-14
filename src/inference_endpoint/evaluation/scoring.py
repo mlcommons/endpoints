@@ -26,6 +26,7 @@ import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -145,19 +146,18 @@ class Scorer(ABC):
             d = msgspec.json.decode(f.read())
             return d[self.dataset_name]  # Implicitly raises KeyError
 
-    def get_outputs(self):
-        """Read COMPLETE events from events.jsonl and extract response text.
+    def _iter_complete(self) -> Iterator[tuple[str, Any]]:
+        """Yield ``(sample_uuid, data)`` for each COMPLETE event in events.jsonl.
 
-        The EventLoggerService writes EventRecord objects serialized via msgspec.
-        We decode them using the EventRecord decoder and extract the response
-        text from TextModelOutput data.
+        The single events reader shared by ``get_raw_outputs`` and any scorer
+        that needs the structured event data (e.g. BFCL's ``tool_calls``). The
+        EventLoggerService writes EventRecord objects serialized via msgspec.
         """
         events_log_path = self.report_dir / "events.jsonl"
         if not events_log_path.exists():
             raise FileNotFoundError(f"Events log file not found at {events_log_path}")
 
         decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
-        outputs: list[dict[str, str]] = []
         with events_log_path.open("r") as f:
             for line in f:
                 stripped = line.strip()
@@ -165,11 +165,35 @@ class Scorer(ABC):
                     continue
                 record = decoder.decode(stripped)
                 if record.event_type == SampleEventType.COMPLETE:
-                    output_text = str(record.data) if record.data is not None else ""
-                    outputs.append(
-                        {"sample_uuid": record.sample_uuid, "output": output_text}
-                    )
-        return pd.DataFrame(outputs)
+                    yield record.sample_uuid, record.data
+
+    def get_raw_outputs(self, wanted_uuids: set[str] | None = None) -> pd.DataFrame:
+        """uuid -> the text the model generated (``str(TextModelOutput)``).
+
+        Identical for every scorer: the actual model output before any
+        scoring-specific transform. Used for OSL and response accounting.
+        ``wanted_uuids`` bounds the frame to a target population (one accuracy
+        dataset's issued samples) so finalize need not hold the whole run's
+        response-text corpus.
+        """
+        rows = [
+            {"sample_uuid": u, "output": str(d) if d is not None else ""}
+            for u, d in self._iter_complete()
+            if wanted_uuids is None or u in wanted_uuids
+        ]
+        # Fixed columns so an all-filtered (empty) frame still exposes
+        # "sample_uuid"/"output". Callers index those columns; a bare
+        # pd.DataFrame([]) is column-less and would KeyError, dropping response
+        # accounting for an all-missing phase — the exact masking the response
+        # counts exist to prevent.
+        return pd.DataFrame(rows, columns=["sample_uuid", "output"])
+
+    def get_scoring_outputs(self) -> pd.DataFrame:
+        """uuid -> the text to score. Base returns the raw model output; scorers
+        that must transform before scoring (e.g. BFCL serializes ``tool_calls``)
+        override this.
+        """
+        return self.get_raw_outputs()
 
     def match_sample_index(self, row: pd.Series) -> pd.Series:
         # Pandas Apply function to create a new 'sample_index' column
@@ -187,7 +211,7 @@ class Scorer(ABC):
             tuple[float | None, int]: The mean score and the number of repeats.
                 Returns None as the score if evaluation fails.
         """
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
 
         # Outputs are for all samples, not just the target dataset
         valid_uuids = self.sample_index_map.keys()
@@ -302,7 +326,7 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         )
 
     def score(self) -> tuple[float, int]:
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
 
         # Outputs are for all samples, not just the target dataset
         valid_uuids = self.sample_index_map.keys()
@@ -1094,7 +1118,7 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
             tuple[float | None, int]: The pass@1 score and the number of repeats.
             Returns None as the score if evaluation fails.
         """
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
 
         # Outputs are for all samples, not just the target dataset
         valid_uuids = self.sample_index_map.keys()
@@ -1317,7 +1341,7 @@ class ShopifyCategoryF1Scorer(Scorer, scorer_id="shopify_category_f1"):
         )
 
     def score(self) -> tuple[float, int]:
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
 
         valid_uuids = self.sample_index_map.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
@@ -1600,10 +1624,10 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         return scores
 
     def score(self) -> tuple[float | None, int]:
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
         valid_uuids = self.sample_index_map.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
-        # Drop failed queries: Scorer.get_outputs() emits "" when record.data
+        # Drop failed queries: Scorer.get_raw_outputs() emits "" when record.data
         # is None (workers set response_output=None on error). Passing "" to
         # _stage_videos would Path("").resolve() -> cwd and symlink the repo
         # root as a "video", corrupting the entire VBench run. Failed samples
@@ -1875,7 +1899,7 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
         return int(passed), total_samples
 
     def score(self) -> tuple[float | None, int]:
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
         valid_uuids = self.sample_index_map.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
 
@@ -1883,7 +1907,7 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
         num_samples = self.dataset.num_samples()
         n_repeats = n_total // num_samples if num_samples else 0
 
-        # Failed queries log "" (Scorer.get_outputs() emits "" when
+        # Failed queries log "" (Scorer.get_raw_outputs() emits "" when
         # record.data is None). They are graded as incorrect by the evaluator
         # but still count toward the denominator, so keep them in.
         if df.empty:

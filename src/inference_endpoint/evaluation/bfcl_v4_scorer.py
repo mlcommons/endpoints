@@ -31,7 +31,6 @@ import msgspec.json
 import numpy as np
 import pandas as pd
 
-from ..core.record import EventRecord, EventType, SampleEventType
 from ..core.types import merge_tool_calls
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.bfcl_v4 import CATEGORY_MAP, SINGLE_TURN_SUBSETS
@@ -115,8 +114,8 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         # Populated by score(); exposed via score_breakdown().
         self._breakdown: dict[str, Any] | None = None
 
-    def get_outputs(self) -> pd.DataFrame:
-        """Read COMPLETE events, preferring structured tool_calls for scoring.
+    def get_scoring_outputs(self) -> pd.DataFrame:
+        """Text to score, preferring structured tool_calls over the raw output.
 
         When the model returns structured tool calls, score against the
         serialized tool_calls directly rather than str(TextModelOutput): the
@@ -125,37 +124,27 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         defeats the function-call parser. The function call is the answer here;
         the prose is chatter. Plain-text responses (no tool calls, e.g.
         hallucination refusals) fall back to the full string.
-        """
-        events_log_path = self.report_dir / "events.jsonl"
-        if not events_log_path.exists():
-            raise FileNotFoundError(f"Events log file not found at {events_log_path}")
 
-        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+        OSL / response accounting read the base ``get_raw_outputs()`` instead, so
+        they count the full generated text rather than this normalized form.
+        """
         outputs: list[dict[str, str]] = []
-        with events_log_path.open("r") as f:
-            for line in f:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                record = decoder.decode(stripped)
-                if record.event_type != SampleEventType.COMPLETE:
-                    continue
-                data = record.data
-                tool_calls = getattr(data, "tool_calls", None)
-                # Streaming responses store tool_calls as raw per-delta chunks
-                # (list-of-lists with fragmented `arguments`); merge_tool_calls
-                # reassembles them into complete [{"function": {...}}] objects.
-                # Non-streaming tool_calls are already complete and pass through
-                # unchanged, so this is safe for both paths.
-                merged_tool_calls = merge_tool_calls(tool_calls)
-                if merged_tool_calls:
-                    output_text = msgspec.json.encode(list(merged_tool_calls)).decode()
-                else:
-                    output_text = str(data) if data is not None else ""
-                outputs.append(
-                    {"sample_uuid": record.sample_uuid, "output": output_text}
-                )
-        return pd.DataFrame(outputs)
+        for sample_uuid, data in self._iter_complete():
+            tool_calls = getattr(data, "tool_calls", None)
+            # Streaming responses store tool_calls as raw per-delta chunks
+            # (list-of-lists with fragmented `arguments`); merge_tool_calls
+            # reassembles them into complete [{"function": {...}}] objects.
+            # Non-streaming tool_calls are already complete and pass through
+            # unchanged, so this is safe for both paths.
+            merged_tool_calls = merge_tool_calls(tool_calls)
+            if merged_tool_calls:
+                output_text = msgspec.json.encode(list(merged_tool_calls)).decode()
+            else:
+                output_text = str(data) if data is not None else ""
+            outputs.append({"sample_uuid": sample_uuid, "output": output_text})
+        # Columned even when empty, matching the base get_raw_outputs invariant,
+        # so callers that index "sample_uuid"/"output" never KeyError.
+        return pd.DataFrame(outputs, columns=["sample_uuid", "output"])
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         """Score a single function-calling sample using ast_checker.
@@ -256,10 +245,11 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         per-category breakdown (with percentages and sample counts) is cached and
         exposed separately via :meth:`score_breakdown`.
         """
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
 
-        # get_outputs() may return an empty, column-less frame (no COMPLETE
-        # events at all), so guard before indexing "sample_uuid".
+        # get_scoring_outputs() returns an empty (columned) frame when there are
+        # no COMPLETE events; skip the isin filter in that case — the
+        # zero-breakdown branch below handles the empty result.
         if not df.empty:
             valid_uuids = self.sample_index_map.keys()
             df = df[df["sample_uuid"].isin(valid_uuids)]

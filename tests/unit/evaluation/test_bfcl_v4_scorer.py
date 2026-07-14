@@ -35,11 +35,11 @@ def _write_events(report_dir: Path, records: list[EventRecord]) -> None:
 
 
 def _get_outputs_for(report_dir: Path):
-    # get_outputs() only needs report_dir; bypass __init__ so the test does not
-    # require the optional bfcl-eval dependency.
+    # get_scoring_outputs() only needs report_dir; bypass __init__ so the test
+    # does not require the optional bfcl-eval dependency.
     scorer = object.__new__(BFCLv4Scorer)
     scorer.report_dir = report_dir
-    return scorer.get_outputs()
+    return scorer.get_scoring_outputs()
 
 
 class _StubDataset:
@@ -92,7 +92,7 @@ class TestBFCLv4ScorerGetOutputs:
 
         Without merging, the serialized output is a list-of-lists that the
         function-call extractor cannot parse, so every function-calling sample
-        scores 0. get_outputs() must reassemble the deltas so the extractor
+        scores 0. get_scoring_outputs() must reassemble the deltas so the extractor
         recovers a complete call.
         """
         report_dir = tmp_path / "report"
@@ -189,12 +189,19 @@ class TestBFCLv4ScorerGetOutputs:
 class TestBFCLv4ScorerEmptyGuards:
     """score() must never KeyError on an empty/unmatched events log."""
 
-    def test_no_complete_events_returns_zero_breakdown(self, tmp_path):
-        """An events log with no COMPLETE records yields a column-less frame.
+    def test_get_scoring_outputs_empty_is_columned(self, tmp_path):
+        """No COMPLETE records still yields an empty frame WITH the
+        sample_uuid/output columns (not a column-less pd.DataFrame([])), matching
+        the base get_raw_outputs invariant so callers never KeyError."""
+        report_dir = tmp_path / "report"
+        _write_events(report_dir, [])  # empty events.jsonl
+        df = _get_outputs_for(report_dir)
+        assert df.empty
+        assert list(df.columns) == ["sample_uuid", "output"]
 
-        Without the guard, ``df["sample_uuid"]`` would KeyError. Instead the
-        scorer must emit a well-formed zero breakdown.
-        """
+    def test_no_complete_events_returns_zero_breakdown(self, tmp_path):
+        """An events log with no COMPLETE records yields an empty (columned)
+        frame; score() must emit a well-formed zero breakdown."""
         report_dir = tmp_path / "report"
         _write_events(report_dir, [])  # empty events.jsonl
 
