@@ -101,6 +101,7 @@ class ChatMessage(
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
     reasoning_content: str | None = None
+    reasoning: str | None = None
 
 
 # gc=False: audit 2026-05: request containers set at construction; frozen=True blocks field reassignment.

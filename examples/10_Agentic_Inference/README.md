@@ -19,7 +19,8 @@ contiguous and ordered by increasing `turn`.
 
 Required fields are `conversation_id`, `turn`, and `role`. User rows normally
 include `content`; agentic rows can also include `system`, `tools`,
-`tool_calls`, `tool_results`, `reasoning_content`, and `delay_seconds`.
+`tool_calls`, `tool_results`, `reasoning_content`, `reasoning`, and
+`delay_seconds`.
 
 Place the dataset under `examples/10_Agentic_Inference/datasets/` or point the YAML at
 another accessible JSONL path.

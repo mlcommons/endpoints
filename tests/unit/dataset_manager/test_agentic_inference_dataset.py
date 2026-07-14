@@ -974,6 +974,57 @@ def test_build_metadata_pre_built_messages_no_tools():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("source_field", ["reasoning_content", "reasoning"])
+def test_pre_built_messages_preserve_reasoning_aliases(source_field: str):
+    df = pd.DataFrame(
+        [
+            {"conversation_id": "c1", "turn": 1, "role": "user", "content": "A"},
+            {
+                "conversation_id": "c1",
+                "turn": 2,
+                "role": "assistant",
+                "content": "B",
+                source_field: "thinking",
+            },
+            {"conversation_id": "c1", "turn": 3, "role": "user", "content": "C"},
+        ]
+    )
+    ds = AgenticInferenceDataset(df)
+    ds.load()
+
+    assert ds.conversation_metadata is not None
+    msgs = ds.conversation_metadata.pre_built_messages_by_key[("c1", 3)]
+    assert msgs[1][source_field] == "thinking"
+
+
+@pytest.mark.unit
+def test_pre_built_messages_reject_both_reasoning_aliases():
+    df = pd.DataFrame(
+        [
+            {"conversation_id": "c1", "turn": 1, "role": "user", "content": "A"},
+            {
+                "conversation_id": "c1",
+                "turn": 2,
+                "role": "assistant",
+                "content": "B",
+                "reasoning_content": "thinking",
+                "reasoning": "thinking",
+            },
+            {"conversation_id": "c1", "turn": 3, "role": "user", "content": "C"},
+        ]
+    )
+    ds = AgenticInferenceDataset(df)
+
+    with pytest.raises(
+        InputValidationError,
+        match=(
+            "conversation 'c1' turn 2 has both " "'reasoning_content' and 'reasoning'"
+        ),
+    ):
+        ds.load()
+
+
+@pytest.mark.unit
 def test_load_sample_includes_messages():
     """load_sample returns messages with the complete message list."""
     df = _make_tool_sequence_df()

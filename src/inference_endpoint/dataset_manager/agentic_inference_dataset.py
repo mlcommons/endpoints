@@ -147,6 +147,20 @@ def _build_conversation_metadata(
 
     for _, row in sorted_group.iterrows():
         role = row.get("role")
+        reasoning_content = row.get("reasoning_content")
+        reasoning = row.get("reasoning")
+        if (
+            reasoning_content is not None
+            and not (
+                isinstance(reasoning_content, float) and pd.isna(reasoning_content)
+            )
+            and reasoning is not None
+            and not (isinstance(reasoning, float) and pd.isna(reasoning))
+        ):
+            raise InputValidationError(
+                f"conversation {row.get('conversation_id')!r} turn {row.get('turn')} "
+                "has both 'reasoning_content' and 'reasoning' values"
+            )
 
         # Format this row into message(s) using the same field extraction as before.
         expanded = _expand_tool_results(row)
@@ -161,6 +175,7 @@ def _build_conversation_metadata(
                 "tool_calls",
                 "tool_results",
                 "reasoning_content",
+                "reasoning",
             ):
                 val = row.get(key)
                 if val is not None and not (isinstance(val, float) and pd.isna(val)):
