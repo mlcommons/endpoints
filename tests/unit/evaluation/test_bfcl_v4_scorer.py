@@ -216,7 +216,8 @@ class TestBFCLv4ScorerEmptyGuards:
             "category_scores": {},
             "subset_scores": {},
             "unscored_subsets": {},
-            "total_samples": 0,
+            "total_samples": 0,  # nothing completed
+            "issued_samples": 1,  # but one was attempted
         }
 
     def test_events_present_but_no_matching_uuid_returns_zero_breakdown(self, tmp_path):
@@ -428,7 +429,117 @@ class TestBFCLv4ScorerFullPath:
             66.67, abs=0.01
         )
         assert breakdown["overall_accuracy"] == pytest.approx(66.67, abs=0.01)
+        # Complete run: completed == issued.
         assert breakdown["total_samples"] == 3
+        assert breakdown["issued_samples"] == 3
+
+    def test_missing_samples_count_as_failures(self, tmp_path, monkeypatch):
+        """A partial run — some issued uuids with no COMPLETE event — counts the
+        missing samples as failures in the ACCURACY (overall / per-subset /
+        normalized), rather than averaging over only the survivors, which would
+        inflate BFCL's gated accuracy. Mirrors the complete run above with idx 1
+        *missing* instead of wrong: the padded 0.0 scores it like a wrong answer,
+        so overall/subset/category match the complete-run values. total_samples
+        stays the completed count (2) — its pre-PR meaning, read by the
+        min_sample_count gate — while issued_samples records the attempted
+        count (3)."""
+        import inference_endpoint.evaluation.bfcl_v4_scorer as mod
+        import pandas as pd
+
+        monkeypatch.setattr(mod, "Language", {"PYTHON": "python"})
+        monkeypatch.setattr(
+            mod, "ast_checker", lambda **kw: {"valid": bool(kw["model_output"])}
+        )
+
+        report_dir = tmp_path / "report"
+        gt = json.dumps([{"f": {}}])
+        dataframe = pd.DataFrame(
+            [
+                {"subset": "live_simple", "ground_truth": gt},  # idx 0: completed
+                {"subset": "live_simple", "ground_truth": gt},  # idx 1: MISSING
+                {"subset": "live_multiple", "ground_truth": gt},  # idx 2: completed
+            ]
+        )
+        # Only u0 and u2 come back; u1 (issued) never produces a COMPLETE event.
+        _write_events(
+            report_dir,
+            [
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="u0",
+                    data=_tool_call_output(),
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="u2",
+                    data=_tool_call_output(),
+                ),
+            ],
+        )
+
+        scorer = _make_scorer(
+            report_dir,
+            sample_index_map={"u0": 0, "u1": 1, "u2": 2},
+            dataframe=dataframe,
+        )
+        overall, n_repeats = scorer.score()
+        breakdown = scorer.score_breakdown()
+
+        # Accuracy is over the issued count: overall = mean(1, 0[missing], 1) ==
+        # 2/3, NOT mean(1, 1) == 1.0 over only the survivors.
+        assert overall == pytest.approx(2 / 3)
+        assert n_repeats == 1
+        # live_simple: one correct + one missing -> 50%, not 100%.
+        assert breakdown["subset_scores"]["live_simple"] == 50.0
+        assert breakdown["subset_scores"]["live_multiple"] == 100.0
+        # total_samples = completed (2); issued_samples = attempted (3).
+        assert breakdown["total_samples"] == 2
+        assert breakdown["issued_samples"] == 3
+        assert breakdown["overall_accuracy"] == pytest.approx(66.67, abs=0.01)
+        assert breakdown["normalized_single_turn_score"] == pytest.approx(
+            66.67, abs=0.01
+        )
+
+    def test_duplicate_complete_scored_once(self, tmp_path, monkeypatch):
+        """A duplicate COMPLETE for one issued uuid is scored once, not twice —
+        otherwise the sample is double-weighted and total_samples exceeds the
+        issued count."""
+        import inference_endpoint.evaluation.bfcl_v4_scorer as mod
+        import pandas as pd
+
+        monkeypatch.setattr(mod, "Language", {"PYTHON": "python"})
+        monkeypatch.setattr(
+            mod, "ast_checker", lambda **kw: {"valid": bool(kw["model_output"])}
+        )
+
+        report_dir = tmp_path / "report"
+        gt = json.dumps([{"f": {}}])
+        dataframe = pd.DataFrame([{"subset": "live_simple", "ground_truth": gt}])
+        _write_events(
+            report_dir,
+            [
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="u0",
+                    data=_tool_call_output(),
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="u0",  # duplicate COMPLETE for the same issued uuid
+                    data=_tool_call_output(),
+                ),
+            ],
+        )
+
+        scorer = _make_scorer(
+            report_dir, sample_index_map={"u0": 0}, dataframe=dataframe
+        )
+        overall, _ = scorer.score()
+
+        assert overall == pytest.approx(1.0)
+        breakdown = scorer.score_breakdown()
+        assert breakdown["total_samples"] == 1  # deduped to one completion, not 2
+        assert breakdown["issued_samples"] == 1
 
 
 pytestmark = pytest.mark.unit
