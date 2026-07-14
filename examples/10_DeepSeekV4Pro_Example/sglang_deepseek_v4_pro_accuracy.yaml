@@ -2,14 +2,14 @@ name: "deepseek-v4-pro-sglang-accuracy"
 version: "1.0"
 type: "offline"
 # Wall-clock CLI budget (seconds) for the full multi-phase run (AIME + GPQA + LCB).
-# Set large: max_new_tokens=256000 makes generations very long (multi-day total).
+# Set large: max_new_tokens=320000 with 4 repeats makes generations very long (multi-day total).
 timeout: 1209600
 
 model_params:
   # Must match the model id served by SGLang (see GET /v1/models).
   name: "/data/workloads-inference/models/DeepSeek-V4-Pro"
   temperature: 1.0
-  max_new_tokens: 256000
+  max_new_tokens: 320000
   top_k: -1
   top_p: 1.0
   streaming: "on"
@@ -27,20 +27,20 @@ datasets:
       eval_method: "pass_at_1"
       ground_truth: "answer"
       extractor: "boxed_math_extractor"
-      num_repeats: 2
+      num_repeats: 4
   - name: "gpqa::deepseek_v4"
     type: "accuracy"
     accuracy_config:
       eval_method: "pass_at_1"
       extractor: "abcd_extractor"
       ground_truth: "ground_truth"
-      num_repeats: 2
+      num_repeats: 4
   - name: "livecodebench::deepseek_v4"
     type: "accuracy"
     accuracy_config:
       eval_method: "code_bench_scorer"
       extractor: "python_code_extractor"
-      num_repeats: 2
+      num_repeats: 4
 
 settings:
   runtime:
@@ -53,7 +53,14 @@ settings:
     type: "max_throughput"
 
   client:
-    num_workers: 256
+    # Concurrency is bounded by the SGLang KV pool, NOT batch size: with
+    # max_new_tokens=320000 the dsv4 scheduler ABORTS (SIGABRT) if the
+    # ~8M-token KV pool saturates to 100% (no graceful preempt). Sequence
+    # length varies by phase: AIME/GPQA reasoning averages ~81k tokens, but
+    # LiveCodeBench averages ~167k, so it saturates the pool at far lower
+    # concurrency (48 crashed during LCB; 96 and 141 crashed on GPQA).
+    # 32 keeps every phase (incl. LCB) near/below ~75% KV with margin.
+    num_workers: 32
     # Large worker counts + cold model can exceed the default 60s init budget.
     worker_initialization_timeout: 600.0
 
