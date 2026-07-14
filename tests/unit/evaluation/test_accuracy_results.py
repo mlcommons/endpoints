@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import pytest
 from inference_endpoint.evaluation.accuracy_results import (
-    ACCURACY_METRIC_KEYS,
     average_accuracy,
     build_breakdown,
     find_accuracy_breakdown,
@@ -155,12 +154,3 @@ class TestAverageAccuracy:
             )
             is None
         )
-
-
-@pytest.mark.unit
-def test_metric_keys():
-    assert ACCURACY_METRIC_KEYS["bfcl_overall_accuracy"] == "overall_accuracy"
-    assert (
-        ACCURACY_METRIC_KEYS["bfcl_normalized_accuracy"]
-        == "normalized_single_turn_score"
-    )

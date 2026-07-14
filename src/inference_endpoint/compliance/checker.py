@@ -44,9 +44,6 @@ from ..config.ruleset_base import BenchmarkSuiteRuleset
 from ..config.ruleset_registry import get_ruleset
 from ..config.schema import BenchmarkConfig
 from ..evaluation.accuracy_results import (
-    ACCURACY_METRIC_KEYS as _ACCURACY_METRIC_KEYS,
-)
-from ..evaluation.accuracy_results import (
     find_accuracy_breakdown as _find_accuracy_score,
 )
 from ..evaluation.accuracy_results import (
@@ -54,6 +51,9 @@ from ..evaluation.accuracy_results import (
 )
 from ..evaluation.accuracy_results import (
     to_float as _to_float,
+)
+from ..evaluation.bfcl_v4_metrics import (
+    ACCURACY_METRIC_KEYS as _ACCURACY_METRIC_KEYS,
 )
 
 

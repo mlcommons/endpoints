@@ -38,12 +38,6 @@ from typing import Any
 
 from ..config.schema import DatasetType
 
-# Ruleset golden-metric name -> key in the scorer's breakdown block.
-ACCURACY_METRIC_KEYS = {
-    "bfcl_overall_accuracy": "overall_accuracy",
-    "bfcl_normalized_accuracy": "normalized_single_turn_score",
-}
-
 
 def to_float(value: Any) -> float | None:
     """Coerce a metric to float, or None if absent/non-numeric.

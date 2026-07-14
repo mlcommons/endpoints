@@ -43,13 +43,13 @@ from typing import Any
 from ..config.ruleset_registry import get_ruleset
 from ..config.schema import DatasetType
 from ..evaluation.accuracy_results import (
-    ACCURACY_METRIC_KEYS as _ACCURACY_METRIC_KEYS,
-)
-from ..evaluation.accuracy_results import (
     find_accuracy_entry as _find_accuracy_entry,
 )
 from ..evaluation.accuracy_results import (
     to_float as _to_float,
+)
+from ..evaluation.bfcl_v4_metrics import (
+    ACCURACY_METRIC_KEYS as _ACCURACY_METRIC_KEYS,
 )
 
 logger = logging.getLogger(__name__)
