@@ -3,9 +3,10 @@
 # docker build -f scripts/Dockerfile.dev --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
 # docker run -v $(pwd):/mnt/inference-endpoint -it --shm-size=512m inference-endpoint-dev bash
 #
-# VBench (WAN 2.2) accuracy scorer is OFF by default (lives under examples/, not
-# src/). To bake it in, build with --build-arg PROVISION_VBENCH=1:
-# docker build -f scripts/Dockerfile.dev --build-arg PROVISION_VBENCH=1 --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-vbench .
+# VBench (WAN 2.2) accuracy scorer is ON by default (consistent with the DeepSeek-R1
+# evaluator, PROVISION_DSR1=1). It lives under examples/, not src/, so it is COPYed in
+# explicitly. To skip it (leaner image, no wan22 accuracy), build with PROVISION_VBENCH=0:
+# docker build -f scripts/Dockerfile.dev --build-arg PROVISION_VBENCH=0 --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
 
 FROM python:3.12.11-slim
 
@@ -87,11 +88,12 @@ RUN if [ "${PROVISION_DSR1}" = "1" ]; then \
     fi
 
 # Provision the isolated VBench (WAN 2.2) accuracy scorer. Gated by PROVISION_VBENCH
-# (default 0, matching upstream's lean image). VBench lives under examples/ (NOT src/),
-# so the stock build excludes it; turning this on materializes the accuracy uv project
-# at /opt/vbench_accuracy with its OWN .venv, so wan22 `benchmark --mode acc|both` reuses
-# it via UV_NO_SYNC=1 (accuracy configs' vbench_project_path=/opt/vbench_accuracy) — no
-# host checkout, no runtime network.
+# (default 1, matching the DeepSeek-R1 evaluator above). VBench lives under examples/
+# (NOT src/), so it is COPYed in explicitly; provisioning materializes the accuracy uv
+# project at /opt/vbench_accuracy with its OWN .venv, so wan22 `benchmark --mode acc|both`
+# reuses it via UV_NO_SYNC=1 (accuracy configs' vbench_project_path=/opt/vbench_accuracy)
+# — no host checkout, no runtime network. Build with --build-arg PROVISION_VBENCH=0 to
+# skip it (leaner image that never runs wan22 accuracy).
 #
 # Same isolation rule as DSR1 above: the vbench project pins Python 3.11 + heavy/old deps
 # (torch, decord, vbench 0.1.5 -> transformers 4.33.2 -> tokenizers 0.13.3) that must stay
@@ -100,7 +102,7 @@ RUN if [ "${PROVISION_DSR1}" = "1" ]; then \
 # because tokenizers 0.13.3 has no cp312 wheel. The pyproject patches relax requires-python
 # and swap decord->decord2 so the venv installs from wheels only — required on aarch64
 # (no decord 0.6.0 / tokenizers cp312 wheels), harmless on x86_64.
-ARG PROVISION_VBENCH=0
+ARG PROVISION_VBENCH=1
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 COPY --chown=${USER_ID}:${GROUP_ID} examples/09_Wan22_VideoGen_Example/accuracy /opt/vbench_accuracy
 RUN if [ "${PROVISION_VBENCH}" = "1" ]; then \
