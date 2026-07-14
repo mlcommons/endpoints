@@ -1110,16 +1110,28 @@ async def _run_benchmark_async(
 
                 if snap_dict is not None:
                     try:
-                        runtime = ctx.config.settings.runtime
-                        warmup = ctx.config.settings.warmup
                         load_pattern = ctx.config.settings.load_pattern
+                        runtime_cfg = ctx.config.settings.runtime
+                        # load_pattern + warmup config and the RNG seeds, so
+                        # result_summary.json is self-describing and a valid run is
+                        # identified by its settings. The full, re-runnable config
+                        # lives in config.yaml alongside. The resolved/effective
+                        # runtime settings (sample count + ordering, which can differ
+                        # per audit phase) are deferred to a follow-up. endpoint_config
+                        # (api_key/URLs) is a sibling of settings and never included,
+                        # so no secrets.
+                        run_config = ctx.config.settings.model_dump(
+                            mode="json", include={"load_pattern", "warmup"}
+                        )
+                        run_config["scheduler_random_seed"] = (
+                            runtime_cfg.scheduler_random_seed
+                        )
+                        run_config["dataloader_random_seed"] = (
+                            runtime_cfg.dataloader_random_seed
+                        )
                         report = Report.from_snapshot(
                             snap_dict,
-                            seeds={
-                                "scheduler_random_seed": runtime.scheduler_random_seed,
-                                "dataloader_random_seed": runtime.dataloader_random_seed,
-                                "warmup_random_seed": warmup.warmup_random_seed,
-                            },
+                            run_config=run_config,
                             use_legacy_loadgen_qps_metrics=(
                                 load_pattern.type == LoadPatternType.POISSON
                                 and load_pattern.use_legacy_loadgen_qps_metrics
