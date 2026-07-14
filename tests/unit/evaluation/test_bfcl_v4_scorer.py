@@ -19,11 +19,16 @@ import json
 from pathlib import Path
 
 import msgspec
+import pandas as pd
 import pytest
 from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
 from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.evaluation.bfcl_v4_scorer import BFCLv4Scorer
 from inference_endpoint.evaluation.extractor import FunctionCallExtractor
+
+# Dotted path for monkeypatching module-level names (Language / ast_checker)
+# without a second `import ... as mod` of the scorer module.
+_SCORER = "inference_endpoint.evaluation.bfcl_v4_scorer"
 
 
 def _write_events(report_dir: Path, records: list[EventRecord]) -> None:
@@ -353,11 +358,9 @@ class TestBFCLv4ScorerScoreAst:
         assert scorer._score_ast("[]", "not-json") == 0.0
 
     def test_ast_checker_result_is_honored(self, tmp_path, monkeypatch):
-        import inference_endpoint.evaluation.bfcl_v4_scorer as mod
-
-        monkeypatch.setattr(mod, "Language", {"PYTHON": "python"})
+        monkeypatch.setattr(f"{_SCORER}.Language", {"PYTHON": "python"})
         monkeypatch.setattr(
-            mod, "ast_checker", lambda **kw: {"valid": bool(kw["model_output"])}
+            f"{_SCORER}.ast_checker", lambda **kw: {"valid": bool(kw["model_output"])}
         )
         scorer = _make_scorer(tmp_path, sample_index_map={})
         model = json.dumps([{"name": "f", "arguments": {}}])
@@ -370,13 +373,10 @@ class TestBFCLv4ScorerFullPath:
     """End-to-end score() incl. sample-weighted category aggregation + breakdown."""
 
     def test_live_sample_weighted_aggregation(self, tmp_path, monkeypatch):
-        import inference_endpoint.evaluation.bfcl_v4_scorer as mod
-        import pandas as pd
-
-        monkeypatch.setattr(mod, "Language", {"PYTHON": "python"})
+        monkeypatch.setattr(f"{_SCORER}.Language", {"PYTHON": "python"})
         # "Correct" iff the model produced any tool call (bfcl_output non-empty).
         monkeypatch.setattr(
-            mod, "ast_checker", lambda **kw: {"valid": bool(kw["model_output"])}
+            f"{_SCORER}.ast_checker", lambda **kw: {"valid": bool(kw["model_output"])}
         )
 
         report_dir = tmp_path / "report"
@@ -443,12 +443,9 @@ class TestBFCLv4ScorerFullPath:
         stays the completed count (2) — its pre-PR meaning, read by the
         min_sample_count gate — while issued_samples records the attempted
         count (3)."""
-        import inference_endpoint.evaluation.bfcl_v4_scorer as mod
-        import pandas as pd
-
-        monkeypatch.setattr(mod, "Language", {"PYTHON": "python"})
+        monkeypatch.setattr(f"{_SCORER}.Language", {"PYTHON": "python"})
         monkeypatch.setattr(
-            mod, "ast_checker", lambda **kw: {"valid": bool(kw["model_output"])}
+            f"{_SCORER}.ast_checker", lambda **kw: {"valid": bool(kw["model_output"])}
         )
 
         report_dir = tmp_path / "report"
@@ -504,12 +501,9 @@ class TestBFCLv4ScorerFullPath:
         """A duplicate COMPLETE for one issued uuid is scored once, not twice —
         otherwise the sample is double-weighted and total_samples exceeds the
         issued count."""
-        import inference_endpoint.evaluation.bfcl_v4_scorer as mod
-        import pandas as pd
-
-        monkeypatch.setattr(mod, "Language", {"PYTHON": "python"})
+        monkeypatch.setattr(f"{_SCORER}.Language", {"PYTHON": "python"})
         monkeypatch.setattr(
-            mod, "ast_checker", lambda **kw: {"valid": bool(kw["model_output"])}
+            f"{_SCORER}.ast_checker", lambda **kw: {"valid": bool(kw["model_output"])}
         )
 
         report_dir = tmp_path / "report"
