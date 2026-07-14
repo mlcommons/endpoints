@@ -171,9 +171,9 @@ def test_chat_message_from_dict_all_fields():
     [
         ({"reasoning_content": "thinking via sglang"}, "thinking via sglang"),
         ({"reasoning": "thinking via vllm"}, "thinking via vllm"),
-        ({"reasoning_content": "same", "reasoning": "same"}, "same"),
+        ({"reasoning_content": "sglang", "reasoning": "vllm"}, "sglang"),
     ],
-    ids=["reasoning_content", "reasoning", "both_equal"],
+    ids=["reasoning_content", "reasoning", "reasoning_content_precedence"],
 )
 def test_to_endpoint_request_forwards_both_reasoning_aliases(message_fields, expected):
     query = Query(
@@ -196,32 +196,6 @@ def test_to_endpoint_request_forwards_both_reasoning_aliases(message_fields, exp
     msg = payload["messages"][0]
     assert msg["reasoning_content"] == expected
     assert msg["reasoning"] == expected
-
-
-@pytest.mark.unit
-def test_to_endpoint_request_uses_reasoning_content_precedence():
-    query = Query(
-        id="q-reasoning-precedence",
-        data={
-            "model": "m",
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": "answer",
-                    "reasoning_content": "sglang",
-                    "reasoning": "vllm",
-                }
-            ],
-        },
-    )
-
-    payload = json.loads(
-        msgspec.json.encode(OpenAIMsgspecAdapter.to_endpoint_request(query))
-    )
-
-    msg = payload["messages"][0]
-    assert msg["reasoning_content"] == "sglang"
-    assert msg["reasoning"] == "sglang"
 
 
 @pytest.mark.unit

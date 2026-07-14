@@ -974,8 +974,18 @@ def test_build_metadata_pre_built_messages_no_tools():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("source_field", ["reasoning_content", "reasoning"])
-def test_pre_built_messages_preserve_reasoning_aliases(source_field: str):
+@pytest.mark.parametrize(
+    ("message_fields", "expected_field"),
+    [
+        ({"reasoning_content": "thinking"}, "reasoning_content"),
+        ({"reasoning": "thinking"}, "reasoning"),
+        ({"reasoning_content": "thinking", "reasoning": "thinking"}, None),
+    ],
+    ids=["reasoning_content", "reasoning", "both_rejected"],
+)
+def test_pre_built_messages_reasoning_alias_policy(
+    message_fields: dict[str, str], expected_field: str | None
+):
     df = pd.DataFrame(
         [
             {"conversation_id": "c1", "turn": 1, "role": "user", "content": "A"},
@@ -984,44 +994,28 @@ def test_pre_built_messages_preserve_reasoning_aliases(source_field: str):
                 "turn": 2,
                 "role": "assistant",
                 "content": "B",
-                source_field: "thinking",
+                **message_fields,
             },
             {"conversation_id": "c1", "turn": 3, "role": "user", "content": "C"},
         ]
     )
     ds = AgenticInferenceDataset(df)
-    ds.load()
 
+    if expected_field is None:
+        with pytest.raises(
+            InputValidationError,
+            match=(
+                "conversation 'c1' turn 2 has both "
+                "'reasoning_content' and 'reasoning'"
+            ),
+        ):
+            ds.load()
+        return
+
+    ds.load()
     assert ds.conversation_metadata is not None
     msgs = ds.conversation_metadata.pre_built_messages_by_key[("c1", 3)]
-    assert msgs[1][source_field] == "thinking"
-
-
-@pytest.mark.unit
-def test_pre_built_messages_reject_both_reasoning_aliases():
-    df = pd.DataFrame(
-        [
-            {"conversation_id": "c1", "turn": 1, "role": "user", "content": "A"},
-            {
-                "conversation_id": "c1",
-                "turn": 2,
-                "role": "assistant",
-                "content": "B",
-                "reasoning_content": "thinking",
-                "reasoning": "thinking",
-            },
-            {"conversation_id": "c1", "turn": 3, "role": "user", "content": "C"},
-        ]
-    )
-    ds = AgenticInferenceDataset(df)
-
-    with pytest.raises(
-        InputValidationError,
-        match=(
-            "conversation 'c1' turn 2 has both " "'reasoning_content' and 'reasoning'"
-        ),
-    ):
-        ds.load()
+    assert msgs[1][expected_field] == "thinking"
 
 
 @pytest.mark.unit
