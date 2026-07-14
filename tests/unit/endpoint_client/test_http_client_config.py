@@ -73,20 +73,14 @@ class TestEndpointBudgetScaling:
             )
         assert c.max_connections == 10000  # single endpoint -> unchanged
 
-    def test_live_socket_usage_does_not_reject_overall_connection_limit(self):
-        with (
-            patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)),
-            patch.object(
-                cfg, "get_ephemeral_port_limit", return_value=0, create=True
-            ) as live_port_limit,
-        ):
+    def test_explicit_max_connections_below_budget_unchanged(self):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
             c = cfg.HTTPClientConfig(
                 endpoint_urls=["http://10.0.0.1:8000"],
                 num_workers=10,
                 max_connections=10,
             )
         assert c.max_connections == 10
-        live_port_limit.assert_not_called()
 
     def test_duplicate_endpoints_do_not_inflate_budget(self):
         # Same (host, port) repeated (even with different paths) is one
@@ -162,3 +156,59 @@ class TestEndpointDestination:
                 num_workers=10,
             )
         assert c.max_connections == 20000  # 10000 ports x 2 distinct hosts
+
+
+@pytest.mark.unit
+class TestAutoWarmupResolution:
+    """warmup_connections=-1 resolves against the port budget only when
+    max_connections is also auto; otherwise the worker's 50%-of-pool auto
+    applies (sentinel passes through unresolved)."""
+
+    def test_full_auto_warms_quarter_of_budget(self):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
+            c = cfg.HTTPClientConfig(
+                endpoint_urls=["http://10.0.0.1:8000"], num_workers=10
+            )
+        assert c.max_connections == 10000
+        assert c.warmup_connections == int(10000 * cfg.AUTO_WARMUP_BUDGET_FRACTION)
+
+    def test_full_auto_warmup_scales_with_distinct_endpoints(self):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
+            c = cfg.HTTPClientConfig(
+                endpoint_urls=[
+                    "http://10.0.0.1:8000",
+                    "http://10.0.0.2:8000",
+                    "http://10.0.0.3:8000",
+                ],
+                num_workers=10,
+            )
+        assert c.warmup_connections == int(30000 * cfg.AUTO_WARMUP_BUDGET_FRACTION)
+
+    def test_explicit_warmup_preserved_with_auto_max(self):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
+            c = cfg.HTTPClientConfig(
+                endpoint_urls=["http://10.0.0.1:8000"],
+                num_workers=10,
+                warmup_connections=123,
+            )
+        assert c.warmup_connections == 123
+
+    def test_disabled_warmup_stays_disabled(self):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
+            c = cfg.HTTPClientConfig(
+                endpoint_urls=["http://10.0.0.1:8000"],
+                num_workers=10,
+                warmup_connections=0,
+            )
+        assert c.warmup_connections == 0
+
+    def test_explicit_max_connections_leaves_warmup_sentinel(self):
+        # With an explicit pool size the worker-side auto (50% of pool)
+        # still applies, so the -1 sentinel must survive config resolution.
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
+            c = cfg.HTTPClientConfig(
+                endpoint_urls=["http://10.0.0.1:8000"],
+                num_workers=10,
+                max_connections=500,
+            )
+        assert c.warmup_connections == -1

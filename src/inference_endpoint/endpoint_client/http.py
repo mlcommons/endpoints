@@ -31,6 +31,14 @@ import httptools
 
 logger = logging.getLogger(__name__)
 
+# Bound on simultaneous in-flight connect() calls per pool. Unbounded
+# establishment (warmup or a t=0 demand burst growing the pool) delivers one
+# SYN flood: the server accept queue overflows and the client can transiently
+# exhaust ephemeral ports (EADDRNOTAVAIL). Paced waves complete in a few RTTs
+# each, so total establishment time is barely affected. Applies only to pool
+# growth — the pooled-connection reuse path never touches it.
+MAX_CONCURRENT_CONNECTS = 128
+
 
 class _SocketConfig:
     """
@@ -471,6 +479,7 @@ class ConnectionPool:
         max_connections: int | None = None,  # None means no limit
         max_idle_time: float = 4.0,  # Discard connections idle longer than this
         ssl_context: ssl.SSLContext | None = None,
+        max_concurrent_connects: int = MAX_CONCURRENT_CONNECTS,
     ):
         self._host = host
         self._port = port
@@ -482,6 +491,8 @@ class ConnectionPool:
         self._idle_stack: list[PooledConnection] = []
         self._all_connections: set[PooledConnection] = set()
         self._creating: int = 0
+        # Paces pool growth so bursts don't stampede the endpoint / port space
+        self._connect_limiter = asyncio.Semaphore(max_concurrent_connects)
 
         # FIFO waiter queue using OrderedDict (O(1) operations)
         self._waiters: OrderedDict[asyncio.Future[None], None] = OrderedDict()
@@ -554,19 +565,23 @@ class ConnectionPool:
 
     async def _create_connection(self) -> PooledConnection:
         """Create a new TCP connection."""
+        # Reserve the slot BEFORE waiting on the limiter: _can_create_connection
+        # counts _creating, so a burst of acquire() calls queued on the limiter
+        # must already be counted or the pool overshoots max_connections.
         self._creating += 1
         try:
             # Create protocol factory
             def protocol_factory() -> HttpResponseProtocol:
                 return HttpResponseProtocol(self._loop)
 
-            # Create connection without timeout
-            transport, protocol = await self._loop.create_connection(
-                protocol_factory,
-                host=self._host,
-                port=self._port,
-                ssl=self._ssl_context,
-            )
+            # Create connection without timeout, paced by the connect limiter
+            async with self._connect_limiter:
+                transport, protocol = await self._loop.create_connection(
+                    protocol_factory,
+                    host=self._host,
+                    port=self._port,
+                    ssl=self._ssl_context,
+                )
 
             # Apply/Override socket defaults
             if sock := transport.get_extra_info("socket"):

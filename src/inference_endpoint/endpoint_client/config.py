@@ -76,6 +76,16 @@ ACCUMULATOR_MAP = {
 }
 
 
+# Fraction of the ephemeral-port budget the auto (``max_connections=-1``,
+# ``warmup_connections=-1``) configuration pre-establishes at init. The pool
+# ceiling stays at the full budget; only the warm set is bounded. Warming far
+# beyond steady-state concurrency wastes ports (the idle stack is LIFO, so
+# excess warm connections sit established at the bottom, holding ephemeral
+# ports until shutdown) and inflates the startup connect burst. Under-warming
+# is cheap: the pool opens new connections on demand at runtime.
+AUTO_WARMUP_BUDGET_FRACTION = 0.25
+
+
 class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     """HTTP endpoint client configuration.
 
@@ -103,7 +113,11 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # Reduces p99/max latency from cold-start connections.
     #
     # Values:
-    #   -1 = auto (50% of pool, safe default - 100% can overwhelm some servers)
+    #   -1 = auto. With an explicit max_connections: 50% of the pool. With
+    #        max_connections=-1: AUTO_WARMUP_BUDGET_FRACTION of the port
+    #        budget (resolved to an explicit count at config time) — the full
+    #        auto pool is the whole ephemeral range, and warming half of that
+    #        is a connect stampede that can overwhelm servers.
     #    0 = disabled
     #   >0 = explicit total connection count to warmup (split across workers)
     warmup_connections: int = Field(
@@ -281,6 +295,16 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 
             if self.max_connections == -1:
                 object.__setattr__(self, "max_connections", port_budget)
+                # With an auto ceiling the pool is the whole port budget, so
+                # auto warmup must not derive from it (half the port range in
+                # one burst). Warm a bounded fraction instead; the rest of the
+                # pool is opened on demand at runtime.
+                if self.warmup_connections == -1:
+                    object.__setattr__(
+                        self,
+                        "warmup_connections",
+                        max(1, int(port_budget * AUTO_WARMUP_BUDGET_FRACTION)),
+                    )
             elif self.max_connections > 0:
                 if self.max_connections > port_budget:
                     raise RuntimeError(
