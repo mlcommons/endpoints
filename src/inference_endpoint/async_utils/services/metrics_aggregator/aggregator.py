@@ -45,7 +45,7 @@ from .metrics_table import (
     TtftTrigger,
 )
 from .publisher import MetricsPublisher
-from .registry import MetricsRegistry
+from .registry import TOKEN_HDR_HIGH, TOKEN_HDR_LOW, MetricsRegistry
 from .snapshot import SessionState
 from .token_metrics import BatchTokenizer, TokenBatchQueue
 
@@ -95,8 +95,6 @@ _TRACKED_SAMPLE_EVENTS = frozenset(
 # clamped on insert and a warning is logged once per series.
 _NS_HDR_LOW: Final[int] = 1
 _NS_HDR_HIGH: Final[int] = 3_600_000_000_000  # 1 hour in ns
-_TOKEN_HDR_LOW: Final[int] = 1
-_TOKEN_HDR_HIGH: Final[int] = 10_000_000  # 10M tokens
 
 
 class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
@@ -188,15 +186,15 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         )
         self._registry.register_series(
             MetricSeriesKey.ISL.value,
-            hdr_low=_TOKEN_HDR_LOW,
-            hdr_high=_TOKEN_HDR_HIGH,
+            hdr_low=TOKEN_HDR_LOW,
+            hdr_high=TOKEN_HDR_HIGH,
             sig_figs=sig_figs,
             n_histogram_buckets=n_histogram_buckets,
         )
         self._registry.register_series(
             MetricSeriesKey.OSL.value,
-            hdr_low=_TOKEN_HDR_LOW,
-            hdr_high=_TOKEN_HDR_HIGH,
+            hdr_low=TOKEN_HDR_LOW,
+            hdr_high=TOKEN_HDR_HIGH,
             sig_figs=sig_figs,
             n_histogram_buckets=n_histogram_buckets,
         )
