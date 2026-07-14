@@ -50,6 +50,9 @@ from ..evaluation.accuracy_results import (
     find_accuracy_breakdown as _find_accuracy_score,
 )
 from ..evaluation.accuracy_results import (
+    find_accuracy_entry as _find_accuracy_entry,
+)
+from ..evaluation.accuracy_results import (
     to_float as _to_float,
 )
 
@@ -161,17 +164,27 @@ def _resolve_model(ruleset: BenchmarkSuiteRuleset, model_name: str) -> Any:
     )
 
 
+# The breakdown key for the headline accuracy. Only BFCL stores it in the block;
+# every other scorer keeps it on the entry's scalar ``score`` (see
+# accuracy_results.find_accuracy_entry), so this is the one metric the gate falls
+# back to the entry score for.
+_OVERALL_ACCURACY_KEY = "overall_accuracy"
+
+
 def check_accuracy(
     results: dict[str, Any],
     golden: dict[str, float],
     factors: dict[str, tuple[float, ...]],
     min_samples: int | None,
 ) -> list[Check]:
-    """Validate the accuracy gate from a BFCL ``accuracy_results.json`` dict."""
+    """Validate the accuracy gate from an ``accuracy_results.json`` dict."""
     checks: list[Check] = []
 
-    score = _find_accuracy_score(results)
-    if score is None:
+    entry = _find_accuracy_entry(results)
+    if entry is None:
+        return [Check("accuracy_results_present", False, "no accuracy score found")]
+    block = entry.get("breakdown")
+    if not isinstance(block, dict):
         return [Check("accuracy_results_present", False, "no accuracy score found")]
 
     applicable_metrics = 0
@@ -179,7 +192,16 @@ def check_accuracy(
         if golden_key not in golden or golden_key not in factors:
             continue
         applicable_metrics += 1
-        measured = _to_float(score.get(result_key))
+        measured = _to_float(block.get(result_key))
+        if measured is None and result_key == _OVERALL_ACCURACY_KEY:
+            # The headline accuracy lives on the entry's scalar ``score``; only
+            # BFCL also duplicates it into the breakdown block. Fall back to the
+            # entry score (parity with the plot path) so a DeepSeek-R1 submission
+            # — which omits ``overall_accuracy`` from the block — is still gated.
+            # The block metrics and the deepseek/bfcl headline are percentages in
+            # [0, 100]; gpt-oss's fraction scorers aren't gate targets (they'd
+            # need the scale homogenization tracked separately).
+            measured = _to_float(entry.get("score"))
         if measured is None:
             checks.append(
                 Check(f"accuracy:{result_key}", False, "metric missing or non-numeric")
@@ -208,7 +230,7 @@ def check_accuracy(
         )
 
     if min_samples is not None:
-        raw_total = score.get("total_samples")
+        raw_total = block.get("total_samples")
         total = _to_float(raw_total)
         checks.append(
             Check(

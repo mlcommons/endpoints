@@ -217,6 +217,21 @@ class Scorer(ABC):
         valid_uuids = self.sample_index_map.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
 
+        # Denominator is the number of samples *issued* for this dataset
+        # (``sample_index_map``, written at issue time), not the number that
+        # produced a COMPLETE event. Samples lost to a drain-timeout or crash are
+        # absent from ``df``; counting them as failures — dividing the summed
+        # per-sample scores by the issued total — keeps a partial run from
+        # reporting an accuracy inflated over only the surviving subset.
+        issued = len(self.sample_index_map)
+        if issued == 0:
+            return None, 0
+        n_repeats = issued // self.dataset.num_samples()
+        if df.empty:
+            # Nothing completed for this dataset: every issued sample failed.
+            # 0 correct / issued == 0.0, never ``mean([]) == NaN`` (invalid JSON).
+            return 0.0, n_repeats
+
         # Match to sample index from dataset
         df = df.apply(self.match_sample_index, axis=1)
 
@@ -237,15 +252,15 @@ class Scorer(ABC):
             order
         ]
 
-        scores = []
-        for i in range(len(empirical)):
-            scores.append(self.score_single_sample(empirical[i], ground_truths[i]))
+        scores = [
+            self.score_single_sample(empirical[i], ground_truths[i])
+            for i in range(len(empirical))
+        ]
 
-        n_repeats = len(scores) // self.dataset.num_samples()
-        # float(...) so callers get a native Python float, not a numpy scalar:
-        # the score flows into result_summary.json (msgspec) and results.json
-        # (json), neither of which can serialize numpy.float64.
-        return float(np.mean(scores)), n_repeats
+        # ``float(...)`` yields a native Python float, not a numpy scalar, so the
+        # score serializes cleanly into accuracy_results.json.
+        mean = float(np.sum(scores)) / issued
+        return (mean if np.isfinite(mean) else None), n_repeats
 
     def score_breakdown(self) -> dict[str, Any] | None:
         """Optional structured detail accompanying the scalar ``score()``.

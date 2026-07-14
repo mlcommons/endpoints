@@ -206,15 +206,16 @@ def test_accuracy_gate_fails_on_too_few_samples():
 
 @pytest.mark.unit
 def test_accuracy_gate_accepts_non_bfcl_breakdown():
-    """A deepseek/gpt-oss breakdown (overall_accuracy + subset_scores, no
-    normalized single-turn score) is discovered and gated on overall_accuracy."""
+    """A DeepSeek-R1-style breakdown omits overall_accuracy from the block and
+    keeps the headline on the entry's scalar ``score`` (a percentage). The gate
+    falls back to that entry score, so it is still gated on overall_accuracy."""
     results = {
         "accuracy_scores": [
             {
-                "dataset_name": "gptoss",
-                "score": 0.83,
+                "dataset_name": "deepseek_r1",
+                # Headline percentage on the entry, NOT duplicated in the block.
+                "score": 83.0,
                 "breakdown": {
-                    "overall_accuracy": 83.0,
                     "subset_scores": {"aime25": 80.0, "gpqa": 88.0},
                     "total_samples": 1283,
                 },
@@ -226,9 +227,33 @@ def test_accuracy_gate_accepts_non_bfcl_breakdown():
     checks = check_accuracy(results, golden, factors, 1000)
 
     overall = next(c for c in checks if c.name == "accuracy:overall_accuracy")
-    assert overall.passed
+    assert overall.passed  # 83.0 >= 82.0 x 0.97, via the entry-score fallback
     samples = next(c for c in checks if c.name == "min_sample_count")
     assert samples.passed  # total_samples read from the breakdown
+
+
+@pytest.mark.unit
+def test_accuracy_gate_reports_missing_when_no_overall_anywhere():
+    """The fallback is bounded: a breakdown without overall_accuracy AND without a
+    scalar entry score reports the metric missing rather than passing silently."""
+    results = {
+        "accuracy_scores": [
+            {
+                "dataset_name": "deepseek_r1",
+                "breakdown": {
+                    "subset_scores": {"aime25": 80.0},
+                    "total_samples": 1283,
+                },
+            }
+        ]
+    }
+    golden = {"bfcl_overall_accuracy": 82.0}
+    factors = {"bfcl_overall_accuracy": (0.97,)}
+    checks = check_accuracy(results, golden, factors, None)
+
+    overall = next(c for c in checks if c.name == "accuracy:overall_accuracy")
+    assert not overall.passed
+    assert "missing" in overall.detail
 
 
 @pytest.mark.unit
