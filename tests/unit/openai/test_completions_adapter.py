@@ -18,6 +18,7 @@
 import json
 
 import msgspec
+import pandas as pd
 import pytest
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
@@ -64,6 +65,36 @@ class TestOpenAITextCompletionsAdapterDatasetTransforms:
         static = next(t for t in transforms if isinstance(t, AddStaticColumns))
         assert static.data["stream"] is False
 
+    @pytest.mark.unit
+    def test_generation_controls_flow_from_model_params_to_request(self):
+        params = ModelParams(name="m", min_new_tokens=0, skip_special_tokens=False)
+        data = pd.DataFrame({"input_tokens": [[10, 20]]})
+        for transform in OpenAITextCompletionsAdapter.dataset_transforms(params):
+            data = transform(data)
+
+        payload = json.loads(
+            OpenAITextCompletionsAdapter.encode_query(
+                Query(data=data.to_dict(orient="records")[0])
+            )
+        )
+        assert payload["min_tokens"] == 0
+        assert payload["skip_special_tokens"] is False
+
+    @pytest.mark.unit
+    def test_generation_controls_use_defaults_in_request(self):
+        params = ModelParams(name="m")
+        data = pd.DataFrame({"input_tokens": [[10, 20]]})
+        for transform in OpenAITextCompletionsAdapter.dataset_transforms(params):
+            data = transform(data)
+
+        payload = json.loads(
+            OpenAITextCompletionsAdapter.encode_query(
+                Query(data=data.to_dict(orient="records")[0])
+            )
+        )
+        assert payload["min_tokens"] == 1
+        assert payload["skip_special_tokens"] is True
+
 
 class TestOpenAITextCompletionsAdapterEncodeQuery:
     @pytest.mark.unit
@@ -86,6 +117,8 @@ class TestOpenAITextCompletionsAdapterEncodeQuery:
         payload = json.loads(OpenAITextCompletionsAdapter.encode_query(query))
         assert "temperature" not in payload
         assert "top_p" not in payload
+        assert "min_tokens" not in payload
+        assert "skip_special_tokens" not in payload
 
 
 class TestOpenAITextCompletionsAdapterDecodeResponse:

@@ -20,12 +20,37 @@ import json
 import msgspec
 import pandas as pd
 import pytest
-from inference_endpoint.core.types import Query
+from inference_endpoint.core.types import Query, TextModelOutput
 from inference_endpoint.openai.openai_msgspec_adapter import (
     OpenAIMsgspecAdapter,
     _chat_message_from_dict,
 )
 from inference_endpoint.openai.types import ChatMessage
+
+
+def _make_reasoning_response(
+    field_name: str,
+    value: str,
+    extra_message_fields: dict | None = None,
+) -> bytes:
+    message: dict = {"role": "assistant", "content": "answer", field_name: value}
+    if extra_message_fields:
+        message.update(extra_message_fields)
+    return json.dumps(
+        {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+    ).encode()
 
 
 @pytest.mark.unit
@@ -150,8 +175,6 @@ def test_chat_message_content_optional():
 @pytest.mark.unit
 def test_from_endpoint_response_populates_tool_calls_in_text_output():
     """Non-streaming response with tool_calls populates TextModelOutput.tool_calls."""
-    import json
-
     tool_calls = [
         {
             "id": "call_1",
@@ -184,14 +207,94 @@ def test_from_endpoint_response_populates_tool_calls_in_text_output():
 
     result = OpenAIMsgspecAdapter.decode_response(response_bytes, "q1")
 
-    from inference_endpoint.core.types import TextModelOutput
-
     assert isinstance(result.response_output, TextModelOutput)
     assert result.response_output.tool_calls is not None
     assert len(result.response_output.tool_calls) == 1
     assert result.response_output.tool_calls[0]["function"]["name"] == "search"
     # metadata path unchanged
     assert result.metadata.get("tool_calls") == tool_calls
+
+
+@pytest.mark.unit
+def test_seed_forwarded_in_metadata():
+    """seed from ModelParams is propagated into the request metadata dict."""
+    from inference_endpoint.config.schema import ModelParams
+    from inference_endpoint.dataset_manager.transforms import AddStaticColumns
+
+    model_params = ModelParams(name="test-model", seed=42)
+    transforms = OpenAIMsgspecAdapter.dataset_transforms(model_params)
+    injector = next(t for t in transforms if isinstance(t, AddStaticColumns))
+    assert injector.data.get("seed") == 42
+
+
+@pytest.mark.unit
+def test_seed_none_when_not_set():
+    """seed key is present but None in metadata when ModelParams.seed is not configured."""
+    from inference_endpoint.config.schema import ModelParams
+    from inference_endpoint.dataset_manager.transforms import AddStaticColumns
+
+    model_params = ModelParams(name="test-model")
+    transforms = OpenAIMsgspecAdapter.dataset_transforms(model_params)
+    injector = next(t for t in transforms if isinstance(t, AddStaticColumns))
+    assert injector.data.get("seed") is None
+
+
+@pytest.mark.unit
+def test_max_completion_tokens_always_emitted():
+    """max_new_tokens always has a value (default 1024), so the metadata always
+    carries max_completion_tokens — matching OpenAIAdapter (no conditional guard)."""
+    from inference_endpoint.config.schema import ModelParams
+    from inference_endpoint.dataset_manager.transforms import AddStaticColumns
+
+    mp = ModelParams(name="test-model", max_new_tokens=256)
+    transforms = OpenAIMsgspecAdapter.dataset_transforms(mp)
+    injector = next(t for t in transforms if isinstance(t, AddStaticColumns))
+    assert injector.data["max_completion_tokens"] == 256
+
+
+@pytest.mark.unit
+def test_seed_in_request_payload():
+    """seed passes through to_endpoint_request when present in query data."""
+    query = Query(
+        id="q-seed",
+        data={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "seed": 99,
+        },
+    )
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    encoded = msgspec.json.encode(request)
+    payload = json.loads(encoded)
+    assert payload.get("seed") == 99
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "field_name",
+    ["reasoning", "reasoning_content"],
+    ids=["vllm", "sglang"],
+)
+def test_from_endpoint_response_reasoning_field(field_name: str):
+    """Non-streaming reasoning is captured regardless of server field name."""
+    result = OpenAIMsgspecAdapter.decode_response(
+        _make_reasoning_response(field_name, "thinking..."), "q1"
+    )
+    assert isinstance(result.response_output, TextModelOutput)
+    assert result.response_output.reasoning == "thinking..."
+    assert result.metadata.get("reasoning_content") == "thinking..."
+
+
+@pytest.mark.unit
+def test_from_endpoint_response_reasoning_both_fields_raises():
+    """Both reasoning fields populated simultaneously triggers an assertion error."""
+    response = _make_reasoning_response(
+        "reasoning_content",
+        "thinking via sglang",
+        extra_message_fields={"reasoning": "thinking via vllm"},
+    )
+    with pytest.raises(AssertionError):
+        OpenAIMsgspecAdapter.decode_response(response, "q1")
 
 
 @pytest.mark.unit

@@ -44,8 +44,8 @@ class SessionState(str, Enum):
                   state to carry).
     LIVE        → run in progress; tick task publishing live HDR-derived stats.
     DRAINING    → ``SessionEventType.ENDED`` has been received; the aggregator
-                  is awaiting the in-flight async tokenize tasks (bounded by
-                  the ``--drain-timeout`` budget, default 60 s). Tick task
+                  is tokenizing the buffered samples (bounded by the
+                  ``--drain-timeout`` budget — schema default 0 = unlimited). Tick task
                   continues at this stage, still HDR-derived; no new events
                   will arrive.
     COMPLETE    → terminal clean state. The ``publish_final()`` snapshot
@@ -149,13 +149,14 @@ class MetricsSnapshot(
                           ``INTERRUPTED``) mark the last snapshot of the run;
                           for ``COMPLETE`` snapshots percentiles and
                           histograms are exact, otherwise HDR-derived.
-        n_pending_tasks:  Count of in-flight async tokenize tasks at snapshot
-                          composition time. ``> 0`` during normal load (ISL/
-                          OSL/TPOT post-processing in flight) and during the
-                          drain phase. **Drain timeout is detected as**
-                          ``state == COMPLETE and n_pending_tasks > 0``: the
-                          aggregator gave up draining; some async-only series
-                          are missing samples that were still being tokenized.
+        n_pending_tasks:  Count of buffered tokenizations not yet recorded at
+                          snapshot composition time. ``> 0`` during normal
+                          load (ISL/OSL/TPOT buffered between publish-tick
+                          flushes) and during the drain phase. **An
+                          incomplete drain is detected as** ``state ==
+                          COMPLETE and n_pending_tasks > 0``: the end-of-run
+                          flush timed out or failed; the token-derived series
+                          are missing those samples.
         metrics:          Tagged union of ``CounterStat`` and ``SeriesStat``,
                           ordered counters-first then series, registration
                           order within each.

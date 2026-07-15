@@ -120,6 +120,7 @@ class ChatCompletionRequest(
     temperature: float | None = None
     max_completion_tokens: int | None = None
     stream: bool | None = None
+    seed: int | None = None
     top_p: float | None = None
     top_k: int | None = None
     repetition_penalty: float | None = None
@@ -132,6 +133,7 @@ class ChatCompletionRequest(
     chat_template: str | None = None
     chat_template_kwargs: dict[str, Any] | None = None
     tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
 
 
 # gc=False: audit 2026-05: tool_calls set at construction; frozen=True blocks field reassignment.
@@ -149,7 +151,8 @@ class ChatCompletionResponseMessage(
     content: str | None = None
     refusal: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
-    reasoning_content: str | None = None
+    reasoning_content: str | None = None  # SGLang / DeepSeek field name
+    reasoning: str | None = None  # vLLM field name
 
 
 class ChatCompletionChoice(
@@ -217,6 +220,8 @@ class TextCompletionRequest(
     prompt: str | list[int]
     temperature: float | None = None
     max_tokens: int | None = None
+    min_tokens: int | None = None
+    skip_special_tokens: bool | None = None
     stream: bool | None = None
     top_p: float | None = None
     top_k: int | None = None
