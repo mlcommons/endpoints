@@ -28,6 +28,8 @@ Exit codes:
 
 import argparse
 import json
+import os
+import shutil
 import sys
 import traceback
 from importlib.resources import files as _pkg_files
@@ -35,6 +37,12 @@ from importlib.resources import files as _pkg_files
 import torch
 import vbench as _vbench_pkg
 from vbench import VBench
+
+# VBench's reference checkpoints are full pickles and fail under torch>=2.6's
+# weights_only=True default. This escape hatch is read at torch.load call time,
+# only applies when the callsite does not set weights_only explicitly, and is
+# scoped to this subprocess.
+os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 
 
 def _emit_error(exc: BaseException) -> None:
@@ -84,6 +92,29 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+
+    # vbench downloads weights via wget/unzip subprocesses on a cold cache;
+    # fail fast instead of a FileNotFoundError mid-evaluation.
+    missing_tools = [t for t in ("wget", "unzip") if shutil.which(t) is None]
+    if missing_tools:
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "type": "MissingSystemDependency",
+                    "message": (
+                        f"Required system tool(s) not found: {', '.join(missing_tools)}. "
+                        "VBench downloads its per-dimension model weights via "
+                        "wget/unzip on first use. Install them in the client "
+                        "environment (e.g. `apt-get install wget unzip`) or "
+                        "pre-populate the VBench cache directory."
+                    ),
+                }
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
 
     if not torch.cuda.is_available() and not args.allow_cpu:
         print(
