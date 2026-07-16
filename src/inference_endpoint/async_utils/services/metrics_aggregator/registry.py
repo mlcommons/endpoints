@@ -43,9 +43,9 @@ import numpy as np
 from hdrh.histogram import HdrHistogram
 
 from inference_endpoint.metrics.early_stopping import (
-    ES_TARGET_METRICS,
     EarlyStoppingSpec,
     es_percentile_estimate,
+    es_percentiles_from_grid,
 )
 
 from .snapshot import (
@@ -233,6 +233,20 @@ class SeriesSampler(MetricSampler):
 
     # -- snapshot construction --------------------------------------------
 
+    def _es_blocks(
+        self, sorted_values
+    ) -> list[dict[str, float | int | bool | None]] | None:
+        # Percentile targets come from this series' own report grid (>= median)
+        # unless the spec pins an explicit tuple (tests / offline analysis).
+        if self._es_spec is None:
+            return None
+        spec = self._es_spec
+        targets = spec.percentiles or es_percentiles_from_grid(self._percentiles)
+        return [
+            es_percentile_estimate(sorted_values, p, spec.confidence).as_dict()
+            for p in targets
+        ]
+
     def build_stat(self, *, exact: bool) -> SeriesStat:
         if self._count == 0:
             # No data → no histogram. Edges are dynamic and only meaningful
@@ -240,13 +254,7 @@ class SeriesSampler(MetricSampler):
             # histogram as "no data yet". Early stopping still self-describes
             # (n=0, sufficient=false) — an empty target series must not look
             # like the feature was disabled.
-            early_stopping: list[dict[str, float | int | bool | None]] | None = None
-            if exact and self._es_spec is not None:
-                spec = self._es_spec
-                early_stopping = [
-                    es_percentile_estimate((), p, spec.confidence).as_dict()
-                    for p in spec.percentiles
-                ]
+            early_stopping = self._es_blocks(()) if exact else None
             return SeriesStat(
                 name=self.name,
                 count=0,
@@ -337,14 +345,7 @@ class SeriesSampler(MetricSampler):
         # Early-stopping estimates (COMPLETE path only): conservative confidence-backed
         # bound per configured percentile, all off one sorted raw array. Cold path —
         # the sort is one-time at run end and each estimate is a few beta evaluations.
-        early_stopping: list[dict[str, float | int | bool | None]] | None = None
-        if self._es_spec is not None:
-            spec = self._es_spec
-            sorted_arr = np.sort(arr)
-            early_stopping = [
-                es_percentile_estimate(sorted_arr, p, spec.confidence).as_dict()
-                for p in spec.percentiles
-            ]
+        early_stopping = self._es_blocks(np.sort(arr))
 
         return SeriesStat(
             name=self.name,
@@ -364,7 +365,7 @@ class SeriesSampler(MetricSampler):
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_PERCENTILES: Final[tuple[float, ...]] = (
+DEFAULT_PERCENTILES: Final[tuple[float, ...]] = (
     99.9,
     99.0,
     97.0,
@@ -387,7 +388,7 @@ class MetricsRegistry:
         self._counters: dict[str, CounterSampler] = {}
         self._series: dict[str, SeriesSampler] = {}
         self._seen_names: set[str] = set()
-        # Optional early-stopping spec; applied only to ES_TARGET_METRICS series.
+        # Optional early-stopping spec; applied to series registered tail_latency=True.
         self._early_stopping = early_stopping
         # Monotonic snapshot emit counter; surfaced on the wire as
         # MetricsSnapshot.counter for diagnostic use by consumers.
@@ -411,8 +412,9 @@ class MetricsRegistry:
         hdr_high: int,
         sig_figs: int = 3,
         n_histogram_buckets: int = 30,
-        percentiles: tuple[float, ...] = _DEFAULT_PERCENTILES,
+        percentiles: tuple[float, ...] = DEFAULT_PERCENTILES,
         dtype: type = int,
+        tail_latency: bool = False,
     ) -> SeriesSampler:
         """Register a new series.
 
@@ -441,7 +443,7 @@ class MetricsRegistry:
             n_histogram_buckets=n_histogram_buckets,
             percentiles=percentiles,
             dtype=dtype,
-            es_spec=self._early_stopping if name in ES_TARGET_METRICS else None,
+            es_spec=self._early_stopping if tail_latency else None,
         )
         self._series[name] = sampler
         self._seen_names.add(name)
@@ -527,7 +529,7 @@ def build_token_series_dict(
         hdr_high=TOKEN_HDR_HIGH,
         sig_figs=sig_figs,
         n_histogram_buckets=n_histogram_buckets,
-        percentiles=_DEFAULT_PERCENTILES,
+        percentiles=DEFAULT_PERCENTILES,
         dtype=int,
     )
     for v in values:

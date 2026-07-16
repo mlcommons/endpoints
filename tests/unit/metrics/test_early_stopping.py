@@ -9,11 +9,12 @@ import pytest
 
 from inference_endpoint.metrics.early_stopping import (
     CONFIDENCE,
-    PERCENTILES,
+    ES_MIN_PERCENTILE,
     TOLERANCE,
     EarlyStoppingResult,
     EarlyStoppingSpec,
     es_percentile_estimate,
+    es_percentiles_from_grid,
     find_min_passing,
 )
 
@@ -26,14 +27,26 @@ class TestSpecAndConstants:
         assert CONFIDENCE == 0.99
         assert TOLERANCE == 0.0
 
-    def test_standard_percentile_set(self):
-        # one fixed report set for every scenario; blocks self-describe, so no
-        # per-yaml tuning field exists.
-        assert PERCENTILES == (0.5, 0.9, 0.95, 0.99)
+    def test_percentiles_derive_from_report_grid(self):
+        # ES runs for every percentile the report grid shows at or above the
+        # median (an ES bound is a tail certification; below-median entries are
+        # not meaningful gates) — one source of truth, no separate ES set.
+        grid = (99.9, 99.0, 97.0, 95.0, 90.0, 80.0, 75.0, 50.0, 25.0, 10.0, 5.0, 1.0)
+        assert es_percentiles_from_grid(grid) == (
+            0.5,
+            0.75,
+            0.8,
+            0.9,
+            0.95,
+            0.97,
+            0.99,
+            0.999,
+        )
+        assert ES_MIN_PERCENTILE == 0.5
 
-    def test_spec_defaults_mirror_constants(self):
+    def test_spec_defaults(self):
         spec = EarlyStoppingSpec()
-        assert spec.percentiles == PERCENTILES
+        assert spec.percentiles is None  # None = derive from the series' grid
         assert spec.confidence == CONFIDENCE
         assert not hasattr(spec, "tolerance")
 

@@ -18,50 +18,88 @@ equals LoadGen's Gauss-hypergeometric ``beta_regularized`` but converges in tens
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
 __all__ = [
     "CONFIDENCE",
-    "ES_TARGET_METRICS",
-    "PERCENTILES",
+    "ES_MIN_PERCENTILE",
     "TOLERANCE",
     "EarlyStoppingResult",
     "EarlyStoppingSpec",
     "es_percentile_estimate",
+    "es_percentiles_from_grid",
     "find_min_passing",
 ]
 
 # LoadGen hardcodes confidence c = 0.99 and tolerance d = 0.0 (results.cc:157-158). They are
 # algorithm constants, not knobs: lowering c or raising d weakens the certified claim (d > 0
 # certifies percentile p - d instead of p). Exposed only as defaulted arguments on the pure
-# math for parity tests. The report always covers one standard percentile set — each block
-# self-describes, so there is nothing to tune per config.
+# math for parity tests.
 CONFIDENCE: Final[float] = 0.99
 TOLERANCE: Final[float] = 0.0
-PERCENTILES: Final[tuple[float, ...]] = (0.5, 0.9, 0.95, 0.99)
 
-# Tail-latency series that receive an early-stopping estimate. Must match the aggregator's
-# registered metric names (see metrics_aggregator/metrics_table.py: MetricSeriesKey).
-ES_TARGET_METRICS: frozenset[str] = frozenset(
-    {"ttft_ns", "tpot_ns", "sample_latency_ns"}
-)
+# ES runs for every percentile the series' report grid shows at or above the median. The
+# estimate is a tail certification (a conservative upper confidence bound), so below-median
+# grid entries (p25/p10/...) are not meaningful gates and are skipped. Deriving from the grid
+# keeps one source of truth: whatever percentiles a series reports, ES covers.
+ES_MIN_PERCENTILE: Final[float] = 0.5
+
+
+def es_percentiles_from_grid(grid_percentiles: Iterable[float]) -> tuple[float, ...]:
+    """ES target percentiles (ascending fractions) from a report grid in 0-100 units.
+
+    E.g. the default grid ``(99.9, 99.0, ..., 50.0, 25.0, ...)`` yields
+    ``(0.5, 0.75, 0.8, 0.9, 0.95, 0.97, 0.99, 0.999)``.
+
+    Rounded to 6 decimals: grid values carry at most a few decimals in 0-100 units, so
+    this is lossless while avoiding float-division artifacts (99.9/100 != 0.999 exactly)
+    in the self-describing ``percentile`` field of the report blocks.
+    """
+    return tuple(
+        sorted(
+            {
+                round(p / 100.0, 6)
+                for p in grid_percentiles
+                if p / 100.0 >= ES_MIN_PERCENTILE
+            }
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class EarlyStoppingSpec:
     """Resolved early-stopping parameters used by the aggregator.
 
-    Defaults mirror the module constants; non-default values are for tests and offline
-    analysis only — the config surface is a single ``enabled`` flag.
+    ``percentiles=None`` (the default) derives the target set from each series' own
+    report grid via ``es_percentiles_from_grid``; explicit tuples are for tests and
+    offline analysis only — the config surface is a single ``enabled`` flag.
     """
 
-    percentiles: tuple[float, ...] = PERCENTILES
+    percentiles: tuple[float, ...] | None = None
     confidence: float = CONFIDENCE
 
 
 def _betacf(a: float, b: float, x: float) -> float:
+    """Continued-fraction kernel of the regularized incomplete beta.
+
+    Numerical Recipes 3rd ed. §6.4 (``betacf``), evaluated with the modified Lentz
+    algorithm: each loop iteration applies one even-numbered and one odd-numbered CF
+    term, and stops when the running product changes by less than ``eps``.
+
+    Magic numbers:
+      - ``eps = 3e-16``: relative-convergence threshold, ~1.4x double-precision machine
+        epsilon (2.22e-16) — one step above the noise floor, so the loop stops as soon
+        as further terms cannot change the result.
+      - ``fpmin = 1e-300``: substituted for near-zero intermediate denominators (Lentz's
+        guard against division blow-up); any positive value far below the smallest
+        normal double (~2.2e-308) times a typical term works.
+      - ``400``: iteration cap. NR uses 100 with an error escape; our (a, b) grow with
+        the discard search (hundreds to thousands) where the CF still converges in tens
+        of iterations because ``_betai`` always evaluates on the fast-converging side of
+        its symmetry split — 400 is a generous safety bound, not a tuning knob.
+    """
     eps, fpmin = 3e-16, 1e-300
     qab, qap, qam = a + b, a + 1.0, a - 1.0
     c = 1.0
@@ -92,7 +130,18 @@ def _betacf(a: float, b: float, x: float) -> float:
 
 
 def _betai(a: float, b: float, x: float) -> float:
-    """Regularized incomplete beta I_x(a, b) == LoadGen beta_regularized(x, a, b)."""
+    """Regularized incomplete beta I_x(a, b).
+
+    Numerical Recipes 3rd ed. §6.4 (``betai``). Numerically equal to LoadGen's
+    ``beta_regularized(x, a, b)`` (``loadgen/early_stopping.cc:42-45``, computed there
+    from the Gauss hypergeometric 2F1 series, ``:25-35``) but converges in tens of CF
+    iterations instead of thousands of series terms.
+
+    ``ln_bt`` is log(x^a * (1-x)^b / B(a, b)) via ``lgamma`` so the prefactor cannot
+    overflow for large a/b. The ``x < (a + 1) / (a + b + 2)`` test is NR's symmetry
+    split: evaluate the continued fraction on whichever side of the identity
+    I_x(a, b) = 1 - I_{1-x}(b, a) converges fastest.
+    """
     if x <= 0.0:
         return 0.0
     if x >= 1.0:
@@ -111,7 +160,12 @@ def _betai(a: float, b: float, x: float) -> float:
 
 
 def _odds(h: int, t: int, p: float, d: float) -> float:
-    # P(<= t over-latency in h + t total | over-latency rate = 1 - p + d)
+    """LoadGen ``odds()`` (``loadgen/early_stopping.cc:47-58``).
+
+    P(<= t over-latency among h + t Bernoulli trials | over-latency rate = 1 - p + d),
+    computed via the binomial-CDF <-> incomplete-beta identity: that probability equals
+    I_{p-d}(h, t + 1).
+    """
     return _betai(h, 1 + t, p - d)
 
 
@@ -129,7 +183,14 @@ def _validate_domain(p: float, d: float, c: float) -> None:
 def find_min_passing(
     t: int, p: float, d: float = TOLERANCE, c: float = CONFIDENCE
 ) -> int:
-    """Minimum ``h`` such that ``_odds(h, t, p, d) <= 1 - c``. ``_odds`` decreases in ``h``."""
+    """Minimum ``h`` such that ``_odds(h, t, p, d) <= 1 - c``.
+
+    LoadGen's ``MinPassingQueriesFinder`` (``loadgen/early_stopping.cc:62-114``): the
+    smallest number of under-latency queries that, alongside ``t`` over-latency queries,
+    lets you conclude at confidence ``c`` that the true p-percentile meets the bound.
+    ``_odds`` is monotonically decreasing in ``h``, so exponential bracketing (double
+    ``hi`` until it passes) followed by binary search finds the boundary exactly.
+    """
     _validate_domain(p, d, c)
     target = 1.0 - c
     lo, hi = 1, 2
@@ -145,7 +206,15 @@ def find_min_passing(
 
 
 def _discard_count(n: int, p: float, d: float, c: float) -> int:
-    # Largest t >= 1 with n >= find_min_passing(t) + t; 0 if even t=1 needs more than n.
+    """Largest ``t >= 1`` with ``n >= find_min_passing(t) + t``; 0 below the floor.
+
+    This is the LoadGen SingleStream estimate construction (``results.cc:162-226``):
+    discard the ``t`` highest samples such that the run of ``n`` queries would still
+    pass the binomial test with those as its over-latency set — the (t+1)-th highest
+    value is then a c-confidence upper bound on the true p-percentile. Same
+    exponential-bracket + binary-search shape as ``find_min_passing`` (the passing
+    margin ``n - (find_min_passing(t) + t)`` is monotone in ``t``).
+    """
     if find_min_passing(1, p, d, c) + 1 > n:
         return 0
     lo, hi = 1, 2

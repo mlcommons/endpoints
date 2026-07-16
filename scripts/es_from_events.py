@@ -39,6 +39,9 @@ import sys
 
 import msgspec.json
 
+from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
+    DEFAULT_PERCENTILES,
+)
 from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
     encode_lengths,
     load_reference_backend,
@@ -46,8 +49,8 @@ from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics im
 from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.metrics.early_stopping import (
     CONFIDENCE,
-    PERCENTILES,
     es_percentile_estimate,
+    es_percentiles_from_grid,
 )
 
 _loads = msgspec.json.decode
@@ -234,8 +237,8 @@ def main(argv=None):
     )
     ap.add_argument(
         "--percentiles",
-        default=",".join(str(p) for p in PERCENTILES),
-        help="offline-analysis override; the in-band report always uses the standard set",
+        default=",".join(str(p) for p in es_percentiles_from_grid(DEFAULT_PERCENTILES)),
+        help="offline-analysis override; defaults to the report grid at/above the median",
     )
     ap.add_argument("--confidence", type=float, default=CONFIDENCE)
     ap.add_argument("--compare", help="result_summary.json to cross-check against")

@@ -12,8 +12,9 @@ estimate stays honest, which is exactly the regime edge/T2V workloads live in.
 
 ## What it computes
 
-For each target percentile `p` in the standard set `PERCENTILES = (0.5, 0.9, 0.95, 0.99)`, at
-confidence `c = 0.99`, over the `n` ascending-sorted latencies of a series:
+For each target percentile `p` — every entry of the series' own report percentile grid at or above
+the median (`es_percentiles_from_grid`; the default grid yields p50/p75/p80/p90/p95/p97/p99/p99.9) —
+at confidence `c = 0.99`, over the `n` ascending-sorted latencies of a series:
 
 ```
 estimate = sorted[n - t],  t = max{ i : n >= find_min_passing(i, p, d, c) + i }
@@ -25,12 +26,16 @@ at confidence `c`, always `>=` the empirical percentile. Below the floor
 samples). The binomial math lives in `metrics/early_stopping.py` (fast `betai`, no scipy; validated
 against LoadGen values, e.g. `h_min(t=0,p99)=459`).
 
-**Confidence, tolerance, and the percentile set are algorithm constants, not configuration**
-(`CONFIDENCE = 0.99`, `TOLERANCE = 0.0`, `PERCENTILES = (0.5, 0.9, 0.95, 0.99)` in
-`metrics/early_stopping.py`). LoadGen hardcodes the first two (`results.cc:157-158`); lowering `c`
-or raising `d` weakens the certified claim (`d > 0` certifies percentile `p − d`), and the fixed
-percentile set means every scenario's gate percentile (p99 Server, p90 SingleStream/T2V) is always
-covered with nothing to tune. The pure math keeps defaulted arguments for parity tests only.
+**Confidence and tolerance are algorithm constants, not configuration** (`CONFIDENCE = 0.99`,
+`TOLERANCE = 0.0` in `metrics/early_stopping.py`). LoadGen hardcodes both (`results.cc:157-158`);
+lowering `c` or raising `d` weakens the certified claim (`d > 0` certifies percentile `p − d`).
+The pure math keeps defaulted arguments for parity tests only.
+
+**The percentile targets are not a separate list either** — they derive from the series' report
+percentile grid, filtered to `p ≥ 0.5` (`ES_MIN_PERCENTILE`): the estimate is a *tail*
+certification (a conservative upper confidence bound), so below-median grid entries are skipped.
+One source of truth: whatever percentiles a series reports, ES covers — every scenario's gate
+percentile (p99 Server, p90 SingleStream/T2V) is always included, with nothing to tune.
 
 Each estimate is a *marginal* `c`-confidence statement per percentile. Reporting several at once is
 fine for diagnostics, but a joint gate across all of them holds at lower than `c` confidence
@@ -54,8 +59,10 @@ exists in the aggregator subprocess (`SeriesSampler._raw`). Only the summarized 
 to the main process, so the estimate must be produced before that boundary — in `build_stat`, on the
 COMPLETE (exact) path. Hot path is untouched; this is cold-path work at run end.
 
-**Target metrics:** `ES_TARGET_METRICS = {ttft_ns, tpot_ns, sample_latency_ns}`. Only these
-tail-latency series get an estimate; counters / ISL / OSL do not.
+**Target metrics:** any series registered with `register_series(..., tail_latency=True)` — today
+`ttft_ns`, `tpot_ns`, and `sample_latency_ns` (see the aggregator's registration block). The flag
+lives at the metric's definition site, so a new latency metric opts in where it is declared;
+counters / ISL / OSL simply don't set it.
 
 ## Config (YAML)
 
