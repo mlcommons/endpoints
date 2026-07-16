@@ -30,14 +30,24 @@ curl http://localhost:18080/health
 
 ## 2. End-to-end test (requires live endpoint)
 
+Run the config for the model under test:
+
 ```bash
+# Qwen
 uv run inference-endpoint benchmark from-config \
-  --config examples/10_Agentic_Inference/swe_bench_accuracy.yaml \
-  --mode both
+  --config examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml \
+  --mode acc
+
+# Kimi
+uv run inference-endpoint benchmark from-config \
+  --config examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml \
+  --mode acc
 ```
 
-`--mode both` is required: `type: online` configs default to `TestMode.PERF`,
-which skips accuracy datasets.
+Both configs include a performance dataset and the SWE-bench accuracy dataset.
+`--mode acc` skips the performance dataset and is required because
+`type: online` configs default to `TestMode.PERF`, which skips accuracy
+datasets.
 
 Scorer preflight calls the service `/health` endpoint. It does not check Docker
 or pre-pull images on the benchmark client.

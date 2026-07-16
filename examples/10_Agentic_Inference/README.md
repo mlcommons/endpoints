@@ -197,12 +197,13 @@ uv run inference-endpoint benchmark from-config \
 
 ## SWE-bench Accuracy
 
-`swe_bench_accuracy.yaml` runs the SWE-bench accuracy evaluation alongside a
-minimal performance dataset. The benchmark framework skips its built-in
-accuracy phase for this dataset; instead, `SWEBenchScorer` submits the run to a
-native SWE-bench service. The service host owns Docker, `mini-swe-agent`, and
-the `swebench` evaluation harness, and it drives requests to the configured
-endpoint.
+Both `qwen_agentic_benchmark.yaml` and `kimi_agentic_benchmark.yaml` include the
+SWE-bench accuracy dataset. Run the config for the model under test with
+`--mode acc`; this skips the agentic performance dataset. The benchmark
+framework also skips its built-in endpoint phase for the SWE-bench dataset.
+Instead, `SWEBenchScorer` submits the run to a native SWE-bench service. The
+service host owns Docker, `mini-swe-agent`, and the `swebench` evaluation
+harness, and it drives requests to the configured endpoint.
 
 Keep `accuracy_config.num_repeats: 1`: the scorer performs one external
 evaluation run per benchmark. Optional `accuracy_config.extras.subset` and
@@ -234,16 +235,22 @@ uv run --project src/inference_endpoint/evaluation/swebench_service \
   python -m swebench_service --host 0.0.0.0 --port 18080
 ```
 
-Then run the benchmark from the repo root:
+Then run the matching model config from the repo root:
 
 ```bash
+# Qwen
 uv run inference-endpoint benchmark from-config \
-  --config examples/10_Agentic_Inference/swe_bench_accuracy.yaml \
-  --mode both
+  --config examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml \
+  --mode acc
+
+# Kimi
+uv run inference-endpoint benchmark from-config \
+  --config examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml \
+  --mode acc
 ```
 
-`--mode both` is required: `type: online` configs default to `TestMode.PERF`,
-which skips accuracy datasets.
+`--mode acc` is required because `type: online` configs default to
+`TestMode.PERF`, which skips accuracy datasets.
 
 See `accuracy/RUNBOOK.md` for preconditions, sanity checks, and common failure
 modes.
