@@ -42,6 +42,12 @@ from typing import Final
 import numpy as np
 from hdrh.histogram import HdrHistogram
 
+from inference_endpoint.metrics.early_stopping import (
+    ES_TARGET_METRICS,
+    EarlyStoppingSpec,
+    es_percentile_estimate,
+)
+
 from .snapshot import (
     CounterStat,
     MetricsSnapshot,
@@ -144,6 +150,7 @@ class SeriesSampler(MetricSampler):
         "_min",
         "_max",
         "_warned_clamp",
+        "_es_spec",
     )
 
     def __init__(
@@ -156,11 +163,13 @@ class SeriesSampler(MetricSampler):
         n_histogram_buckets: int,
         percentiles: tuple[float, ...],
         dtype: type,
+        es_spec: EarlyStoppingSpec | None = None,
     ) -> None:
         if dtype not in _ARRAY_TYPECODE:
             raise ValueError(f"Unsupported series dtype: {dtype!r}")
         self.name = name
         self._dtype = dtype
+        self._es_spec = es_spec
         # HDR low must be >=1; a bound of 0 is rejected by the C library.
         self._hdr_low = max(int(hdr_low), 1)
         self._hdr_high = int(hdr_high)
@@ -315,6 +324,15 @@ class SeriesSampler(MetricSampler):
             for i in range(len(edges) - 1)
         ]
 
+        # Early-stopping estimate (COMPLETE path only): conservative confidence-backed
+        # percentile off the sorted raw array. Cold path — sort is one-time at run end.
+        early_stopping: dict[str, float | int | bool | None] | None = None
+        if self._es_spec is not None:
+            spec = self._es_spec
+            early_stopping = es_percentile_estimate(
+                np.sort(arr), spec.percentile, spec.confidence, spec.tolerance
+            ).as_dict()
+
         return SeriesStat(
             name=self.name,
             count=self._count,
@@ -324,6 +342,7 @@ class SeriesSampler(MetricSampler):
             sum_sq=float(self._sum_sq),
             percentiles=perc_dict,
             histogram=histogram,
+            early_stopping=early_stopping,
         )
 
 
@@ -351,10 +370,12 @@ _DEFAULT_PERCENTILES: Final[tuple[float, ...]] = (
 class MetricsRegistry:
     """Central registry of all counter and series samplers."""
 
-    def __init__(self) -> None:
+    def __init__(self, early_stopping: EarlyStoppingSpec | None = None) -> None:
         self._counters: dict[str, CounterSampler] = {}
         self._series: dict[str, SeriesSampler] = {}
         self._seen_names: set[str] = set()
+        # Optional early-stopping spec; applied only to ES_TARGET_METRICS series.
+        self._early_stopping = early_stopping
         # Monotonic snapshot emit counter; surfaced on the wire as
         # MetricsSnapshot.counter for diagnostic use by consumers.
         self._counter: int = 0
@@ -407,6 +428,7 @@ class MetricsRegistry:
             n_histogram_buckets=n_histogram_buckets,
             percentiles=percentiles,
             dtype=dtype,
+            es_spec=self._early_stopping if name in ES_TARGET_METRICS else None,
         )
         self._series[name] = sampler
         self._seen_names.add(name)

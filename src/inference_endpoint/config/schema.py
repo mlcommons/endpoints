@@ -925,6 +925,39 @@ class ProfilingConfig(BaseModel):
 
 
 @cyclopts.Parameter(name="*")
+class EarlyStoppingConfig(BaseModel):
+    """MLPerf-style early-stopping percentile estimate (default off).
+
+    Adds a conservative, confidence-backed estimate of the target tail percentile to the
+    TTFT / TPOT / latency metrics in ``result_summary.json``. Estimate-only: no target-latency
+    pass/fail and no dynamic mid-run halt. See ``docs/early_stopping.md``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--early-stopping",
+            help="Report MLPerf early-stopping percentile estimates for TTFT/TPOT/latency",
+        ),
+    ] = Field(
+        False, description="Enable early-stopping percentile estimates (default off)"
+    )
+    percentile: float = Field(
+        0.99,
+        gt=0.0,
+        lt=1.0,
+        description="Target percentile (0.99 for Server/interactive p99, 0.90 for SingleStream/T2V)",
+    )
+    confidence: float = Field(
+        0.99, gt=0.0, lt=1.0, description="Confidence level c (MLPerf default 0.99)"
+    )
+    tolerance: float = Field(
+        0.0, ge=0.0, lt=1.0, description="Tolerance d (MLPerf default 0.0)"
+    )
+
+
 class Settings(BaseModel):
     """Test settings."""
 
@@ -939,6 +972,10 @@ class Settings(BaseModel):
     )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
     profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
+    early_stopping: EarlyStoppingConfig = Field(
+        default_factory=EarlyStoppingConfig,
+        description="MLPerf early-stopping percentile estimate (default off)",
+    )
     service_ready_timeout_s: Annotated[
         float,
         cyclopts.Parameter(

@@ -89,7 +89,7 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
         median = (s_min + s_max) / 2
 
     histogram = stat.get("histogram", [])
-    return {
+    metric: dict[str, Any] = {
         "total": total,
         "min": s_min,
         "max": s_max,
@@ -102,6 +102,12 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
             "counts": [c for _, c in histogram],
         },
     }
+    # Early-stopping estimate block — present only when the feature is enabled
+    # (COMPLETE snapshots for TTFT/TPOT/latency).
+    early_stopping = stat.get("early_stopping")
+    if early_stopping is not None:
+        metric["early_stopping"] = early_stopping
+    return metric
 
 
 def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:

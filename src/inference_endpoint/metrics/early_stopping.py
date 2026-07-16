@@ -19,8 +19,30 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 
-__all__ = ["EarlyStoppingResult", "es_percentile_estimate", "find_min_passing"]
+__all__ = [
+    "ES_TARGET_METRICS",
+    "EarlyStoppingResult",
+    "EarlyStoppingSpec",
+    "es_percentile_estimate",
+    "find_min_passing",
+]
+
+# Tail-latency series that receive an early-stopping estimate. Must match the aggregator's
+# registered metric names (see metrics_aggregator/metrics_table.py: MetricSeriesKey).
+ES_TARGET_METRICS: frozenset[str] = frozenset(
+    {"ttft_ns", "tpot_ns", "sample_latency_ns"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EarlyStoppingSpec:
+    """Resolved early-stopping parameters passed to the aggregator."""
+
+    percentile: float = 0.99
+    confidence: float = 0.99
+    tolerance: float = 0.0
 
 
 def _betacf(a: float, b: float, x: float) -> float:
@@ -60,8 +82,11 @@ def _betai(a: float, b: float, x: float) -> float:
     if x >= 1.0:
         return 1.0
     ln_bt = (
-        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
-        + a * math.log(x) + b * math.log(1.0 - x)
+        math.lgamma(a + b)
+        - math.lgamma(a)
+        - math.lgamma(b)
+        + a * math.log(x)
+        + b * math.log(1.0 - x)
     )
     bt = math.exp(ln_bt)
     if x < (a + 1.0) / (a + b + 2.0):
@@ -112,12 +137,28 @@ class EarlyStoppingResult:
     (``n < find_min_passing(1) + 1``); ``min_queries`` is that floor.
     """
 
-    __slots__ = ("percentile", "confidence", "tolerance", "n", "estimate",
-                 "empirical", "min_queries", "discarded")
+    __slots__ = (
+        "percentile",
+        "confidence",
+        "tolerance",
+        "n",
+        "estimate",
+        "empirical",
+        "min_queries",
+        "discarded",
+    )
 
-    def __init__(self, percentile: float, confidence: float, tolerance: float, n: int,
-                 estimate: float | None, empirical: float | None,
-                 min_queries: int, discarded: int) -> None:
+    def __init__(
+        self,
+        percentile: float,
+        confidence: float,
+        tolerance: float,
+        n: int,
+        estimate: float | None,
+        empirical: float | None,
+        min_queries: int,
+        discarded: int,
+    ) -> None:
         self.percentile = percentile
         self.confidence = confidence
         self.tolerance = tolerance
@@ -133,8 +174,8 @@ class EarlyStoppingResult:
             "confidence": self.confidence,
             "tolerance": self.tolerance,
             "n": self.n,
-            "estimate": self.estimate,
-            "empirical": self.empirical,
+            "estimate": None if self.estimate is None else float(self.estimate),
+            "empirical": None if self.empirical is None else float(self.empirical),
             "sufficient": self.estimate is not None,
             "min_queries": self.min_queries,
             "discarded": self.discarded,
@@ -153,8 +194,17 @@ def es_percentile_estimate(
     emp_idx = min(n - 1, max(0, math.ceil(percentile * n) - 1)) if n else 0
     empirical = sorted_latencies[emp_idx] if n else None
     if n < min_queries:
-        return EarlyStoppingResult(percentile, confidence, tolerance, n, None,
-                                   empirical, min_queries, 0)
+        return EarlyStoppingResult(
+            percentile, confidence, tolerance, n, None, empirical, min_queries, 0
+        )
     t = _discard_count(n, percentile, tolerance, confidence)
-    return EarlyStoppingResult(percentile, confidence, tolerance, n,
-                               sorted_latencies[n - t], empirical, min_queries, t)
+    return EarlyStoppingResult(
+        percentile,
+        confidence,
+        tolerance,
+        n,
+        sorted_latencies[n - t],
+        empirical,
+        min_queries,
+        t,
+    )

@@ -18,7 +18,11 @@ from inference_endpoint.metrics.early_stopping import (
 class TestFindMinPassing:
     def test_matches_loadgen_reference_values(self):
         # h_min(t=0, p99) closed form = ceil(ln(0.01)/ln(0.99)) = 459
-        assert find_min_passing(0, 0.99) == 459 == math.ceil(math.log(0.01) / math.log(0.99))
+        assert (
+            find_min_passing(0, 0.99)
+            == 459
+            == math.ceil(math.log(0.01) / math.log(0.99))
+        )
         # p90 best case
         assert find_min_passing(0, 0.90) == 44
         # SingleStream estimate floor uses t=1
@@ -66,8 +70,15 @@ class TestEsPercentileEstimate:
         d = r.as_dict()
         assert d["sufficient"] is True
         assert set(d) == {
-            "percentile", "confidence", "tolerance", "n", "estimate",
-            "empirical", "sufficient", "min_queries", "discarded",
+            "percentile",
+            "confidence",
+            "tolerance",
+            "n",
+            "estimate",
+            "empirical",
+            "sufficient",
+            "min_queries",
+            "discarded",
         }
 
     def test_empty_series(self):

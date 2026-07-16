@@ -119,6 +119,9 @@ class SeriesStat(
     sum_sq: int | float
     percentiles: dict[str, float]
     histogram: list[tuple[tuple[float, float], int]]
+    # Early-stopping percentile estimate (COMPLETE snapshots only, when enabled). Optional
+    # trailing field so the array_like wire format stays backward-compatible. None = not computed.
+    early_stopping: dict[str, float | int | bool | None] | None = None
 
 
 # Tagged union: msgspec dispatches on the ``tag`` literal at decode time.
@@ -229,7 +232,7 @@ def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
 def _metric_to_dict(m: MetricStat) -> dict:
     if isinstance(m, CounterStat):
         return {"type": "counter", "name": m.name, "value": _scrub_nonfinite(m.value)}
-    return {
+    series: dict = {
         "type": "series",
         "name": m.name,
         "count": m.count,
@@ -246,6 +249,9 @@ def _metric_to_dict(m: MetricStat) -> dict:
             for rng, c in m.histogram
         ],
     }
+    if m.early_stopping is not None:
+        series["early_stopping"] = m.early_stopping
+    return series
 
 
 class MetricsSnapshotCodec:
