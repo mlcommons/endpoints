@@ -473,8 +473,8 @@ class ConnectionPool:
         ssl_context: ssl.SSLContext | None = None,
         # Bound on simultaneous in-flight connect() calls (pool growth only —
         # never the pooled-connection reuse path). Real runs pass the
-        # HTTPClientConfig.max_concurrent_connects field; the default mirrors it.
-        max_concurrent_connects: int = 128,
+        # HTTPClientConfig.max_concurrent_warmup_connects field; the default mirrors it.
+        max_concurrent_warmup_connects: int = 128,
     ):
         self._host = host
         self._port = port
@@ -487,7 +487,7 @@ class ConnectionPool:
         self._all_connections: set[PooledConnection] = set()
         self._creating: int = 0
         # Paces pool growth so bursts don't stampede the endpoint / port space
-        self._connect_limiter = asyncio.Semaphore(max_concurrent_connects)
+        self._connect_limiter = asyncio.Semaphore(max_concurrent_warmup_connects)
 
         # FIFO waiter queue using OrderedDict (O(1) operations)
         self._waiters: OrderedDict[asyncio.Future[None], None] = OrderedDict()

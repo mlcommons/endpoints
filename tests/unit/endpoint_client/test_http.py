@@ -607,7 +607,7 @@ class TestConnectionPool:
             port=parsed.port,
             loop=TrackingLoop(),
             max_connections=12,
-            max_concurrent_connects=2,
+            max_concurrent_warmup_connects=2,
         )
         try:
             warmed = await p.warmup(count=12)

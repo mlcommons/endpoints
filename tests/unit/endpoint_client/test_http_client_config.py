@@ -220,7 +220,7 @@ class TestAutoWarmupResolution:
                 endpoint_urls=["http://10.0.0.1:8000"],
                 num_workers=10,
                 auto_warmup_budget_fraction=0.1,
-                max_concurrent_connects=32,
+                max_concurrent_warmup_connects=32,
             )
         assert c.warmup_connections == 1000  # 10% of the 10000 budget
-        assert c.max_concurrent_connects == 32
+        assert c.max_concurrent_warmup_connects == 32

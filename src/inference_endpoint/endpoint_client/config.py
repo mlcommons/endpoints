@@ -137,13 +137,24 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # ports (EADDRNOTAVAIL). Paced waves complete in a few RTTs each, so total
     # establishment time is barely affected. Applies only to pool growth — the
     # pooled-connection reuse path never touches it.
-    max_concurrent_connects: Annotated[
+    max_concurrent_warmup_connects: Annotated[
         int,
         cyclopts.Parameter(
-            alias="--max-concurrent-connects",
-            help="Max in-flight connection establishments per worker pool",
+            alias="--max-concurrent-warmup-connects",
+            help=(
+                "Max in-flight connection establishments per worker pool "
+                "(paces the warmup stampede AND on-demand pool growth)"
+            ),
         ),
-    ] = Field(128, ge=1)
+    ] = Field(
+        128,
+        ge=1,
+        description=(
+            "Max in-flight connect() calls per worker pool. Named for its "
+            "primary job — pacing the warmup connection stampede — but it "
+            "bounds ALL pool growth, including t=0 on-demand bursts."
+        ),
+    )
 
     # Maximum concurrent TCP connections.
     # Performance sweetspot is often a low number compared to port limit ~1024.
