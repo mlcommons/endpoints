@@ -35,16 +35,15 @@ from pathlib import Path
 
 import cyclopts
 import yaml
-from pydantic import BaseModel
-from pydantic.fields import FieldInfo
-from pydantic_core import PydanticUndefined
-
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
     OfflineBenchmarkConfig,
     OnlineBenchmarkConfig,
     TestType,
 )
+from pydantic import BaseModel
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "src/inference_endpoint/config/templates"
 

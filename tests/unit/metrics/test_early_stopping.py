@@ -6,7 +6,6 @@
 import math
 
 import pytest
-
 from inference_endpoint.metrics.early_stopping import (
     CONFIDENCE,
     ES_MIN_PERCENTILE,

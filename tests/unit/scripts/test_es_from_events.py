@@ -142,7 +142,9 @@ class TestMalformedInput:
         return p
 
     def test_junk_lines_counted_not_crashed(self, tmp_path, capsys):
-        s = mod.compute_series(self._events_with_junk(tmp_path), count_tokens=_ws_counts)
+        s = mod.compute_series(
+            self._events_with_junk(tmp_path), count_tokens=_ws_counts
+        )
         assert s["ttft_ns"] == [50]
         assert s["sample_latency_ns"] == [300]
         err = capsys.readouterr().err

@@ -41,7 +41,6 @@ from typing import Final
 
 import numpy as np
 from hdrh.histogram import HdrHistogram
-
 from inference_endpoint.metrics.early_stopping import (
     EarlyStoppingSpec,
     es_percentile_estimate,

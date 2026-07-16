@@ -120,6 +120,7 @@ The aggregator is a separate process (`python -m inference_endpoint.async_utils.
 - **Counter API**: `registry.increment(name, delta=1)` for sample-event counters. `registry.set_counter(name, value)` only for the three derived-duration counters (`total_duration_ns` max-of-elapsed, `tracked_duration_ns` sum-of-blocks, `legacy_loadgen_window_duration_ns` first-issue→last-issued-completion span for LoadGen-parity QPS/TPS).
 - **Lifecycle**: `INITIALIZE` (constructed, awaiting first `STARTED`) → `LIVE` (run in progress, ticking every `--publish-interval` seconds) → `DRAINING` (set on `ENDED`; tick continues; bounded by the `--drain-timeout` budget — schema default 0 = unlimited) → terminal: `COMPLETE` (clean end via `publish_final`, exact stats) **or** `INTERRUPTED` (signal-handler-triggered final via SIGTERM/SIGINT; best-effort partial stats). Drain timeout detected by consumers as `state == COMPLETE and n_pending_tasks > 0`; interrupted runs are detected as `state == INTERRUPTED` directly.
 - **Final delivery is dual-path with separated concerns**: `publish_final` atomically writes `final_snapshot.json` (`tmp + fsync(file) + rename + fsync(parent_dir)`) — this is the **primary** Report source — AND emits the terminal-state snapshot over pub/sub as a TUI shutdown signal. Each path is wrapped in its own try/except so one failure cannot suppress the other. Main process consumer reads `final_snapshot.json` (via `json.loads` to dict, no Struct decode); falls back to the subscriber's `latest` live snapshot only if the file is missing (e.g. SIGKILL / OOM before the signal handler ran). The dict form is the canonical consumer contract (see `snapshot_to_dict`).
+- **Early stopping (opt-in)**: series registered with `register_series(..., tail_latency=True)` (today ttft/tpot/latency) get MLPerf early-stopping percentile estimates on the COMPLETE (exact) snapshot — one self-describing block per report-grid percentile ≥ p50, surfaced as an `early_stopping` list in `result_summary.json` and rendered in the text report. Single config switch `settings.early_stopping.enabled` (default off); confidence/tolerance are LoadGen constants. Pure math in `metrics/early_stopping.py`; post-hoc recomputation from any run's `events.jsonl` via `scripts/es_from_events.py`. See docs/early_stopping.md.
 - **Histogram bucket edges are dynamic per snapshot**: log-spaced over the observed `[min, max]`. Bucket count is fixed at construction; consumers MUST re-render from the snapshot's `(lo, hi, count)` triples each frame and MUST NOT track bucket-by-index across snapshots.
 
 ### CLI Modes
@@ -237,6 +238,7 @@ src/inference_endpoint/
 ├── metrics/
 │   ├── report.py              # Report.from_snapshot(MetricsSnapshot); display + JSON serialization
 │   ├── metric.py              # Metric types (Throughput, etc.)
+│   ├── early_stopping.py      # MLPerf LoadGen early-stopping percentile estimates (pure math; see docs/early_stopping.md)
 │   └── results_plots.py       # Standardized run-artifact plots (matplotlib-guarded); CLI: scripts/plot_results.py
 ├── config/
 │   ├── schema.py              # Single source of truth: Pydantic models + cyclopts annotations

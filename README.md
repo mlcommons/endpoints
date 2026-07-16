@@ -76,13 +76,13 @@ Dataset Manager ──> Load Generator ──> Endpoint Client ──> External 
                     Metrics Collector (EventRecorder + MetricsReporter)
 ```
 
-| Component           | Purpose                                                                              |
-| ------------------- | ------------------------------------------------------------------------------------ |
-| **Load Generator**  | Central orchestrator: `BenchmarkSession` owns lifecycle, `Scheduler` controls timing |
-| **Endpoint Client** | Multi-process HTTP workers communicating via ZMQ IPC                                 |
-| **Dataset Manager** | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets                                |
-| **Metrics**         | SQLite-backed event recording, aggregation (QPS, latency, TTFT, TPOT)                |
-| **Config**          | Pydantic-based YAML schema, CLI auto-generated via cyclopts                          |
+| Component           | Purpose                                                                                                                    |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **Load Generator**  | Central orchestrator: `BenchmarkSession` owns lifecycle, `Scheduler` controls timing                                       |
+| **Endpoint Client** | Multi-process HTTP workers communicating via ZMQ IPC                                                                       |
+| **Dataset Manager** | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets                                                                      |
+| **Metrics**         | SQLite-backed event recording, aggregation (QPS, latency, TTFT, TPOT), optional MLPerf early-stopping percentile estimates |
+| **Config**          | Pydantic-based YAML schema, CLI auto-generated via cyclopts                                                                |
 
 ### Benchmark Modes
 

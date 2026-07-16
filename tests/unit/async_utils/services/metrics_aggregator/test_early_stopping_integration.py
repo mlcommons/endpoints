@@ -6,7 +6,6 @@
 import random
 
 import pytest
-
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     MetricsRegistry,
 )

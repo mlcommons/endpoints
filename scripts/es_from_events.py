@@ -38,7 +38,6 @@ import json
 import sys
 
 import msgspec.json
-
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     DEFAULT_PERCENTILES,
 )

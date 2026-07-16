@@ -1,8 +1,8 @@
 # Early stopping — design
 
 Optional, default-off feature that adds an MLPerf-LoadGen-style **early-stopping percentile
-estimate** to tail-latency metrics (TTFT / TPOT / total latency). It reports a *conservative,
-confidence-backed* percentile alongside the empirical one, so a run with too few samples to trust its
+estimate** to tail-latency metrics (TTFT / TPOT / total latency). It reports a _conservative,
+confidence-backed_ percentile alongside the empirical one, so a run with too few samples to trust its
 raw p99/p90 is surfaced honestly instead of silently under-reporting the tail.
 
 It is an **estimate only** — no target-latency pass/fail, no dynamic mid-run halt. The gap analysis
@@ -32,12 +32,12 @@ lowering `c` or raising `d` weakens the certified claim (`d > 0` certifies perce
 The pure math keeps defaulted arguments for parity tests only.
 
 **The percentile targets are not a separate list either** — they derive from the series' report
-percentile grid, filtered to `p ≥ 0.5` (`ES_MIN_PERCENTILE`): the estimate is a *tail*
+percentile grid, filtered to `p ≥ 0.5` (`ES_MIN_PERCENTILE`): the estimate is a _tail_
 certification (a conservative upper confidence bound), so below-median grid entries are skipped.
 One source of truth: whatever percentiles a series reports, ES covers — every scenario's gate
 percentile (p99 Server, p90 SingleStream/T2V) is always included, with nothing to tune.
 
-Each estimate is a *marginal* `c`-confidence statement per percentile. Reporting several at once is
+Each estimate is a _marginal_ `c`-confidence statement per percentile. Reporting several at once is
 fine for diagnostics, but a joint gate across all of them holds at lower than `c` confidence
 (multiple testing) — compliance gates should use the single scenario percentile.
 
@@ -69,7 +69,7 @@ counters / ISL / OSL simply don't set it.
 ```yaml
 settings:
   early_stopping:
-    enabled: false   # the only knob (or --early-stopping on the CLI)
+    enabled: false # the only knob (or --early-stopping on the CLI)
 ```
 
 Enabling the feature is just `enabled: true` — everything else is a constant (see above), so
@@ -91,6 +91,7 @@ configured percentile (present only when enabled):
   ]
 }
 ```
+
 `sufficient=false` with `estimate=null` means the run had fewer than `min_queries` samples to claim
 that percentile at the requested confidence. `empirical` uses the same order statistic as the
 `percentiles` grid (`np.percentile(..., method="lower")`, index `floor(p·(n−1))`), so the two can

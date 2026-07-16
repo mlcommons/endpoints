@@ -108,6 +108,7 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
   the output location; otherwise a default report directory is used.
 - `--timeout` - Global timeout in seconds
 - `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
+- `--early-stopping / --no-early-stopping` - MLPerf early-stopping percentile estimates in `result_summary.json` (default: off; see [early_stopping.md](early_stopping.md))
 
 **Online-specific:**
 
