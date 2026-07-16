@@ -34,6 +34,17 @@ def _series(snap_dict: dict, name: str) -> dict:
 
 
 @pytest.mark.unit
+class TestConfigSurface:
+    def test_schema_is_a_single_flag(self):
+        # The whole feature is one opt-in switch: percentiles/confidence/tolerance
+        # are loadgen-parity constants, not YAML/CLI knobs.
+        from inference_endpoint.config.schema import EarlyStoppingConfig
+
+        assert set(EarlyStoppingConfig.model_fields) == {"enabled"}
+        assert EarlyStoppingConfig().enabled is False
+
+
+@pytest.mark.unit
 class TestEarlyStoppingIntegration:
     def test_enabled_emits_default_percentile_list(self):
         # Default spec covers [0.5, 0.9, 0.95, 0.99] so users never tune per-yaml.

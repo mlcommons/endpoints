@@ -926,11 +926,13 @@ class ProfilingConfig(BaseModel):
 
 @cyclopts.Parameter(name="*")
 class EarlyStoppingConfig(BaseModel):
-    """MLPerf-style early-stopping percentile estimate (default off).
+    """MLPerf-style early-stopping percentile estimates (default off).
 
-    Adds a conservative, confidence-backed estimate of the target tail percentile to the
-    TTFT / TPOT / latency metrics in ``result_summary.json``. Estimate-only: no target-latency
-    pass/fail and no dynamic mid-run halt. See ``docs/early_stopping.md``.
+    Adds conservative, confidence-backed estimates of the tail percentiles to the
+    TTFT / TPOT / latency metrics in ``result_summary.json``. A single opt-in switch:
+    the percentile set (p50/p90/p95/p99), confidence (0.99), and tolerance (0.0) are
+    LoadGen-parity constants in ``metrics/early_stopping.py``, not knobs. Estimate-only:
+    no target-latency pass/fail and no dynamic mid-run halt. See ``docs/early_stopping.md``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -943,17 +945,6 @@ class EarlyStoppingConfig(BaseModel):
         ),
     ] = Field(
         False, description="Enable early-stopping percentile estimates (default off)"
-    )
-    percentiles: list[Annotated[float, Field(gt=0.0, lt=1.0)]] = Field(
-        default_factory=lambda: [0.5, 0.9, 0.95, 0.99],
-        min_length=1,
-        description=(
-            "Target percentiles — every ES metric gets one estimate per entry, so the "
-            "default covers p50/p90/p95/p99 without per-scenario tuning"
-        ),
-    )
-    confidence: float = Field(
-        0.99, gt=0.0, lt=1.0, description="Confidence level c (MLPerf default 0.99)"
     )
 
 

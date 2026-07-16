@@ -873,16 +873,7 @@ async def _run_benchmark_async(
                 ]
             )
             if config.settings.early_stopping.enabled:
-                es = config.settings.early_stopping
-                aggregator_args.extend(
-                    [
-                        "--early-stopping",
-                        "--es-percentiles",
-                        ",".join(str(p) for p in es.percentiles),
-                        "--es-confidence",
-                        str(es.confidence),
-                    ]
-                )
+                aggregator_args.append("--early-stopping")
 
             # EventLoggerService writes events.jsonl to tmpfs (high-frequency writes)
             event_logger_args: list[str] = [

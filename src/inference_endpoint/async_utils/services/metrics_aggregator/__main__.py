@@ -204,18 +204,6 @@ async def main() -> None:
         default=False,
         help="Compute MLPerf early-stopping percentile estimates for TTFT/TPOT/latency.",
     )
-    parser.add_argument(
-        "--es-percentiles",
-        type=lambda s: tuple(float(x) for x in s.split(",")),
-        default=EarlyStoppingSpec().percentiles,
-        help="Comma-separated early-stopping target percentiles (default 0.5,0.9,0.95,0.99).",
-    )
-    parser.add_argument(
-        "--es-confidence",
-        type=float,
-        default=0.99,
-        help="Early-stopping confidence c (default 0.99).",
-    )
     args = parser.parse_args()
     setup_logging(level="INFO")
 
@@ -259,14 +247,7 @@ async def main() -> None:
         tokenizer_cm as tokenizer,
         ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx,
     ):
-        es_spec = (
-            EarlyStoppingSpec(
-                percentiles=args.es_percentiles,
-                confidence=args.es_confidence,
-            )
-            if args.early_stopping
-            else None
-        )
+        es_spec = EarlyStoppingSpec() if args.early_stopping else None
         registry = MetricsRegistry(early_stopping=es_spec)
         publisher = MetricsPublisher(
             MetricsSnapshotCodec(),

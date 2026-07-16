@@ -23,7 +23,9 @@ from dataclasses import dataclass
 from typing import Final
 
 __all__ = [
+    "CONFIDENCE",
     "ES_TARGET_METRICS",
+    "PERCENTILES",
     "TOLERANCE",
     "EarlyStoppingResult",
     "EarlyStoppingSpec",
@@ -31,10 +33,14 @@ __all__ = [
     "find_min_passing",
 ]
 
-# LoadGen hardcodes tolerance d = 0.0 (results.cc:158): the test certifies the exact target
-# percentile. It is an algorithm constant, not a knob — d > 0 would weaken the guarantee to
-# percentile (p - d). Exposed only as a defaulted argument on the pure math for parity tests.
+# LoadGen hardcodes confidence c = 0.99 and tolerance d = 0.0 (results.cc:157-158). They are
+# algorithm constants, not knobs: lowering c or raising d weakens the certified claim (d > 0
+# certifies percentile p - d instead of p). Exposed only as defaulted arguments on the pure
+# math for parity tests. The report always covers one standard percentile set — each block
+# self-describes, so there is nothing to tune per config.
+CONFIDENCE: Final[float] = 0.99
 TOLERANCE: Final[float] = 0.0
+PERCENTILES: Final[tuple[float, ...]] = (0.5, 0.9, 0.95, 0.99)
 
 # Tail-latency series that receive an early-stopping estimate. Must match the aggregator's
 # registered metric names (see metrics_aggregator/metrics_table.py: MetricSeriesKey).
@@ -45,14 +51,14 @@ ES_TARGET_METRICS: frozenset[str] = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class EarlyStoppingSpec:
-    """Resolved early-stopping parameters passed to the aggregator.
+    """Resolved early-stopping parameters used by the aggregator.
 
-    Every target metric gets one estimate per entry in ``percentiles`` (default covers
-    p50/p90/p95/p99 so configs never need per-scenario tuning).
+    Defaults mirror the module constants; non-default values are for tests and offline
+    analysis only — the config surface is a single ``enabled`` flag.
     """
 
-    percentiles: tuple[float, ...] = (0.5, 0.9, 0.95, 0.99)
-    confidence: float = 0.99
+    percentiles: tuple[float, ...] = PERCENTILES
+    confidence: float = CONFIDENCE
 
 
 def _betacf(a: float, b: float, x: float) -> float:
@@ -109,7 +115,7 @@ def _odds(h: int, t: int, p: float, d: float) -> float:
     return _betai(h, 1 + t, p - d)
 
 
-def find_min_passing(t: int, p: float, d: float = TOLERANCE, c: float = 0.99) -> int:
+def find_min_passing(t: int, p: float, d: float = TOLERANCE, c: float = CONFIDENCE) -> int:
     """Minimum ``h`` such that ``_odds(h, t, p, d) <= 1 - c``. ``_odds`` decreases in ``h``."""
     target = 1.0 - c
     lo, hi = 1, 2
@@ -191,7 +197,7 @@ class EarlyStoppingResult:
 def es_percentile_estimate(
     sorted_latencies: Sequence[float],
     percentile: float,
-    confidence: float = 0.99,
+    confidence: float = CONFIDENCE,
 ) -> EarlyStoppingResult:
     """Conservative early-stopping percentile estimate over an ascending-sorted latency series."""
     n = len(sorted_latencies)

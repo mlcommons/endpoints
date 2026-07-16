@@ -10,8 +10,8 @@ gap analysis in the companion `endpoints-early-stopping` repo.
 
 ## What it computes
 
-For each target percentile `p` in `percentiles`, at confidence `c` (default 0.99), over the `n`
-ascending-sorted latencies of a series:
+For each target percentile `p` in the standard set `PERCENTILES = (0.5, 0.9, 0.95, 0.99)`, at
+confidence `c = 0.99`, over the `n` ascending-sorted latencies of a series:
 
 ```
 estimate = sorted[n - t],  t = max{ i : n >= find_min_passing(i, p, d, c) + i }
@@ -23,9 +23,12 @@ at confidence `c`, always `>=` the empirical percentile. Below the floor
 samples). The binomial math lives in `metrics/early_stopping.py` (fast `betai`, no scipy; validated
 against LoadGen values, e.g. `h_min(t=0,p99)=459`).
 
-**Tolerance `d` is an algorithm constant (`TOLERANCE = 0.0`), not configuration** — LoadGen
-hardcodes it (`results.cc:158`). `d > 0` would weaken the guarantee to percentile `p - d`, so it is
-deliberately not exposed as a knob; the pure math keeps a defaulted argument for parity tests only.
+**Confidence, tolerance, and the percentile set are algorithm constants, not configuration**
+(`CONFIDENCE = 0.99`, `TOLERANCE = 0.0`, `PERCENTILES = (0.5, 0.9, 0.95, 0.99)` in
+`metrics/early_stopping.py`). LoadGen hardcodes the first two (`results.cc:157-158`); lowering `c`
+or raising `d` weakens the certified claim (`d > 0` certifies percentile `p − d`), and the fixed
+percentile set means every scenario's gate percentile (p99 Server, p90 SingleStream/T2V) is always
+covered with nothing to tune. The pure math keeps defaulted arguments for parity tests only.
 
 Each estimate is a *marginal* `c`-confidence statement per percentile. Reporting several at once is
 fine for diagnostics, but a joint gate across all of them holds at lower than `c` confidence
@@ -57,13 +60,11 @@ tail-latency series get an estimate; counters / ISL / OSL do not.
 ```yaml
 settings:
   early_stopping:
-    enabled: false                      # default off
-    percentiles: [0.5, 0.9, 0.95, 0.99] # default — covers every scenario, no per-yaml tuning
-    confidence: 0.99                    # MLPerf default
+    enabled: false   # the only knob (or --early-stopping on the CLI)
 ```
 
-The default `percentiles` list means enabling the feature is just `enabled: true`; the scenario's
-gate percentile (p99 Server, p90 SingleStream/T2V) is always included, plus context percentiles.
+Enabling the feature is just `enabled: true` — everything else is a constant (see above), so
+there is nothing to tune per config and no way to accidentally weaken the statistical claim.
 
 ## Output (`result_summary.json`)
 

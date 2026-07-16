@@ -8,6 +8,8 @@ import math
 import pytest
 
 from inference_endpoint.metrics.early_stopping import (
+    CONFIDENCE,
+    PERCENTILES,
     TOLERANCE,
     EarlyStoppingResult,
     EarlyStoppingSpec,
@@ -18,14 +20,21 @@ from inference_endpoint.metrics.early_stopping import (
 
 @pytest.mark.unit
 class TestSpecAndConstants:
-    def test_tolerance_is_loadgen_constant(self):
-        # loadgen hardcodes tolerance d = 0.0 (results.cc:158); it is not a knob.
+    def test_loadgen_constants_not_knobs(self):
+        # loadgen hardcodes confidence c = 0.99 and tolerance d = 0.0
+        # (results.cc:157-158); neither is configuration.
+        assert CONFIDENCE == 0.99
         assert TOLERANCE == 0.0
 
-    def test_spec_default_percentiles(self):
+    def test_standard_percentile_set(self):
+        # one fixed report set for every scenario; blocks self-describe, so no
+        # per-yaml tuning field exists.
+        assert PERCENTILES == (0.5, 0.9, 0.95, 0.99)
+
+    def test_spec_defaults_mirror_constants(self):
         spec = EarlyStoppingSpec()
-        assert spec.percentiles == (0.5, 0.9, 0.95, 0.99)
-        assert spec.confidence == 0.99
+        assert spec.percentiles == PERCENTILES
+        assert spec.confidence == CONFIDENCE
         assert not hasattr(spec, "tolerance")
 
 

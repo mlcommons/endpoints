@@ -41,7 +41,8 @@ import msgspec.json
 
 from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.metrics.early_stopping import (
-    EarlyStoppingSpec,
+    CONFIDENCE,
+    PERCENTILES,
     es_percentile_estimate,
 )
 
@@ -203,9 +204,10 @@ def main(argv=None):
     ap.add_argument("--tokenizer", help="HF model dir (or tokenizer.json) — enables TPOT")
     ap.add_argument(
         "--percentiles",
-        default=",".join(str(p) for p in EarlyStoppingSpec().percentiles),
+        default=",".join(str(p) for p in PERCENTILES),
+        help="offline-analysis override; the in-band report always uses the standard set",
     )
-    ap.add_argument("--confidence", type=float, default=0.99)
+    ap.add_argument("--confidence", type=float, default=CONFIDENCE)
     ap.add_argument("--compare", help="result_summary.json to cross-check against")
     ap.add_argument("--json", dest="json_out", help="write blocks to this JSON file")
     args = ap.parse_args(argv)
