@@ -1166,7 +1166,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 "SUBMISSION configs must specify benchmark_mode (offline or online)"
             )
 
-        # Duplicate datasets — same (name, type) would collide in results.json
+        # Duplicate datasets — same (name, type) would collide in the accuracy report
         if self.datasets:
             pairs = [(d.name, d.type) for d in self.datasets]
             dupes = [

@@ -36,12 +36,20 @@ import logging
 import math
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from typing import Final
 
 import numpy as np
 from hdrh.histogram import HdrHistogram
 
-from .snapshot import CounterStat, MetricsSnapshot, MetricStat, SeriesStat, SessionState
+from .snapshot import (
+    CounterStat,
+    MetricsSnapshot,
+    MetricStat,
+    SeriesStat,
+    SessionState,
+    _metric_to_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -447,3 +455,46 @@ class MetricsRegistry:
 
     def has_series(self, name: str) -> bool:
         return name in self._series
+
+
+# ---------------------------------------------------------------------------
+# Token-count series (OSL / ISL)
+# ---------------------------------------------------------------------------
+
+# Canonical parameters for a token-count series, shared by the aggregator's live
+# OSL/ISL series and the finalize-side accuracy OSL so both emit an identical
+# block from one source. The HDR bounds size the live/HDR percentile view; the
+# exact (raw-array) path used for COMPLETE snapshots and accuracy OSL ignores them
+# and derives histogram edges from the observed range.
+TOKEN_HDR_LOW: Final[int] = 1
+TOKEN_HDR_HIGH: Final[int] = 10_000_000  # 10M tokens
+TOKEN_SERIES_SIG_FIGS: Final[int] = 3
+TOKEN_SERIES_HISTOGRAM_BUCKETS: Final[int] = 30
+
+
+def build_token_series_dict(
+    values: Iterable[int],
+    *,
+    sig_figs: int = TOKEN_SERIES_SIG_FIGS,
+    n_histogram_buckets: int = TOKEN_SERIES_HISTOGRAM_BUCKETS,
+) -> dict:
+    """Build a token-count series stat dict (exact) from raw ``values``.
+
+    Records ``values`` into a ``SeriesSampler`` configured identically to the
+    aggregator's OSL/ISL series, then materializes the exact-path stat (sort +
+    np.percentile/np.histogram over the observed range) in the same dict shape
+    ``snapshot_to_dict`` produces — so the finalize-side accuracy OSL block
+    matches the perf one without duplicating the construction. Off the hot path.
+    """
+    sampler = SeriesSampler(
+        "osl",
+        hdr_low=TOKEN_HDR_LOW,
+        hdr_high=TOKEN_HDR_HIGH,
+        sig_figs=sig_figs,
+        n_histogram_buckets=n_histogram_buckets,
+        percentiles=_DEFAULT_PERCENTILES,
+        dtype=int,
+    )
+    for v in values:
+        sampler.record(v)
+    return _metric_to_dict(sampler.build_stat(exact=True))

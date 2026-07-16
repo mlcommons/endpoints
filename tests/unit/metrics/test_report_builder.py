@@ -25,6 +25,7 @@ import json
 import math
 from pathlib import Path
 
+import msgspec.structs
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
     MetricCounterKey,
@@ -41,10 +42,55 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     SessionState,
     snapshot_to_dict,
 )
-from inference_endpoint.metrics.report import Report
+from inference_endpoint.metrics.report import Report, series_metric_dict
 
 # 1 hour in ns — same as the aggregator's default bound for time-series.
 _NS_HIGH = 3_600_000_000_000
+
+
+@pytest.mark.unit
+class TestSeriesMetricDict:
+    """Direct coverage for the accuracy-OSL rollup builder (perf-shape parity)."""
+
+    _PERF_KEYS = {
+        "avg",
+        "min",
+        "max",
+        "median",
+        "std_dev",
+        "total",
+        "percentiles",
+        "histogram",
+    }
+
+    def test_empty_returns_empty(self):
+        assert series_metric_dict([]) == {}
+
+    def test_keys_match_perf_block(self):
+        # Same key set as the perf report's output_sequence_lengths.
+        assert self._PERF_KEYS <= set(series_metric_dict([2, 4, 6]))
+
+    def test_basic_stats(self):
+        d = series_metric_dict([2, 4, 6])
+        assert d["avg"] == 4.0
+        assert d["min"] == 2
+        assert d["max"] == 6
+        assert d["total"] == 12
+        assert d["median"] == 4
+
+    def test_single_value(self):
+        d = series_metric_dict([7])
+        assert d["avg"] == 7.0
+        assert d["min"] == d["max"] == 7
+        assert d["std_dev"] == 0.0
+        assert d["median"] == 7
+
+    def test_all_equal_values(self):
+        # min == max must not degenerate the log-spaced histogram edges.
+        d = series_metric_dict([3, 3, 3])
+        assert d["min"] == d["max"] == 3
+        assert d["avg"] == 3.0
+        assert d["std_dev"] == 0.0
 
 
 def _make_registry(n_samples: int = 50) -> MetricsRegistry:
@@ -248,7 +294,66 @@ class TestReportDisplayAndSerialize:
 
         assert "Summary" in output
         assert "QPS:" in output
+        assert "TPS:" in output
         assert "End of Summary" in output
+
+    def test_from_snapshot_leaves_accuracy_empty(self):
+        """Accuracy isn't in the metrics snapshot; from_snapshot leaves it []."""
+        report = _build_report(_make_registry(n_samples=5))
+        assert report.accuracy == []
+
+    def test_display_tps_na_when_unmeasured(self):
+        """TPS renders an explicit N/A (symmetric with QPS) with no duration/OSL."""
+        report = _build_report(_make_registry(n_samples=0))
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        assert "TPS: N/A" in "\n".join(lines)
+
+    def test_display_accuracy_section(self):
+        """Each accuracy entry renders score + sample counts, plus per-subset
+        breakdown lines and the incomplete marker when present."""
+        report = _build_report(_make_registry(n_samples=10))
+        entry = {
+            "dataset_name": "gptoss",
+            "score": 82.3,
+            "unit_samples": 1283,
+            "num_repeats": 1,
+            "total_samples": 1283,
+            "duration_s": 12.5,
+            "complete": False,
+            "response_counts": {
+                "issued": 1283,
+                "scored": 1280,
+                "empty": 2,
+                "missing": 1,
+            },
+            "output_sequence_lengths": {"avg": 650.4, "min": 12, "max": 4096},
+            "osl_tokenize_s": 1.234,
+            "breakdown": {
+                "overall_accuracy": 82.3,
+                "subset_scores": {"aime25": 70.0, "livecodebench": 60.0},
+                "total_samples": 1283,
+                "complete": False,
+            },
+        }
+        report = msgspec.structs.replace(report, accuracy=[entry])
+
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "\n".join(lines)
+
+        assert "Accuracy:" in output
+        assert (
+            "gptoss: 82.3 (unit=1283, repeats=1, total=1283, duration=12.50s)" in output
+        )
+        assert "aime25: 70.00%" in output
+        assert "(incomplete)" in output
+        assert "responses: 1280/1283 scored (2 empty, 1 missing)" in output
+        assert "output tokens (avg/min/max): 650.4/12/4096" in output
+        # Cross-component mean (one component here, so it equals its score).
+        assert "Average: 82.3" in output
+        # Total accuracy-path tokenization time (summed per-entry osl_tokenize_s).
+        assert "OSL tokenization: 1.23s" in output
 
     def test_display_full(self):
         registry = _make_registry(n_samples=10)
@@ -270,6 +375,22 @@ class TestReportDisplayAndSerialize:
         data = json.loads(report.to_json())
         assert data["n_samples_completed"] == 5
         assert "ttft" in data
+
+    def test_to_json_excludes_accuracy(self):
+        """Accuracy lives only in the dedicated accuracy report; result_summary.json
+        stays purely performance. The field remains on the struct so report.txt /
+        the console summary still render it."""
+        report = _build_report(_make_registry(n_samples=10))
+        report = msgspec.structs.replace(
+            report,
+            accuracy=[{"dataset_name": "d", "score": 0.5, "total_samples": 10}],
+        )
+        data = json.loads(report.to_json())
+        assert "accuracy" not in data
+        # ...but the human-readable render still shows it.
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        assert any("Accuracy:" in ln for ln in lines)
 
     def test_to_json_serializes_qps_and_tps(self):
         """result_summary.json is self-complete: qps/tps are serialized so
