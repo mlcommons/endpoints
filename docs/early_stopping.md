@@ -10,7 +10,7 @@ gap analysis in the companion `endpoints-early-stopping` repo.
 
 ## What it computes
 
-For target percentile `p`, confidence `c` (default 0.99), tolerance `d` (default 0.0), over the `n`
+For each target percentile `p` in `percentiles`, at confidence `c` (default 0.99), over the `n`
 ascending-sorted latencies of a series:
 
 ```
@@ -19,9 +19,17 @@ estimate = sorted[n - t],  t = max{ i : n >= find_min_passing(i, p, d, c) + i }
 
 This is LoadGen's SingleStream estimate (`results.cc:162-226`): a value the true p-percentile is `<=`
 at confidence `c`, always `>=` the empirical percentile. Below the floor
-`find_min_passing(1, p, d, c) + 1` (662 for p99) the estimate is `None` (too few samples). The
-binomial math lives in `metrics/early_stopping.py` (fast `betai`, no scipy; validated against LoadGen
-values, e.g. `h_min(t=0,p99)=459`).
+`find_min_passing(1, p, d, c) + 1` (662 for p99, 64 for p90) the estimate is `None` (too few
+samples). The binomial math lives in `metrics/early_stopping.py` (fast `betai`, no scipy; validated
+against LoadGen values, e.g. `h_min(t=0,p99)=459`).
+
+**Tolerance `d` is an algorithm constant (`TOLERANCE = 0.0`), not configuration** — LoadGen
+hardcodes it (`results.cc:158`). `d > 0` would weaken the guarantee to percentile `p - d`, so it is
+deliberately not exposed as a knob; the pure math keeps a defaulted argument for parity tests only.
+
+Each estimate is a *marginal* `c`-confidence statement per percentile. Reporting several at once is
+fine for diagnostics, but a joint gate across all of them holds at lower than `c` confidence
+(multiple testing) — compliance gates should use the single scenario percentile.
 
 ## Layering (who owns what)
 
@@ -49,28 +57,32 @@ tail-latency series get an estimate; counters / ISL / OSL do not.
 ```yaml
 settings:
   early_stopping:
-    enabled: false        # default off
-    percentile: 0.99      # target: 0.99 for Server/interactive p99, 0.90 for SingleStream/T2V
-    confidence: 0.99      # MLPerf default
-    tolerance: 0.0        # MLPerf default (d=0)
+    enabled: false                      # default off
+    percentiles: [0.5, 0.9, 0.95, 0.99] # default — covers every scenario, no per-yaml tuning
+    confidence: 0.99                    # MLPerf default
 ```
+
+The default `percentiles` list means enabling the feature is just `enabled: true`; the scenario's
+gate percentile (p99 Server, p90 SingleStream/T2V) is always included, plus context percentiles.
 
 ## Output (`result_summary.json`)
 
-Each of `ttft`/`tpot`/`latency` gains an `early_stopping` block (present only when enabled):
+Each of `ttft`/`tpot`/`latency` gains an `early_stopping` **list** — one self-describing block per
+configured percentile (present only when enabled):
 
 ```json
 "tpot": {
   "percentiles": { "99.0": 71908203.4, ... },
-  "early_stopping": {
-    "percentile": 0.99, "confidence": 0.99, "tolerance": 0.0,
-    "n": 40000, "estimate": 71997480.0, "empirical": 71908203.4,
-    "sufficient": true, "min_queries": 662, "discarded": 353
-  }
+  "early_stopping": [
+    { "percentile": 0.5,  "confidence": 0.99, "n": 40000, "estimate": ..., "empirical": ...,
+      "sufficient": true, "min_queries": 11,  "discarded": 19766 },
+    { "percentile": 0.99, "confidence": 0.99, "n": 40000, "estimate": 71997480.0,
+      "empirical": 71908203.4, "sufficient": true, "min_queries": 662, "discarded": 353 }
+  ]
 }
 ```
 `sufficient=false` with `estimate=null` means the run had fewer than `min_queries` samples to claim
-the percentile at the requested confidence. The text report renders one extra line per metric.
+that percentile at the requested confidence. The text report renders one extra line per metric.
 
 ## Explicitly out of scope
 

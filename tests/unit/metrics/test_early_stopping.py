@@ -8,10 +8,25 @@ import math
 import pytest
 
 from inference_endpoint.metrics.early_stopping import (
+    TOLERANCE,
     EarlyStoppingResult,
+    EarlyStoppingSpec,
     es_percentile_estimate,
     find_min_passing,
 )
+
+
+@pytest.mark.unit
+class TestSpecAndConstants:
+    def test_tolerance_is_loadgen_constant(self):
+        # loadgen hardcodes tolerance d = 0.0 (results.cc:158); it is not a knob.
+        assert TOLERANCE == 0.0
+
+    def test_spec_default_percentiles(self):
+        spec = EarlyStoppingSpec()
+        assert spec.percentiles == (0.5, 0.9, 0.95, 0.99)
+        assert spec.confidence == 0.99
+        assert not hasattr(spec, "tolerance")
 
 
 @pytest.mark.unit
@@ -66,13 +81,13 @@ class TestEsPercentileEstimate:
         assert r_ok.min_queries == find_min_passing(1, 0.90) + 1
 
     def test_as_dict_shape(self):
+        # tolerance is an algorithm constant, not configuration -> not reported.
         r = es_percentile_estimate([float(i) for i in range(10000)], 0.99)
         d = r.as_dict()
         assert d["sufficient"] is True
         assert set(d) == {
             "percentile",
             "confidence",
-            "tolerance",
             "n",
             "estimate",
             "empirical",
@@ -80,6 +95,14 @@ class TestEsPercentileEstimate:
             "min_queries",
             "discarded",
         }
+
+    def test_median_estimate_is_conservative_upper_bound(self):
+        # p50 is in the default report list: the estimate is a c-confidence upper
+        # bound on the median, so it must sit above the empirical median.
+        arr = [float(i) for i in range(10000)]
+        r = es_percentile_estimate(arr, 0.5)
+        assert r.estimate is not None
+        assert r.estimate >= r.empirical
 
     def test_empty_series(self):
         r = es_percentile_estimate([], 0.99)

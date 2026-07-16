@@ -944,17 +944,16 @@ class EarlyStoppingConfig(BaseModel):
     ] = Field(
         False, description="Enable early-stopping percentile estimates (default off)"
     )
-    percentile: float = Field(
-        0.99,
-        gt=0.0,
-        lt=1.0,
-        description="Target percentile (0.99 for Server/interactive p99, 0.90 for SingleStream/T2V)",
+    percentiles: list[Annotated[float, Field(gt=0.0, lt=1.0)]] = Field(
+        default_factory=lambda: [0.5, 0.9, 0.95, 0.99],
+        min_length=1,
+        description=(
+            "Target percentiles — every ES metric gets one estimate per entry, so the "
+            "default covers p50/p90/p95/p99 without per-scenario tuning"
+        ),
     )
     confidence: float = Field(
         0.99, gt=0.0, lt=1.0, description="Confidence level c (MLPerf default 0.99)"
-    )
-    tolerance: float = Field(
-        0.0, ge=0.0, lt=1.0, description="Tolerance d (MLPerf default 0.0)"
     )
 
 

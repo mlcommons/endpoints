@@ -324,14 +324,17 @@ class SeriesSampler(MetricSampler):
             for i in range(len(edges) - 1)
         ]
 
-        # Early-stopping estimate (COMPLETE path only): conservative confidence-backed
-        # percentile off the sorted raw array. Cold path — sort is one-time at run end.
-        early_stopping: dict[str, float | int | bool | None] | None = None
+        # Early-stopping estimates (COMPLETE path only): conservative confidence-backed
+        # bound per configured percentile, all off one sorted raw array. Cold path —
+        # the sort is one-time at run end and each estimate is a few beta evaluations.
+        early_stopping: list[dict[str, float | int | bool | None]] | None = None
         if self._es_spec is not None:
             spec = self._es_spec
-            early_stopping = es_percentile_estimate(
-                np.sort(arr), spec.percentile, spec.confidence, spec.tolerance
-            ).as_dict()
+            sorted_arr = np.sort(arr)
+            early_stopping = [
+                es_percentile_estimate(sorted_arr, p, spec.confidence).as_dict()
+                for p in spec.percentiles
+            ]
 
         return SeriesStat(
             name=self.name,

@@ -20,14 +20,21 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Final
 
 __all__ = [
     "ES_TARGET_METRICS",
+    "TOLERANCE",
     "EarlyStoppingResult",
     "EarlyStoppingSpec",
     "es_percentile_estimate",
     "find_min_passing",
 ]
+
+# LoadGen hardcodes tolerance d = 0.0 (results.cc:158): the test certifies the exact target
+# percentile. It is an algorithm constant, not a knob — d > 0 would weaken the guarantee to
+# percentile (p - d). Exposed only as a defaulted argument on the pure math for parity tests.
+TOLERANCE: Final[float] = 0.0
 
 # Tail-latency series that receive an early-stopping estimate. Must match the aggregator's
 # registered metric names (see metrics_aggregator/metrics_table.py: MetricSeriesKey).
@@ -38,11 +45,14 @@ ES_TARGET_METRICS: frozenset[str] = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class EarlyStoppingSpec:
-    """Resolved early-stopping parameters passed to the aggregator."""
+    """Resolved early-stopping parameters passed to the aggregator.
 
-    percentile: float = 0.99
+    Every target metric gets one estimate per entry in ``percentiles`` (default covers
+    p50/p90/p95/p99 so configs never need per-scenario tuning).
+    """
+
+    percentiles: tuple[float, ...] = (0.5, 0.9, 0.95, 0.99)
     confidence: float = 0.99
-    tolerance: float = 0.0
 
 
 def _betacf(a: float, b: float, x: float) -> float:
@@ -99,7 +109,7 @@ def _odds(h: int, t: int, p: float, d: float) -> float:
     return _betai(h, 1 + t, p - d)
 
 
-def find_min_passing(t: int, p: float, d: float = 0.0, c: float = 0.99) -> int:
+def find_min_passing(t: int, p: float, d: float = TOLERANCE, c: float = 0.99) -> int:
     """Minimum ``h`` such that ``_odds(h, t, p, d) <= 1 - c``. ``_odds`` decreases in ``h``."""
     target = 1.0 - c
     lo, hi = 1, 2
@@ -140,7 +150,6 @@ class EarlyStoppingResult:
     __slots__ = (
         "percentile",
         "confidence",
-        "tolerance",
         "n",
         "estimate",
         "empirical",
@@ -152,7 +161,6 @@ class EarlyStoppingResult:
         self,
         percentile: float,
         confidence: float,
-        tolerance: float,
         n: int,
         estimate: float | None,
         empirical: float | None,
@@ -161,7 +169,6 @@ class EarlyStoppingResult:
     ) -> None:
         self.percentile = percentile
         self.confidence = confidence
-        self.tolerance = tolerance
         self.n = n
         self.estimate = estimate
         self.empirical = empirical
@@ -172,7 +179,6 @@ class EarlyStoppingResult:
         return {
             "percentile": self.percentile,
             "confidence": self.confidence,
-            "tolerance": self.tolerance,
             "n": self.n,
             "estimate": None if self.estimate is None else float(self.estimate),
             "empirical": None if self.empirical is None else float(self.empirical),
@@ -186,22 +192,20 @@ def es_percentile_estimate(
     sorted_latencies: Sequence[float],
     percentile: float,
     confidence: float = 0.99,
-    tolerance: float = 0.0,
 ) -> EarlyStoppingResult:
     """Conservative early-stopping percentile estimate over an ascending-sorted latency series."""
     n = len(sorted_latencies)
-    min_queries = find_min_passing(1, percentile, tolerance, confidence) + 1
+    min_queries = find_min_passing(1, percentile, TOLERANCE, confidence) + 1
     emp_idx = min(n - 1, max(0, math.ceil(percentile * n) - 1)) if n else 0
     empirical = sorted_latencies[emp_idx] if n else None
     if n < min_queries:
         return EarlyStoppingResult(
-            percentile, confidence, tolerance, n, None, empirical, min_queries, 0
+            percentile, confidence, n, None, empirical, min_queries, 0
         )
-    t = _discard_count(n, percentile, tolerance, confidence)
+    t = _discard_count(n, percentile, TOLERANCE, confidence)
     return EarlyStoppingResult(
         percentile,
         confidence,
-        tolerance,
         n,
         sorted_latencies[n - t],
         empirical,

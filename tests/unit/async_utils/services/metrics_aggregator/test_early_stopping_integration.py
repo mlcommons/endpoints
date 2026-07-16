@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integration test: early-stopping estimate flows registry -> snapshot -> report dict."""
+"""Integration test: early-stopping estimates flow registry -> snapshot -> report dict."""
 
 import random
 
@@ -35,19 +35,33 @@ def _series(snap_dict: dict, name: str) -> dict:
 
 @pytest.mark.unit
 class TestEarlyStoppingIntegration:
-    def test_enabled_populates_target_series_only(self):
-        reg = _registry_with_data(EarlyStoppingSpec(percentile=0.99))
+    def test_enabled_emits_default_percentile_list(self):
+        # Default spec covers [0.5, 0.9, 0.95, 0.99] so users never tune per-yaml.
+        reg = _registry_with_data(EarlyStoppingSpec())
         d = snapshot_to_dict(
             reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
         ttft, isl = _series(d, "ttft_ns"), _series(d, "isl")
         es = ttft["early_stopping"]
-        assert es["sufficient"] is True
-        assert es["estimate"] >= es["empirical"]  # conservative
-        assert es["n"] == 2000
+        assert isinstance(es, list)
+        assert [b["percentile"] for b in es] == [0.5, 0.9, 0.95, 0.99]
+        for block in es:
+            assert block["n"] == 2000
+            assert block["sufficient"] is True  # all floors are << 2000
+            assert block["estimate"] >= block["empirical"]  # conservative per percentile
+            assert "tolerance" not in block  # constant, not reported
         assert "early_stopping" not in isl  # non-target series untouched
         # and it survives the report-dict conversion
         assert _series_to_metric_dict(ttft)["early_stopping"] == es
+
+    def test_custom_single_percentile(self):
+        reg = _registry_with_data(EarlyStoppingSpec(percentiles=(0.99,)))
+        d = snapshot_to_dict(
+            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        es = _series(d, "ttft_ns")["early_stopping"]
+        assert [b["percentile"] for b in es] == [0.99]
+        assert es[0]["min_queries"] == 662
 
     def test_disabled_by_default_no_block(self):
         reg = _registry_with_data(None)  # feature off
@@ -59,7 +73,7 @@ class TestEarlyStoppingIntegration:
 
     def test_live_snapshot_has_no_estimate(self):
         # ES is COMPLETE-only (needs the exact sorted raw array); LIVE must not carry it.
-        reg = _registry_with_data(EarlyStoppingSpec(percentile=0.99))
+        reg = _registry_with_data(EarlyStoppingSpec())
         d = snapshot_to_dict(
             reg.build_snapshot(state=SessionState.LIVE, n_pending_tasks=1)
         )

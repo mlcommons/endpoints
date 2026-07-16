@@ -205,22 +205,16 @@ async def main() -> None:
         help="Compute MLPerf early-stopping percentile estimates for TTFT/TPOT/latency.",
     )
     parser.add_argument(
-        "--es-percentile",
-        type=float,
-        default=0.99,
-        help="Early-stopping target percentile (default 0.99).",
+        "--es-percentiles",
+        type=lambda s: tuple(float(x) for x in s.split(",")),
+        default=EarlyStoppingSpec().percentiles,
+        help="Comma-separated early-stopping target percentiles (default 0.5,0.9,0.95,0.99).",
     )
     parser.add_argument(
         "--es-confidence",
         type=float,
         default=0.99,
         help="Early-stopping confidence c (default 0.99).",
-    )
-    parser.add_argument(
-        "--es-tolerance",
-        type=float,
-        default=0.0,
-        help="Early-stopping tolerance d (default 0.0).",
     )
     args = parser.parse_args()
     setup_logging(level="INFO")
@@ -267,9 +261,8 @@ async def main() -> None:
     ):
         es_spec = (
             EarlyStoppingSpec(
-                percentile=args.es_percentile,
+                percentiles=args.es_percentiles,
                 confidence=args.es_confidence,
-                tolerance=args.es_tolerance,
             )
             if args.early_stopping
             else None

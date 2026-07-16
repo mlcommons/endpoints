@@ -877,12 +877,10 @@ async def _run_benchmark_async(
                 aggregator_args.extend(
                     [
                         "--early-stopping",
-                        "--es-percentile",
-                        str(es.percentile),
+                        "--es-percentiles",
+                        ",".join(str(p) for p in es.percentiles),
                         "--es-confidence",
                         str(es.confidence),
-                        "--es-tolerance",
-                        str(es.tolerance),
                     ]
                 )
 

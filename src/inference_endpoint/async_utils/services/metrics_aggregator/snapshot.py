@@ -119,9 +119,10 @@ class SeriesStat(
     sum_sq: int | float
     percentiles: dict[str, float]
     histogram: list[tuple[tuple[float, float], int]]
-    # Early-stopping percentile estimate (COMPLETE snapshots only, when enabled). Optional
-    # trailing field so the array_like wire format stays backward-compatible. None = not computed.
-    early_stopping: dict[str, float | int | bool | None] | None = None
+    # Early-stopping percentile estimates (COMPLETE snapshots only, when enabled): one
+    # self-describing block per configured percentile. Optional trailing field so the
+    # array_like wire format stays backward-compatible. None = not computed.
+    early_stopping: list[dict[str, float | int | bool | None]] | None = None
 
 
 # Tagged union: msgspec dispatches on the ``tag`` literal at decode time.
