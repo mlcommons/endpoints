@@ -237,7 +237,16 @@ class SeriesSampler(MetricSampler):
         if self._count == 0:
             # No data → no histogram. Edges are dynamic and only meaningful
             # once min/max are observed; consumers should treat an empty
-            # histogram as "no data yet".
+            # histogram as "no data yet". Early stopping still self-describes
+            # (n=0, sufficient=false) — an empty target series must not look
+            # like the feature was disabled.
+            early_stopping: list[dict[str, float | int | bool | None]] | None = None
+            if exact and self._es_spec is not None:
+                spec = self._es_spec
+                early_stopping = [
+                    es_percentile_estimate((), p, spec.confidence).as_dict()
+                    for p in spec.percentiles
+                ]
             return SeriesStat(
                 name=self.name,
                 count=0,
@@ -247,6 +256,7 @@ class SeriesSampler(MetricSampler):
                 sum_sq=self._dtype(),
                 percentiles={str(p): 0.0 for p in self._percentiles},
                 histogram=[],
+                early_stopping=early_stopping,
             )
 
         if exact:

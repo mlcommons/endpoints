@@ -115,8 +115,22 @@ def _odds(h: int, t: int, p: float, d: float) -> float:
     return _betai(h, 1 + t, p - d)
 
 
-def find_min_passing(t: int, p: float, d: float = TOLERANCE, c: float = CONFIDENCE) -> int:
+def _validate_domain(p: float, d: float, c: float) -> None:
+    # p >= 1 makes _odds identically 1.0 (the doubling search would never terminate);
+    # c >= 1 makes the target 0.0 (only reachable via float underflow). Reject both.
+    if not 0.0 < p < 1.0:
+        raise ValueError(f"percentile must be in (0, 1), got {p}")
+    if not 0.0 < c < 1.0:
+        raise ValueError(f"confidence must be in (0, 1), got {c}")
+    if not 0.0 <= d < p:
+        raise ValueError(f"tolerance must be in [0, percentile), got {d}")
+
+
+def find_min_passing(
+    t: int, p: float, d: float = TOLERANCE, c: float = CONFIDENCE
+) -> int:
     """Minimum ``h`` such that ``_odds(h, t, p, d) <= 1 - c``. ``_odds`` decreases in ``h``."""
+    _validate_domain(p, d, c)
     target = 1.0 - c
     lo, hi = 1, 2
     while _odds(hi, t, p, d) > target:
@@ -202,7 +216,10 @@ def es_percentile_estimate(
     """Conservative early-stopping percentile estimate over an ascending-sorted latency series."""
     n = len(sorted_latencies)
     min_queries = find_min_passing(1, percentile, TOLERANCE, confidence) + 1
-    emp_idx = min(n - 1, max(0, math.ceil(percentile * n) - 1)) if n else 0
+    # Same order statistic as the report's percentile grid (np.percentile with
+    # method="lower": index floor(p*(n-1))) so the block's empirical can never
+    # disagree with the grid value in the same result_summary.json.
+    emp_idx = int(percentile * (n - 1)) if n else 0
     empirical = sorted_latencies[emp_idx] if n else None
     if n < min_queries:
         return EarlyStoppingResult(

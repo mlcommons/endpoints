@@ -924,7 +924,6 @@ class ProfilingConfig(BaseModel):
         return v
 
 
-@cyclopts.Parameter(name="*")
 class EarlyStoppingConfig(BaseModel):
     """MLPerf-style early-stopping percentile estimates (default off).
 
@@ -948,6 +947,7 @@ class EarlyStoppingConfig(BaseModel):
     )
 
 
+@cyclopts.Parameter(name="*")
 class Settings(BaseModel):
     """Test settings."""
 

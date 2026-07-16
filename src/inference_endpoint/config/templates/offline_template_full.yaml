@@ -1,10 +1,10 @@
-name: offline_benchmark
+name: offline_benchmark  # Benchmark name (auto-derived from type if empty)
 version: '1.0'  # Config version
 type: offline  # Test type: offline, online, eval, submission | options: offline, online, eval, submission
 submission_ref: null
 benchmark_mode: null  # options: offline, online
 model_params:
-  name: '<MODEL_NAME eg: meta-llama/Llama-3.1-8B-Instruct>'
+  name: '<MODEL_NAME eg: meta-llama/Llama-3.1-8B-Instruct>'  # Model name
   temperature: null  # Sampling temperature
   seed: null  # Random seed for reproducible sampling
   top_k: null  # Top-K sampling
@@ -24,8 +24,8 @@ datasets:  # Dataset configs
   type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
   path: '<DATASET_PATH eg: tests/assets/datasets/dummy_1k.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
-  samples: null
-  eval_method: null
+  samples: null  # Number of samples to use
+  eval_method: null  # Accuracy evaluation method | options: exact_match, contains, judge
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: text_input
   generate_params: null  # Dataset-specific parameters passed to the generate() method
@@ -36,7 +36,7 @@ datasets:  # Dataset configs
   type: accuracy  # Dataset purpose: performance or accuracy | options: performance, accuracy
   path: '<DATASET_PATH eg: tests/assets/datasets/ds_samples.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
-  samples: null
+  samples: null  # Number of samples to use
   eval_method: exact_match  # Accuracy evaluation method | options: exact_match, contains, judge
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: question
@@ -84,23 +84,23 @@ settings:
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
-  drain:
+  drain:  # Per-phase in-flight response drain timeout configuration
     warmup_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)
     performance_timeout_s: 240.0  # Performance drain timeout in seconds (None = wait indefinitely)
     accuracy_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely)
     metrics_drain_timeout_s: 0.0  # Wall-clock budget (seconds) to finish tokenizing buffered samples after ENDED (default: 0 = unlimited). An incomplete drain is surfaced via n_pending_tasks > 0, never silently dropped.
     metrics_tokenizer_workers: 2  # In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT (default: 2; 0 = defer everything to the end-of-run drain).
   warmup:
-    enabled: false
+    enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
     salt: true  # Prepend a unique random hex salt to each warmup prompt
-    drain: false
+    drain: false  # Drain in-flight warmup requests before starting the performance phase
     warmup_random_seed: 42  # RNG seed for warmup scheduling and sample ordering
   profiling:
     engine: null  # Profile the named inference engine around the performance phase | options: vllm
     urls: null  # URL(s) the profiler start/stop triggers are derived from. When None, derived from endpoint_config.endpoints instead. Use when the profiler admin endpoint differs from the inference endpoint.
   early_stopping:  # MLPerf early-stopping percentile estimate (default off)
-    enabled: false
+    enabled: false  # Enable early-stopping percentile estimates (default off)
   service_ready_timeout_s: 30.0  # Seconds to wait for metrics-aggregator/event-logger services to become ready.
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.

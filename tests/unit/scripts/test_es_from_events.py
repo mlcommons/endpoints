@@ -122,3 +122,100 @@ class TestEsBlocks:
         for b in blocks:
             assert "tolerance" not in b
             assert b["estimate"] >= b["empirical"]
+
+
+class TestMalformedInput:
+    def _events_with_junk(self, tmp_path):
+        lines = [
+            _ev("session.start_performance_tracking", 10),
+            "this is not json {",
+            "123",  # valid JSON, not an object
+            '"just a string"',
+            _ev("sample.issued", 100, "a"),
+            json.dumps({"event_type": "sample.issued", "timestamp_ns": 150}),  # no uuid
+            _ev("sample.recv_first", 150, "a"),
+            _ev("sample.complete", 400, "a", _tmo(["x", "one two"])),
+            _ev("session.stop_performance_tracking", 500),
+        ]
+        p = tmp_path / "events.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        return p
+
+    def test_junk_lines_counted_not_crashed(self, tmp_path, capsys):
+        s = mod.compute_series(self._events_with_junk(tmp_path), count_tokens=_ws_counts)
+        assert s["ttft_ns"] == [50]
+        assert s["sample_latency_ns"] == [300]
+        err = capsys.readouterr().err
+        assert "malformed" in err and "4" in err  # 3 junk lines + 1 missing-uuid event
+
+    def test_tool_call_samples_warned(self, tmp_path, capsys):
+        lines = [
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _ev("sample.complete", 400, "a", _tmo(["x", "y"], None, [["tc"]])),
+            _ev("session.stop_performance_tracking", 500),
+        ]
+        p = tmp_path / "events.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        s = mod.compute_series(p, count_tokens=_ws_counts)
+        assert s["tpot_ns"] == []  # skipped, not guessed
+        assert "tool-call" in capsys.readouterr().err
+
+    def test_duplicate_issued_mirrors_aggregator(self, tmp_path):
+        # aggregator keeps the row on duplicate ISSUED (recv_first preserved) and
+        # refreshes only the issue timestamp — the script must match, or --compare
+        # reports spurious mismatches on runs with retries.
+        lines = [
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _ev("sample.issued", 200, "a"),  # retry between recv_first and complete
+            _ev("sample.complete", 400, "a", _tmo(["x", "one two"])),
+            _ev("session.stop_performance_tracking", 500),
+        ]
+        p = tmp_path / "events.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        s = mod.compute_series(p, count_tokens=_ws_counts)
+        assert s["ttft_ns"] == [50]  # from the first issue
+        assert s["sample_latency_ns"] == [200]  # complete - refreshed issue ts
+        assert s["tpot_ns"] == [(400 - 150) / 2]  # recv_first survived the retry
+
+
+class TestCrossCheckAndMain:
+    def _summary(self, blocks):
+        return {
+            "n_samples_completed": 2,
+            "ttft": {"early_stopping": blocks},
+            "tpot": {},
+            "latency": {},
+        }
+
+    def test_cross_check_exact_match_and_mismatch(self, capsys):
+        values = [1.0, 2.0]
+        blocks = mod.es_blocks(values, [0.99], 0.99)
+        mod._cross_check(self._summary(blocks), "ttft_ns", values, blocks)
+        assert "EXACT MATCH" in capsys.readouterr().out
+        tampered = [dict(blocks[0], estimate=123.0)]
+        mod._cross_check(self._summary(tampered), "ttft_ns", values, blocks)
+        assert "MISMATCH" in capsys.readouterr().out
+
+    def test_main_writes_json_and_validates_args(self, tmp_path, capsys):
+        lines = [
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _ev("sample.complete", 400, "a", _tmo(["x", "one two"])),
+            _ev("session.stop_performance_tracking", 500),
+        ]
+        events = tmp_path / "events.jsonl"
+        events.write_text("\n".join(lines) + "\n")
+        out = tmp_path / "blocks.json"
+        result = mod.main([str(events), "--json", str(out)])
+        assert out.exists()
+        assert "ttft" in result and "latency" in result
+        capsys.readouterr()  # drain
+        with pytest.raises(SystemExit):
+            mod.main([str(events), "--percentiles", "1.0"])
+        with pytest.raises(SystemExit):
+            mod.main([str(events), "--confidence", "1.0"])

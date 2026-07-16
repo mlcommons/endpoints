@@ -39,6 +39,10 @@ import sys
 
 import msgspec.json
 
+from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
+    encode_lengths,
+    load_reference_backend,
+)
 from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.metrics.early_stopping import (
     CONFIDENCE,
@@ -53,7 +57,11 @@ _METRIC_TO_SUMMARY = {
     "tpot_ns": "tpot",
     "sample_latency_ns": "latency",
 }
-_UNITS = {"ttft_ns": ("ms", 1e6), "tpot_ns": ("ms", 1e6), "sample_latency_ns": ("s", 1e9)}
+_UNITS = {
+    "ttft_ns": ("ms", 1e6),
+    "tpot_ns": ("ms", 1e6),
+    "sample_latency_ns": ("s", 1e9),
+}
 _TPOT_BATCH = 4096
 
 
@@ -87,6 +95,7 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
     rows: dict[str, list] = {}  # uuid -> [issued_ns, recv_first_ns]
     tracking = False
     tool_call_skipped = 0
+    malformed = 0
     batch_deltas: list[float] = []
     batch_texts: list[str] = []
 
@@ -105,39 +114,61 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
             try:
                 e = _loads(line)
             except (ValueError, msgspec.DecodeError):
+                # DecodeError is NOT a ValueError; the stdlib-json fallback raises one
+                malformed += 1
+                continue
+            if not isinstance(e, dict):
+                malformed += 1
                 continue
             et = e.get("event_type")
             if et == "session.start_performance_tracking":
                 tracking = True
             elif et == "session.stop_performance_tracking":
                 tracking = False
-            elif et == "sample.issued":
-                if tracking:
-                    rows[e["sample_uuid"]] = [e["timestamp_ns"], None]
-            elif et == "sample.recv_first":
-                row = rows.get(e["sample_uuid"])
-                if row is not None and row[1] is None:
-                    row[1] = e["timestamp_ns"]
-                    ttft.append(e["timestamp_ns"] - row[0])
-            elif et == "sample.complete":
-                row = rows.pop(e["sample_uuid"], None)
-                if row is None:
+            elif et in ("sample.issued", "sample.recv_first", "sample.complete"):
+                uuid, ts = e.get("sample_uuid"), e.get("timestamp_ns")
+                if not uuid or ts is None:
+                    malformed += 1
                     continue
-                ts = e["timestamp_ns"]
-                latency.append(ts - row[0])
-                if count_tokens is None or row[1] is None:
-                    continue
-                text = extract_tpot_text(e.get("data"))
-                if text is None and isinstance(e.get("data"), list):
-                    d = e["data"]
-                    if d and d[0] == "TextModelOutput" and len(d) > 3 and d[3]:
-                        tool_call_skipped += 1
-                if text:
-                    batch_deltas.append(ts - row[1])
-                    batch_texts.append(text)
-                    if len(batch_texts) >= _TPOT_BATCH:
-                        flush()
+                if et == "sample.issued":
+                    if not tracking:
+                        continue
+                    row = rows.get(uuid)
+                    if row is not None:
+                        # duplicate ISSUED (retry): aggregator parity — keep the
+                        # row (recv_first preserved), refresh only the issue ts.
+                        row[0] = ts
+                    else:
+                        rows[uuid] = [ts, None]
+                elif et == "sample.recv_first":
+                    row = rows.get(uuid)
+                    if row is not None and row[1] is None:
+                        row[1] = ts
+                        ttft.append(ts - row[0])
+                else:  # sample.complete
+                    row = rows.pop(uuid, None)
+                    if row is None:
+                        continue
+                    latency.append(ts - row[0])
+                    if count_tokens is None or row[1] is None:
+                        continue
+                    text = extract_tpot_text(e.get("data"))
+                    if text is None and isinstance(e.get("data"), list):
+                        d = e["data"]
+                        if d and d[0] == "TextModelOutput" and len(d) > 3 and d[3]:
+                            tool_call_skipped += 1
+                    if text:
+                        batch_deltas.append(ts - row[1])
+                        batch_texts.append(text)
+                        if len(batch_texts) >= _TPOT_BATCH:
+                            flush()
     flush()
+    if malformed:
+        print(
+            f"WARN: {malformed} malformed event lines skipped — the series may be "
+            "incomplete (truncated/corrupt log?)",
+            file=sys.stderr,
+        )
     if tool_call_skipped:
         print(
             f"WARN: {tool_call_skipped} tool-call samples skipped for TPOT",
@@ -146,23 +177,20 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
     return {"ttft_ns": ttft, "tpot_ns": tpot, "sample_latency_ns": latency}
 
 
-def es_blocks(values, percentiles, confidence: float) -> list[dict]:
-    """Sorted-input ES blocks, same shape as result_summary.json ``early_stopping``."""
-    values = sorted(values)
+def es_blocks(sorted_values, percentiles, confidence: float) -> list[dict]:
+    """ES blocks over an ascending-sorted series, same shape as ``early_stopping``."""
     return [
-        es_percentile_estimate(values, p, confidence).as_dict() for p in percentiles
+        es_percentile_estimate(sorted_values, p, confidence).as_dict()
+        for p in percentiles
     ]
 
 
 def _make_counter(tokenizer_path: str):
-    from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
-        encode_lengths,
-        load_reference_backend,
-    )
-
     backend = load_reference_backend(tokenizer_path)
     if backend is None:
-        raise SystemExit(f"FATAL: could not load tokenizer backend from {tokenizer_path}")
+        raise SystemExit(
+            f"FATAL: could not load tokenizer backend from {tokenizer_path}"
+        )
     return lambda texts: encode_lengths(backend, texts)
 
 
@@ -177,12 +205,12 @@ def _cross_check(summary: dict, series_name: str, values: list, blocks: list) ->
         # ttft/tpot legitimately count fewer (streaming-only / empty-rest skips);
         # latency should equal n_samples_completed.
         note = " ** MISMATCH **" if series_name == "sample_latency_ns" else " (info)"
-        print(f"  XCHECK count: ours={len(values)} n_samples_completed={completed}{note}")
+        print(
+            f"  XCHECK count: ours={len(values)} n_samples_completed={completed}{note}"
+        )
     inband = md.get("early_stopping")
     if not inband:
         return
-    if isinstance(inband, dict):  # pre-list single-percentile shape
-        inband = [inband]
     ours_by_p = {b["percentile"]: b for b in blocks}
     for ib in inband:
         b = ours_by_p.get(ib["percentile"])
@@ -201,7 +229,9 @@ def _cross_check(summary: dict, series_name: str, values: list, blocks: list) ->
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("events", help="path to a run's events.jsonl")
-    ap.add_argument("--tokenizer", help="HF model dir (or tokenizer.json) — enables TPOT")
+    ap.add_argument(
+        "--tokenizer", help="HF model dir (or tokenizer.json) — enables TPOT"
+    )
     ap.add_argument(
         "--percentiles",
         default=",".join(str(p) for p in PERCENTILES),
@@ -213,18 +243,26 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     percentiles = [float(x) for x in args.percentiles.split(",")]
+    if not all(0.0 < p < 1.0 for p in percentiles):
+        raise SystemExit(f"FATAL: percentiles must be in (0, 1), got {percentiles}")
+    if not 0.0 < args.confidence < 1.0:
+        raise SystemExit(f"FATAL: confidence must be in (0, 1), got {args.confidence}")
     counter = _make_counter(args.tokenizer) if args.tokenizer else None
     if counter is None:
         print("NOTE: no --tokenizer given -> TPOT skipped", file=sys.stderr)
 
     series = compute_series(args.events, count_tokens=counter, progress=True)
-    summary = json.load(open(args.compare)) if args.compare else None
+    summary = None
+    if args.compare:
+        with open(args.compare) as f:
+            summary = json.load(f)
 
     result: dict[str, list[dict]] = {}
     rows = []
     for name, values in series.items():
         if not values:
             continue
+        values.sort()
         blocks = es_blocks(values, percentiles, args.confidence)
         result[_METRIC_TO_SUMMARY[name]] = blocks
         unit, div = _UNITS[name]
@@ -242,7 +280,7 @@ def main(argv=None):
             print(line)
             rows.append((_METRIC_TO_SUMMARY[name], b, unit, div))
         if summary is not None:
-            _cross_check(summary, name, sorted(values), blocks)
+            _cross_check(summary, name, values, blocks)
 
     print("\n--- markdown ---")
     print("| metric | p | n | empirical | ES-adjusted | gap |")

@@ -5,8 +5,10 @@ estimate** to tail-latency metrics (TTFT / TPOT / total latency). It reports a *
 confidence-backed* percentile alongside the empirical one, so a run with too few samples to trust its
 raw p99/p90 is surfaced honestly instead of silently under-reporting the tail.
 
-It is an **estimate only** — no target-latency pass/fail, no dynamic mid-run halt. See the study /
-gap analysis in the companion `endpoints-early-stopping` repo.
+It is an **estimate only** — no target-latency pass/fail, no dynamic mid-run halt. The gap analysis
+motivating it: at large n the estimate merely certifies the empirical percentile (a small
+conservative shift), while on short runs — where the empirical tail is optimistically noisy — the
+estimate stays honest, which is exactly the regime edge/T2V workloads live in.
 
 ## What it computes
 
@@ -83,10 +85,17 @@ configured percentile (present only when enabled):
 }
 ```
 `sufficient=false` with `estimate=null` means the run had fewer than `min_queries` samples to claim
-that percentile at the requested confidence. The text report renders one extra line per metric.
+that percentile at the requested confidence. `empirical` uses the same order statistic as the
+`percentiles` grid (`np.percentile(..., method="lower")`, index `floor(p·(n−1))`), so the two can
+never disagree within one summary. An enabled target series that recorded nothing still emits the
+blocks (`n=0, sufficient=false`) rather than silently looking feature-off. The text report renders
+an "Early-stopping estimates" section per metric (one line per percentile; insufficient percentiles
+say so explicitly).
 
 ## Explicitly out of scope
 
 - No `target_latency` pass/fail gate (LoadGen's Server ES path).
 - No dynamic mid-run halt — evaluated once at COMPLETE.
-- Offline/max_throughput scenarios are not tail-latency-bounded, so ES is a no-op there even if enabled.
+- No scenario gating: offline/max_throughput runs with the flag enabled still compute the estimates
+  (for `latency`, plus `ttft`/`tpot` when streaming); they are simply not gating metrics there, since
+  throughput-bound scenarios have no tail-latency constraint to certify.

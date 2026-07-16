@@ -251,7 +251,16 @@ def _metric_to_dict(m: MetricStat) -> dict:
         ],
     }
     if m.early_stopping is not None:
-        series["early_stopping"] = m.early_stopping
+        # estimate/empirical come from the raw value array — scrub like every
+        # other numeric field so json.dumps(..., allow_nan=False) cannot raise.
+        series["early_stopping"] = [
+            {
+                **b,
+                "estimate": _scrub_nonfinite(b["estimate"]),
+                "empirical": _scrub_nonfinite(b["empirical"]),
+            }
+            for b in m.early_stopping
+        ]
     return series
 
 

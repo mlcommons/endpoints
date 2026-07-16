@@ -89,3 +89,59 @@ class TestEarlyStoppingIntegration:
             reg.build_snapshot(state=SessionState.LIVE, n_pending_tasks=1)
         )
         assert "early_stopping" not in _series(d, "ttft_ns")
+
+    def test_interrupted_snapshot_has_no_estimate(self):
+        # SIGTERM path publishes a terminal INTERRUPTED snapshot via the non-exact
+        # (HDR) path — it must not carry a partial ES block.
+        reg = _registry_with_data(EarlyStoppingSpec())
+        d = snapshot_to_dict(
+            reg.build_snapshot(state=SessionState.INTERRUPTED, n_pending_tasks=0)
+        )
+        assert "early_stopping" not in _series(d, "ttft_ns")
+
+    def test_empty_target_series_still_reports_blocks(self):
+        # A target series that recorded nothing (e.g. all requests failed) must
+        # still self-describe as insufficient — not silently look feature-off.
+        reg = MetricsRegistry(early_stopping=EarlyStoppingSpec())
+        reg.register_series("ttft_ns", hdr_low=1, hdr_high=10_000_000_000)
+        d = snapshot_to_dict(
+            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        es = _series(d, "ttft_ns")["early_stopping"]
+        assert len(es) == 4
+        for b in es:
+            assert b["n"] == 0 and b["sufficient"] is False
+            assert b["estimate"] is None and b["empirical"] is None
+
+    def test_all_target_series_get_blocks(self):
+        # tpot_ns is the only float-dtype member of ES_TARGET_METRICS; latency and
+        # ttft are int — all three must carry blocks on COMPLETE.
+        reg = MetricsRegistry(early_stopping=EarlyStoppingSpec())
+        reg.register_series("ttft_ns", hdr_low=1, hdr_high=10_000_000_000)
+        reg.register_series("sample_latency_ns", hdr_low=1, hdr_high=10_000_000_000)
+        reg.register_series(
+            "tpot_ns", hdr_low=1, hdr_high=10_000_000_000, dtype=float
+        )
+        rng = random.Random(1)
+        for _ in range(1000):
+            reg.record("ttft_ns", rng.randint(1_000_000, 2_000_000))
+            reg.record("sample_latency_ns", rng.randint(5_000_000, 9_000_000))
+            reg.record("tpot_ns", rng.uniform(50_000.0, 90_000.0))
+        d = snapshot_to_dict(
+            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        for name in ("ttft_ns", "sample_latency_ns", "tpot_ns"):
+            es = _series(d, name)["early_stopping"]
+            assert isinstance(es, list) and len(es) == 4
+
+    def test_block_empirical_equals_grid_value(self):
+        # The block's empirical and the percentile grid come from the same array
+        # and must use the same order-statistic convention.
+        reg = _registry_with_data(EarlyStoppingSpec())
+        d = snapshot_to_dict(
+            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        ttft = _series(d, "ttft_ns")
+        for p_block, p_grid in ((0.99, "99.0"), (0.9, "90.0"), (0.95, "95.0")):
+            blk = next(b for b in ttft["early_stopping"] if b["percentile"] == p_block)
+            assert blk["empirical"] == ttft["percentiles"][p_grid]

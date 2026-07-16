@@ -507,3 +507,22 @@ def _display_metric(
     fn(f"\n  Percentiles:{newline}")
     for p, val in metric_dict.get("percentiles", {}).items():
         fn(f"  {p:>6}: {_scaled(val)} {unit}{newline}")
+
+    es_blocks = metric_dict.get("early_stopping")
+    if es_blocks:
+        fn(
+            f"\n  Early-stopping estimates "
+            f"(confidence {es_blocks[0]['confidence']}):{newline}"
+        )
+        for b in es_blocks:
+            label = f"p{b['percentile'] * 100:g}"
+            if b["estimate"] is None:
+                fn(
+                    f"  {label:>6}: insufficient samples "
+                    f"(n={b['n']} < {b['min_queries']}){newline}"
+                )
+            else:
+                fn(
+                    f"  {label:>6}: {_scaled(b['estimate'])} {unit} "
+                    f"(empirical {_scaled(b['empirical'])} {unit}, n={b['n']}){newline}"
+                )

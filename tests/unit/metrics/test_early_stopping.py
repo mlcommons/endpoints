@@ -116,3 +116,28 @@ class TestEsPercentileEstimate:
     def test_empty_series(self):
         r = es_percentile_estimate([], 0.99)
         assert r.estimate is None and r.empirical is None and r.n == 0
+
+    def test_invalid_domain_raises(self):
+        # p >= 1 would never terminate the doubling loop; c >= 1 only exits via
+        # float underflow with a meaningless result — both must be rejected.
+        with pytest.raises(ValueError):
+            find_min_passing(1, 1.0)
+        with pytest.raises(ValueError):
+            find_min_passing(1, 0.0)
+        with pytest.raises(ValueError):
+            find_min_passing(1, 0.99, c=1.0)
+        with pytest.raises(ValueError):
+            find_min_passing(1, 0.99, d=0.99)  # tolerance must stay below p
+        with pytest.raises(ValueError):
+            es_percentile_estimate([1.0, 2.0], 1.5)
+        with pytest.raises(ValueError):
+            es_percentile_estimate([1.0, 2.0], 0.99, confidence=0.0)
+
+    def test_empirical_matches_report_grid_convention(self):
+        # `empirical` must use the same order statistic as the report's percentile
+        # grid (np.percentile method="lower": index floor(p*(n-1))) so the block can
+        # never disagree with the grid inside one result_summary.json. n=50 p99
+        # discriminates: floor(0.99*49)=48, while ceil(0.99*50)-1=49.
+        arr = [float(i) for i in range(50)]
+        r = es_percentile_estimate(arr, 0.99)
+        assert r.empirical == arr[48]
