@@ -571,6 +571,11 @@ class ConnectionPool:
 
             # Create connection without timeout, paced by the connect limiter
             async with self._connect_limiter:
+                # While queued on the limiter, earlier requests may have
+                # released reusable sockets; prefer one over a fresh handshake
+                # so a paced burst doesn't grow the pool past what it needs.
+                if conn := self._try_get_idle():
+                    return conn
                 transport, protocol = await self._loop.create_connection(
                     protocol_factory,
                     host=self._host,

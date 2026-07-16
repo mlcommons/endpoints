@@ -638,6 +638,33 @@ class TestConnectionPool:
             await p.close()
 
     @pytest.mark.asyncio
+    async def test_paced_acquire_reuses_socket_released_while_queued(self, echo_server):
+        """An acquire queued on the connect limiter must prefer a socket
+        released while it waited over dialing a fresh connection."""
+        loop = asyncio.get_running_loop()
+        parsed = urlparse(echo_server.url)
+        p = ConnectionPool(
+            host=parsed.hostname,
+            port=parsed.port,
+            loop=loop,
+            max_connections=4,
+            max_concurrent_warmup_connects=1,
+        )
+        try:
+            c0 = await p.acquire()
+            # Hold the single connect permit so the next acquire queues.
+            async with p._connect_limiter:
+                queued = asyncio.create_task(p.acquire())
+                await asyncio.sleep(0.01)
+                assert not queued.done()
+                p.release(c0)
+            reused = await queued
+            assert reused is c0
+            assert p.total_count == 1
+        finally:
+            await p.close()
+
+    @pytest.mark.asyncio
     async def test_waiter_creates_new_connection(self, pool):
         """When waiter wakes with no idle connections, it creates a new one."""
         conns = [await pool.acquire() for _ in range(4)]
