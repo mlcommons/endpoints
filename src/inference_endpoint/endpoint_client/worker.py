@@ -223,6 +223,7 @@ class Worker:
                 max_connections=connections_per_worker,
                 max_idle_time=self.http_config.max_idle_time,
                 ssl_context=self._ssl_context,
+                max_concurrent_connects=self.http_config.max_concurrent_connects,
             )
 
             # Signal handlers for graceful shutdown

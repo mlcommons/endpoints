@@ -170,7 +170,8 @@ class TestAutoWarmupResolution:
                 endpoint_urls=["http://10.0.0.1:8000"], num_workers=10
             )
         assert c.max_connections == 10000
-        assert c.warmup_connections == int(10000 * cfg.AUTO_WARMUP_BUDGET_FRACTION)
+        assert c.warmup_connections == int(10000 * c.auto_warmup_budget_fraction)
+        assert c.auto_warmup_budget_fraction == 0.25  # default
 
     def test_full_auto_warmup_scales_with_distinct_endpoints(self):
         with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
@@ -182,7 +183,7 @@ class TestAutoWarmupResolution:
                 ],
                 num_workers=10,
             )
-        assert c.warmup_connections == int(30000 * cfg.AUTO_WARMUP_BUDGET_FRACTION)
+        assert c.warmup_connections == int(30000 * c.auto_warmup_budget_fraction)
 
     def test_explicit_warmup_preserved_with_auto_max(self):
         with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
@@ -212,3 +213,14 @@ class TestAutoWarmupResolution:
                 max_connections=500,
             )
         assert c.warmup_connections == -1
+
+    def test_warmup_fraction_and_connect_limit_are_configurable(self):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
+            c = cfg.HTTPClientConfig(
+                endpoint_urls=["http://10.0.0.1:8000"],
+                num_workers=10,
+                auto_warmup_budget_fraction=0.1,
+                max_concurrent_connects=32,
+            )
+        assert c.warmup_connections == 1000  # 10% of the 10000 budget
+        assert c.max_concurrent_connects == 32

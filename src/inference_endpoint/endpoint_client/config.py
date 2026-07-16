@@ -76,16 +76,6 @@ ACCUMULATOR_MAP = {
 }
 
 
-# Fraction of the ephemeral-port budget the auto (``max_connections=-1``,
-# ``warmup_connections=-1``) configuration pre-establishes at init. The pool
-# ceiling stays at the full budget; only the warm set is bounded. Warming far
-# beyond steady-state concurrency wastes ports (the idle stack is LIFO, so
-# excess warm connections sit established at the bottom, holding ephemeral
-# ports until shutdown) and inflates the startup connect burst. Under-warming
-# is cheap: the pool opens new connections on demand at runtime.
-AUTO_WARMUP_BUDGET_FRACTION = 0.25
-
-
 class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     """HTTP endpoint client configuration.
 
@@ -123,6 +113,37 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     warmup_connections: int = Field(
         -1, ge=-1, description="Pre-establish TCP connections (-1=auto, 0=disabled)"
     )
+
+    # Fraction of the ephemeral-port budget the auto (max_connections=-1,
+    # warmup_connections=-1) configuration pre-establishes at init. The pool
+    # ceiling stays at the full budget; only the warm set is bounded. Warming
+    # far beyond steady-state concurrency wastes ports (the idle stack is
+    # LIFO, so excess warm connections sit established at the bottom, holding
+    # ephemeral ports until shutdown) and inflates the startup connect burst.
+    # Under-warming is cheap: the pool opens new connections on demand at
+    # runtime.
+    auto_warmup_budget_fraction: float = Field(
+        0.25,
+        gt=0.0,
+        le=1.0,
+        description="Fraction of the port budget auto warmup pre-establishes "
+        "(only used when max_connections and warmup_connections are both -1)",
+    )
+
+    # Bound on simultaneous in-flight connect() calls per worker pool (host-wide
+    # SYN burst ~= value x num_workers). Unbounded establishment (warmup or a
+    # t=0 demand burst growing the pool) delivers one SYN flood: the server
+    # accept queue overflows and the client can transiently exhaust ephemeral
+    # ports (EADDRNOTAVAIL). Paced waves complete in a few RTTs each, so total
+    # establishment time is barely affected. Applies only to pool growth — the
+    # pooled-connection reuse path never touches it.
+    max_concurrent_connects: Annotated[
+        int,
+        cyclopts.Parameter(
+            alias="--max-concurrent-connects",
+            help="Max in-flight connection establishments per worker pool",
+        ),
+    ] = Field(128, ge=1)
 
     # Maximum concurrent TCP connections.
     # Performance sweetspot is often a low number compared to port limit ~1024.
@@ -303,7 +324,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
                     object.__setattr__(
                         self,
                         "warmup_connections",
-                        max(1, int(port_budget * AUTO_WARMUP_BUDGET_FRACTION)),
+                        max(1, int(port_budget * self.auto_warmup_budget_fraction)),
                     )
             elif self.max_connections > 0:
                 if self.max_connections > port_budget:

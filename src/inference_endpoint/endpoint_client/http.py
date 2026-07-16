@@ -31,14 +31,6 @@ import httptools
 
 logger = logging.getLogger(__name__)
 
-# Bound on simultaneous in-flight connect() calls per pool. Unbounded
-# establishment (warmup or a t=0 demand burst growing the pool) delivers one
-# SYN flood: the server accept queue overflows and the client can transiently
-# exhaust ephemeral ports (EADDRNOTAVAIL). Paced waves complete in a few RTTs
-# each, so total establishment time is barely affected. Applies only to pool
-# growth — the pooled-connection reuse path never touches it.
-MAX_CONCURRENT_CONNECTS = 128
-
 
 class _SocketConfig:
     """
@@ -479,7 +471,10 @@ class ConnectionPool:
         max_connections: int | None = None,  # None means no limit
         max_idle_time: float = 4.0,  # Discard connections idle longer than this
         ssl_context: ssl.SSLContext | None = None,
-        max_concurrent_connects: int = MAX_CONCURRENT_CONNECTS,
+        # Bound on simultaneous in-flight connect() calls (pool growth only —
+        # never the pooled-connection reuse path). Real runs pass the
+        # HTTPClientConfig.max_concurrent_connects field; the default mirrors it.
+        max_concurrent_connects: int = 128,
     ):
         self._host = host
         self._port = port
