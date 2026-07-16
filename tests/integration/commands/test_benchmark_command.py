@@ -42,7 +42,7 @@ from inference_endpoint.config.timeouts import Timeouts
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 
 _TEST_SETTINGS = Settings(
-    timeouts=Timeouts(min_duration_ms=0),
+    timeouts=Timeouts(),
     load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
     client=HTTPClientConfig(num_workers=1, warmup_connections=0, max_connections=10),
 )
@@ -192,7 +192,7 @@ class TestBenchmarkCommandIntegration:
             (
                 TestType.OFFLINE,
                 Settings(
-                    timeouts=Timeouts(min_duration_ms=0),
+                    timeouts=Timeouts(),
                     load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
                     client=HTTPClientConfig(
                         num_workers=1, warmup_connections=0, max_connections=10
@@ -202,7 +202,7 @@ class TestBenchmarkCommandIntegration:
             (
                 TestType.ONLINE,
                 Settings(
-                    timeouts=Timeouts(min_duration_ms=0),
+                    timeouts=Timeouts(),
                     load_pattern=LoadPattern(
                         type=LoadPatternType.CONCURRENCY, target_concurrency=1
                     ),
@@ -297,7 +297,7 @@ class TestBenchmarkCommandIntegration:
             model_params=ModelParams(name="echo-server", streaming=StreamingMode.OFF),
             datasets=[Dataset(path=ds_dataset_path, type=DatasetType.PERFORMANCE)],
             settings=Settings(
-                timeouts=Timeouts(min_duration_ms=0),
+                timeouts=Timeouts(),
                 load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
                 client=HTTPClientConfig(
                     num_workers=1, warmup_connections=0, max_connections=10

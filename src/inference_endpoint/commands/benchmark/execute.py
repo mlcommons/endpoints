@@ -495,7 +495,13 @@ def setup_benchmark(
     )
     if rt_settings is not None:
         logger.info(
-            f"Min Duration: {rt_settings.min_duration_ms / 1000:.1f}s, Expected samples: {total_samples}"
+            "Min Duration: %s, Expected samples: %d"
+            % (
+                f"{rt_settings.min_duration_ms / 1000:.1f}s"
+                if rt_settings.min_duration_ms
+                else "none (dataset-once)",
+                total_samples,
+            )
         )
     else:
         logger.info(f"Accuracy-only mode, Expected samples: {total_samples}")
@@ -534,7 +540,7 @@ def _build_phases(
             )
             warmup_rt = dataclass_replace(
                 ctx.rt_settings,
-                min_duration_ms=0,
+                min_duration_ms=None,
                 max_duration_ms=None,
                 n_samples_from_dataset=ctx.dataloader.num_samples(),
                 n_samples_to_issue=warmup_cfg.n_requests,
@@ -598,7 +604,7 @@ def _build_phases(
         acc_settings = RuntimeSettings(
             metric_target=rng_settings.metric_target,
             reported_metrics=rng_settings.reported_metrics,
-            min_duration_ms=0,
+            min_duration_ms=None,
             max_duration_ms=None,
             n_samples_from_dataset=acc_ds.num_samples(),
             n_samples_to_issue=acc_ds.num_samples() * acc_ds.repeats,

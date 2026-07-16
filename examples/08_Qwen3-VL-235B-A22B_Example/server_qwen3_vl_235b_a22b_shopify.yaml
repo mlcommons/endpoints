@@ -26,7 +26,7 @@ settings:
     dataloader_random_seed: 42
 
   timeouts:
-    min_duration_ms: 600000 # 10 minutes, this is override when n_samples_to_issue is set
+    min_duration_ms: 600000 # 10 minutes (mutually exclusive with runtime.n_samples_to_issue)
 
   load_pattern:
     type: "poisson"

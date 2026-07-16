@@ -359,10 +359,6 @@ def _build_minimal(test_type: TestType, overrides: dict) -> dict:
             "runtime": {
                 "n_samples_to_issue": None,
             },
-            "timeouts": {
-                "min_duration_ms": 600000,
-                "max_duration_ms": 0,
-            },
         },
         "endpoint_config": {"endpoints": [PLACEHOLDER_ENDPOINT]},
     }

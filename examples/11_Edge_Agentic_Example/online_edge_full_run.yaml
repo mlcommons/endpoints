@@ -89,7 +89,6 @@ settings:
   runtime:
     dataloader_random_seed: 42 # BFCL accuracy sampling seed; compliance requires 42.
   timeouts:
-    min_duration_ms: 0
     # Safety cap (4 h) so the performance phase stays bounded even if decode is
     # slower than expected; one pass should finish in ~2.5 h on an edge box.
     max_duration_ms: 14400000

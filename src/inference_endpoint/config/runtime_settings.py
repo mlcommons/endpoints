@@ -94,8 +94,9 @@ class RuntimeSettings:
     reported_metrics: list[metrics.Metric]
     """List of metrics to collect and report"""
 
-    min_duration_ms: int
-    """Minimum benchmark duration in milliseconds"""
+    min_duration_ms: int | None
+    """Minimum performance-phase duration in ms (None/0 = no duration target:
+    issue the dataset once)."""
 
     max_duration_ms: int | None
     """Maximum benchmark duration in milliseconds (timeout). None means no wall-clock limit."""
@@ -190,9 +191,7 @@ class RuntimeSettings:
             "metric_target": metrics.Throughput(effective_qps),
             "reported_metrics": [metrics.Throughput(effective_qps)],
             "min_duration_ms": timeouts_cfg.min_duration_ms,
-            "max_duration_ms": None
-            if timeouts_cfg.max_duration_ms == 0
-            else timeouts_cfg.max_duration_ms,
+            "max_duration_ms": timeouts_cfg.max_duration_ms,
             "n_samples_from_dataset": dataloader_num_samples,
             "n_samples_to_issue": runtime_cfg.n_samples_to_issue,  # From config (CLI --num-samples or YAML)
             "min_sample_count": 1,
@@ -214,7 +213,7 @@ class RuntimeSettings:
 
         Priority:
         1. If `n_samples_to_issue` is set, return it (explicit override)
-        2. If min_duration_ms=0, return all dataset samples (new CLI default)
+        2. If no duration target is set, return all dataset samples
         3. Otherwise, calculate from metric target * duration
 
         Args:
@@ -252,11 +251,12 @@ class RuntimeSettings:
             )
             return self.n_samples_from_dataset
 
-        # If min_duration is 0, use all dataset samples (new CLI default behavior)
-        if self.min_duration_ms == 0:
+        # No duration target (None from schema, 0 from programmatic callers):
+        # issue the dataset once.
+        if not self.min_duration_ms:
             result = max(self.min_sample_count, self.n_samples_from_dataset)
             logger.debug(
-                f"Sample count: {result} (using all dataset samples, duration=0)"
+                f"Sample count: {result} (using all dataset samples, no duration target)"
             )
             return result
 

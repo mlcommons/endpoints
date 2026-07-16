@@ -354,7 +354,7 @@ class TestBenchmarkConfig:
 
     @pytest.mark.unit
     def test_negative_min_duration_rejected(self):
-        with pytest.raises(ValueError, match="greater than or equal to 0"):
+        with pytest.raises(ValueError, match="greater than 0"):
             BenchmarkConfig(
                 type=TestType.OFFLINE,
                 model_params={"name": "M"},
@@ -378,7 +378,7 @@ class TestBenchmarkConfig:
 
     @pytest.mark.unit
     def test_max_duration_below_zero_rejected(self):
-        with pytest.raises(ValueError, match="greater than or equal to 0"):
+        with pytest.raises(ValueError, match="greater than 0"):
             BenchmarkConfig(
                 type=TestType.OFFLINE,
                 model_params={"name": "M"},
@@ -503,7 +503,7 @@ class TestBenchmarkConfigMethods:
         assert loaded.model_params.name == "M"
 
     @pytest.mark.unit
-    def test_max_duration_zero_converts_to_none_in_runtime_settings(self):
+    def test_max_duration_defaults_to_none_in_runtime_settings(self):
         from inference_endpoint.config.runtime_settings import RuntimeSettings
 
         config = BenchmarkConfig(
@@ -511,7 +511,6 @@ class TestBenchmarkConfigMethods:
             model_params={"name": "M"},
             endpoint_config={"endpoints": ["http://x"]},
             datasets=[{"path": "D"}],
-            settings={"timeouts": {"max_duration_ms": 0}},
         )
         rt = RuntimeSettings.from_config(config, dataloader_num_samples=100)
         assert rt.max_duration_ms is None

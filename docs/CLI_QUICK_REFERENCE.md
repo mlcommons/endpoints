@@ -96,8 +96,9 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--model-params.max-new-tokens --max-output-tokens` - Max output tokens (default: 1024)
 - `--model-params.osl-distribution.min --min-output-tokens` - Min output tokens (default: 1)
 - `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default: auto)
-- `--min-duration-ms --duration` - Min duration: ms default, or with suffix (600s, 10m) (default: 600000)
-- `--runtime.n-samples-to-issue --num-samples` - Explicit sample count override
+- `--min-duration-ms --duration` - Min perf-phase duration: ms default, or with suffix (600s, 10m); sample count = QPS x duration
+- `--runtime.n-samples-to-issue --num-samples` - Explicit sample count
+  - `--duration` and `--num-samples` are mutually exclusive; omit both to issue the dataset once (the default)
 - `--client.num-workers --workers` - HTTP workers (-1=auto, default: -1)
 - `--client.max-connections --max-connections` - Max TCP connections (-1=unlimited)
 - `--endpoint-config.api-key --api-key` - API authentication
@@ -284,10 +285,10 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minutes
-    n_samples_to_issue: null # Optional: explicit sample count (null = auto-calculate)
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
+  timeouts:
+    min_duration_ms: 600000 # 10 minutes (or set runtime.n_samples_to_issue instead; omit both = dataset once)
   load_pattern:
     type: "max_throughput"
     target_qps: 10.0
@@ -325,8 +326,8 @@ Note: For submission configs, `model_params.name` is optional when `submission_r
 
 **Sample Count Control:**
 
-- Priority: `--num-samples` > calculated (target_qps × duration) > dataset size
-- Default duration: 600000ms (10 minutes)
+- `--num-samples` and `--duration` are mutually exclusive: explicit count, or calculated (target_qps × duration)
+- Default (neither set): issue the dataset once
 
 **Mode Requirements:**
 

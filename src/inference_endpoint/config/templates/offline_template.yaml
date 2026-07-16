@@ -11,9 +11,6 @@ datasets:  # Dataset configs
 settings:
   runtime:
     n_samples_to_issue: null  # Sample count override
-  timeouts:  # All global durations and deadlines (see config/timeouts.py)
-    min_duration_ms: 600000  # Minimum duration of the whole performance phase in ms (drives sample-count math)
-    max_duration_ms: 0  # Maximum duration of the whole performance phase in ms (0 for no limit; never bounds warmup/accuracy)
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000

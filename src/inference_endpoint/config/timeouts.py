@@ -27,9 +27,11 @@ Two disjoint categories live here, and they must not be conflated:
   when it fires the run is aborted and the report is marked INTERRUPTED —
   it never derives or caps the per-stage deadlines below it.
 
-``None`` means "wait indefinitely" for every optional deadline. Deadlines
-are resolved to plain floats before the run starts; nothing in the hot
-path reads this model.
+``None`` means "wait indefinitely" for every optional deadline. For the
+workload durations ``None`` means "no duration target": the sample count is
+then explicit (``runtime.n_samples_to_issue``) or the dataset issued once.
+Everything is resolved to plain values before the run starts; nothing in
+the hot path reads this model.
 
 Dataset-scoped time knobs (e.g. agentic ``turn_timeout_s``) stay in their
 dataset config blocks — they are per-workload behavior, not global.
@@ -53,25 +55,26 @@ class Timeouts(WithUpdatesMixin, BaseModel):
 
     # --- Workload durations (benchmark definition, not failure handling) ---
     min_duration_ms: Annotated[
-        int,
+        int | None,
         cyclopts.Parameter(
             alias="--duration",
             help="Min performance-phase duration (ms, or with suffix: 600s, 10m)",
         ),
     ] = Field(
-        600000,
-        ge=0,
+        None,
+        gt=0,
         description=(
-            "Minimum duration of the whole performance phase in ms "
-            "(drives sample-count math)"
+            "Minimum duration of the whole performance phase in ms; the sample "
+            "count is derived as QPS x duration. Mutually exclusive with "
+            "runtime.n_samples_to_issue — omit both to issue the dataset once."
         ),
     )
-    max_duration_ms: int = Field(
-        0,
-        ge=0,
+    max_duration_ms: int | None = Field(
+        None,
+        gt=0,
         description=(
             "Maximum duration of the whole performance phase in ms "
-            "(0 for no limit; never bounds warmup/accuracy)"
+            "(None for no limit; never bounds warmup/accuracy)"
         ),
     )
 
@@ -180,7 +183,11 @@ class Timeouts(WithUpdatesMixin, BaseModel):
 
     @model_validator(mode="after")
     def _validate_durations(self) -> Self:
-        if self.max_duration_ms != 0 and self.max_duration_ms < self.min_duration_ms:
+        if (
+            self.max_duration_ms is not None
+            and self.min_duration_ms is not None
+            and self.max_duration_ms < self.min_duration_ms
+        ):
             raise ValueError(
                 f"max_duration_ms ({self.max_duration_ms}) must be >= "
                 f"min_duration_ms ({self.min_duration_ms})"

@@ -119,7 +119,7 @@ class TestAccuracyPipeline:
                 ),
             ],
             settings=Settings(
-                timeouts=Timeouts(min_duration_ms=0),
+                timeouts=Timeouts(),
                 load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
                 client=HTTPClientConfig(
                     num_workers=1, warmup_connections=0, max_connections=10

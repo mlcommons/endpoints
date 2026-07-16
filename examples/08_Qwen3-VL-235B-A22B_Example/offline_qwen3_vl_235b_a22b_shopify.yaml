@@ -26,7 +26,7 @@ settings:
     dataloader_random_seed: 42 # For dataset shuffling
 
   timeouts:
-    min_duration_ms: 600000 # 10 minutes, this is override when n_samples_to_issue is set
+    min_duration_ms: 600000 # 10 minutes (mutually exclusive with runtime.n_samples_to_issue)
     warmup_drain_timeout_s: 240.0 # Warmup drain timeout in seconds (None = wait indefinitely)
     performance_drain_timeout_s: null # Performance drain timeout in seconds (None = wait indefinitely)
     accuracy_drain_timeout_s: null # Accuracy drain timeout in seconds (None = wait indefinitely)

@@ -38,10 +38,10 @@ from .timeouts import Timeouts
 class RuntimeConfig(BaseModel):
     """Runtime configuration.
 
-    Sample count priority (in RuntimeSettings.total_samples_to_issue()):
-    1. n_samples_to_issue (if specified) — explicit override
-    2. Calculated from QPS * duration — duration-based (default: 600000ms)
-    3. All dataset samples — fallback when duration is 0
+    Sample count (mutually exclusive knobs; see Settings validator):
+    - n_samples_to_issue — explicit count
+    - timeouts.min_duration_ms — duration-derived (QPS * duration)
+    - neither — issue the dataset once
 
     Durations live in ``settings.timeouts`` (see ``config/timeouts.py``).
     """
@@ -283,6 +283,20 @@ class Settings(BaseModel):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
     profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
+
+    @model_validator(mode="after")
+    def _validate_count_or_duration(self) -> Self:
+        if (
+            self.runtime.n_samples_to_issue is not None
+            and self.timeouts.min_duration_ms is not None
+        ):
+            raise ValueError(
+                "runtime.n_samples_to_issue (--num-samples) and "
+                "timeouts.min_duration_ms (--duration) are mutually exclusive: "
+                "the sample count is either explicit or duration-derived. "
+                "Omit both to issue the dataset once."
+            )
+        return self
 
 
 class OfflineSettings(Settings):

@@ -129,7 +129,7 @@ For official Kimi agentic benchmark runs, keep these values fixed:
 - `model_params.chat_template_kwargs.preserve_thinking: true`
 - First dataset `type: performance`
 - First dataset `accuracy_config.eval_method: agentic_inference_inline`
-- `settings.timeouts.min_duration_ms: 0`
+- `settings.timeouts.min_duration_ms` omitted (no duration target)
 - `settings.load_pattern.type: agentic_inference`
 - `settings.client.warmup_connections: 0`
 - `settings.client.max_idle_time: 0.5`

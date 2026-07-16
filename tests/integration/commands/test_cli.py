@@ -246,8 +246,6 @@ class TestE2E:
             tmp_path,
             "benchmark",
             "offline",
-            "--duration",
-            "0",
             "--streaming",
             "off",
         )

@@ -179,10 +179,6 @@ def generate_ie_config(
             "runtime": {
                 "n_samples_to_issue": num_requests,
             },
-            "timeouts": {
-                "min_duration_ms": 0,
-                "max_duration_ms": timeout * 1000,
-            },
             "load_pattern": {"type": "max_throughput"},
             "client": {"num_workers": workers},
         },

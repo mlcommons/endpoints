@@ -98,7 +98,7 @@ def _offline_config(
         datasets=[ConfigDataset(path=str(dataset_path), type=DatasetType.PERFORMANCE)],
         settings=OfflineSettings(
             runtime=RuntimeConfig(n_samples_to_issue=n_perf_samples),
-            timeouts=Timeouts(min_duration_ms=0),
+            timeouts=Timeouts(),
             load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
             client=_MINIMAL_CLIENT,
             warmup=warmup,

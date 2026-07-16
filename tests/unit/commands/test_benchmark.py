@@ -125,7 +125,7 @@ class TestCLIConfigModels:
         config = cls(**_OFFLINE_KWARGS, **extra_kwargs)
         assert config.type == expected_type
         assert config.model_params.streaming == expected_streaming
-        assert config.settings.timeouts.min_duration_ms == 600000
+        assert config.settings.timeouts.min_duration_ms is None
 
     @pytest.mark.unit
     def test_num_samples_override(self):
@@ -133,7 +133,7 @@ class TestCLIConfigModels:
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(
                 runtime=RuntimeConfig(n_samples_to_issue=100),
-                timeouts=Timeouts(min_duration_ms=0),
+                timeouts=Timeouts(),
             ),
         )
         assert config.settings.runtime.n_samples_to_issue == 100
@@ -554,6 +554,27 @@ settings:
         warmup = config.settings.warmup
         assert warmup.enabled is False
         assert warmup.n_requests is None
+
+
+class TestSampleCountKnobs:
+    """n_samples_to_issue and min_duration_ms are mutually exclusive."""
+
+    @pytest.mark.unit
+    def test_count_and_duration_mutually_exclusive(self):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            OfflineSettings(
+                runtime=RuntimeConfig(n_samples_to_issue=100),
+                timeouts=Timeouts(min_duration_ms=1000),
+            )
+
+    @pytest.mark.unit
+    def test_neither_set_issues_dataset_once(self):
+        from inference_endpoint.config.runtime_settings import RuntimeSettings
+
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        rt = RuntimeSettings.from_config(config, dataloader_num_samples=123)
+        assert rt.min_duration_ms is None
+        assert rt.total_samples_to_issue(align_to_dataset_size=False) == 123
 
 
 class TestTimeoutsDrainFields:
@@ -982,7 +1003,9 @@ class TestBuildPhases:
         assert warmup_rt.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
 
     @pytest.mark.unit
-    def test_warmup_phase_min_duration_is_zero(self, base_rt_settings, simple_dataset):
+    def test_warmup_phase_has_no_duration_target(
+        self, base_rt_settings, simple_dataset
+    ):
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
@@ -990,7 +1013,7 @@ class TestBuildPhases:
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
         phases = _build_phases(ctx)
 
-        assert phases[0].runtime_settings.min_duration_ms == 0
+        assert phases[0].runtime_settings.min_duration_ms is None
 
     @pytest.mark.unit
     def test_warmup_phase_no_max_duration(self, base_rt_settings, simple_dataset):
