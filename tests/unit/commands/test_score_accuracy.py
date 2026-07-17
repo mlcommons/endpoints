@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import msgspec.json
 import pytest
-from inference_endpoint.commands.benchmark.execute import (
+from inference_endpoint.commands.benchmark.accuracy import (
     AccuracyConfiguration,
     _accuracy_uuid_bound,
     _phase_osl_stats,
@@ -31,11 +31,11 @@ from inference_endpoint.commands.benchmark.execute import (
 )
 from inference_endpoint.config.schema import DatasetType
 
-# Module object for the tests that monkeypatch execute's own module-level symbols
-# (load_reference_backend) so _score_accuracy resolves the patched one. Taken from
-# sys.modules to avoid importing execute under both the ``from ... import`` and
-# ``import ...`` styles.
-execute_mod = sys.modules[_score_accuracy.__module__]
+# The module that defines _score_accuracy (commands.benchmark.accuracy), resolved
+# via __module__ so the tests monkeypatch its module-level load_reference_backend
+# and _score_accuracy picks up the patched one — without importing the module under
+# both the ``from ... import`` and ``import ...`` styles.
+scoring_mod = sys.modules[_score_accuracy.__module__]
 
 
 class _FakeDataset:
@@ -246,7 +246,7 @@ class TestScoreAccuracy:
         """With a tokenizer, each accuracy entry gets an output_sequence_lengths
         block (same shape as the perf report) from the phase's completions."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
@@ -265,7 +265,7 @@ class TestScoreAccuracy:
 
     def test_osl_skipped_for_performance_entry(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("performance", 2, 0.6, tmp_path, scorer=_FakeOSLScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
@@ -276,7 +276,7 @@ class TestScoreAccuracy:
     def test_osl_dropped_when_get_raw_outputs_raises(self, tmp_path, monkeypatch):
         """A read/tokenize failure only drops OSL — scoring still succeeds."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
 
         class _RaisingScorer(_FakeOSLScorer):
@@ -308,7 +308,7 @@ class TestScoreAccuracy:
         """Masking regression: every response empty => OSL returns None, but
         response_counts must still publish scored=0 rather than omitting all."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_EmptyOSLScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
@@ -326,7 +326,7 @@ class TestScoreAccuracy:
         """scored/empty/missing partition the issued samples; OSL tokenizes only
         the one scored (non-empty) response."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_MixedOSLScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
@@ -349,7 +349,7 @@ class TestScoreAccuracy:
         """An accuracy phase with no COMPLETE rows (empty, columned frame) must
         still publish response_counts (all missing) rather than dropping them."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_AllMissingScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
@@ -366,7 +366,7 @@ class TestScoreAccuracy:
     def test_no_fast_backend_disables_osl_keeps_counts(self, tmp_path, monkeypatch):
         """A tokenizer with no fast backend (load_reference_backend -> None) skips
         OSL but still publishes response_counts."""
-        monkeypatch.setattr(execute_mod, "load_reference_backend", lambda name: None)
+        monkeypatch.setattr(scoring_mod, "load_reference_backend", lambda name: None)
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
             "aime25::gptoss"
@@ -382,7 +382,7 @@ class TestScoreAccuracy:
         def _boom(name):
             raise OSError("no tokenizer")
 
-        monkeypatch.setattr(execute_mod, "load_reference_backend", _boom)
+        monkeypatch.setattr(scoring_mod, "load_reference_backend", _boom)
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
         entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
             "aime25::gptoss"
@@ -395,7 +395,7 @@ class TestScoreAccuracy:
         """End-to-end: _score_accuracy computes the accuracy uuid bound from
         sample_idx_map.json and passes it into get_raw_outputs."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         (tmp_path / "sample_idx_map.json").write_bytes(
             msgspec.json.encode({"aime25::gptoss": {"u1": 0, "u2": 1}})

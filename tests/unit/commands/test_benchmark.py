@@ -40,14 +40,16 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     ResponseCollector,
     _build_phases,
-    _derive_profile_urls,
     _load_datasets,
     _PerfPhaseTimeout,
+    _run_benchmark_async,
+    setup_benchmark,
+)
+from inference_endpoint.commands.benchmark.profiling import (
+    _derive_profile_urls,
     _post_profile,
     _render_profile_status,
-    _run_benchmark_async,
     _write_profiling_section,
-    setup_benchmark,
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -677,16 +679,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -727,16 +729,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -781,16 +783,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -1855,7 +1857,7 @@ class TestProfilingHelpers:
         resp = MagicMock()
         resp.__enter__.return_value.status = 200
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             return_value=resp,
         ):
             rec = _post_profile("http://h/start_profile")
@@ -1868,7 +1870,7 @@ class TestProfilingHelpers:
     def test_post_profile_http_error(self):
         err = urllib_error.HTTPError("http://h", 404, "Not Found", {}, None)
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             side_effect=err,
         ):
             rec = _post_profile("http://h/start_profile")
@@ -1878,7 +1880,7 @@ class TestProfilingHelpers:
     @pytest.mark.unit
     def test_post_profile_connection_failure_never_raises(self):
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             side_effect=OSError("refused"),
         ):
             rec = _post_profile("http://h/start_profile")
