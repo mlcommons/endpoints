@@ -21,7 +21,7 @@ import math
 import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import msgspec.json
 import msgspec.structs
@@ -33,6 +33,37 @@ from inference_endpoint.evaluation.accuracy_results import average_accuracy
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
+
+# Aggregator series name -> result_summary.json field. Single source of truth for the
+# summary's latency sections: ``Report.from_snapshot`` builds its fields from this, and
+# ``scripts/early_stopping_estimate_from_events.py`` uses it to key its post-hoc output the same way.
+SERIES_TO_SUMMARY_FIELD: Final[dict[str, str]] = {
+    "ttft_ns": "ttft",
+    "tpot_ns": "tpot",
+    "sample_latency_ns": "latency",
+}
+
+
+def place_early_stopping_percentiles(
+    metric_dict: dict[str, Any], esp: dict[str, float | None]
+) -> dict[str, Any]:
+    """Return ``metric_dict`` with the ES map directly after ``percentiles``.
+
+    Single source of the map's position in every summary-shaped dict — used by
+    the report builder and by ``scripts/early_stopping_estimate_from_events.py``
+    when augmenting a historical ``result_summary.json``. Replaces any existing
+    placement; appends at the end if the dict has no ``percentiles`` key.
+    """
+    out: dict[str, Any] = {}
+    for key, value in metric_dict.items():
+        if key == "early_stopping_percentiles":
+            continue
+        out[key] = value
+        if key == "percentiles":
+            out["early_stopping_percentiles"] = esp
+    if "early_stopping_percentiles" not in out:
+        out["early_stopping_percentiles"] = esp
+    return out
 
 
 def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
@@ -49,7 +80,10 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
     """
     count = stat.get("count", 0)
     if count == 0:
-        return {}
+        # No data -> no rollups, but an enabled-ES empty series still self-describes
+        # (all-null map) in the summary instead of looking feature-off.
+        esp = stat.get("early_stopping_percentiles")
+        return {"early_stopping_percentiles": esp} if esp is not None else {}
 
     total = stat.get("total", 0)
     sum_sq = stat.get("sum_sq", 0)
@@ -89,7 +123,7 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
         median = (s_min + s_max) / 2
 
     histogram = stat.get("histogram", [])
-    return {
+    metric: dict[str, Any] = {
         "total": total,
         "min": s_min,
         "max": s_max,
@@ -102,6 +136,12 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
             "counts": [c for _, c in histogram],
         },
     }
+    # Early-stopping estimate map — present only when the feature is enabled
+    # (COMPLETE snapshots for TTFT/TPOT/latency); sits right after `percentiles`.
+    early_stopping_percentiles = stat.get("early_stopping_percentiles")
+    if early_stopping_percentiles is not None:
+        metric = place_early_stopping_percentiles(metric, early_stopping_percentiles)
+    return metric
 
 
 def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
@@ -296,9 +336,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             duration_ns=duration_ns,
             state=state,
             complete=(state == "complete" and n_pending_tasks == 0),
-            ttft=_series_dict("ttft_ns"),
-            tpot=_series_dict("tpot_ns"),
-            latency=_series_dict("sample_latency_ns"),
+            **{
+                field: _series_dict(series)
+                for series, field in SERIES_TO_SUMMARY_FIELD.items()
+            },
             output_sequence_lengths=osl,
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
@@ -472,6 +513,7 @@ def _display_metric(
             return "N/A"
         return f"{v * scale_factor:.2f}"
 
+    # .get(): an empty-but-ES-carrying metric dict has no rollups/histogram.
     for name, key in [
         ("Min", "min"),
         ("Max", "max"),
@@ -479,11 +521,12 @@ def _display_metric(
         ("Avg.", "avg"),
         ("Std Dev.", "std_dev"),
     ]:
-        fn(f"  {name}: {_scaled(metric_dict[key])} {unit}{newline}")
+        fn(f"  {name}: {_scaled(metric_dict.get(key))} {unit}{newline}")
 
     fn(f"\n  Histogram:{newline}")
-    buckets = metric_dict["histogram"]["buckets"]
-    counts = metric_dict["histogram"]["counts"]
+    histogram = metric_dict.get("histogram") or {"buckets": [], "counts": []}
+    buckets = histogram["buckets"]
+    counts = histogram["counts"]
 
     if buckets:
         bucket_strs = [
@@ -501,3 +544,11 @@ def _display_metric(
     fn(f"\n  Percentiles:{newline}")
     for p, val in metric_dict.get("percentiles", {}).items():
         fn(f"  {p:>6}: {_scaled(val)} {unit}{newline}")
+
+    es_map = metric_dict.get("early_stopping_percentiles")
+    if es_map:
+        fn(
+            f"\n  Early-stopping percentile estimates (N/A = insufficient samples):{newline}"
+        )
+        for k, v in es_map.items():
+            fn(f"  {k:>6}: {_scaled(v)} {unit}{newline}")

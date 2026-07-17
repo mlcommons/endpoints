@@ -181,6 +181,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             MetricSeriesKey.SAMPLE_LATENCY_NS.value,
             hdr_low=_NS_HDR_LOW,
             hdr_high=_NS_HDR_HIGH,
+            tail_latency=True,
             sig_figs=sig_figs,
             n_histogram_buckets=n_histogram_buckets,
         )
@@ -205,6 +206,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 MetricSeriesKey.TTFT_NS.value,
                 hdr_low=_NS_HDR_LOW,
                 hdr_high=_NS_HDR_HIGH,
+                tail_latency=True,
                 sig_figs=sig_figs,
                 n_histogram_buckets=n_histogram_buckets,
             )
@@ -219,6 +221,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 MetricSeriesKey.TPOT_NS.value,
                 hdr_low=_NS_HDR_LOW,
                 hdr_high=_NS_HDR_HIGH,
+                tail_latency=True,
                 sig_figs=sig_figs,
                 n_histogram_buckets=n_histogram_buckets,
                 dtype=float,
