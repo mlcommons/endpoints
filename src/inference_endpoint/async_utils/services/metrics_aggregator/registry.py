@@ -45,7 +45,6 @@ from inference_endpoint.metrics.early_stopping import (
     EarlyStoppingSpec,
     es_percentile_estimate,
     es_targets_from_grid,
-    grid_percentile_key,
 )
 
 from .snapshot import (
@@ -257,10 +256,7 @@ class SeriesSampler(MetricSampler):
         self, sorted_values, spec: EarlyStoppingSpec
     ) -> dict[str, float | None]:
         if spec.percentiles is not None:  # explicit override: tests / offline analysis
-            targets = {
-                grid_percentile_key(f): f
-                for f in sorted(spec.percentiles, reverse=True)
-            }
+            targets = {str(v): float(v) for v in sorted(spec.percentiles, reverse=True)}
         else:
             targets = es_targets_from_grid(self._percentiles)
         results = {

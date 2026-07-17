@@ -17,7 +17,10 @@ estimate stays honest, which is exactly the regime edge/T2V workloads live in.
 
 For each target percentile `p` — every entry of the series' own report percentile grid at or above
 the median (`es_targets_from_grid`; the default grid yields p50/p75/p80/p90/p95/p97/p99/p99.9) —
-at confidence `c = 0.99`, over the `n` ascending-sorted latencies of a series:
+at confidence `c = 0.99`, over the `n` ascending-sorted latencies of a series
+(percentiles use the grid convention — 0-100 — at every surface; only the LoadGen-parity
+kernel keeps LoadGen's fraction domain, converted exactly once and unrounded, the same `/100`
+`np.percentile` applies internally):
 
 ```
 estimate = sorted[n - t],  t = max{ i : n >= find_min_passing(i, p, d, c) + i }
@@ -35,7 +38,7 @@ lowering `c` or raising `d` weakens the certified claim (`d > 0` certifies perce
 The pure math keeps defaulted arguments for parity tests only.
 
 **The percentile targets are not a separate list either** — they derive from the series' report
-percentile grid, filtered to `p ≥ 0.5` (`ES_MIN_PERCENTILE`): the estimate is a _tail_
+percentile grid, filtered to `≥ p50` (`ES_MIN_PERCENTILE = 50.0`, grid convention): the estimate is a _tail_
 certification (a conservative upper confidence bound), so below-median grid entries are skipped.
 One source of truth: whatever percentiles a series reports, ES covers — every scenario's gate
 percentile (p99 Server, p90 SingleStream/T2V) is always included, with nothing to tune.

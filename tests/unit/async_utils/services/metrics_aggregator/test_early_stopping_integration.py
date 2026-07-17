@@ -156,7 +156,7 @@ def test_es_failure_does_not_kill_the_final_snapshot():
     # ES runs inside publish_final's build_snapshot, where an exception would
     # cost the entire final report — a bad explicit override must degrade to
     # "map omitted", never raise.
-    reg = _registry(EarlyStoppingSpec(percentiles=(1.5,)), n=100)  # out of domain
+    reg = _registry(EarlyStoppingSpec(percentiles=(150.0,)), n=100)  # out of domain
     d = _snap(reg)
     assert "early_stopping_percentiles" not in _series(d, "ttft_ns")
     assert _series(d, "ttft_ns")["percentiles"]  # exact stats still intact

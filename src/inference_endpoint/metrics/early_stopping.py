@@ -14,6 +14,13 @@ and the true p-percentile is <= it at confidence ``c``.
 
 The regularized incomplete beta uses a continued fraction (Numerical Recipes ``betai``); it
 equals LoadGen's Gauss-hypergeometric ``beta_regularized`` but converges in tens of iterations.
+
+Percentile convention: every product surface (spec, estimates, grid targets, report keys,
+script CLI) speaks the report-grid convention — 0-100, e.g. ``99.9`` — matching
+``DEFAULT_PERCENTILES``, ``np.percentile``, and the summary's ``percentiles`` keys. Only the
+LoadGen-parity kernel (``find_min_passing`` / ``_odds`` / ``_discard_count``) keeps LoadGen's
+own fraction domain (0-1); the single conversion happens inside ``es_percentile_estimate``,
+unrounded — the same ``/100`` ``np.percentile`` applies internally, so grid parity is exact.
 """
 
 from __future__ import annotations
@@ -32,7 +39,6 @@ __all__ = [
     "es_percentile_estimate",
     "es_targets_from_grid",
     "find_min_passing",
-    "grid_percentile_key",
 ]
 
 # LoadGen hardcodes confidence c = 0.99 and tolerance d = 0.0 (results.cc:157-158). They are
@@ -45,44 +51,30 @@ TOLERANCE: Final[float] = 0.0
 # ES runs for every percentile the series' report grid shows at or above the median. The
 # estimate is a tail certification (a conservative upper confidence bound), so below-median
 # grid entries (p25/p10/...) are not meaningful gates and are skipped. Deriving from the grid
-# keeps one source of truth: whatever percentiles a series reports, ES covers.
-ES_MIN_PERCENTILE: Final[float] = 0.5
+# keeps one source of truth: whatever percentiles a series reports, ES covers. Grid
+# convention (0-100), like every percentile surface in this module.
+ES_MIN_PERCENTILE: Final[float] = 50.0
 
 
 def es_targets_from_grid(grid_percentiles: Iterable[float | str]) -> dict[str, float]:
-    """{report-grid key: fraction} for every grid entry in the ES domain.
+    """{report-grid key: percentile} for every grid entry in the ES domain.
 
     Keys are ``str()`` of the ORIGINAL grid entries and the map preserves the
     grid's own order (descending in the default grid), so the compact map
-    overlays the ``percentiles`` grid 1:1 in both naming and ordering. Accepts
-    the entries as numbers (registry grids) or strings (summary-JSON keys — an
-    int grid entry ``99`` keys as ``"99"`` either way). Entries below the median
+    overlays the ``percentiles`` grid 1:1 in naming and ordering. Accepts the
+    entries as numbers (registry grids) or strings (summary-JSON keys — an int
+    grid entry ``99`` keys as ``"99"`` either way). Values stay in the grid
+    convention (0-100) — no conversion, no rounding. Entries below the median
     are skipped (an ES estimate is a tail certification) and ``>= 100`` is
-    excluded — p1.0 is outside the binomial test's domain and would otherwise
-    crash the terminal snapshot. Fractions are rounded to 6 decimals: lossless
-    for grid values while avoiding float-division artifacts (99.9/100 != 0.999).
+    excluded — p100 is outside the binomial test's domain and would otherwise
+    crash the terminal snapshot.
     """
     targets: dict[str, float] = {}
     for p in grid_percentiles:
-        # 6 fraction decimals == grid_percentile_key's 4 percent decimals — same
-        # precision, different spaces.
-        fraction = round(float(p) / 100.0, 6)
-        if ES_MIN_PERCENTILE <= fraction < 1.0:
-            # str(p) of the ORIGINAL entry, deliberately NOT grid_percentile_key:
-            # reconstructing the key from the fraction would render float-style
-            # ("99.0") and break the 1:1 overlay for int grids keyed as "99".
-            targets[str(p)] = fraction
+        value = float(p)
+        if ES_MIN_PERCENTILE <= value < 100.0:
+            targets[str(p)] = value
     return targets
-
-
-def grid_percentile_key(p: float) -> str:
-    """Report-grid-style key for a fraction percentile: 0.5 -> "50.0", 0.999 -> "99.9".
-
-    Used for explicit percentile overrides (tests / offline analysis), where no grid
-    string exists to carry through; grid-derived targets keep the grid's own keys via
-    ``es_targets_from_grid``. ``round`` absorbs float artifacts (0.97 * 100 != 97.0).
-    """
-    return str(round(p * 100.0, 4))
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,8 +82,9 @@ class EarlyStoppingSpec:
     """Resolved early-stopping parameters used by the aggregator.
 
     ``percentiles=None`` (the default) derives the target set from each series' own
-    report grid via ``es_targets_from_grid``; explicit tuples are for tests and
-    offline analysis only — the config surface is a single ``enabled`` flag.
+    report grid via ``es_targets_from_grid``; explicit tuples (grid convention,
+    0-100) are for tests and offline analysis only — the config surface is a
+    single ``enabled`` flag.
     """
 
     percentiles: tuple[float, ...] | None = None
@@ -289,19 +282,27 @@ def es_percentile_estimate(
     percentile: float,
     confidence: float = CONFIDENCE,
 ) -> EarlyStoppingResult:
-    """Conservative early-stopping percentile estimate over an ascending-sorted latency series."""
+    """Conservative early-stopping estimate over an ascending-sorted latency series.
+
+    ``percentile`` uses the grid convention (0-100, e.g. ``99.9``); the single
+    conversion to the kernel's fraction domain happens here, unrounded — the same
+    ``/100`` ``np.percentile`` applies internally, so the ``empirical`` value can
+    never diverge from the report grid's ``method="lower"`` entry.
+    """
+    if not 0.0 < percentile < 100.0:
+        raise ValueError(f"percentile must be in (0, 100), got {percentile}")
+    fraction = percentile / 100.0
     n = len(sorted_latencies)
-    min_queries = find_min_passing(1, percentile, TOLERANCE, confidence) + 1
+    min_queries = find_min_passing(1, fraction, TOLERANCE, confidence) + 1
     # Same order statistic as the report's percentile grid (np.percentile with
-    # method="lower": index floor(p*(n-1))) so the block's empirical can never
-    # disagree with the grid value in the same result_summary.json.
-    emp_idx = int(percentile * (n - 1)) if n else 0
+    # method="lower": index floor(p*(n-1))).
+    emp_idx = int(fraction * (n - 1)) if n else 0
     empirical = sorted_latencies[emp_idx] if n else None
     if n < min_queries:
         return EarlyStoppingResult(
             percentile, confidence, n, None, empirical, min_queries, 0
         )
-    t = _discard_count(n, percentile, TOLERANCE, confidence)
+    t = _discard_count(n, fraction, TOLERANCE, confidence)
     # The estimate is the t-th highest sample, so the number of samples actually
     # discarded (strictly above the reported value) is t - 1; at the floor
     # (t == 1) nothing is discarded.
