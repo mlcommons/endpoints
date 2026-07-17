@@ -51,19 +51,19 @@ from inference_endpoint.metrics.early_stopping import (
     es_percentile_estimate,
     es_percentiles_from_grid,
 )
+from inference_endpoint.metrics.report import SERIES_TO_SUMMARY_FIELD
 
 _loads = msgspec.json.decode
 
-_METRIC_TO_SUMMARY = {
-    "ttft_ns": "ttft",
-    "tpot_ns": "tpot",
-    "sample_latency_ns": "latency",
-}
+# Script-local display units, keyed by result_summary.json field. Latency renders in
+# seconds (long-CoT runs sit at 100s+ per sample); the in-band report renders ms.
 _UNITS = {
-    "ttft_ns": ("ms", 1e6),
-    "tpot_ns": ("ms", 1e6),
-    "sample_latency_ns": ("s", 1e9),
+    "ttft": ("ms", 1e6),
+    "tpot": ("ms", 1e6),
+    "latency": ("s", 1e9),
 }
+# Texts buffered per tokenizer call: 4096 texts x ~16 KB of CoT output ~= 64 MB peak,
+# bounded even on login nodes, while large enough to amortize the batch-encode overhead.
 _TPOT_BATCH = 4096
 
 
@@ -201,7 +201,7 @@ def _fmt(v, unit: str, div: float) -> str:
 
 
 def _cross_check(summary: dict, series_name: str, values: list, blocks: list) -> None:
-    md = summary.get(_METRIC_TO_SUMMARY[series_name]) or {}
+    md = summary.get(SERIES_TO_SUMMARY_FIELD[series_name]) or {}
     completed = summary.get("n_samples_completed")
     if completed is not None and len(values) != completed:
         # ttft/tpot legitimately count fewer (streaming-only / empty-rest skips);
@@ -211,7 +211,8 @@ def _cross_check(summary: dict, series_name: str, values: list, blocks: list) ->
             f"  XCHECK count: ours={len(values)} n_samples_completed={completed}{note}"
         )
     inband = md.get("early_stopping")
-    if not inband:
+    if not isinstance(inband, list) or not inband:
+        # absent, or a non-list from a pre-release artifact — nothing to compare
         return
     ours_by_p = {b["percentile"]: b for b in blocks}
     for ib in inband:
@@ -266,9 +267,9 @@ def main(argv=None):
             continue
         values.sort()
         blocks = es_blocks(values, percentiles, args.confidence)
-        result[_METRIC_TO_SUMMARY[name]] = blocks
-        unit, div = _UNITS[name]
-        print(f"\n{_METRIC_TO_SUMMARY[name]} (from {name}, n={len(values)}):")
+        result[SERIES_TO_SUMMARY_FIELD[name]] = blocks
+        unit, div = _UNITS[SERIES_TO_SUMMARY_FIELD[name]]
+        print(f"\n{SERIES_TO_SUMMARY_FIELD[name]} (from {name}, n={len(values)}):")
         for b in blocks:
             line = (
                 f"  p{b['percentile'] * 100:g}: sufficient={b['sufficient']} "
@@ -280,7 +281,7 @@ def main(argv=None):
                 gap = b["estimate"] - b["empirical"]
                 line += f"  gap=+{_fmt(gap, unit, div)} (+{100 * gap / b['empirical']:.2f}%)"
             print(line)
-            rows.append((_METRIC_TO_SUMMARY[name], b, unit, div))
+            rows.append((SERIES_TO_SUMMARY_FIELD[name], b, unit, div))
         if summary is not None:
             _cross_check(summary, name, values, blocks)
 

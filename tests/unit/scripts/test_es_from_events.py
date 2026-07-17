@@ -124,6 +124,15 @@ class TestEsBlocks:
             assert b["estimate"] >= b["empirical"]
 
 
+def test_metric_mapping_comes_from_product():
+    # The series -> result_summary.json field mapping must be the product's own
+    # (report.py builds the summary from it) — not a copy that can drift.
+    from inference_endpoint.metrics.report import SERIES_TO_SUMMARY_FIELD
+
+    assert mod.SERIES_TO_SUMMARY_FIELD is SERIES_TO_SUMMARY_FIELD
+    assert set(mod._UNITS) == set(SERIES_TO_SUMMARY_FIELD.values())
+
+
 class TestMalformedInput:
     def _events_with_junk(self, tmp_path):
         lines = [
@@ -185,6 +194,14 @@ class TestMalformedInput:
 
 
 class TestCrossCheckAndMain:
+    def test_cross_check_skips_non_list_inband(self, capsys):
+        # pre-release artifacts can carry a dict here; skip instead of crashing
+        values = [1.0, 2.0]
+        blocks = mod.es_blocks(values, [0.99], 0.99)
+        summary = self._summary({"percentile": 0.99})  # dict, not list
+        mod._cross_check(summary, "ttft_ns", values, blocks)
+        assert "MATCH" not in capsys.readouterr().out
+
     def _summary(self, blocks):
         return {
             "n_samples_completed": 2,

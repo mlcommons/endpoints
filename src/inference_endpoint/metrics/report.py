@@ -21,7 +21,7 @@ import math
 import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import msgspec.json
 import msgspec.structs
@@ -33,6 +33,15 @@ from inference_endpoint.evaluation.accuracy_results import average_accuracy
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
+
+# Aggregator series name -> result_summary.json field. Single source of truth for the
+# summary's latency sections: ``Report.from_snapshot`` builds its fields from this, and
+# ``scripts/es_from_events.py`` uses it to key its post-hoc output the same way.
+SERIES_TO_SUMMARY_FIELD: Final[dict[str, str]] = {
+    "ttft_ns": "ttft",
+    "tpot_ns": "tpot",
+    "sample_latency_ns": "latency",
+}
 
 
 def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
@@ -302,9 +311,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             duration_ns=duration_ns,
             state=state,
             complete=(state == "complete" and n_pending_tasks == 0),
-            ttft=_series_dict("ttft_ns"),
-            tpot=_series_dict("tpot_ns"),
-            latency=_series_dict("sample_latency_ns"),
+            **{
+                field: _series_dict(series)
+                for series, field in SERIES_TO_SUMMARY_FIELD.items()
+            },
             output_sequence_lengths=osl,
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
