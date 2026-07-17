@@ -120,7 +120,7 @@ class SeriesStat(
     percentiles: dict[str, float]
     histogram: list[tuple[tuple[float, float], int]]
     # Early-stopping percentile estimates (COMPLETE snapshots only, when enabled):
-    # compact {grid_percentile_key: estimate-or-None} map whose keys mirror
+    # compact {grid key (str of the grid entry): estimate-or-None} map mirroring
     # ``percentiles``; None value = insufficient samples for that percentile.
     # Optional trailing field so the array_like wire format stays
     # backward-compatible. None field = not computed.

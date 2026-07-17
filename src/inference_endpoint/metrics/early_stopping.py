@@ -284,10 +284,12 @@ def es_percentile_estimate(
 ) -> EarlyStoppingResult:
     """Conservative early-stopping estimate over an ascending-sorted latency series.
 
-    ``percentile`` uses the grid convention (0-100, e.g. ``99.9``); the single
-    conversion to the kernel's fraction domain happens here, unrounded — the same
-    ``/100`` ``np.percentile`` applies internally, so the ``empirical`` value can
-    never diverge from the report grid's ``method="lower"`` entry.
+    ``percentile`` uses the grid convention (0-100, e.g. ``99.9``) — a value below
+    1 almost certainly means a caller still passing the pre-#423 fraction style
+    and will be interpreted as a sub-1% percentile. The single conversion to the
+    kernel's fraction domain happens here, unrounded — the same ``/100``
+    ``np.percentile`` applies internally, so the ``empirical`` value can never
+    diverge from the report grid's ``method="lower"`` entry.
     """
     if not 0.0 < percentile < 100.0:
         raise ValueError(f"percentile must be in (0, 100), got {percentile}")
