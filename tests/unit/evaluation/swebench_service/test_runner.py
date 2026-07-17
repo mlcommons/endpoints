@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import subprocess
 import sys
 import threading
@@ -25,7 +24,7 @@ from swebench_service.runner import (  # noqa: E402
     CancellationToken,
     RunCancelled,
     RunnerError,
-    SwebenchRunner,
+    SweBenchRunner,
 )
 from swebench_service.schemas import RunRequest  # noqa: E402
 
@@ -136,7 +135,7 @@ def test_base_env_keeps_proxies_and_sets_no_proxy_for_loopback(monkeypatch, tmp_
     monkeypatch.setenv("ALL_PROXY", "socks5://proxy.example:1080")
     monkeypatch.setenv("NO_PROXY", "intel.com")
 
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     env = runner._base_env(_request(["http://localhost:30000"]))
 
     assert env["http_proxy"] == "http://proxy.example:8080"
@@ -152,7 +151,7 @@ def test_base_env_keeps_proxies_and_sets_no_proxy_for_loopback(monkeypatch, tmp_
 def test_base_env_keeps_proxies_for_non_loopback_endpoints(monkeypatch, tmp_path):
     monkeypatch.setenv("https_proxy", "http://proxy.example:8080")
 
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     env = runner._base_env(_request(["http://swebench-host:30000"]))
 
     assert env["https_proxy"] == "http://proxy.example:8080"
@@ -160,7 +159,7 @@ def test_base_env_keeps_proxies_for_non_loopback_endpoints(monkeypatch, tmp_path
 
 
 def test_patch_config_rewrites_localhost_api_base_to_127_0_0_1(tmp_path):
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
 
     patched = runner._patch_config(
         tmp_path,
@@ -170,6 +169,7 @@ def test_patch_config_rewrites_localhost_api_base_to_127_0_0_1(tmp_path):
 
     cfg = yaml.safe_load(patched.read_text())
     assert cfg["model"]["model_kwargs"]["api_base"] == "http://127.0.0.1:30000/v1"
+    assert "model_class" not in cfg["model"]
     assert "api_key" not in cfg["model"]["model_kwargs"]
     assert cfg["environment"]["run_args"] == [
         "--rm",
@@ -187,7 +187,7 @@ def test_patch_config_keeps_api_key_out_of_yaml_and_forwards_generation(tmp_path
         "max_new_tokens": 2048,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
 
     patched = runner._patch_config(tmp_path, request, run_id="run-1")
 
@@ -203,7 +203,7 @@ def test_patch_config_keeps_api_key_out_of_yaml_and_forwards_generation(tmp_path
 
 
 def test_base_env_supplies_api_key_only_to_agent_subprocess(monkeypatch, tmp_path):
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     authenticated = _request(["http://endpoint:30000"])
     authenticated.endpoint_api_key = "real-secret"
     loopback = _request(["http://localhost:30000"])
@@ -227,7 +227,7 @@ def test_run_agent_filters_exact_instance_ids(monkeypatch, tmp_path):
     request = _request(["http://endpoint:30000"])
     request.endpoint_api_key = "agent-secret"
     request.evaluated_instance_ids = ["repo__repo-1", "repo.with.regex+chars"]
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
 
     runner._run_agent(request, tmp_path / "config.yaml", tmp_path, tmp_path)
 
@@ -239,31 +239,28 @@ def test_run_agent_filters_exact_instance_ids(monkeypatch, tmp_path):
     assert envs[0]["OPENAI_API_KEY"] == "agent-secret"
 
 
-def test_run_agent_toolcall_patch_prepends_overlay_pythonpath(monkeypatch, tmp_path):
+def test_patch_config_selects_qwen_model_without_mutating_pythonpath(
+    monkeypatch, tmp_path
+):
     envs: list[dict[str, str]] = []
-    overlay = tmp_path / "overlay"
     request = _request(["http://endpoint:30000"])
     request.enable_swebench_toolcall_patch = True
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
-
-    def fake_create_overlay(self, overlay_root, replacement_root):
-        assert replacement_root == self._template_dir
-        overlay.mkdir()
-        return overlay
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
 
     def fake_run_subprocess(cmd, log_path, *, env, **kwargs):
         envs.append(env)
 
     monkeypatch.setenv("PYTHONPATH", "/existing/path")
-    monkeypatch.setattr(
-        SwebenchRunner, "_create_toolcall_patch_overlay", fake_create_overlay
-    )
     monkeypatch.setattr(runner_mod, "_run_subprocess", fake_run_subprocess)
 
-    runner._run_agent(request, tmp_path / "config.yaml", tmp_path, tmp_path)
+    patched = runner._patch_config(tmp_path, request, run_id="run-qwen")
+    cfg = yaml.safe_load(patched.read_text())
+    runner._run_agent(request, patched, tmp_path, tmp_path)
 
-    pythonpath = envs[0]["PYTHONPATH"].split(os.pathsep)
-    assert pythonpath[:2] == [str(overlay), "/existing/path"]
+    assert cfg["model"]["model_class"] == (
+        "swebench_service.qwen_tools_model.QwenToolsModel"
+    )
+    assert envs[0]["PYTHONPATH"] == "/existing/path"
 
 
 def test_validate_prediction_ids_rejects_unexpected_instances(tmp_path):
@@ -273,14 +270,14 @@ def test_validate_prediction_ids_rejects_unexpected_instances(tmp_path):
     preds.write_bytes(
         msgspec.json.encode({"repo__repo-1": "patch", "repo__repo-2": "patch"})
     )
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
 
     with pytest.raises(RunnerError, match="unexpected SWE-bench"):
         runner._validate_prediction_ids(request, preds)
 
 
 def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path):
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     request = _request(["http://endpoint:30000"])
     output_dir = tmp_path / "output"
     run_dir = tmp_path / "run"
@@ -305,7 +302,7 @@ def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path):
     assert (run_dir / "swe_bench_eval_run_id.txt").read_text().startswith("endpoints_")
 
 
-def _stub_successful_run(monkeypatch, runner: SwebenchRunner) -> None:
+def _stub_successful_run(monkeypatch, runner: SweBenchRunner) -> None:
     def fake_run_agent(request, patched_config, output_dir, run_dir, cancel_token=None):
         (output_dir / "preds.json").write_text('{"repo__repo-1":"patch"}')
 
@@ -319,7 +316,7 @@ def _stub_successful_run(monkeypatch, runner: SwebenchRunner) -> None:
 
 
 def test_run_cleans_labeled_containers_after_success(monkeypatch, tmp_path):
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     _stub_successful_run(monkeypatch, runner)
     cleaned: list[str] = []
     monkeypatch.setattr(runner, "_cleanup_containers", cleaned.append)
@@ -341,7 +338,7 @@ def test_run_cleans_labeled_containers_after_success(monkeypatch, tmp_path):
 def test_run_cleans_labeled_containers_after_failure(
     monkeypatch, tmp_path, error, match
 ):
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     cleaned: list[str] = []
 
     def fail_agent(*args, **kwargs):
@@ -357,7 +354,7 @@ def test_run_cleans_labeled_containers_after_failure(
 
 
 def test_cleanup_failure_fails_successful_run(monkeypatch, tmp_path):
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     _stub_successful_run(monkeypatch, runner)
     monkeypatch.setattr(
         runner,
@@ -370,7 +367,7 @@ def test_cleanup_failure_fails_successful_run(monkeypatch, tmp_path):
 
 
 def test_cleanup_failure_does_not_mask_primary_failure(monkeypatch, tmp_path):
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     monkeypatch.setattr(
         runner,
         "_run_agent",
@@ -397,7 +394,7 @@ def test_cleanup_uses_exact_run_label_and_leaves_unrelated_containers(
         return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
-    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
 
     runner._cleanup_containers("run-exact")
 

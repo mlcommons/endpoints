@@ -855,33 +855,15 @@ class TestAccuracyOnlyDataset:
         assert captured == {"subset": "lite", "split": "dev"}
 
     @pytest.mark.unit
-    def test_swe_bench_rejects_num_repeats_greater_than_one(self, tmp_path):
-        dummy_jsonl = tmp_path / "dummy.jsonl"
-        dummy_jsonl.write_text('{"text_input": "hello"}\n')
-        config = OfflineConfig(
-            endpoint_config={"endpoints": ["http://test:8000"]},
-            model_params={"name": "test-model"},
-            datasets=[
-                {
-                    "type": "performance",
-                    "path": str(dummy_jsonl),
-                    "parser": {"prompt": "text_input"},
-                },
-                {
-                    "name": "swe_bench",
-                    "type": "accuracy",
-                    "accuracy_config": {
-                        "eval_method": "swe_bench_scorer",
-                        "num_repeats": 2,
-                    },
-                },
-            ],
-        )
-
+    def test_external_scorer_rejects_num_repeats_greater_than_one(self):
         with pytest.raises(
             InputValidationError, match=r"accuracy_config\.num_repeats must be 1"
         ):
-            _load_datasets(config, tmp_path, TestMode.ACC)
+            execute_mod._validate_accuracy_config_for_scorer(
+                _SelfContainedScorer,
+                "external_accuracy",
+                SimpleNamespace(num_repeats=2),
+            )
 
 
 class TestYAMLTemplateValidation:

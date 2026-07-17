@@ -31,12 +31,12 @@ from pydantic import ValidationError
 from . import API_VERSION, CAPABILITIES
 from .artifacts import redact_secrets, redact_text, resolve_artifact
 from .config import ServiceConfig
-from .runner import CancellationToken, RunCancelled, SwebenchRunner
+from .runner import CancellationToken, RunCancelled, RunnerProtocol, SweBenchRunner
 from .schemas import ArtifactInfo, RunRequest, RunStatus
 
 
 class RunManager:
-    def __init__(self, *, config: ServiceConfig, runner: Any):
+    def __init__(self, *, config: ServiceConfig, runner: RunnerProtocol):
         self.config = config
         self.runner = runner
         self.runs: dict[str, RunStatus] = {}
@@ -355,7 +355,10 @@ class RunManager:
 MANAGER_KEY = web.AppKey("manager", RunManager)
 
 
-def create_app(config: ServiceConfig, runner: Any | None = None) -> web.Application:
+def create_app(
+    config: ServiceConfig,
+    runner: RunnerProtocol | None = None,
+) -> web.Application:
     config = ServiceConfig(
         host=config.host,
         port=config.port,
@@ -366,7 +369,7 @@ def create_app(config: ServiceConfig, runner: Any | None = None) -> web.Applicat
         max_stored_runs=config.max_stored_runs,
     )
     config.artifact_root.mkdir(parents=True, exist_ok=True)
-    runner = runner or SwebenchRunner(
+    runner = runner or SweBenchRunner(
         project_root=Path(__file__).resolve().parents[1],
         subprocess_timeout_s=config.subprocess_timeout_s,
     )

@@ -14,7 +14,11 @@ import pytest
 # isort: split
 from inference_endpoint.config.schema import EndpointConfig, ModelParams
 from inference_endpoint.evaluation import scoring as scoring_mod
+from inference_endpoint.evaluation import swe_bench_scorer as swe_bench_mod
 from inference_endpoint.evaluation.scoring import Scorer, SWEBenchScorer
+from inference_endpoint.evaluation.swe_bench_scorer import (
+    SWEBenchScorer as ExtractedSWEBenchScorer,
+)
 from inference_endpoint.exceptions import SetupError
 
 pytestmark = pytest.mark.unit
@@ -106,6 +110,8 @@ class TestSWEBenchScorerRegistration:
     def test_registered(self):
         assert "swe_bench_scorer" in Scorer.PREDEFINED
         assert Scorer.get("swe_bench_scorer") is SWEBenchScorer
+        assert SWEBenchScorer is ExtractedSWEBenchScorer
+        assert scoring_mod.SWEBenchScorer is ExtractedSWEBenchScorer
 
     def test_skip_endpoint_phase(self):
         assert SWEBenchScorer.SKIP_ENDPOINT_PHASE is True
@@ -159,10 +165,6 @@ class TestSWEBenchScorerPreflight:
         assert calls == [("http://service-host:18080/health", "GET", "tok")]
 
     def test_preflight_never_calls_docker_or_subprocess(self, monkeypatch):
-        def fail_run(*args, **kwargs):
-            pytest.fail("client preflight must not run local subprocesses")
-
-        monkeypatch.setattr(scoring_mod.subprocess, "run", fail_run)
         monkeypatch.setattr(
             SWEBenchScorer,
             "_http_json",
@@ -387,7 +389,7 @@ class TestSWEBenchScorerScore:
         def fake_http_json(url, *, method="GET", payload=None, **kwargs):
             return statuses.pop(0)
 
-        monkeypatch.setattr(scoring_mod, "tqdm", FakeTqdm)
+        monkeypatch.setattr(swe_bench_mod, "tqdm", FakeTqdm)
         monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
 
         score, _ = _make_scorer(report_dir).score()
@@ -418,7 +420,7 @@ class TestSWEBenchScorerScore:
         def fake_http_json(url, *, method="GET", payload=None, **kwargs):
             return statuses.pop(0)
 
-        monkeypatch.setattr(scoring_mod, "tqdm", fake_tqdm)
+        monkeypatch.setattr(swe_bench_mod, "tqdm", fake_tqdm)
         monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
 
         score, _ = _make_scorer(report_dir).score()
@@ -509,11 +511,66 @@ class TestSWEBenchScorerScore:
         assert score == pytest.approx(1 / 3)
         assert scorer.complete is False
 
+    def test_decimal_string_result_counters_are_accepted(self, report_dir, monkeypatch):
+        monkeypatch.setattr(
+            SWEBenchScorer,
+            "_http_json",
+            lambda *args, **kwargs: {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "result": {
+                    "resolved_instances": "2",
+                    "submitted_instances": "3",
+                },
+                "artifacts": [],
+            },
+        )
+        scorer = _make_scorer(report_dir)
+
+        score, _ = scorer.score()
+
+        assert score == pytest.approx(2 / 3)
+        assert scorer.complete is True
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            {"resolved_instances": True, "submitted_instances": 3},
+            {"resolved_instances": 1, "submitted_instances": False},
+            {"resolved_instances": -1, "submitted_instances": 3},
+            {"resolved_instances": 1, "submitted_instances": -3},
+            {"resolved_instances": " 1", "submitted_instances": 3},
+            {"resolved_instances": "1.0", "submitted_instances": 3},
+            {"resolved_instances": 1.0, "submitted_instances": 3},
+            {"submitted_instances": 3},
+            {"resolved_instances": 1},
+            {"resolved_instances": 3, "submitted_instances": 2},
+            {"resolved_instances": 1, "submitted_instances": 4},
+        ],
+    )
+    def test_invalid_result_counters_mark_score_incomplete(
+        self, report_dir, monkeypatch, result
+    ):
+        monkeypatch.setattr(
+            SWEBenchScorer,
+            "_http_json",
+            lambda *args, **kwargs: {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "result": result,
+                "artifacts": [],
+            },
+        )
+        scorer = _make_scorer(report_dir)
+
+        assert scorer.score() == (None, 1)
+        assert scorer.complete is False
+
     def test_unsafe_artifact_url_is_not_downloaded(self, report_dir, monkeypatch):
         def fail_urlopen(*args, **kwargs):
             pytest.fail("unsafe artifact URL must not be fetched")
 
-        monkeypatch.setattr(scoring_mod.urllib_request, "urlopen", fail_urlopen)
+        monkeypatch.setattr(swe_bench_mod.urllib_request, "urlopen", fail_urlopen)
 
         SWEBenchScorer._download_artifact(
             "http://service-host:18080/",
@@ -537,7 +594,7 @@ class TestSWEBenchScorerScore:
             b"",
         ]
         monkeypatch.setattr(
-            scoring_mod.urllib_request, "urlopen", MagicMock(return_value=response)
+            swe_bench_mod.urllib_request, "urlopen", MagicMock(return_value=response)
         )
 
         SWEBenchScorer._download_artifact(
@@ -568,7 +625,7 @@ class TestSWEBenchScorerScore:
             OSError("download interrupted"),
         ]
         monkeypatch.setattr(
-            scoring_mod.urllib_request, "urlopen", MagicMock(return_value=response)
+            swe_bench_mod.urllib_request, "urlopen", MagicMock(return_value=response)
         )
 
         SWEBenchScorer._download_artifact(
@@ -652,7 +709,7 @@ class TestSWEBenchScorerScore:
         self, report_dir, monkeypatch
     ):
         atomic_writes: list[tuple[Path, dict]] = []
-        real_atomic_write = scoring_mod.atomic_write_bytes
+        real_atomic_write = swe_bench_mod.atomic_write_bytes
 
         def spy_atomic_write(path, data):
             atomic_writes.append((path, msgspec.json.decode(data, type=dict)))
@@ -676,7 +733,7 @@ class TestSWEBenchScorerScore:
 
         monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
         monkeypatch.setattr(SWEBenchScorer, "_download_artifacts", fake_download)
-        monkeypatch.setattr(scoring_mod, "atomic_write_bytes", spy_atomic_write)
+        monkeypatch.setattr(swe_bench_mod, "atomic_write_bytes", spy_atomic_write)
 
         score, _ = _make_scorer(report_dir).score()
 

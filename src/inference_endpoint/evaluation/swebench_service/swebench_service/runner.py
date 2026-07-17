@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlparse, urlunparse
 
 import msgspec.json
@@ -106,6 +106,13 @@ def _exact_instance_filter(instance_ids: list[str]) -> str:
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
+    """Terminate the launched command and its local subprocess descendants.
+
+    On POSIX, ``_run_subprocess`` creates a new session so the process ID is
+    also the process-group ID. Signaling that group is necessary because
+    ``mini-extra`` launches child processes that otherwise survive cancellation.
+    Detached Docker containers are handled separately by run-label cleanup.
+    """
     if process.poll() is not None:
         return
     try:
@@ -190,7 +197,18 @@ def _run_subprocess(
         )
 
 
-class SwebenchRunner:
+class RunnerProtocol(Protocol):
+    """Structural interface used by the service to execute a SWE-bench run."""
+
+    def run(
+        self,
+        request: RunRequest,
+        run_dir: Path,
+        cancel_token: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
+
+
+class SweBenchRunner:
     def __init__(
         self,
         *,
@@ -290,6 +308,12 @@ class SwebenchRunner:
         model_kwargs = model_cfg["model_kwargs"]
 
         model_cfg["model_name"] = request.model_name
+        if request.enable_swebench_toolcall_patch:
+            model_cfg["model_class"] = (
+                "swebench_service.qwen_tools_model.QwenToolsModel"
+            )
+        else:
+            model_cfg.pop("model_class", None)
         if request.endpoint_urls:
             base = _normalize_endpoint_base(str(request.endpoint_urls[0]))
             model_kwargs["api_base"] = base + "/v1"
@@ -370,18 +394,6 @@ class SwebenchRunner:
             "--output",
             str(output_dir),
         ]
-        if request.enable_swebench_toolcall_patch:
-            with tempfile.TemporaryDirectory(prefix="minisweagent_overlay_") as tmp:
-                env = self._agent_env(request, Path(tmp))
-                _run_subprocess(
-                    cmd,
-                    run_dir / "swe_bench_agent.log",
-                    cwd=output_dir,
-                    timeout_s=self.subprocess_timeout_s,
-                    env=env,
-                    cancel_token=cancel_token,
-                )
-                return
         _run_subprocess(
             cmd,
             run_dir / "swe_bench_agent.log",
@@ -444,40 +456,6 @@ class SwebenchRunner:
                 f"failed to clean up Docker containers for SWE-bench run {run_id}"
             ) from exc
 
-    def _agent_env(self, request: RunRequest, overlay_root: Path) -> dict[str, str]:
-        env = self._base_env(request)
-        overlay = self._create_toolcall_patch_overlay(overlay_root, self._template_dir)
-        pythonpath = [str(overlay)]
-        if existing := env.get("PYTHONPATH"):
-            pythonpath.append(existing)
-        env["PYTHONPATH"] = os.pathsep.join(pythonpath)
-        return env
-
-    def _create_toolcall_patch_overlay(
-        self, overlay_root: Path, replacement_root: Path
-    ) -> Path:
-        site_packages = self._resolve_minisweagent_site_packages()
-        package_src = site_packages / "minisweagent"
-        if not package_src.is_dir():
-            raise RunnerError(
-                f"minisweagent package directory not found: {package_src}"
-            )
-        package_dest = overlay_root / "minisweagent"
-        shutil.copytree(package_src, package_dest)
-        replacements = {
-            "actions_toolcall.py": "minisweagent/models/utils/actions_toolcall.py",
-            "litellm_model.py": "minisweagent/models/litellm_model.py",
-        }
-        for src_name, rel_dest in replacements.items():
-            src = replacement_root / src_name
-            if not src.exists():
-                raise RunnerError(
-                    "enable_swebench_toolcall_patch requested, but replacement "
-                    f"file is missing on the service host: {src}"
-                )
-            shutil.copy2(src, overlay_root / rel_dest)
-        return overlay_root
-
     def _validate_prediction_ids(self, request: RunRequest, preds_path: Path) -> None:
         try:
             preds = msgspec.json.decode(preds_path.read_bytes(), type=dict)
@@ -491,37 +469,6 @@ class SwebenchRunner:
                 "mini-extra produced predictions for unexpected SWE-bench "
                 f"instances: {', '.join(unexpected[:10])}"
             )
-
-    def _resolve_minisweagent_site_packages(self) -> Path:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import minisweagent.models.utils.actions_toolcall as m; print(m.__file__)",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            raise RunnerError("could not locate minisweagent: " + result.stderr.strip())
-        last_line = next(
-            (line for line in reversed(result.stdout.splitlines()) if line.strip()),
-            "",
-        )
-        if not last_line:
-            raise RunnerError("could not locate minisweagent: empty output")
-        actions_toolcall = Path(last_line.strip())
-        try:
-            site_packages = actions_toolcall.parents[3]
-        except IndexError as exc:
-            raise RunnerError(
-                f"could not resolve site-packages from {actions_toolcall}"
-            ) from exc
-        if not site_packages.is_dir():
-            raise RunnerError(f"resolved site-packages does not exist: {site_packages}")
-        return site_packages
 
     def _run_eval(
         self,

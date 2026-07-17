@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the Qwen mini-swe-agent toolcall replacements."""
+"""Regression tests for the Qwen mini-swe-agent model extension."""
 
-import importlib.util
+import importlib
 import json
-import os
 import subprocess
 import sys
 import types
@@ -16,149 +15,76 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_TEMPLATES_DIR = (
+_SERVICE_ROOT = (
     Path(__file__).resolve().parents[3]
     / "src"
     / "inference_endpoint"
     / "evaluation"
     / "swebench_service"
-    / "swebench_service"
-    / "templates"
 )
-_ACTIONS_TOOLCALL = _TEMPLATES_DIR / "actions_toolcall.py"
-_LITELLM_MODEL = _TEMPLATES_DIR / "litellm_model.py"
 
 
-def _load_actions_module(monkeypatch):
+def _install_minisweagent_stubs(monkeypatch):
     class FormatError(Exception):
         pass
 
-    exceptions_mod = types.ModuleType("minisweagent.exceptions")
-    exceptions_mod.FormatError = FormatError
-    multimodal_mod = types.ModuleType("minisweagent.models.utils.openai_multimodal")
-    multimodal_mod.expand_multimodal_content = lambda msg, pattern: msg
+    class LitellmModel:
+        def __init__(self, **kwargs):
+            defaults = {
+                "format_error_template": "{{ error }}",
+                "observation_template": "{{ output.output }}",
+                "multimodal_regex": "",
+                "model_kwargs": {},
+            }
+            self.config = SimpleNamespace(**(defaults | kwargs))
 
-    for name in [
-        "minisweagent",
-        "minisweagent.models",
-        "minisweagent.models.utils",
-    ]:
-        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    monkeypatch.setitem(sys.modules, "minisweagent.exceptions", exceptions_mod)
-    monkeypatch.setitem(
-        sys.modules,
-        "minisweagent.models.utils.openai_multimodal",
-        multimodal_mod,
-    )
+    litellm = types.ModuleType("litellm")
+    litellm.completion = lambda **kwargs: kwargs
 
-    spec = importlib.util.spec_from_file_location(
-        "_test_actions_toolcall", _ACTIONS_TOOLCALL
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    exceptions = types.ModuleType("minisweagent.exceptions")
+    exceptions.FormatError = FormatError
+    multimodal = types.ModuleType("minisweagent.models.utils.openai_multimodal")
+    multimodal.expand_multimodal_content = lambda msg, pattern: {
+        **msg,
+        "multimodal_pattern": pattern,
+    }
+    litellm_model = types.ModuleType("minisweagent.models.litellm_model")
+    litellm_model.LitellmModel = LitellmModel
 
-
-def _load_litellm_model_module(monkeypatch):
-    class LitellmError(Exception):
-        pass
-
-    litellm_mod = types.ModuleType("litellm")
-    litellm_mod.exceptions = SimpleNamespace(
-        UnsupportedParamsError=LitellmError,
-        NotFoundError=LitellmError,
-        PermissionDeniedError=LitellmError,
-        ContextWindowExceededError=LitellmError,
-        AuthenticationError=LitellmError,
-    )
-    litellm_mod.utils = SimpleNamespace(register_model=lambda model: None)
-
-    models_mod = types.ModuleType("minisweagent.models")
-    models_mod.GLOBAL_MODEL_STATS = SimpleNamespace(add=lambda cost: None)
-    actions_mod = types.ModuleType("minisweagent.models.utils.actions_toolcall")
-    actions_mod.TOOL_SCHEMAS = []
-    actions_mod.format_toolcall_observation_messages = lambda **kwargs: []
-    actions_mod.parse_toolcall_actions = lambda *args, **kwargs: []
-    anthropic_mod = types.ModuleType("minisweagent.models.utils.anthropic_utils")
-    anthropic_mod._reorder_anthropic_thinking_blocks = lambda messages: messages
-    cache_mod = types.ModuleType("minisweagent.models.utils.cache_control")
-    cache_mod.set_cache_control = lambda messages, mode: messages
-    multimodal_mod = types.ModuleType("minisweagent.models.utils.openai_multimodal")
-    multimodal_mod.expand_multimodal_content = lambda message, pattern: message
-    retry_mod = types.ModuleType("minisweagent.models.utils.retry")
-    retry_mod.retry = lambda **kwargs: []
-
-    for name, module in {
-        "litellm": litellm_mod,
+    modules = {
+        "litellm": litellm,
         "minisweagent": types.ModuleType("minisweagent"),
-        "minisweagent.models": models_mod,
+        "minisweagent.exceptions": exceptions,
+        "minisweagent.models": types.ModuleType("minisweagent.models"),
+        "minisweagent.models.litellm_model": litellm_model,
         "minisweagent.models.utils": types.ModuleType("minisweagent.models.utils"),
-        "minisweagent.models.utils.actions_toolcall": actions_mod,
-        "minisweagent.models.utils.anthropic_utils": anthropic_mod,
-        "minisweagent.models.utils.cache_control": cache_mod,
-        "minisweagent.models.utils.openai_multimodal": multimodal_mod,
-        "minisweagent.models.utils.retry": retry_mod,
-    }.items():
+        "minisweagent.models.utils.openai_multimodal": multimodal,
+    }
+    for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
-
-    spec = importlib.util.spec_from_file_location("_test_litellm_model", _LITELLM_MODEL)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    for name in ("swebench_service.qwen_tools", "swebench_service.qwen_tools_model"):
+        sys.modules.pop(name, None)
+    monkeypatch.syspath_prepend(str(_SERVICE_ROOT))
 
 
-def _tool_call(name: str, args: dict) -> SimpleNamespace:
+def _load_modules(monkeypatch):
+    _install_minisweagent_stubs(monkeypatch)
+    tools = importlib.import_module("swebench_service.qwen_tools")
+    model = importlib.import_module("swebench_service.qwen_tools_model")
+    return tools, model
+
+
+def _tool_call(name: str, args: dict, *, call_id: str = "call-1"):
     return SimpleNamespace(
-        id="call-1",
+        id=call_id,
         function=SimpleNamespace(name=name, arguments=json.dumps(args)),
     )
 
 
-def test_litellm_model_loopback_preserves_proxy_environment(monkeypatch):
-    proxy_vars = {
-        "http_proxy": "http://proxy.example:8080",
-        "https_proxy": "http://proxy.example:8080",
-        "HTTP_PROXY": "http://proxy.example:8080",
-        "HTTPS_PROXY": "http://proxy.example:8080",
-        "all_proxy": "socks5://proxy.example:1080",
-        "ALL_PROXY": "socks5://proxy.example:1080",
-    }
-    for name, value in proxy_vars.items():
-        monkeypatch.setenv(name, value)
-
-    litellm_model = _load_litellm_model_module(monkeypatch)
-    config = SimpleNamespace(
-        model_kwargs={"api_base": "http://127.0.0.1:30000/v1"},
-        litellm_model_registry=None,
-    )
-
-    litellm_model.LitellmModel(config_class=lambda **kwargs: config)
-
-    assert {name: os.environ[name] for name in proxy_vars} == proxy_vars
-
-
-def test_litellm_model_serialization_does_not_capture_environment_api_key(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "trajectory-secret")
-    litellm_model = _load_litellm_model_module(monkeypatch)
-
-    model = litellm_model.LitellmModel(
-        model_name="openai/test-model",
-        model_kwargs={"api_base": "http://127.0.0.1:30000/v1"},
-    )
-
-    serialized = json.dumps(model.serialize())
-    assert "trajectory-secret" not in serialized
-    assert "api_key" not in serialized
-
-
 def test_finish_emits_relative_pathspecs_and_git_add_intent(monkeypatch):
-    actions_mod = _load_actions_module(monkeypatch)
+    tools, _ = _load_modules(monkeypatch)
 
-    actions = actions_mod.parse_toolcall_actions(
+    actions = tools.parse_toolcall_actions(
         [
             _tool_call(
                 "finish",
@@ -168,7 +94,7 @@ def test_finish_emits_relative_pathspecs_and_git_add_intent(monkeypatch):
                         "tests/test_widget.py",
                     ]
                 },
-            )
+            ),
         ],
         format_error_template="{{ error }}",
     )
@@ -183,9 +109,9 @@ def test_finish_emits_relative_pathspecs_and_git_add_intent(monkeypatch):
 
 
 def test_str_replace_editor_view_range_emits_clean_awk(monkeypatch):
-    actions_mod = _load_actions_module(monkeypatch)
+    tools, _ = _load_modules(monkeypatch)
 
-    actions = actions_mod.parse_toolcall_actions(
+    actions = tools.parse_toolcall_actions(
         [
             _tool_call(
                 "str_replace_editor",
@@ -208,12 +134,10 @@ def test_str_replace_editor_view_range_emits_clean_awk(monkeypatch):
 
 
 def test_str_replace_editor_view_range_rejects_non_integers(monkeypatch):
-    actions_mod = _load_actions_module(monkeypatch)
+    tools, _ = _load_modules(monkeypatch)
 
-    with pytest.raises(
-        actions_mod.FormatError, match="view_range values must be integers"
-    ):
-        actions_mod.parse_toolcall_actions(
+    with pytest.raises(tools.FormatError, match="view_range values must be integers"):
+        tools.parse_toolcall_actions(
             [
                 _tool_call(
                     "str_replace_editor",
@@ -238,11 +162,10 @@ def test_str_replace_editor_view_range_rejects_non_integers(monkeypatch):
 def test_str_replace_editor_command_exit_status_tracks_match_count(
     monkeypatch, tmp_path, contents, old_str, expected_contents, succeeds
 ):
-    actions_mod = _load_actions_module(monkeypatch)
+    tools, _ = _load_modules(monkeypatch)
     target = tmp_path / "file.txt"
     target.write_text(contents)
-
-    action = actions_mod.parse_toolcall_actions(
+    action = tools.parse_toolcall_actions(
         [
             _tool_call(
                 "str_replace_editor",
@@ -256,7 +179,63 @@ def test_str_replace_editor_command_exit_status_tracks_match_count(
         ],
         format_error_template="{{ error }}",
     )[0]
+
     result = subprocess.run(action["command"], shell=True, capture_output=True)
 
     assert (result.returncode == 0) is succeeds
     assert target.read_text() == expected_contents
+
+
+def test_qwen_model_query_sends_custom_tool_request(monkeypatch):
+    tools, model_mod = _load_modules(monkeypatch)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        model_mod.litellm,
+        "completion",
+        lambda **kwargs: calls.append(kwargs) or "response",
+    )
+    model = model_mod.QwenToolsModel(
+        model_name="openai/test-model",
+        model_kwargs={"api_base": "http://endpoint/v1", "temperature": 0.2},
+    )
+
+    response = model._query([{"role": "user", "content": "task"}], temperature=0.7)
+
+    assert response == "response"
+    assert calls == [
+        {
+            "model": "openai/test-model",
+            "messages": [{"role": "user", "content": "task"}],
+            "tools": tools.TOOL_SCHEMAS,
+            "api_base": "http://endpoint/v1",
+            "temperature": 0.7,
+        }
+    ]
+
+
+def test_qwen_model_uses_custom_parser_and_observation_formatter(monkeypatch):
+    _, model_mod = _load_modules(monkeypatch)
+    model = model_mod.QwenToolsModel(
+        model_name="openai/test-model",
+        model_kwargs={},
+        observation_template="{{ output.output }}",
+    )
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[_tool_call("bash", {"command": "pwd"})]
+                )
+            )
+        ]
+    )
+
+    actions = model._parse_actions(response)
+    messages = model.format_observation_messages(
+        {"extra": {"actions": actions}},
+        [{"output": "/testbed", "returncode": 0}],
+    )
+
+    assert actions == [{"command": "pwd", "tool_call_id": "call-1"}]
+    assert messages[0]["content"] == "/testbed"
+    assert messages[0]["role"] == "tool"

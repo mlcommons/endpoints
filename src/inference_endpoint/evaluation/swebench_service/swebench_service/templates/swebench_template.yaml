@@ -1,5 +1,5 @@
 # Portions of this template are derived from mini-swe-agent v2.3.0.
-# See MINI_SWE_AGENT_LICENSE.md in this directory for the upstream MIT notice.
+# See ../MINI_SWE_AGENT_LICENSE.md for the upstream MIT notice.
 agent:
   system_template: |
     You are a helpful assistant that can interact with a computer shell to solve programming tasks.

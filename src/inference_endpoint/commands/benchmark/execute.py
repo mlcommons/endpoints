@@ -194,6 +194,7 @@ class AccuracyConfiguration:
 def _effective_external_sample_count(
     eval_cfg: AccuracyConfiguration,
 ) -> int | None:
+    """Clamp an external scorer's requested count to its loaded dataset size."""
     count = eval_cfg.scorer.external_sample_count(eval_cfg.extras)
     if count is None:
         return None
@@ -317,14 +318,17 @@ def _validate_accuracy_config_for_scorer(
     dataset_name: str,
     accuracy_config: Any,
 ) -> None:
-    if (
-        scorer_cls.SCORER_ID == ScorerMethod.SWE_BENCH.value
-        and accuracy_config.num_repeats != 1
-    ):
+    """Reject repeats that cannot be represented by an external scorer.
+
+    A scorer that skips the endpoint phase owns one external evaluation run.
+    Repeating its local dataset would not repeat that external run and would
+    therefore make reported sample counts misleading.
+    """
+    if scorer_cls.SKIP_ENDPOINT_PHASE and accuracy_config.num_repeats != 1:
         raise InputValidationError(
             f"Dataset '{dataset_name}' uses scorer '{scorer_cls.SCORER_ID}'; "
-            "accuracy_config.num_repeats must be 1 because SWE-bench evaluation "
-            "runs externally once per benchmark."
+            "accuracy_config.num_repeats must be 1 because the scorer runs "
+            "externally once per benchmark."
         )
 
 
