@@ -291,6 +291,9 @@ class TestE2E:
         )
         assert r["n_samples_issued"] > 0
         assert r["n_samples_completed"] > 0
+        # default-on ES must land in a real run's summary — the config ->
+        # aggregator-args plumbing in execute.py has no other end-to-end guard.
+        assert "early_stopping_percentiles" in r["latency"]
 
     @pytest.mark.integration
     def test_poisson(self, mock_http_echo_server, ds_dataset_path, tmp_path):

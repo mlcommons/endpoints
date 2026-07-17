@@ -44,7 +44,7 @@ from hdrh.histogram import HdrHistogram
 from inference_endpoint.metrics.early_stopping import (
     EarlyStoppingSpec,
     es_percentile_estimate,
-    es_percentiles_from_grid,
+    es_targets_from_grid,
     grid_percentile_key,
 )
 
@@ -242,26 +242,27 @@ class SeriesSampler(MetricSampler):
         if self._es_spec is None:
             return None
         spec = self._es_spec
-        targets = spec.percentiles or es_percentiles_from_grid(self._percentiles)
-        results = [
-            es_percentile_estimate(sorted_values, p, spec.confidence) for p in targets
-        ]
+        if spec.percentiles is not None:  # explicit override: tests / offline analysis
+            targets = {grid_percentile_key(f): f for f in spec.percentiles}
+        else:
+            targets = es_targets_from_grid(self._percentiles)
+        results = {
+            key: es_percentile_estimate(sorted_values, f, spec.confidence)
+            for key, f in targets.items()
+        }
         logger.info(
             "%s early-stopping detail (confidence %s): %s",
             self.name,
             spec.confidence,
             "; ".join(
-                f"p{grid_percentile_key(r.percentile)}: estimate={r.estimate} "
-                f"empirical={r.empirical} n={r.n} min_queries={r.min_queries} "
-                f"discarded={r.discarded}"
-                for r in results
+                f"p{key}: estimate={r.estimate} empirical={r.empirical} n={r.n} "
+                f"min_queries={r.min_queries} discarded={r.discarded}"
+                for key, r in results.items()
             ),
         )
         return {
-            grid_percentile_key(r.percentile): (
-                None if r.estimate is None else float(r.estimate)
-            )
-            for r in results
+            key: (None if r.estimate is None else float(r.estimate))
+            for key, r in results.items()
         }
 
     def build_stat(self, *, exact: bool) -> SeriesStat:

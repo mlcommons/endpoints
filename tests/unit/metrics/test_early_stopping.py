@@ -15,7 +15,7 @@ from inference_endpoint.metrics.early_stopping import (
     TOLERANCE,
     EarlyStoppingSpec,
     es_percentile_estimate,
-    es_percentiles_from_grid,
+    es_targets_from_grid,
     find_min_passing,
     grid_percentile_key,
 )
@@ -48,13 +48,14 @@ def test_constants_and_spec_defaults():
 
 
 def test_grid_derivation_and_key_format():
-    # The ES targets and map keys must overlay the report's percentile grid 1:1;
-    # a drifting derivation or key format silently splits the two views.
-    grid = (99.9, 99.0, 97.0, 95.0, 90.0, 80.0, 75.0, 50.0, 25.0, 10.0, 5.0, 1.0)
-    targets = es_percentiles_from_grid(grid)
-    assert targets == (0.5, 0.75, 0.8, 0.9, 0.95, 0.97, 0.99, 0.999)  # >= median only
-    # round-trip: fraction -> the exact grid key string (incl. the 0.97*100 float artifact)
-    assert [grid_percentile_key(p) for p in targets] == [
+    # The ES targets and map keys must overlay the report's percentile grid 1:1
+    # (keys are str() of the ORIGINAL grid values — int grids key as "99"), and
+    # out-of-domain entries must be excluded: a grid containing 100.0 would
+    # otherwise crash the terminal snapshot (default-on!), below-median entries
+    # are not tail certifications.
+    grid = (100.0, 99.9, 99.0, 97.0, 95.0, 90.0, 80.0, 75.0, 50.0, 25.0, 1.0)
+    targets = es_targets_from_grid(grid)
+    assert list(targets) == [
         "50.0",
         "75.0",
         "80.0",
@@ -64,6 +65,12 @@ def test_grid_derivation_and_key_format():
         "99.0",
         "99.9",
     ]
+    assert (
+        targets["99.9"] == 0.999 and targets["97.0"] == 0.97
+    )  # float artifacts absorbed
+    assert es_targets_from_grid((99, 90, 50)) == {"50": 0.5, "90": 0.9, "99": 0.99}
+    # explicit-spec overrides still key float-style via grid_percentile_key
+    assert grid_percentile_key(0.999) == "99.9"
 
 
 def test_estimate_reference_values_and_conservatism():

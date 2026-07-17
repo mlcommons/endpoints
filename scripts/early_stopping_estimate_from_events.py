@@ -60,7 +60,7 @@ from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.metrics.early_stopping import (
     CONFIDENCE,
     es_percentile_estimate,
-    es_percentiles_from_grid,
+    es_targets_from_grid,
     grid_percentile_key,
 )
 from inference_endpoint.metrics.report import SERIES_TO_SUMMARY_FIELD
@@ -122,7 +122,10 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
                 print(f"  ...{i} events", file=sys.stderr)
             try:
                 rec = _DECODER.decode(line)
-            except msgspec.DecodeError:  # includes ValidationError (non-record JSON)
+            except (msgspec.DecodeError, NotImplementedError):
+                # DecodeError covers malformed JSON and wrong-shape records;
+                # EventType.decode_hook raises NotImplementedError for a
+                # non-string event_type, which msgspec does not wrap.
                 malformed += 1
                 continue
             et = rec.event_type
@@ -151,7 +154,10 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
                         rows[uuid] = [ts, None]
                 elif et is SampleEventType.RECV_FIRST:
                     row = rows.get(uuid)
-                    if row is not None and row[1] is None:
+                    if row is not None:
+                        # aggregator parity: every RECV_FIRST re-fires the ttft
+                        # trigger and refreshes the TPOT window start (retried
+                        # streaming attempts re-emit their first chunk).
                         row[1] = ts
                         ttft.append(ts - row[0])
                 else:  # SampleEventType.COMPLETE
@@ -169,7 +175,6 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
                         batch_texts.append(text)
                         if len(batch_texts) >= _TPOT_BATCH:
                             flush()
-    flush()
     flush()
     if malformed:
         print(
@@ -243,7 +248,9 @@ def main(argv=None):
     )
     ap.add_argument(
         "--percentiles",
-        default=",".join(str(p) for p in es_percentiles_from_grid(DEFAULT_PERCENTILES)),
+        default=",".join(
+            str(f) for f in es_targets_from_grid(DEFAULT_PERCENTILES).values()
+        ),
         help="offline-analysis override; defaults to the report grid at/above the median",
     )
     ap.add_argument("--confidence", type=float, default=CONFIDENCE)

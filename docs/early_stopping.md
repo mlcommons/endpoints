@@ -16,7 +16,7 @@ estimate stays honest, which is exactly the regime edge/T2V workloads live in.
 ## What it computes
 
 For each target percentile `p` — every entry of the series' own report percentile grid at or above
-the median (`es_percentiles_from_grid`; the default grid yields p50/p75/p80/p90/p95/p97/p99/p99.9) —
+the median (`es_targets_from_grid`; the default grid yields p50/p75/p80/p90/p95/p97/p99/p99.9) —
 at confidence `c = 0.99`, over the `n` ascending-sorted latencies of a series:
 
 ```
@@ -47,7 +47,7 @@ fine for diagnostics, but a joint gate across all of them holds at lower than `c
 ## Layering (who owns what)
 
 ```
-config/schema.py            EarlyStoppingConfig (Pydantic, enabled=False)  <- the YAML flag
+config/schema.py            EarlyStoppingConfig (Pydantic, enabled=True)   <- the YAML opt-out
   -> commands/benchmark/execute.py   passes it to the aggregator subprocess as CLI args
     -> metrics_aggregator/__main__.py   parses args -> EarlyStoppingSpec -> MetricsRegistry
       -> metrics_aggregator/registry.py   SeriesSampler.build_stat(exact=True) computes the estimate
@@ -81,7 +81,7 @@ way to accidentally weaken the statistical claim.
 
 ## Output (`result_summary.json`)
 
-Each of `ttft`/`tpot`/`latency` gains an `early_stopping_percentiles` map (present unless opted out) — keys mirror the `percentiles` grid, values are the conservative estimate or `null`
+Each of `ttft`/`tpot`/`latency` gains an `early_stopping_percentiles` map (COMPLETE snapshots only, for the series the run recorded; absent when opted out) — keys mirror the `percentiles` grid, values are the conservative estimate or `null`
 when the run has too few samples to certify that percentile:
 
 ```json

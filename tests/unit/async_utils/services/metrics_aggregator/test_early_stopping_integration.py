@@ -117,6 +117,25 @@ def test_empty_series_reports_all_null():
     assert _series_to_metric_dict(stat)["early_stopping_percentiles"] == esp
 
 
+def test_custom_grid_with_p100_and_int_keys_is_safe():
+    # A legal report grid may contain 100.0 (np.percentile accepts it) and int
+    # entries; the COMPLETE snapshot must neither crash (p1.0 is outside the
+    # binomial domain — and this path runs default-on inside publish_final) nor
+    # emit keys that diverge from the grid's own strings.
+    reg = MetricsRegistry(early_stopping=EarlyStoppingSpec())
+    reg.register_series(
+        "ttft_ns",
+        hdr_low=1,
+        hdr_high=10_000_000_000,
+        percentiles=(100.0, 99, 50),
+        tail_latency=True,
+    )
+    for _ in range(1000):
+        reg.record("ttft_ns", 1_000_000)
+    esp = _series(_snap(reg), "ttft_ns")["early_stopping_percentiles"]
+    assert list(esp) == ["50", "99"]  # 100.0 excluded; int keys match the grid
+
+
 def test_repeated_complete_snapshots_are_identical():
     # The exact path sorts the raw array IN PLACE (avoids a full transient copy);
     # a second COMPLETE snapshot must be byte-identical or the mutation leaked.

@@ -116,14 +116,16 @@ def test_imperfect_log_robustness(tmp_path, capsys):
             _ev("session.start_performance_tracking", 10),
             "this is not json {",  # malformed 1
             "123",  # valid JSON, not an event record -> malformed 2
+            json.dumps(
+                {"event_type": 42, "timestamp_ns": 1}
+            ),  # decode_hook escape -> 3
             _ev("sample.issued", 100, "a"),
             json.dumps(
                 {"event_type": "sample.issued", "timestamp_ns": 1}
-            ),  # no uuid -> 3
+            ),  # no uuid -> 4
             _ev("sample.recv_first", 150, "a"),
-            _ev(
-                "sample.issued", 200, "a"
-            ),  # retry: keep row (recv_first!), refresh issue ts
+            _ev("sample.issued", 200, "a"),  # retry: keep row, refresh issue ts
+            _ev("sample.recv_first", 250, "a"),  # retry re-emits its first chunk
             _ev("sample.issued", 300, "b"),
             _ev("sample.recv_first", 360, "b"),
             _ev("sample.complete", 400, "b", _tmo(["x", "y"], tool_calls=[["tc"]])),
@@ -132,13 +134,14 @@ def test_imperfect_log_robustness(tmp_path, capsys):
         ],
     )
     s = mod.compute_series(events, count_tokens=_ws_counts)
-    assert sorted(s["ttft_ns"]) == [50, 60]
-    # a: complete - REFRESHED issue ts (aggregator duplicate-ISSUED parity)
+    # aggregator parity: BOTH recv_first events fire ttft (150-100, 250-200)
+    assert sorted(s["ttft_ns"]) == [50, 50, 60]
+    # a: complete - REFRESHED issue ts (duplicate-ISSUED parity)
     assert sorted(s["sample_latency_ns"]) == [100, 400]
-    # a's tpot survives the retry (recv_first kept); b's is skipped (tool call)
-    assert s["tpot_ns"] == [(600 - 150) / 2]
+    # a's TPOT window starts at the RETRY's first chunk; b skipped (tool call)
+    assert s["tpot_ns"] == [(600 - 250) / 2]
     err = capsys.readouterr().err
-    assert "3" in err and "malformed" in err
+    assert "4" in err and "malformed" in err
     assert "tool-call" in err
 
 

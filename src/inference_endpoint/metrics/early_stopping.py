@@ -30,7 +30,7 @@ __all__ = [
     "EarlyStoppingResult",
     "EarlyStoppingSpec",
     "es_percentile_estimate",
-    "es_percentiles_from_grid",
+    "es_targets_from_grid",
     "find_min_passing",
     "grid_percentile_key",
 ]
@@ -49,25 +49,26 @@ TOLERANCE: Final[float] = 0.0
 ES_MIN_PERCENTILE: Final[float] = 0.5
 
 
-def es_percentiles_from_grid(grid_percentiles: Iterable[float]) -> tuple[float, ...]:
-    """ES target percentiles (ascending fractions) from a report grid in 0-100 units.
+def es_targets_from_grid(grid_percentiles: Iterable[float]) -> dict[str, float]:
+    """{report-grid key: fraction} for every grid entry in the ES domain.
+
+    Keys are ``str()`` of the ORIGINAL grid values so the compact map overlays the
+    ``percentiles`` grid keys byte-for-byte (an int grid entry ``99`` keys as ``"99"``,
+    not ``"99.0"``). Entries below the median are skipped (an ES estimate is a tail
+    certification) and ``>= 100`` is excluded — p1.0 is outside the binomial test's
+    domain and would otherwise crash the terminal snapshot. Fractions are rounded to
+    6 decimals: lossless for grid values (at most a few decimals in 0-100 units) while
+    avoiding float-division artifacts (99.9/100 != 0.999 exactly).
 
     E.g. the default grid ``(99.9, 99.0, ..., 50.0, 25.0, ...)`` yields
-    ``(0.5, 0.75, 0.8, 0.9, 0.95, 0.97, 0.99, 0.999)``.
-
-    Rounded to 6 decimals: grid values carry at most a few decimals in 0-100 units, so
-    this is lossless while avoiding float-division artifacts (99.9/100 != 0.999 exactly)
-    in the self-describing ``percentile`` field of the report blocks.
+    ``{"50.0": 0.5, ..., "99.0": 0.99, "99.9": 0.999}``.
     """
-    return tuple(
-        sorted(
-            {
-                round(p / 100.0, 6)
-                for p in grid_percentiles
-                if p / 100.0 >= ES_MIN_PERCENTILE
-            }
-        )
-    )
+    pairs = {
+        str(p): round(p / 100.0, 6)
+        for p in grid_percentiles
+        if ES_MIN_PERCENTILE <= p / 100.0 < 1.0
+    }
+    return dict(sorted(pairs.items(), key=lambda kv: kv[1]))
 
 
 def grid_percentile_key(p: float) -> str:
@@ -85,7 +86,7 @@ class EarlyStoppingSpec:
     """Resolved early-stopping parameters used by the aggregator.
 
     ``percentiles=None`` (the default) derives the target set from each series' own
-    report grid via ``es_percentiles_from_grid``; explicit tuples are for tests and
+    report grid via ``es_targets_from_grid``; explicit tuples are for tests and
     offline analysis only — the config surface is a single ``enabled`` flag.
     """
 
@@ -107,10 +108,14 @@ def _betacf(a: float, b: float, x: float) -> float:
       - ``fpmin = 1e-300``: substituted for near-zero intermediate denominators (Lentz's
         guard against division blow-up); any positive value far below the smallest
         normal double (~2.2e-308) times a typical term works.
-      - ``400``: iteration cap. NR uses 100 with an error escape; our (a, b) grow with
-        the discard search (hundreds to thousands) where the CF still converges in tens
-        of iterations because ``_betai`` always evaluates on the fast-converging side of
-        its symmetry split — 400 is a generous safety bound, not a tuning knob.
+      - ``400``: iteration cap. For the boundary searches at very large n (a ~ b ~ n/2
+        with x within O(1/sqrt(n)) of the mean — the p50/p75 targets at tens of millions
+        of samples) Lentz needs ~O(sqrt(a)) iterations and CAN hit this cap; the running
+        product has plateaued by then (measured <= 3e-8 relative error vs
+        scipy.special.betainc at n=1e7, far below the 0.01 threshold the result is
+        compared against), so the truncated value is returned rather than raising —
+        this runs on the terminal-snapshot path, where an exception would cost the
+        whole final report.
     """
     eps, fpmin = 3e-16, 1e-300
     qab, qap, qam = a + b, a + 1.0, a - 1.0
