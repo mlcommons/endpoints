@@ -146,6 +146,27 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
             \(?\s*([ABCD])\b
             """
         ),
+        # "the correct answer/choice/option is C", "correct answer: (B)"
+        re.compile(
+            r"""(?ix)
+            \bcorrect\s+(?:answer|choice|option)\b
+            \s*(?:is|:|=)?\s*
+            (?:\\boxed\{\s*)?
+            (?:\*{1,2}|_{1,2})?
+            \(?\s*([ABCD])\b
+            """
+        ),
+        # "C is the correct answer", "**B** the correct choice", "(A) is correct"
+        re.compile(
+            r"""(?ix)
+            (?:\*{1,2}|_{1,2})?
+            \(?\s*([ABCD])\s*\)?
+            (?:\*{1,2}|_{1,2})?
+            \s+(?:is\s+)?(?:the\s+)correct
+            (?:\s+(?:answer|choice|option))?
+            \b
+            """
+        ),
         # Boxed answers.
         # Examples: "\\boxed{D}", "\\boxed{\\text{A}}", "\\boxed{\\textbf{C}}"
         re.compile(r"""(?is)\\boxed\{\s*(?:\\(?:text|textbf)\{\s*)?([ABCD])\b"""),
