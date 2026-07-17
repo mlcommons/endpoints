@@ -191,6 +191,44 @@ def test_online_cli_no_crash(tokens):
         pass  # clean rejection (e.g. missing required arg) is fine
 
 
+def _parsed_config(tokens: list[str]):
+    """Parse without executing and return the bound BenchmarkConfig."""
+    _command, bound, *_ = app.parse_args(tokens)
+    for value in bound.arguments.values():
+        if hasattr(value, "settings"):
+            return value
+    raise AssertionError(f"no config bound from {tokens}")
+
+
+@pytest.mark.integration
+def test_early_stopping_flag_binds_independently_of_warmup():
+    """`enabled` exists on both WarmupConfig (flattened: bare `--enabled`) and
+    EarlyStoppingConfig (namespaced). If EarlyStoppingConfig ever gets flattened
+    too (the decorator-theft regression class), the two silently double-bind and
+    `--no-early-stopping` flips warmup instead — a wrong-config bug with no parse
+    error. Pin that each flag reaches only its own model."""
+    base = [
+        "benchmark",
+        "online",
+        "--endpoints",
+        "http://localhost:9",
+        "--model",
+        "m",
+        "--dataset",
+        "tests/assets/datasets/dummy_1k.jsonl,parser.prompt=text_input",
+        "--load-pattern",
+        "poisson",
+        "--target-qps",
+        "1",
+    ]
+    cfg = _parsed_config(base + ["--no-early-stopping"])
+    assert cfg.settings.early_stopping.enabled is False
+    assert cfg.settings.warmup.enabled is False  # warmup default, untouched
+    cfg = _parsed_config(base + ["--enabled"])  # warmup's flattened flag
+    assert cfg.settings.warmup.enabled is True
+    assert cfg.settings.early_stopping.enabled is True  # ES default, untouched
+
+
 # ---------------------------------------------------------------------------
 # E2E: CLI tokens → echo server → performance/result_summary.json
 # One test per execution mode: offline, poisson, concurrency.

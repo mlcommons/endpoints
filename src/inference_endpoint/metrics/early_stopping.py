@@ -7,8 +7,9 @@ Ports the MLPerf LoadGen early-stopping binomial test (``loadgen/early_stopping.
 ``results.cc``) so a tail-latency percentile (p99 TTFT/TPOT for LLM Server, p90 for
 SingleStream) can be reported as a *conservative, confidence-backed* estimate instead of the
 raw empirical value. This mirrors LoadGen's SingleStream estimate: given ``n`` sorted latencies
-and target percentile ``p``, report ``sorted[n - t]`` where ``t`` is the largest discard count
-whose binomial-confidence bound still holds. The estimate is always >= the empirical percentile
+and target percentile ``p``, report ``sorted[n - t]`` — the t-th highest sample, where ``t`` is
+the largest tolerable over-latency count whose binomial-confidence bound still holds (t - 1
+samples are discarded above the estimate). The estimate is always >= the empirical percentile
 and the true p-percentile is <= it at confidence ``c``.
 
 The regularized incomplete beta uses a continued fraction (Numerical Recipes ``betai``); it
@@ -244,7 +245,9 @@ class EarlyStoppingResult:
     """Result of an early-stopping percentile estimate.
 
     ``estimate`` is None when there are too few samples to make any claim
-    (``n < find_min_passing(1) + 1``); ``min_queries`` is that floor.
+    (``n < find_min_passing(1) + 1``); ``min_queries`` is that floor. ``discarded``
+    is the number of samples strictly above the reported estimate (the estimate
+    itself is the ``discarded + 1``-th highest sample).
     """
 
     __slots__ = (
@@ -306,6 +309,9 @@ def es_percentile_estimate(
             percentile, confidence, n, None, empirical, min_queries, 0
         )
     t = _discard_count(n, percentile, TOLERANCE, confidence)
+    # The estimate is the t-th highest sample, so the number of samples actually
+    # discarded (strictly above the reported value) is t - 1; at the floor
+    # (t == 1) nothing is discarded.
     return EarlyStoppingResult(
         percentile,
         confidence,
@@ -313,5 +319,5 @@ def es_percentile_estimate(
         sorted_latencies[n - t],
         empirical,
         min_queries,
-        t,
+        t - 1,
     )

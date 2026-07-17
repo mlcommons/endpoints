@@ -36,7 +36,7 @@ from ..utils import monotime_to_datetime
 
 # Aggregator series name -> result_summary.json field. Single source of truth for the
 # summary's latency sections: ``Report.from_snapshot`` builds its fields from this, and
-# ``scripts/es_from_events.py`` uses it to key its post-hoc output the same way.
+# ``scripts/early_stopping_estimate_from_events.py`` uses it to key its post-hoc output the same way.
 SERIES_TO_SUMMARY_FIELD: Final[dict[str, str]] = {
     "ttft_ns": "ttft",
     "tpot_ns": "tpot",
@@ -58,7 +58,10 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
     """
     count = stat.get("count", 0)
     if count == 0:
-        return {}
+        # No data -> no rollups, but an enabled-ES empty series still self-describes
+        # (all-null map) in the summary instead of looking feature-off.
+        esp = stat.get("early_stopping_percentiles")
+        return {"early_stopping_percentiles": esp} if esp is not None else {}
 
     total = stat.get("total", 0)
     sum_sq = stat.get("sum_sq", 0)
@@ -488,6 +491,7 @@ def _display_metric(
             return "N/A"
         return f"{v * scale_factor:.2f}"
 
+    # .get(): an empty-but-ES-carrying metric dict has no rollups/histogram.
     for name, key in [
         ("Min", "min"),
         ("Max", "max"),
@@ -495,11 +499,12 @@ def _display_metric(
         ("Avg.", "avg"),
         ("Std Dev.", "std_dev"),
     ]:
-        fn(f"  {name}: {_scaled(metric_dict[key])} {unit}{newline}")
+        fn(f"  {name}: {_scaled(metric_dict.get(key))} {unit}{newline}")
 
     fn(f"\n  Histogram:{newline}")
-    buckets = metric_dict["histogram"]["buckets"]
-    counts = metric_dict["histogram"]["counts"]
+    histogram = metric_dict.get("histogram") or {"buckets": [], "counts": []}
+    buckets = histogram["buckets"]
+    counts = histogram["counts"]
 
     if buckets:
         bucket_strs = [

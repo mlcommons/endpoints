@@ -109,11 +109,12 @@ def test_every_tail_latency_series_and_dtype_gets_the_map():
 def test_empty_series_reports_all_null():
     # A tail series that recorded nothing (e.g. every request failed) must still
     # self-describe as insufficient — silence would look like feature-off.
-    esp = _series(_snap(_registry(EarlyStoppingSpec(), n=0)), "ttft_ns")[
-        "early_stopping_percentiles"
-    ]
+    stat = _series(_snap(_registry(EarlyStoppingSpec(), n=0)), "ttft_ns")
+    esp = stat["early_stopping_percentiles"]
     assert list(esp) == _GRID_ES_KEYS
     assert all(v is None for v in esp.values())
+    # and the report dict must not drop it with the empty rollups
+    assert _series_to_metric_dict(stat)["early_stopping_percentiles"] == esp
 
 
 def test_repeated_complete_snapshots_are_identical():

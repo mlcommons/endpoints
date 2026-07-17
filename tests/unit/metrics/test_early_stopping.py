@@ -71,7 +71,8 @@ def test_estimate_reference_values_and_conservatism():
     # the invariant that the estimate never under-reports the empirical value.
     arr = [float(i) for i in range(10000)]
     r = es_percentile_estimate(arr, 0.99)
-    assert (r.discarded, r.min_queries) == (77, 662)
+    # t=77: the estimate is the 77th-highest sample; 76 samples sit above it
+    assert (r.discarded, r.min_queries) == (76, 662)
     assert r.estimate == arr[10000 - 77]
     assert r.estimate >= r.empirical
 
