@@ -47,6 +47,28 @@ Each estimate is a _marginal_ `c`-confidence statement per percentile. Reporting
 fine for diagnostics, but a joint gate across all of them holds at lower than `c` confidence
 (multiple testing) — compliance gates should use the single scenario percentile.
 
+## Cheat sheet: minimum samples per percentile
+
+The floor is `find_min_passing(1, p) + 1` at confidence 0.99 — the smallest run that can
+certify percentile p at all. Below it the map reports `null` for that percentile (the run
+"does not meet the standard" for that gate); at or above it the estimate is a valid
+c = 0.99 upper confidence bound.
+
+| percentile | minimum samples |
+| ---------- | --------------- |
+| p50        | 11              |
+| p75        | 24              |
+| p80        | 31              |
+| p90        | 64              |
+| p95        | 130             |
+| p97        | 219             |
+| p99        | 662             |
+| p99.9      | 6,636           |
+| p99.99     | 66,381          |
+
+Rule of thumb: floor ≈ 6.64 / (1 − p/100) — one more "9" costs 10× the samples. Contrast
+with the fixed-sample regime the feature replaces (~270k queries for Server p99).
+
 ## Layering (who owns what)
 
 ```
