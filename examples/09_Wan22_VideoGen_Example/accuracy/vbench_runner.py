@@ -28,6 +28,7 @@ Exit codes:
 
 import argparse
 import json
+import os
 import sys
 import traceback
 from importlib.resources import files as _pkg_files
@@ -35,6 +36,17 @@ from importlib.resources import files as _pkg_files
 import torch
 import vbench as _vbench_pkg
 from vbench import VBench
+
+# VBench checkpoints are full pickles; this env var makes torch.load default to
+# weights_only=False in this subprocess. Read at call time, not import time.
+os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+
+# torch.hub validates repos via an unauthenticated GitHub API call that hits
+# HTTP 403 rate limits on shared cluster nodes. The repos are trusted; skip it.
+try:
+    torch.hub._validate_not_a_forked_repo = lambda *a, **k: None
+except AttributeError:  # pragma: no cover
+    pass
 
 
 def _emit_error(exc: BaseException) -> None:
@@ -105,9 +117,7 @@ def main() -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dimension_list = [d.strip() for d in args.dims.split(",") if d.strip()]
-    # VBench's `full_info_dir` arg is actually a JSON *file* path (despite
-    # the name). vbench_standard mode (used here) requires a valid file;
-    # passing None crashes inside VBench's load_json().
+    # full_info_dir is actually a JSON file path despite the misleading name.
     full_info_json = args.full_info_json or str(
         _pkg_files(_vbench_pkg).joinpath("VBench_full_info.json")
     )
