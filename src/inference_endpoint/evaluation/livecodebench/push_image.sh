@@ -84,6 +84,20 @@ done
 source "${SCRIPT_DIR}/_image_env.sh"
 
 # ----------------------------------------------------------------------------
+# Provenance: the endpoints repo commit this image is built from, baked into the
+# image config as an OCI label by both build paths below. A config LABEL (not a
+# manifest --annotation) is deliberate: the buildx push sets oci-mediatypes=false,
+# and Docker-media-type manifests have no annotations field, whereas config labels
+# are representable in both formats and survive `docker inspect`. Scope the dirty
+# check to this build context so unrelated edits elsewhere in the repo don't mark
+# the image -dirty.
+# ----------------------------------------------------------------------------
+ENDPOINTS_SHA="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [[ "$ENDPOINTS_SHA" != "unknown" ]] && ! git -C "$SCRIPT_DIR" diff --quiet HEAD -- "$SCRIPT_DIR" 2>/dev/null; then
+    ENDPOINTS_SHA="${ENDPOINTS_SHA}-dirty"
+fi
+
+# ----------------------------------------------------------------------------
 # Cross-architecture path: build with buildx and push directly to the registry.
 # A non-native image cannot be `docker load`-ed into the local store, so buildx
 # builds and pushes in a single step (no separate tag/push).
@@ -127,12 +141,13 @@ if [[ -n "$PLATFORM" ]]; then
         exit 1
     fi
 
-    echo ">> Building ${LCB_IMAGE_REF} for ${PLATFORM} and pushing (buildx) ..."
+    echo ">> Building ${LCB_IMAGE_REF} for ${PLATFORM} (endpoints ${ENDPOINTS_SHA}) and pushing (buildx) ..."
     docker buildx build \
         --builder "$BUILDX_BUILDER" \
         --platform "$PLATFORM" \
         -f "${SCRIPT_DIR}/lcb_serve.dockerfile" \
         --secret id=HF_TOKEN,env=HF_TOKEN \
+        --build-arg "ENDPOINTS_SHA=${ENDPOINTS_SHA}" \
         -t "$LCB_IMAGE_REF" \
         --provenance=false \
         --output "type=image,push=true,compression=gzip,force-compression=true,oci-mediatypes=false" \
@@ -147,10 +162,11 @@ else
             exit 1
         fi
 
-        echo ">> Building ${LCB_LOCAL_TAG} ..."
+        echo ">> Building ${LCB_LOCAL_TAG} (endpoints ${ENDPOINTS_SHA}) ..."
         docker build \
             -f "${SCRIPT_DIR}/lcb_serve.dockerfile" \
             --secret id=HF_TOKEN,env=HF_TOKEN \
+            --build-arg "ENDPOINTS_SHA=${ENDPOINTS_SHA}" \
             -t "$LCB_LOCAL_TAG" \
             "$SCRIPT_DIR"
     fi

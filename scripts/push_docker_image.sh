@@ -36,6 +36,7 @@
 #   NO_CACHE        1=--no-cache, 0=cache    (default: 1)
 #   ALLOW_DIRTY     1=build HEAD with uncommitted tracked changes (default: 0)
 #   PROVISION_DSR1  passthrough build-arg    (default: Dockerfile default = 1)
+#   IMAGE_DESCRIPTION  GHCR package-page description (default: "endpoints client image (ref <ref>, commit <sha>)")
 #   GHCR_USER/GHCR_TOKEN  optional registry login (fallback: GITHUB_ACTOR/GITHUB_TOKEN)
 set -euo pipefail
 
@@ -181,9 +182,38 @@ fi
 BUILD_ARGS=()
 [[ "$NO_CACHE" == "1" ]] && BUILD_ARGS+=(--no-cache)
 [[ -n "${PROVISION_DSR1:-}" ]] && BUILD_ARGS+=(--build-arg "PROVISION_DSR1=${PROVISION_DSR1}")
+
+# Don't attach SLSA provenance attestations. buildx adds them by default on --push,
+# which surfaces a spurious `unknown/unknown` entry on the GHCR package page and
+# wraps even a single-arch build in an image index. Opting out yields a clean,
+# single-manifest artifact; the source/revision/version annotations below preserve
+# the "which commit built this" traceability the attestation would have carried.
+BUILD_ARGS+=(--provenance=false)
+
 # With --no-push we build to cache and discard (validation only). A multi-platform
 # result cannot be --load-ed into the local store, so no output flag is added.
 [[ "$PUSH" == "1" ]] && BUILD_ARGS+=(--push)
+
+# OCI annotations for the GHCR package page (description + repo/commit provenance).
+# --annotation requires the build to actually produce the component named by the
+# level prefix, so gate on --push and pick the level by artifact shape: a multi-arch
+# build pushes an image index (GHCR reads the description from the index); a
+# single-arch build (provenance off, above) pushes a lone manifest, for which
+# `index:` errors with "index annotations not supported for single platform export".
+if [[ "$PUSH" == "1" ]]; then
+    if [[ "$PLATFORM" == *,* ]]; then
+        ANNOTATION_LEVEL="index"
+    else
+        ANNOTATION_LEVEL="manifest"
+    fi
+    IMAGE_DESCRIPTION="${IMAGE_DESCRIPTION:-endpoints client image (ref ${ENDPOINTS_REF}, commit ${SHORT_SHA})}"
+    BUILD_ARGS+=(
+        --annotation "${ANNOTATION_LEVEL}:org.opencontainers.image.source=https://github.com/mlcommons/endpoints"
+        --annotation "${ANNOTATION_LEVEL}:org.opencontainers.image.revision=${SHORT_SHA}"
+        --annotation "${ANNOTATION_LEVEL}:org.opencontainers.image.version=${ENDPOINTS_REF}"
+        --annotation "${ANNOTATION_LEVEL}:org.opencontainers.image.description=${IMAGE_DESCRIPTION}"
+    )
+fi
 
 BUILD_VERB=$([[ "$PUSH" == "1" ]] && echo "and pushing" || echo "(dry run, --no-push)")
 echo ">> Building ${IMAGE}:${SHORT_SHA} (ref: ${ENDPOINTS_REF}) for ${PLATFORM} ${BUILD_VERB}"
