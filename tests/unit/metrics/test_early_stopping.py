@@ -15,7 +15,17 @@ from inference_endpoint.metrics.early_stopping import (
     es_percentile_estimate,
     es_percentiles_from_grid,
     find_min_passing,
+    grid_percentile_key,
 )
+
+
+@pytest.mark.unit
+class TestGridPercentileKey:
+    def test_keys_mirror_the_report_grid_strings(self):
+        # the compact report map must overlay the `percentiles` grid keys 1:1
+        assert grid_percentile_key(0.5) == "50.0"
+        assert grid_percentile_key(0.97) == "97.0"  # 0.97*100 float artifact handled
+        assert grid_percentile_key(0.999) == "99.9"
 
 
 @pytest.mark.unit

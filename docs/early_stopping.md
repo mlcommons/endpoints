@@ -49,7 +49,7 @@ config/schema.py            EarlyStoppingConfig (Pydantic, enabled=False)  <- th
     -> metrics_aggregator/__main__.py   parses args -> EarlyStoppingSpec -> MetricsRegistry
       -> metrics_aggregator/registry.py   SeriesSampler.build_stat(exact=True) computes the estimate
                                           (COMPLETE path only; the raw sorted array lives here)
-        -> metrics_aggregator/snapshot.py   SeriesStat.early_stopping (optional trailing field)
+        -> metrics_aggregator/snapshot.py   SeriesStat.early_stopping_percentile (trailing field)
           -> metrics/report.py   surfaces the block into result_summary.json + the text report
 metrics/early_stopping.py   pure math (find_min_passing / es_percentile_estimate) — no I/O, unit-tested
 ```
@@ -77,28 +77,23 @@ there is nothing to tune per config and no way to accidentally weaken the statis
 
 ## Output (`result_summary.json`)
 
-Each of `ttft`/`tpot`/`latency` gains an `early_stopping` **list** — one self-describing block per
-configured percentile (present only when enabled):
+Each of `ttft`/`tpot`/`latency` gains an `early_stopping_percentile` map (present only when
+enabled) — keys mirror the `percentiles` grid, values are the conservative estimate or `null`
+when the run has too few samples to certify that percentile:
 
 ```json
 "tpot": {
-  "percentiles": { "99.0": 71908203.4, ... },
-  "early_stopping": [
-    { "percentile": 0.5,  "confidence": 0.99, "n": 40000, "estimate": ..., "empirical": ...,
-      "sufficient": true, "min_queries": 11,  "discarded": 19766 },
-    { "percentile": 0.99, "confidence": 0.99, "n": 40000, "estimate": 71997480.0,
-      "empirical": 71908203.4, "sufficient": true, "min_queries": 662, "discarded": 353 }
-  ]
+  "percentiles": { "99.0": 71908203.4, "99.9": 72592022.9, ... },
+  "early_stopping_percentile": { "50.0": 68903121.0, ..., "99.0": 71943332.4, "99.9": null }
 }
 ```
 
-`sufficient=false` with `estimate=null` means the run had fewer than `min_queries` samples to claim
-that percentile at the requested confidence. `empirical` uses the same order statistic as the
-`percentiles` grid (`np.percentile(..., method="lower")`, index `floor(p·(n−1))`), so the two can
-never disagree within one summary. An enabled target series that recorded nothing still emits the
-blocks (`n=0, sufficient=false`) rather than silently looking feature-off. The text report renders
-an "Early-stopping estimates" section per metric (one line per percentile; insufficient percentiles
-say so explicitly).
+A `null` value means the run had fewer samples than that percentile's floor at confidence 0.99.
+An enabled target series that recorded nothing still emits the map (all `null`) rather than
+silently looking feature-off. The rich per-percentile detail (empirical value, n, `min_queries`,
+discard count) is INFO-logged by the aggregator at run end and reproducible offline via
+`scripts/early_stopping_estimate_from_events.py`. The text report renders the map per metric
+(one line per percentile; `N/A` = insufficient samples).
 
 ## Explicitly out of scope
 

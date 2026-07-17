@@ -23,8 +23,12 @@ Replicated aggregator rules:
                         ``token_metrics.encode_lengths``). Tool-call samples are skipped
                         (their chat-template tokenization path is not replicated).
 
+Events are decoded with the product's own typed ``EventRecord`` (the exact wire types
+the JSONL writer emitted), so event names, payload shapes, and chunk semantics all come
+from ``core/record.py`` / ``core/types.py`` rather than a re-implementation.
+
 usage:
-  python scripts/es_from_events.py <events.jsonl>
+  python scripts/early_stopping_estimate_from_events.py <events.jsonl>
       [--tokenizer <hf-model-dir-or-tokenizer.json>]   # enables TPOT
       [--percentiles 0.5,0.9,0.95,0.99] [--confidence 0.99]
       [--compare <result_summary.json>]                # cross-check vs in-band blocks
@@ -37,6 +41,7 @@ import argparse
 import json
 import sys
 
+import msgspec
 import msgspec.json
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     DEFAULT_PERCENTILES,
@@ -45,15 +50,23 @@ from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics im
     encode_lengths,
     load_reference_backend,
 )
+from inference_endpoint.core.record import (
+    EventRecord,
+    EventType,
+    SampleEventType,
+    SessionEventType,
+)
 from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.metrics.early_stopping import (
     CONFIDENCE,
     es_percentile_estimate,
     es_percentiles_from_grid,
+    grid_percentile_key,
 )
 from inference_endpoint.metrics.report import SERIES_TO_SUMMARY_FIELD
 
-_loads = msgspec.json.decode
+# mirror of the JSONL writer: msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+_DECODER = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
 
 # Script-local display units, keyed by result_summary.json field. Latency renders in
 # seconds (long-CoT runs sit at 100s+ per sample); the in-band report renders ms.
@@ -68,22 +81,16 @@ _TPOT_BATCH = 4096
 
 
 def extract_tpot_text(data) -> str | None:
-    """TPOT denominator text from a ``sample.complete`` data payload.
+    """TPOT denominator text from a decoded ``EventRecord.data``.
 
-    Returns None for non-TextModelOutput payloads and for tool-call samples
-    (chat-template tokenization is not replicated here); otherwise the
-    post-first-chunk text ("" when there is none, e.g. single-chunk output).
+    None for non-``TextModelOutput`` payloads and for tool-call samples (their
+    chat-template tokenization path is not replicated here); otherwise the
+    product's own ``TextModelOutput.text_after_first_chunk()`` ("" when there is
+    no post-first chunk, e.g. single-chunk or non-streaming output).
     """
-    if not (isinstance(data, list) and data and data[0] == "TextModelOutput"):
+    if not isinstance(data, TextModelOutput) or data.tool_calls:
         return None
-    output = data[1] if len(data) > 1 else ""
-    reasoning = data[2] if len(data) > 2 else None
-    tool_calls = data[3] if len(data) > 3 else None
-    if tool_calls:
-        return None
-    return TextModelOutput(
-        output=output or "", reasoning=reasoning
-    ).text_after_first_chunk()
+    return data.text_after_first_chunk()
 
 
 def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[float]]:
@@ -114,25 +121,25 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
             if progress and i and i % 200_000 == 0:
                 print(f"  ...{i} events", file=sys.stderr)
             try:
-                e = _loads(line)
-            except (ValueError, msgspec.DecodeError):
-                # DecodeError is NOT a ValueError; the stdlib-json fallback raises one
+                rec = _DECODER.decode(line)
+            except msgspec.DecodeError:  # includes ValidationError (non-record JSON)
                 malformed += 1
                 continue
-            if not isinstance(e, dict):
-                malformed += 1
-                continue
-            et = e.get("event_type")
-            if et == "session.start_performance_tracking":
+            et = rec.event_type
+            if et is SessionEventType.START_PERFORMANCE_TRACKING:
                 tracking = True
-            elif et == "session.stop_performance_tracking":
+            elif et is SessionEventType.STOP_PERFORMANCE_TRACKING:
                 tracking = False
-            elif et in ("sample.issued", "sample.recv_first", "sample.complete"):
-                uuid, ts = e.get("sample_uuid"), e.get("timestamp_ns")
-                if not uuid or ts is None:
+            elif et in (
+                SampleEventType.ISSUED,
+                SampleEventType.RECV_FIRST,
+                SampleEventType.COMPLETE,
+            ):
+                uuid, ts = rec.sample_uuid, rec.timestamp_ns
+                if not uuid:
                     malformed += 1
                     continue
-                if et == "sample.issued":
+                if et is SampleEventType.ISSUED:
                     if not tracking:
                         continue
                     row = rows.get(uuid)
@@ -142,28 +149,27 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
                         row[0] = ts
                     else:
                         rows[uuid] = [ts, None]
-                elif et == "sample.recv_first":
+                elif et is SampleEventType.RECV_FIRST:
                     row = rows.get(uuid)
                     if row is not None and row[1] is None:
                         row[1] = ts
                         ttft.append(ts - row[0])
-                else:  # sample.complete
+                else:  # SampleEventType.COMPLETE
                     row = rows.pop(uuid, None)
                     if row is None:
                         continue
                     latency.append(ts - row[0])
                     if count_tokens is None or row[1] is None:
                         continue
-                    text = extract_tpot_text(e.get("data"))
-                    if text is None and isinstance(e.get("data"), list):
-                        d = e["data"]
-                        if d and d[0] == "TextModelOutput" and len(d) > 3 and d[3]:
-                            tool_call_skipped += 1
+                    text = extract_tpot_text(rec.data)
+                    if text is None and isinstance(rec.data, TextModelOutput):
+                        tool_call_skipped += 1
                     if text:
                         batch_deltas.append(ts - row[1])
                         batch_texts.append(text)
                         if len(batch_texts) >= _TPOT_BATCH:
                             flush()
+    flush()
     flush()
     if malformed:
         print(
@@ -210,22 +216,22 @@ def _cross_check(summary: dict, series_name: str, values: list, blocks: list) ->
         print(
             f"  XCHECK count: ours={len(values)} n_samples_completed={completed}{note}"
         )
-    inband = md.get("early_stopping")
-    if not isinstance(inband, list) or not inband:
-        # absent, or a non-list from a pre-release artifact — nothing to compare
+    inband = md.get("early_stopping_percentile")
+    if not isinstance(inband, dict) or not inband:
+        # absent, or an unexpected shape (pre-release artifact) — nothing to compare
         return
-    ours_by_p = {b["percentile"]: b for b in blocks}
-    for ib in inband:
-        b = ours_by_p.get(ib["percentile"])
-        if b is None:
+    ours = {grid_percentile_key(b["percentile"]): b["estimate"] for b in blocks}
+    for key, est in inband.items():
+        if key not in ours:
             continue
-        same = all(
-            b[k] == ib[k]
-            for k in ("n", "estimate", "empirical", "discarded", "sufficient")
-        )
+        same = ours[key] == est
         print(
-            f"  XCHECK in-band p{ib['percentile'] * 100:g}: "
-            + ("EXACT MATCH" if same else f"** MISMATCH ** ours={b} inband={ib}")
+            f"  XCHECK in-band p{key}: "
+            + (
+                "EXACT MATCH"
+                if same
+                else f"** MISMATCH ** ours={ours[key]} inband={est}"
+            )
         )
 
 

@@ -31,6 +31,7 @@ __all__ = [
     "es_percentile_estimate",
     "es_percentiles_from_grid",
     "find_min_passing",
+    "grid_percentile_key",
 ]
 
 # LoadGen hardcodes confidence c = 0.99 and tolerance d = 0.0 (results.cc:157-158). They are
@@ -66,6 +67,16 @@ def es_percentiles_from_grid(grid_percentiles: Iterable[float]) -> tuple[float, 
             }
         )
     )
+
+
+def grid_percentile_key(p: float) -> str:
+    """Report-grid-style key for a fraction percentile: 0.5 -> "50.0", 0.999 -> "99.9".
+
+    Matches ``str()`` of the grid's 0-100 floats so the compact
+    ``early_stopping_percentile`` map overlays the ``percentiles`` grid keys 1:1.
+    ``round`` absorbs float-division artifacts (0.97 * 100 != 97.0 exactly).
+    """
+    return str(round(p * 100.0, 4))
 
 
 @dataclass(frozen=True, slots=True)

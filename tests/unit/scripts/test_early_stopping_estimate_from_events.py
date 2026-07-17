@@ -1,20 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for scripts/es_from_events.py — post-hoc ES from an events.jsonl log."""
+"""Tests for scripts/early_stopping_estimate_from_events.py — post-hoc ES from events.jsonl."""
 
 import importlib.util
 import json
 from pathlib import Path
 
 import pytest
+from inference_endpoint.core.types import TextModelOutput
 
 pytestmark = pytest.mark.unit
 
 
 def _load_script():
     spec = importlib.util.spec_from_file_location(
-        "es_from_events", Path("scripts/es_from_events.py")
+        "early_stopping_estimate_from_events",
+        Path("scripts/early_stopping_estimate_from_events.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -38,6 +40,7 @@ def _ev(event_type, ts, uuid="", data=None):
 
 
 def _tmo(output=None, reasoning=None, tool_calls=None):
+    # wire form of TextModelOutput (tagged, array_like) as the JSONL writer emits it
     return ["TextModelOutput", output, reasoning, tool_calls]
 
 
@@ -46,26 +49,40 @@ def _ws_counts(texts):  # deterministic stand-in tokenizer: whitespace tokens
 
 
 class TestExtractTpotText:
+    # operates on the DECODED EventRecord.data — a product TextModelOutput —
+    # so all chunk semantics come from types.py, not a re-implementation.
     def test_streamed_output_drops_first_chunk(self):
-        assert mod.extract_tpot_text(_tmo(["a", "b c", "d"])) == "b cd"
+        assert (
+            mod.extract_tpot_text(TextModelOutput(output=("a", "b c", "d"))) == "b cd"
+        )
 
     def test_single_chunk_output_skips(self):
-        assert not mod.extract_tpot_text(_tmo(["only"]))
+        assert not mod.extract_tpot_text(TextModelOutput(output=("only",)))
 
     def test_nonstreaming_str_output_skips(self):
-        assert not mod.extract_tpot_text(_tmo("full text"))
+        assert not mod.extract_tpot_text(TextModelOutput(output="full text"))
 
     def test_reasoning_first_chunk_absorbs(self):
         # first chunk lives in reasoning -> reasoning[1:] plus ALL output chunks
-        assert mod.extract_tpot_text(_tmo(["o1", "o2"], ["r1", "r2"])) == "r2o1o2"
+        assert (
+            mod.extract_tpot_text(
+                TextModelOutput(output=("o1", "o2"), reasoning=("r1", "r2"))
+            )
+            == "r2o1o2"
+        )
 
     def test_tool_call_samples_return_none(self):
         # chat-template tokenization is not replicated -> skip, don't guess
-        assert mod.extract_tpot_text(_tmo(["a", "b"], None, [["tc"]])) is None
+        assert (
+            mod.extract_tpot_text(
+                TextModelOutput(output=("a", "b"), tool_calls=(("tc",),))
+            )
+            is None
+        )
 
-    def test_non_tmo_data_returns_none(self):
-        assert mod.extract_tpot_text(["PromptData", None, [1, 2]]) is None
+    def test_non_output_data_returns_none(self):
         assert mod.extract_tpot_text(None) is None
+        assert mod.extract_tpot_text("not a model output") is None
 
 
 class TestComputeSeries:
@@ -138,7 +155,7 @@ class TestMalformedInput:
         lines = [
             _ev("session.start_performance_tracking", 10),
             "this is not json {",
-            "123",  # valid JSON, not an object
+            "123",  # valid JSON, not an event record
             '"just a string"',
             _ev("sample.issued", 100, "a"),
             json.dumps({"event_type": "sample.issued", "timestamp_ns": 150}),  # no uuid
@@ -194,18 +211,10 @@ class TestMalformedInput:
 
 
 class TestCrossCheckAndMain:
-    def test_cross_check_skips_non_list_inband(self, capsys):
-        # pre-release artifacts can carry a dict here; skip instead of crashing
-        values = [1.0, 2.0]
-        blocks = mod.es_blocks(values, [0.99], 0.99)
-        summary = self._summary({"percentile": 0.99})  # dict, not list
-        mod._cross_check(summary, "ttft_ns", values, blocks)
-        assert "MATCH" not in capsys.readouterr().out
-
-    def _summary(self, blocks):
+    def _summary(self, esp):
         return {
             "n_samples_completed": 2,
-            "ttft": {"early_stopping": blocks},
+            "ttft": {"early_stopping_percentile": esp},
             "tpot": {},
             "latency": {},
         }
@@ -213,11 +222,20 @@ class TestCrossCheckAndMain:
     def test_cross_check_exact_match_and_mismatch(self, capsys):
         values = [1.0, 2.0]
         blocks = mod.es_blocks(values, [0.99], 0.99)
-        mod._cross_check(self._summary(blocks), "ttft_ns", values, blocks)
+        inband = {"99.0": blocks[0]["estimate"]}  # matches ours (both None here)
+        mod._cross_check(self._summary(inband), "ttft_ns", values, blocks)
         assert "EXACT MATCH" in capsys.readouterr().out
-        tampered = [dict(blocks[0], estimate=123.0)]
-        mod._cross_check(self._summary(tampered), "ttft_ns", values, blocks)
+        mod._cross_check(self._summary({"99.0": 123.0}), "ttft_ns", values, blocks)
         assert "MISMATCH" in capsys.readouterr().out
+
+    def test_cross_check_skips_non_dict_inband(self, capsys):
+        # unexpected in-band shapes (e.g. pre-release artifacts) are skipped, not fatal
+        values = [1.0, 2.0]
+        blocks = mod.es_blocks(values, [0.99], 0.99)
+        mod._cross_check(
+            self._summary([{"percentile": 0.99}]), "ttft_ns", values, blocks
+        )
+        assert "MATCH" not in capsys.readouterr().out
 
     def test_main_writes_json_and_validates_args(self, tmp_path, capsys):
         lines = [

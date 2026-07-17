@@ -45,6 +45,7 @@ from inference_endpoint.metrics.early_stopping import (
     EarlyStoppingSpec,
     es_percentile_estimate,
     es_percentiles_from_grid,
+    grid_percentile_key,
 )
 
 from .snapshot import (
@@ -232,19 +233,36 @@ class SeriesSampler(MetricSampler):
 
     # -- snapshot construction --------------------------------------------
 
-    def _es_blocks(
-        self, sorted_values
-    ) -> list[dict[str, float | int | bool | None]] | None:
+    def _es_estimates(self, sorted_values) -> dict[str, float | None] | None:
         # Percentile targets come from this series' own report grid (>= median)
-        # unless the spec pins an explicit tuple (tests / offline analysis).
+        # unless the spec pins an explicit tuple (tests / offline analysis). The
+        # snapshot carries only the compact {grid_key: estimate-or-None} map; the
+        # rich detail (empirical/n/min_queries/discarded) is INFO-logged here and
+        # recomputable offline via scripts/early_stopping_estimate_from_events.py.
         if self._es_spec is None:
             return None
         spec = self._es_spec
         targets = spec.percentiles or es_percentiles_from_grid(self._percentiles)
-        return [
-            es_percentile_estimate(sorted_values, p, spec.confidence).as_dict()
-            for p in targets
+        results = [
+            es_percentile_estimate(sorted_values, p, spec.confidence) for p in targets
         ]
+        logger.info(
+            "%s early-stopping detail (confidence %s): %s",
+            self.name,
+            spec.confidence,
+            "; ".join(
+                f"p{grid_percentile_key(r.percentile)}: estimate={r.estimate} "
+                f"empirical={r.empirical} n={r.n} min_queries={r.min_queries} "
+                f"discarded={r.discarded}"
+                for r in results
+            ),
+        )
+        return {
+            grid_percentile_key(r.percentile): (
+                None if r.estimate is None else float(r.estimate)
+            )
+            for r in results
+        }
 
     def build_stat(self, *, exact: bool) -> SeriesStat:
         if self._count == 0:
@@ -253,7 +271,7 @@ class SeriesSampler(MetricSampler):
             # histogram as "no data yet". Early stopping still self-describes
             # (n=0, sufficient=false) — an empty target series must not look
             # like the feature was disabled.
-            early_stopping = self._es_blocks(()) if exact else None
+            early_stopping_percentile = self._es_estimates(()) if exact else None
             return SeriesStat(
                 name=self.name,
                 count=0,
@@ -263,7 +281,7 @@ class SeriesSampler(MetricSampler):
                 sum_sq=self._dtype(),
                 percentiles={str(p): 0.0 for p in self._percentiles},
                 histogram=[],
-                early_stopping=early_stopping,
+                early_stopping_percentile=early_stopping_percentile,
             )
 
         if exact:
@@ -344,7 +362,7 @@ class SeriesSampler(MetricSampler):
         # Early-stopping estimates (COMPLETE path only): conservative confidence-backed
         # bound per configured percentile, all off one sorted raw array. Cold path —
         # the sort is one-time at run end and each estimate is a few beta evaluations.
-        early_stopping = self._es_blocks(np.sort(arr))
+        early_stopping_percentile = self._es_estimates(np.sort(arr))
 
         return SeriesStat(
             name=self.name,
@@ -355,7 +373,7 @@ class SeriesSampler(MetricSampler):
             sum_sq=float(self._sum_sq),
             percentiles=perc_dict,
             histogram=histogram,
-            early_stopping=early_stopping,
+            early_stopping_percentile=early_stopping_percentile,
         )
 
 

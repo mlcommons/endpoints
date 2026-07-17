@@ -16,8 +16,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
 from inference_endpoint.metrics.early_stopping import EarlyStoppingSpec
 from inference_endpoint.metrics.report import _series_to_metric_dict
 
-# ES percentiles derived from the default report grid, at or above the median
-_GRID_ES_PERCENTILES = [0.5, 0.75, 0.8, 0.9, 0.95, 0.97, 0.99, 0.999]
+# ES keys derived from the default report grid, at or above the median — these mirror
+# the `percentiles` grid keys exactly so the two blocks overlay 1:1.
+_GRID_ES_KEYS = ["50.0", "75.0", "80.0", "90.0", "95.0", "97.0", "99.0", "99.9"]
 
 
 def _registry_with_data(es_spec: EarlyStoppingSpec | None) -> MetricsRegistry:
@@ -50,43 +51,45 @@ class TestConfigSurface:
 
 @pytest.mark.unit
 class TestEarlyStoppingIntegration:
-    def test_enabled_emits_grid_derived_percentiles(self):
-        # Default spec derives the ES set from the series' own report grid
-        # (p >= 0.5) — one source of truth, nothing to tune per-yaml.
+    def test_enabled_emits_grid_keyed_estimates(self):
+        # The report carries a compact {percentile: estimate-or-null} map whose keys
+        # mirror the `percentiles` grid (>= median); rich detail is log-only.
         reg = _registry_with_data(EarlyStoppingSpec())
         d = snapshot_to_dict(
             reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
         ttft, isl = _series(d, "ttft_ns"), _series(d, "isl")
-        es = ttft["early_stopping"]
-        assert isinstance(es, list)
-        assert [b["percentile"] for b in es] == _GRID_ES_PERCENTILES
-        for block in es:
-            assert block["n"] == 2000
-            assert "tolerance" not in block  # constant, not reported
-            if block["percentile"] <= 0.99:  # p99.9 floor (6636) exceeds n=2000
-                assert block["sufficient"] is True
-                assert block["estimate"] >= block["empirical"]  # conservative
-        assert "early_stopping" not in isl  # not registered tail_latency
+        esp = ttft["early_stopping_percentile"]
+        assert isinstance(esp, dict)
+        assert list(esp) == _GRID_ES_KEYS
+        # n=2000 clears every floor except p99.9 (6636) -> null there, values elsewhere
+        assert esp["99.9"] is None
+        for key, estimate in esp.items():
+            if estimate is not None:
+                # conservative: the estimate sits at or above the grid's empirical value
+                assert estimate >= ttft["percentiles"][key]
+        assert "early_stopping_percentile" not in isl  # not registered tail_latency
         # and it survives the report-dict conversion
-        assert _series_to_metric_dict(ttft)["early_stopping"] == es
+        assert _series_to_metric_dict(ttft)["early_stopping_percentile"] == esp
 
     def test_custom_single_percentile(self):
         reg = _registry_with_data(EarlyStoppingSpec(percentiles=(0.99,)))
         d = snapshot_to_dict(
             reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
-        es = _series(d, "ttft_ns")["early_stopping"]
-        assert [b["percentile"] for b in es] == [0.99]
-        assert es[0]["min_queries"] == 662
+        esp = _series(d, "ttft_ns")["early_stopping_percentile"]
+        assert list(esp) == ["99.0"]
+        assert esp["99.0"] is not None
 
     def test_disabled_by_default_no_block(self):
         reg = _registry_with_data(None)  # feature off
         d = snapshot_to_dict(
             reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
-        assert "early_stopping" not in _series(d, "ttft_ns")
-        assert "early_stopping" not in _series_to_metric_dict(_series(d, "ttft_ns"))
+        assert "early_stopping_percentile" not in _series(d, "ttft_ns")
+        assert "early_stopping_percentile" not in _series_to_metric_dict(
+            _series(d, "ttft_ns")
+        )
 
     def test_live_snapshot_has_no_estimate(self):
         # ES is COMPLETE-only (needs the exact sorted raw array); LIVE must not carry it.
@@ -94,18 +97,18 @@ class TestEarlyStoppingIntegration:
         d = snapshot_to_dict(
             reg.build_snapshot(state=SessionState.LIVE, n_pending_tasks=1)
         )
-        assert "early_stopping" not in _series(d, "ttft_ns")
+        assert "early_stopping_percentile" not in _series(d, "ttft_ns")
 
     def test_interrupted_snapshot_has_no_estimate(self):
         # SIGTERM path publishes a terminal INTERRUPTED snapshot via the non-exact
-        # (HDR) path — it must not carry a partial ES block.
+        # (HDR) path — it must not carry a partial ES map.
         reg = _registry_with_data(EarlyStoppingSpec())
         d = snapshot_to_dict(
             reg.build_snapshot(state=SessionState.INTERRUPTED, n_pending_tasks=0)
         )
-        assert "early_stopping" not in _series(d, "ttft_ns")
+        assert "early_stopping_percentile" not in _series(d, "ttft_ns")
 
-    def test_empty_target_series_still_reports_blocks(self):
+    def test_empty_target_series_still_reports_estimates(self):
         # A series that recorded nothing (e.g. all requests failed) must still
         # self-describe as insufficient — not silently look feature-off.
         reg = MetricsRegistry(early_stopping=EarlyStoppingSpec())
@@ -115,15 +118,13 @@ class TestEarlyStoppingIntegration:
         d = snapshot_to_dict(
             reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
-        es = _series(d, "ttft_ns")["early_stopping"]
-        assert [b["percentile"] for b in es] == _GRID_ES_PERCENTILES
-        for b in es:
-            assert b["n"] == 0 and b["sufficient"] is False
-            assert b["estimate"] is None and b["empirical"] is None
+        esp = _series(d, "ttft_ns")["early_stopping_percentile"]
+        assert list(esp) == _GRID_ES_KEYS
+        assert all(v is None for v in esp.values())
 
-    def test_all_target_series_get_blocks(self):
+    def test_all_target_series_get_estimates(self):
         # tpot_ns is the only float-dtype tail-latency series; latency and ttft
-        # are int — all three must carry blocks on COMPLETE.
+        # are int — all three must carry the map on COMPLETE.
         reg = MetricsRegistry(early_stopping=EarlyStoppingSpec())
         reg.register_series(
             "ttft_ns", hdr_low=1, hdr_high=10_000_000_000, tail_latency=True
@@ -147,18 +148,6 @@ class TestEarlyStoppingIntegration:
             reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
         for name in ("ttft_ns", "sample_latency_ns", "tpot_ns"):
-            es = _series(d, name)["early_stopping"]
-            assert isinstance(es, list)
-            assert len(es) == len(_GRID_ES_PERCENTILES)
-
-    def test_block_empirical_equals_grid_value(self):
-        # The block's empirical and the percentile grid come from the same array
-        # and must use the same order-statistic convention.
-        reg = _registry_with_data(EarlyStoppingSpec())
-        d = snapshot_to_dict(
-            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
-        )
-        ttft = _series(d, "ttft_ns")
-        for p_block, p_grid in ((0.99, "99.0"), (0.9, "90.0"), (0.95, "95.0")):
-            blk = next(b for b in ttft["early_stopping"] if b["percentile"] == p_block)
-            assert blk["empirical"] == ttft["percentiles"][p_grid]
+            esp = _series(d, name)["early_stopping_percentile"]
+            assert isinstance(esp, dict)
+            assert list(esp) == _GRID_ES_KEYS

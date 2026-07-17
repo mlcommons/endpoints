@@ -111,11 +111,11 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
             "counts": [c for _, c in histogram],
         },
     }
-    # Early-stopping estimate block — present only when the feature is enabled
+    # Early-stopping estimate map — present only when the feature is enabled
     # (COMPLETE snapshots for TTFT/TPOT/latency).
-    early_stopping = stat.get("early_stopping")
-    if early_stopping is not None:
-        metric["early_stopping"] = early_stopping
+    early_stopping_percentile = stat.get("early_stopping_percentile")
+    if early_stopping_percentile is not None:
+        metric["early_stopping_percentile"] = early_stopping_percentile
     return metric
 
 
@@ -518,21 +518,10 @@ def _display_metric(
     for p, val in metric_dict.get("percentiles", {}).items():
         fn(f"  {p:>6}: {_scaled(val)} {unit}{newline}")
 
-    es_blocks = metric_dict.get("early_stopping")
-    if es_blocks:
+    es_map = metric_dict.get("early_stopping_percentile")
+    if es_map:
         fn(
-            f"\n  Early-stopping estimates "
-            f"(confidence {es_blocks[0]['confidence']}):{newline}"
+            f"\n  Early-stopping percentile estimates (N/A = insufficient samples):{newline}"
         )
-        for b in es_blocks:
-            label = f"p{b['percentile'] * 100:g}"
-            if b["estimate"] is None:
-                fn(
-                    f"  {label:>6}: insufficient samples "
-                    f"(n={b['n']} < {b['min_queries']}){newline}"
-                )
-            else:
-                fn(
-                    f"  {label:>6}: {_scaled(b['estimate'])} {unit} "
-                    f"(empirical {_scaled(b['empirical'])} {unit}, n={b['n']}){newline}"
-                )
+        for k, v in es_map.items():
+            fn(f"  {k:>6}: {_scaled(v)} {unit}{newline}")

@@ -54,4 +54,10 @@ def test_early_stopping_does_not_shadow_warmup_enabled():
     flat = _online_help()
     assert "--enabled--warmup" in flat  # warmup's pair, whitespace-collapsed
     assert "--early-stopping.enabled" in flat
-    assert "--no-early-stopping" in flat
+
+
+def test_early_stopping_has_no_negative_flag():
+    # The feature is default-off; a --no-early-stopping flag would be dead surface.
+    flat = _online_help()
+    assert "--no-early-stopping" not in flat
+    assert "--early-stopping.no-enabled" not in flat

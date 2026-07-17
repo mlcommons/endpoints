@@ -119,10 +119,12 @@ class SeriesStat(
     sum_sq: int | float
     percentiles: dict[str, float]
     histogram: list[tuple[tuple[float, float], int]]
-    # Early-stopping percentile estimates (COMPLETE snapshots only, when enabled): one
-    # self-describing block per configured percentile. Optional trailing field so the
-    # array_like wire format stays backward-compatible. None = not computed.
-    early_stopping: list[dict[str, float | int | bool | None]] | None = None
+    # Early-stopping percentile estimates (COMPLETE snapshots only, when enabled):
+    # compact {grid_percentile_key: estimate-or-None} map whose keys mirror
+    # ``percentiles``; None value = insufficient samples for that percentile.
+    # Optional trailing field so the array_like wire format stays
+    # backward-compatible. None field = not computed.
+    early_stopping_percentile: dict[str, float | None] | None = None
 
 
 # Tagged union: msgspec dispatches on the ``tag`` literal at decode time.
@@ -250,17 +252,12 @@ def _metric_to_dict(m: MetricStat) -> dict:
             for rng, c in m.histogram
         ],
     }
-    if m.early_stopping is not None:
-        # estimate/empirical come from the raw value array — scrub like every
-        # other numeric field so json.dumps(..., allow_nan=False) cannot raise.
-        series["early_stopping"] = [
-            {
-                **b,
-                "estimate": _scrub_nonfinite(b["estimate"]),
-                "empirical": _scrub_nonfinite(b["empirical"]),
-            }
-            for b in m.early_stopping
-        ]
+    if m.early_stopping_percentile is not None:
+        # estimates come from the raw value array — scrub like every other
+        # numeric field so json.dumps(..., allow_nan=False) cannot raise.
+        series["early_stopping_percentile"] = {
+            k: _scrub_nonfinite(v) for k, v in m.early_stopping_percentile.items()
+        }
     return series
 
 

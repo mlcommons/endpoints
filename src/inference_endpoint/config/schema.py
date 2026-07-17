@@ -940,6 +940,7 @@ class EarlyStoppingConfig(BaseModel):
         bool,
         cyclopts.Parameter(
             alias="--early-stopping",
+            negative=(),  # default-off feature: a --no-early-stopping flag is dead surface
             help="Report MLPerf early-stopping percentile estimates for TTFT/TPOT/latency",
         ),
     ] = Field(
