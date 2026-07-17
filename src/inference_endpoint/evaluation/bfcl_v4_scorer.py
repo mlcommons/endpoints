@@ -31,7 +31,6 @@ import msgspec.json
 import numpy as np
 import pandas as pd
 
-from ..core.record import EventRecord, EventType, SampleEventType
 from ..core.types import merge_tool_calls
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.bfcl_v4 import CATEGORY_MAP, SINGLE_TURN_SUBSETS
@@ -115,8 +114,8 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         # Populated by score(); exposed via score_breakdown().
         self._breakdown: dict[str, Any] | None = None
 
-    def get_outputs(self) -> pd.DataFrame:
-        """Read COMPLETE events, preferring structured tool_calls for scoring.
+    def get_scoring_outputs(self) -> pd.DataFrame:
+        """Text to score, preferring structured tool_calls over the raw output.
 
         When the model returns structured tool calls, score against the
         serialized tool_calls directly rather than str(TextModelOutput): the
@@ -125,37 +124,27 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         defeats the function-call parser. The function call is the answer here;
         the prose is chatter. Plain-text responses (no tool calls, e.g.
         hallucination refusals) fall back to the full string.
-        """
-        events_log_path = self.report_dir / "events.jsonl"
-        if not events_log_path.exists():
-            raise FileNotFoundError(f"Events log file not found at {events_log_path}")
 
-        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+        OSL / response accounting read the base ``get_raw_outputs()`` instead, so
+        they count the full generated text rather than this normalized form.
+        """
         outputs: list[dict[str, str]] = []
-        with events_log_path.open("r") as f:
-            for line in f:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                record = decoder.decode(stripped)
-                if record.event_type != SampleEventType.COMPLETE:
-                    continue
-                data = record.data
-                tool_calls = getattr(data, "tool_calls", None)
-                # Streaming responses store tool_calls as raw per-delta chunks
-                # (list-of-lists with fragmented `arguments`); merge_tool_calls
-                # reassembles them into complete [{"function": {...}}] objects.
-                # Non-streaming tool_calls are already complete and pass through
-                # unchanged, so this is safe for both paths.
-                merged_tool_calls = merge_tool_calls(tool_calls)
-                if merged_tool_calls:
-                    output_text = msgspec.json.encode(list(merged_tool_calls)).decode()
-                else:
-                    output_text = str(data) if data is not None else ""
-                outputs.append(
-                    {"sample_uuid": record.sample_uuid, "output": output_text}
-                )
-        return pd.DataFrame(outputs)
+        for sample_uuid, data in self._iter_complete():
+            tool_calls = getattr(data, "tool_calls", None)
+            # Streaming responses store tool_calls as raw per-delta chunks
+            # (list-of-lists with fragmented `arguments`); merge_tool_calls
+            # reassembles them into complete [{"function": {...}}] objects.
+            # Non-streaming tool_calls are already complete and pass through
+            # unchanged, so this is safe for both paths.
+            merged_tool_calls = merge_tool_calls(tool_calls)
+            if merged_tool_calls:
+                output_text = msgspec.json.encode(list(merged_tool_calls)).decode()
+            else:
+                output_text = str(data) if data is not None else ""
+            outputs.append({"sample_uuid": sample_uuid, "output": output_text})
+        # Columned even when empty, matching the base get_raw_outputs invariant,
+        # so callers that index "sample_uuid"/"output" never KeyError.
+        return pd.DataFrame(outputs, columns=["sample_uuid", "output"])
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         """Score a single function-calling sample using ast_checker.
@@ -256,20 +245,27 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         per-category breakdown (with percentages and sample counts) is cached and
         exposed separately via :meth:`score_breakdown`.
         """
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
 
-        # get_outputs() may return an empty, column-less frame (no COMPLETE
-        # events at all), so guard before indexing "sample_uuid".
+        # get_scoring_outputs() returns an empty (columned) frame when there are
+        # no COMPLETE events; skip the isin filter in that case — the
+        # zero-breakdown branch below handles the empty result.
         if not df.empty:
             valid_uuids = self.sample_index_map.keys()
             df = df[df["sample_uuid"].isin(valid_uuids)]
+            # One row per issued uuid: a duplicate COMPLETE for a uuid would
+            # otherwise be scored twice and, against the issued denominator
+            # below, push a subset/overall mean above 1.0.
+            df = df.drop_duplicates(subset="sample_uuid")
 
         if df.empty:
             # No scorable samples: either the events log had no COMPLETE records
-            # or none map to a known sample_uuid. Emit the zero breakdown so
-            # results.json is well-formed; the sample_index lookup below would
-            # otherwise KeyError on the empty frame.
-            self._breakdown = self._zero_breakdown()
+            # or none map to a known sample_uuid. Emit the zero breakdown so the
+            # accuracy report is well-formed; the sample_index lookup below would
+            # otherwise KeyError on the empty frame. total_samples is 0 (nothing
+            # completed) while issued_samples records what was attempted, so an
+            # all-missing run reads as "0 of N completed", not "0 of 0".
+            self._breakdown = self._zero_breakdown(len(self.sample_index_map))
             return 0.0, 1
 
         df = df.apply(self.match_sample_index, axis=1)
@@ -331,6 +327,28 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
             scores_by_subset[subset].append(s)
             all_scores.append(s)
 
+        # `total_samples` reports how many samples actually completed (the pre-PR
+        # meaning the min_sample_count gate / plot / rollup read); captured here,
+        # before the missing-as-failure padding grows all_scores to the issued
+        # count. The accuracy denominator (issued) is reported separately as
+        # `issued_samples`.
+        n_completed = len(all_scores)
+
+        # Missing-as-failure: samples issued but never completed (drain-timeout /
+        # crash) are absent from `df`. Score each 0.0 under its issued subset so
+        # every accuracy mean below — overall, per-subset, per-category, and the
+        # sample-weighted category weights — divides by the issued count, not the
+        # surviving subset. Without this a partial run reports accuracy inflated
+        # over only the samples that came back. (An all-missing run already
+        # returned 0.0 above.) After this, len(all_scores) == issued.
+        scored_uuids = set(df["sample_uuid"])
+        subset_by_index = self.dataset.dataframe["subset"].to_numpy()
+        for missing_uuid, sample_index in self.sample_index_map.items():
+            if missing_uuid in scored_uuids:
+                continue
+            scores_by_subset[subset_by_index[sample_index]].append(0.0)
+            all_scores.append(0.0)
+
         subset_results = {
             name: float(np.mean(scores)) for name, scores in scores_by_subset.items()
         }
@@ -388,14 +406,20 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
             },
             "subset_scores": {k: round(v * 100, 2) for k, v in subset_results.items()},
             "unscored_subsets": unscored_subsets,
-            "total_samples": len(all_scores),
+            "total_samples": n_completed,
+            "issued_samples": len(all_scores),
         }
 
         return overall, n_repeats
 
     @staticmethod
-    def _zero_breakdown() -> dict[str, Any]:
-        """Well-formed all-zero breakdown for a run with no scorable samples."""
+    def _zero_breakdown(issued: int = 0) -> dict[str, Any]:
+        """Well-formed all-zero breakdown for a run with no scorable samples.
+
+        ``total_samples`` is 0 (nothing completed); ``issued_samples`` records how
+        many were attempted so an all-missing run is distinguishable from an empty
+        one.
+        """
         return {
             "overall_accuracy": 0.0,
             "normalized_single_turn_score": 0.0,
@@ -403,6 +427,7 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
             "subset_scores": {},
             "unscored_subsets": {},
             "total_samples": 0,
+            "issued_samples": issued,
         }
 
     def score_breakdown(self) -> dict[str, Any] | None:

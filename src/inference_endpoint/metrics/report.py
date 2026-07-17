@@ -19,12 +19,17 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
 import msgspec.json
+import msgspec.structs
 
+from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
+    build_token_series_dict,
+)
+from inference_endpoint.evaluation.accuracy_results import average_accuracy
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
@@ -99,6 +104,20 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
+    """Build a series rollup (same shape as the perf ``output_sequence_lengths``
+    block) from raw integer values, off the hot path.
+
+    Delegates the token-series construction to the aggregator's
+    ``build_token_series_dict`` — the single source of the HDR bounds / sig-figs /
+    bucket count — then applies the same ``_series_to_metric_dict`` shaping the
+    perf report uses, so an accuracy-phase OSL block is byte-for-byte the same
+    shape (avg/min/max/median/std_dev/percentiles/histogram) as the performance
+    one. Returns ``{}`` when ``values`` is empty.
+    """
+    return _series_to_metric_dict(build_token_series_dict(values))
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
@@ -146,25 +165,35 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     qps: float | None = None
     tps: float | None = None
 
-    # RNG seeds for this run (scheduler/dataloader/warmup, from config). Carried
-    # so result_summary.json is self-validating: a reproducible run is identified
-    # by its seeds. These are config, not a measured metric, so the from_snapshot
-    # caller supplies them rather than reading them from the metrics snapshot.
-    seeds: dict[str, int] | None = None
+    # Run configuration (load_pattern, warmup, and the scheduler/dataloader RNG
+    # seeds), from config. Carried so result_summary.json is self-describing and a
+    # valid run is identified by its settings. Config, not a measured metric, so
+    # the from_snapshot caller supplies it rather than reading it from the metrics
+    # snapshot. (Resolved/effective runtime settings — sample count + ordering,
+    # which can differ per audit phase — are deferred to a follow-up.)
+    run_config: dict[str, Any] | None = None
+
+    # Per-dataset accuracy entries (one per scored dataset), attached after
+    # scoring in finalize_benchmark. Accuracy is not in the metrics snapshot, so
+    # from_snapshot leaves this empty; perf-only runs keep it empty. Each entry
+    # carries score + sample counts and, for multi-subset scorers, a BFCL-shaped
+    # breakdown. Display-only.
+    accuracy: list[dict[str, Any]] = msgspec.field(default_factory=list)
 
     @classmethod
     def from_snapshot(
         cls,
         snap: dict[str, Any],
         *,
-        seeds: dict[str, int] | None = None,
+        run_config: dict[str, Any] | None = None,
         use_legacy_loadgen_qps_metrics: bool = True,
     ) -> Report:
         """Build a Report from a snapshot dict.
 
-        ``seeds`` (optional) carries the run's RNG seeds from config into the
-        report so result_summary.json is self-validating; it is keyword-only
-        because it is config, not part of the metrics snapshot.
+        ``run_config`` (optional, keyword-only) carries the run's configuration
+        (load_pattern, warmup, and the scheduler/dataloader RNG seeds) into the
+        report so result_summary.json is self-describing; it is config, not part
+        of the metrics snapshot.
 
         Input is the dict form produced by
         ``inference_endpoint.async_utils.services.metrics_aggregator.snapshot
@@ -274,11 +303,18 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
             tps=tps,
-            seeds=seeds,
+            run_config=run_config,
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
-        json_bytes = msgspec.json.format(msgspec.json.encode(self), indent=2)
+        # result_summary.json is the performance report — accuracy lives only in
+        # the dedicated accuracy report (accuracy/accuracy_results.json). The
+        # accuracy field stays on the struct so report.txt / the console summary
+        # still render it; it is just dropped from this serialized perf summary.
+        payload = {
+            k: v for k, v in msgspec.structs.asdict(self).items() if k != "accuracy"
+        }
+        json_bytes = msgspec.json.format(msgspec.json.encode(payload), indent=2)
         if save_to is not None:
             with Path(save_to).open("wb") as f:
                 f.write(json_bytes)
@@ -304,9 +340,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         fn(f"Version: {self.version}{newline}")
         if self.git_sha:
             fn(f"Git SHA: {self.git_sha}{newline}")
-        if self.seeds:
-            seed_str = ", ".join(f"{k}={v}" for k, v in self.seeds.items())
-            fn(f"Seeds: {seed_str}{newline}")
+        if self.run_config:
+            fn(f"Run config:{newline}")
+            for section, params in self.run_config.items():
+                if isinstance(params, dict):
+                    inner = ", ".join(f"{k}={v}" for k, v in params.items())
+                    fn(f"  {section}: {inner}{newline}")
+                else:
+                    fn(f"  {section}: {params}{newline}")
         if self.test_started_at > 0:
             approx = monotime_to_datetime(self.test_started_at)
             fn(f"Test started at: {approx.strftime('%Y-%m-%d %H:%M:%S')}{newline}")
@@ -325,6 +366,61 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         if (tps := self.tps) is not None:
             fn(f"TPS: {tps:.2f}{newline}")
+        else:
+            fn(f"TPS: N/A{newline}")
+
+        if self.accuracy:
+            fn(f"Accuracy:{newline}")
+            for entry in self.accuracy:
+                name = entry.get("dataset_name", "?")
+                score = entry.get("score")
+                if score is None:
+                    score_str = "N/A"
+                elif isinstance(score, bool):
+                    score_str = str(score)
+                elif isinstance(score, int | float):
+                    score_str = f"{score:.4g}"
+                else:
+                    score_str = str(score)
+                unit = entry.get("unit_samples")
+                repeats = entry.get("num_repeats")
+                total = entry.get("total_samples")
+                dur = entry.get("duration_s")
+                dur_str = (
+                    f", duration={dur:.2f}s" if isinstance(dur, int | float) else ""
+                )
+                fn(
+                    f"  {name}: {score_str} "
+                    f"(unit={unit}, repeats={repeats}, total={total}{dur_str}){newline}"
+                )
+                rc = entry.get("response_counts")
+                if isinstance(rc, dict):
+                    fn(
+                        f"    responses: {rc.get('scored', 0)}/{rc.get('issued', 0)} "
+                        f"scored ({rc.get('empty', 0)} empty, "
+                        f"{rc.get('missing', 0)} missing){newline}"
+                    )
+                osl = entry.get("output_sequence_lengths")
+                if isinstance(osl, dict):
+                    fn(
+                        f"    output tokens (avg/min/max): "
+                        f"{osl.get('avg', 0):.1f}/{osl.get('min')}/{osl.get('max')}"
+                        f"{newline}"
+                    )
+                breakdown = entry.get("breakdown")
+                if isinstance(breakdown, dict):
+                    for sub, sub_score in (
+                        breakdown.get("subset_scores") or {}
+                    ).items():
+                        fn(f"    {sub}: {sub_score:.2f}%{newline}")
+                if entry.get("complete") is False:
+                    fn(f"    (incomplete){newline}")
+            avg = average_accuracy(self.accuracy)
+            if avg is not None:
+                fn(f"  Average: {avg:.4g}{newline}")
+            if any("osl_tokenize_s" in e for e in self.accuracy):
+                osl_tok = sum(e.get("osl_tokenize_s", 0.0) for e in self.accuracy)
+                fn(f"  OSL tokenization: {osl_tok:.3g}s{newline}")
 
         if summary_only:
             fn(f"----------------- End of Summary -----------------{newline}")
