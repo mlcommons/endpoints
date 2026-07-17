@@ -113,13 +113,15 @@ def _betacf(a: float, b: float, x: float) -> float:
         guard against division blow-up); any positive value far below the smallest
         normal double (~2.2e-308) times a typical term works.
       - ``400``: iteration cap. For the boundary searches at very large n (a ~ b ~ n/2
-        with x within O(1/sqrt(n)) of the mean — the p50/p75 targets at tens of millions
-        of samples) Lentz needs ~O(sqrt(a)) iterations and CAN hit this cap; the running
-        product has plateaued by then (measured <= 3e-8 relative error vs
-        scipy.special.betainc at n=1e7, far below the 0.01 threshold the result is
-        compared against), so the truncated value is returned rather than raising —
-        this runs on the terminal-snapshot path, where an exception would cost the
-        whole final report.
+        with x near the mean — the p50/p75 targets at tens of millions of samples)
+        Lentz needs ~O(sqrt(a)) iterations and CAN hit this cap, returning a truncated
+        value whose error near the distribution midpoint grows with n (order 1e-4 at
+        a = b = 5e6 and worse beyond — do NOT reuse ``_betai`` standalone where
+        midpoint accuracy matters). Truncation is safe HERE because every decision
+        compares odds against 1 - c (~0.01), far from the slow-converging midpoint:
+        ``find_min_passing`` returns identical answers with cap 400 vs 20000 on the
+        LoadGen references (459/44/661). Returned rather than raised — this runs on
+        the terminal-snapshot path, where an exception would cost the final report.
     """
     eps, fpmin = 3e-16, 1e-300
     qab, qap, qam = a + b, a + 1.0, a - 1.0
@@ -209,17 +211,18 @@ def find_min_passing(
     LoadGen's ``MinPassingQueriesFinder`` (``loadgen/early_stopping.cc:62-114``): the
     smallest number of under-latency queries that, alongside ``t`` over-latency queries,
     lets you conclude at confidence ``c`` that the true p-percentile meets the bound.
-    ``_odds`` is monotonically decreasing in ``h``, so exponential bracketing (double
-    ``hi`` until it passes) followed by binary search finds the boundary exactly.
+    The pass test is strict (``odds < 1 - c``), matching LoadGen's boundary handling
+    (``early_stopping.cc:70``). ``_odds`` is monotonically decreasing in ``h``, so
+    exponential bracketing followed by binary search finds the boundary exactly.
     """
     _validate_domain(p, d, c)
     target = 1.0 - c
     lo, hi = 1, 2
-    while _odds(hi, t, p, d) > target:
+    while _odds(hi, t, p, d) >= target:
         hi *= 2
     while lo < hi:
         mid = (lo + hi) // 2
-        if _odds(mid, t, p, d) <= target:
+        if _odds(mid, t, p, d) < target:
             hi = mid
         else:
             lo = mid + 1
@@ -230,9 +233,9 @@ def _discard_count(n: int, p: float, d: float, c: float) -> int:
     """Largest ``t >= 1`` with ``n >= find_min_passing(t) + t``; 0 below the floor.
 
     This is the LoadGen SingleStream estimate construction (``results.cc:162-226``):
-    discard the ``t`` highest samples such that the run of ``n`` queries would still
-    pass the binomial test with those as its over-latency set — the (t+1)-th highest
-    value is then a c-confidence upper bound on the true p-percentile. Same
+    find the largest over-latency budget ``t`` the run of ``n`` queries can still
+    absorb — the t-th highest value is then a c-confidence upper bound on the true
+    p-percentile, with the ``t - 1`` samples above it discarded. Same
     exponential-bracket + binary-search shape as ``find_min_passing`` (the passing
     margin ``n - (find_min_passing(t) + t)`` is monotone in ``t``).
     """
@@ -250,6 +253,7 @@ def _discard_count(n: int, p: float, d: float, c: float) -> int:
     return lo
 
 
+@dataclass(frozen=True, slots=True)
 class EarlyStoppingResult:
     """Result of an early-stopping percentile estimate.
 
@@ -259,33 +263,13 @@ class EarlyStoppingResult:
     itself is the ``discarded + 1``-th highest sample).
     """
 
-    __slots__ = (
-        "percentile",
-        "confidence",
-        "n",
-        "estimate",
-        "empirical",
-        "min_queries",
-        "discarded",
-    )
-
-    def __init__(
-        self,
-        percentile: float,
-        confidence: float,
-        n: int,
-        estimate: float | None,
-        empirical: float | None,
-        min_queries: int,
-        discarded: int,
-    ) -> None:
-        self.percentile = percentile
-        self.confidence = confidence
-        self.n = n
-        self.estimate = estimate
-        self.empirical = empirical
-        self.min_queries = min_queries
-        self.discarded = discarded
+    percentile: float
+    confidence: float
+    n: int
+    estimate: float | None
+    empirical: float | None
+    min_queries: int
+    discarded: int
 
     def as_dict(self) -> dict[str, float | int | bool | None]:
         return {

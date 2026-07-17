@@ -95,15 +95,28 @@ def test_estimate_reference_values_and_conservatism():
 
 def test_sufficiency_floor_boundary():
     # Below the floor the estimate must be None (never a fabricated bound), the
-    # empirical value must still be reported, and n=0 must not crash.
+    # empirical value must still be reported, and n=0 must not crash. Just above
+    # the floor the budget is t=1: nothing is discarded and the estimate IS the
+    # maximum observed sample.
     below = es_percentile_estimate([float(i) for i in range(600)], 0.99)  # < 662
     assert below.estimate is None and below.empirical is not None
-    assert (
-        es_percentile_estimate([float(i) for i in range(700)], 0.99).estimate
-        is not None
-    )
+    arr = [float(i) for i in range(663)]
+    at_floor = es_percentile_estimate(arr, 0.99)
+    assert at_floor.estimate == arr[-1] and at_floor.discarded == 0
     empty = es_percentile_estimate([], 0.99)
     assert empty.estimate is None and empty.empirical is None and empty.n == 0
+
+
+def test_betai_branches_and_cap_regime():
+    # Pin both evaluation branches against closed forms — I_x(a,1) = x^a exercises
+    # the direct branch, I_x(1,b) = 1-(1-x)^b at large x the reflection branch —
+    # and pin that the iteration-cap regime (a ~ b, midpoint x) stays sane and
+    # exception-free (accuracy there is deliberately NOT claimed; see _betacf).
+    from inference_endpoint.metrics.early_stopping import _betai
+
+    assert abs(_betai(3.0, 1.0, 0.2) - 0.2**3) < 1e-12  # direct branch
+    assert abs(_betai(1.0, 3.0, 0.9) - (1.0 - 0.1**3)) < 1e-12  # reflection branch
+    assert 0.4 < _betai(5e6, 5e6, 0.5) < 0.6  # cap regime: truncated but sane
 
 
 def test_empirical_matches_report_grid_convention():
