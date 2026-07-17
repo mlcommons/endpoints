@@ -47,6 +47,43 @@ Each estimate is a _marginal_ `c`-confidence statement per percentile. Reporting
 fine for diagnostics, but a joint gate across all of them holds at lower than `c` confidence
 (multiple testing) — compliance gates should use the single scenario percentile.
 
+## How the estimate is computed
+
+The statistical question: for a candidate bound `B`, can we claim "the true p-percentile is `<= B`"
+at confidence `c`? Each sample is a Bernoulli trial — over or under `B`. If the true p-percentile
+actually exceeded `B`, samples would land over `B` at a rate above `1 - p`, so observing few
+over-latency samples in a long run is evidence for the bound. LoadGen accepts `B` when
+
+```
+P( <= t over-latency among n samples | over-latency rate = 1 - p )  <  1 - c
+```
+
+— a false certification slips through with probability below `1 - c = 1%`. That binomial tail has a
+closed form as a regularized incomplete beta, `I_p(n - t, t + 1)`, evaluated with the Numerical
+Recipes `betai` continued fraction (no scipy; numerically equal to LoadGen's Gauss-hypergeometric
+form but converging in tens of iterations — see the docstrings in `metrics/early_stopping.py`).
+
+The reported estimate takes `B` to be an actual sample — the t-th highest — with `t` pushed as low
+into the tail as the test allows. Both searches exploit monotonicity (exponential bracketing +
+binary search), so the whole computation is `O(log² n)` beta evaluations on the sorted array:
+
+```
+odds(h, t)          = P(<= t over-latency among h + t trials | rate 1 - p)   # = I_p(h, t + 1)
+find_min_passing(t) = min h with odds(h, t) < 1 - c    # under-latency samples needed to absorb t
+floor               = find_min_passing(1) + 1          # smallest certifiable n (see cheat sheet)
+
+estimate(sorted, p):
+    if n < floor:  return None                         # too few samples for any claim
+    t = largest t >= 1 with find_min_passing(t) + t <= n   # the run's over-latency budget
+    return sorted[n - t]                               # t-th highest sample; t - 1 sit above it
+```
+
+Worked example (n = 10,000, p99): the floor is 662, the budget resolves to `t = 77`, and the
+estimate is the 77th-highest sample — 76 samples sit strictly above it (one budget slot is spent on
+the estimate itself, which keeps the claim strict). At the floor the budget is `t = 1` and the
+estimate is the maximum observed sample — honest but maximally conservative; as `n` grows,
+`t/n -> 1 - p` and the estimate converges onto the empirical percentile from above.
+
 ## Cheat sheet: minimum samples per percentile
 
 The floor is `find_min_passing(1, p) + 1` at confidence 0.99 — the smallest run that can
