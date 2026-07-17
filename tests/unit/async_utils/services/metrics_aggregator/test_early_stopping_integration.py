@@ -140,6 +140,28 @@ def test_custom_grid_with_p100_and_int_keys_is_safe():
     assert list(esp) == ["99", "50"]  # 100.0 excluded; int keys + grid order kept
 
 
+def test_report_from_snapshot_preserves_empty_series_map():
+    # The HIGH round-3 finding: _series_to_metric_dict preserved the map but
+    # Report.from_snapshot._series_dict short-circuited count==0 first, so the
+    # summary still dropped it. Pin the REAL consumer path, not the helper.
+    from inference_endpoint.metrics.report import Report
+
+    report = Report.from_snapshot(_snap(_registry(EarlyStoppingSpec(), n=0)))
+    esp = report.ttft["early_stopping_percentiles"]
+    assert list(esp) == _GRID_ES_KEYS
+    assert all(v is None for v in esp.values())
+
+
+def test_es_failure_does_not_kill_the_final_snapshot():
+    # ES runs inside publish_final's build_snapshot, where an exception would
+    # cost the entire final report — a bad explicit override must degrade to
+    # "map omitted", never raise.
+    reg = _registry(EarlyStoppingSpec(percentiles=(1.5,)), n=100)  # out of domain
+    d = _snap(reg)
+    assert "early_stopping_percentiles" not in _series(d, "ttft_ns")
+    assert _series(d, "ttft_ns")["percentiles"]  # exact stats still intact
+
+
 def test_repeated_complete_snapshots_are_identical():
     # The exact path sorts the raw array IN PLACE (avoids a full transient copy);
     # a second COMPLETE snapshot must be byte-identical or the mutation leaked.

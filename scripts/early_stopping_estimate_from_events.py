@@ -332,11 +332,10 @@ def main(argv=None):
                 f"empirical={_fmt(r.empirical, unit, div)}  "
                 f"estimate={_fmt(r.estimate, unit, div)}"
             )
-            if r.estimate is not None and r.empirical:
+            if r.estimate is not None and r.empirical is not None:
                 gap = r.estimate - r.empirical
-                line += (
-                    f"  gap=+{_fmt(gap, unit, div)} (+{100 * gap / r.empirical:.2f}%)"
-                )
+                pct = f" (+{100 * gap / r.empirical:.2f}%)" if r.empirical else ""
+                line += f"  gap=+{_fmt(gap, unit, div)}{pct}"
             print(line)
             rows.append((field, key, r, unit, div))
         if summary is not None:
@@ -357,9 +356,10 @@ def main(argv=None):
     print("| metric | p | n | empirical | ES-adjusted | gap |")
     print("|---|---|---|---|---|---|")
     for field, key, r, unit, div in rows:
-        if r.estimate is not None and r.empirical:
+        if r.estimate is not None and r.empirical is not None:
             gap = r.estimate - r.empirical
-            g = f"+{_fmt(gap, unit, div)} (+{100 * gap / r.empirical:.2f}%)"
+            pct = f" (+{100 * gap / r.empirical:.2f}%)" if r.empirical else ""
+            g = f"+{_fmt(gap, unit, div)}{pct}"
         else:
             g = "-"
         print(
