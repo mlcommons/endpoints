@@ -148,8 +148,15 @@ def parse_toolcall_actions(
             actions.append({"command": args["command"], "tool_call_id": tool_call_id})
 
         elif name == "finish":
+            if not isinstance(args, dict):
+                errors.append("finish: arguments must be a JSON object.")
+                continue
             files = args.get("files_modified", [])
-            if not isinstance(files, list) or not files:
+            if (
+                not isinstance(files, list)
+                or not files
+                or not all(isinstance(file, str) for file in files)
+            ):
                 errors.append(
                     "finish: files_modified must be a non-empty list of file paths."
                 )
@@ -174,6 +181,9 @@ def parse_toolcall_actions(
             )
 
         elif name == "str_replace_editor":
+            if not isinstance(args, dict):
+                errors.append("str_replace_editor: arguments must be a JSON object.")
+                continue
             command = args.get("command")
             path = args.get("path", "")
             if command == "view":

@@ -353,6 +353,39 @@ def test_run_cleans_labeled_containers_after_failure(
     assert cleaned == ["run-2"]
 
 
+def test_run_cleans_harness_containers_after_eval_cancellation(monkeypatch, tmp_path):
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    cleaned: list[tuple[str, dict]] = []
+
+    def fake_run_agent(request, patched_config, output_dir, run_dir, cancel_token=None):
+        (output_dir / "preds.json").write_text('{"repo__repo-1":"patch"}')
+
+    def cancel_eval(request, preds_path, output_dir, run_dir, cancel_token=None):
+        (run_dir / "swe_bench_eval_run_id.txt").write_text("endpoints_cancelled")
+        raise RunCancelled("subprocess cancelled")
+
+    monkeypatch.setattr(runner, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(runner, "_run_eval", cancel_eval)
+    monkeypatch.setattr(
+        runner,
+        "_cleanup_containers",
+        lambda run_id, **kwargs: cleaned.append((run_id, kwargs)),
+    )
+
+    with pytest.raises(RunCancelled, match="cancelled"):
+        runner.run(_request(["http://endpoint:30000"]), tmp_path / "run-cancelled")
+
+    assert cleaned == [
+        (
+            "run-cancelled",
+            {
+                "eval_run_id": "endpoints_cancelled",
+                "instance_ids": ["repo__repo-1"],
+            },
+        )
+    ]
+
+
 def test_cleanup_failure_fails_successful_run(monkeypatch, tmp_path):
     runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     _stub_successful_run(monkeypatch, runner)
@@ -407,4 +440,52 @@ def test_cleanup_uses_exact_run_label_and_leaves_unrelated_containers(
             "label=com.mlcommons.endpoints.swebench-run=run-exact",
         ],
         ["docker", "rm", "-f", "matched-1", "matched-2"],
+    ]
+
+
+def test_cleanup_exactly_matches_harness_container_names(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1:3] == ["ps", "-aq"]:
+            stdout = "agent-container\n"
+        elif cmd[1:3] == ["ps", "-a"]:
+            stdout = (
+                "eval-container\tsweb.eval.repo__repo-1.endpoints_eval\n"
+                "other-instance\tsweb.eval.repo__repo-2.endpoints_eval\n"
+                "other-run\tsweb.eval.repo__repo-1.endpoints_other\n"
+                "unrelated\tunrelated.endpoints_eval\n"
+            )
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+
+    runner._cleanup_containers(
+        "run-exact",
+        eval_run_id="endpoints_eval",
+        instance_ids=["Repo__Repo-1"],
+    )
+
+    assert calls == [
+        [
+            "docker",
+            "ps",
+            "-aq",
+            "--filter",
+            "label=com.mlcommons.endpoints.swebench-run=run-exact",
+        ],
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            "name=endpoints_eval",
+            "--format",
+            "{{.ID}}\t{{.Names}}",
+        ],
+        ["docker", "rm", "-f", "agent-container", "eval-container"],
     ]

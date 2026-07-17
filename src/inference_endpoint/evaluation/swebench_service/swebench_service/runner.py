@@ -232,7 +232,16 @@ class SweBenchRunner:
             raise
         finally:
             try:
-                self._cleanup_containers(run_dir.name)
+                cleanup_kwargs: dict[str, Any] = {}
+                eval_run_id_path = run_dir / "swe_bench_eval_run_id.txt"
+                if eval_run_id_path.exists():
+                    eval_run_id = eval_run_id_path.read_text().strip()
+                    if eval_run_id:
+                        cleanup_kwargs = {
+                            "eval_run_id": eval_run_id,
+                            "instance_ids": request.evaluated_instance_ids,
+                        }
+                self._cleanup_containers(run_dir.name, **cleanup_kwargs)
             except Exception:
                 if primary_error is None:
                     raise
@@ -431,7 +440,13 @@ class SweBenchRunner:
             env.pop("OPENAI_API_KEY", None)
         return env
 
-    def _cleanup_containers(self, run_id: str) -> None:
+    def _cleanup_containers(
+        self,
+        run_id: str,
+        *,
+        eval_run_id: str | None = None,
+        instance_ids: list[str] | None = None,
+    ) -> None:
         docker = os.getenv("MSWEA_DOCKER_EXECUTABLE", "docker")
         label_filter = f"label={_RUN_LABEL}={run_id}"
         try:
@@ -443,6 +458,35 @@ class SweBenchRunner:
                 timeout=30,
             )
             container_ids = listed.stdout.split()
+            if eval_run_id is not None:
+                expected_names = {
+                    f"sweb.eval.{instance_id.lower()}.{eval_run_id}"
+                    for instance_id in instance_ids or []
+                }
+                listed_eval = subprocess.run(
+                    [
+                        docker,
+                        "ps",
+                        "-a",
+                        "--filter",
+                        f"name={eval_run_id}",
+                        "--format",
+                        "{{.ID}}\t{{.Names}}",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                for line in listed_eval.stdout.splitlines():
+                    container_id, separator, container_name = line.partition("\t")
+                    if (
+                        separator
+                        and container_id
+                        and container_name in expected_names
+                        and container_id not in container_ids
+                    ):
+                        container_ids.append(container_id)
             if container_ids:
                 subprocess.run(
                     [docker, "rm", "-f", *container_ids],

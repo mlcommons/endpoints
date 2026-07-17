@@ -74,11 +74,32 @@ def _load_modules(monkeypatch):
     return tools, model
 
 
-def _tool_call(name: str, args: dict, *, call_id: str = "call-1"):
+def _tool_call(name: str, args: object, *, call_id: str = "call-1"):
     return SimpleNamespace(
         id=call_id,
         function=SimpleNamespace(name=name, arguments=json.dumps(args)),
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("finish", []),
+        (
+            "finish",
+            {"files_modified": ["pkg/file.py", 1]},
+        ),
+        ("str_replace_editor", []),
+    ],
+)
+def test_malformed_tool_arguments_raise_format_error(monkeypatch, name, args):
+    tools, _ = _load_modules(monkeypatch)
+
+    with pytest.raises(tools.FormatError):
+        tools.parse_toolcall_actions(
+            [_tool_call(name, args)],
+            format_error_template="{{ error }}",
+        )
 
 
 def test_finish_emits_relative_pathspecs_and_git_add_intent(monkeypatch):
