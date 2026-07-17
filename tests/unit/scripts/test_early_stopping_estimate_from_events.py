@@ -146,29 +146,25 @@ def test_imperfect_log_robustness(tmp_path, capsys):
 
 
 def test_cross_check_against_inband_map(capsys):
-    # --compare must flag real divergence from a run's in-band map, and skip
-    # unexpected shapes (pre-release artifacts) instead of crashing.
-    values = [float(i) for i in range(1000)]
-    blocks = mod.es_blocks(values, [0.99], 0.99)
-    ours = {"99.0": blocks[0]["estimate"]}
+    # --summary cross-check must flag real divergence from a run's in-band map,
+    # and skip unexpected shapes (pre-release artifacts) instead of crashing.
+    ours = {"99.0": 123.0}
 
     def summary(esp):
-        return {
-            "n_samples_completed": 1000,
-            "ttft": {"early_stopping_percentiles": esp},
-        }
+        return {"ttft": {"early_stopping_percentiles": esp}}
 
-    mod._cross_check(summary(ours), "ttft_ns", values, blocks)
+    mod._cross_check(summary({"99.0": 123.0}), "ttft_ns", dict(ours))
     assert "EXACT MATCH" in capsys.readouterr().out
-    mod._cross_check(summary({"99.0": -1.0}), "ttft_ns", values, blocks)
+    mod._cross_check(summary({"99.0": -1.0}), "ttft_ns", dict(ours))
     assert "MISMATCH" in capsys.readouterr().out
-    mod._cross_check(summary([{"legacy": "shape"}]), "ttft_ns", values, blocks)
+    mod._cross_check(summary([{"legacy": "shape"}]), "ttft_ns", dict(ours))
     assert "MATCH" not in capsys.readouterr().out
 
 
-def test_main_cli_contract(tmp_path, capsys):
-    # --json writes the blocks keyed by summary field; invalid percentile/
-    # confidence must exit up front (they would hang or corrupt the math).
+def test_main_augments_summary_in_run_shape(tmp_path, capsys):
+    # --json must emit the run's summary AUGMENTED in place: same document, with
+    # each recorded metric gaining early_stopping_percentiles directly after its
+    # own grid, keyed and ordered by that grid (int-style keys preserved).
     events = _write(
         tmp_path,
         [
@@ -179,11 +175,63 @@ def test_main_cli_contract(tmp_path, capsys):
             _ev("session.stop_performance_tracking", 500),
         ],
     )
-    out = tmp_path / "blocks.json"
-    result = mod.main([str(events), "--json", str(out)])
-    assert out.exists() and "ttft" in result and "latency" in result
+    summary = {
+        "n_samples_completed": 1,
+        "ttft": {
+            "min": 50,
+            "percentiles": {"99": 50.0, "90": 50.0, "50": 50.0},
+            "histogram": {"buckets": [], "counts": []},
+        },
+        "tpot": {},  # not recorded by the run -> must stay untouched
+        "latency": {
+            "min": 300,
+            "percentiles": {"99.0": 300.0, "50.0": 300.0},
+            "histogram": {"buckets": [], "counts": []},
+        },
+    }
+    spath = tmp_path / "result_summary.json"
+    spath.write_text(json.dumps(summary))
+    out = tmp_path / "augmented.json"
+    result = mod.main([str(events), "--summary", str(spath), "--json", str(out)])
+    augmented = json.loads(out.read_text())
+    assert augmented == result
+    # ttft: grid-keyed (int style preserved), grid order, placed after percentiles
+    ttft = augmented["ttft"]
+    assert list(ttft) == [
+        "min",
+        "percentiles",
+        "early_stopping_percentiles",
+        "histogram",
+    ]
+    assert list(ttft["early_stopping_percentiles"]) == ["99", "90", "50"]
+    assert all(v is None for v in ttft["early_stopping_percentiles"].values())  # n=1
+    assert augmented["tpot"] == {}  # untouched
+    assert list(augmented["latency"]["early_stopping_percentiles"]) == ["99.0", "50.0"]
+    # everything else byte-identical to the input summary
+    stripped = json.loads(out.read_text())
+    for field in ("ttft", "latency"):
+        stripped[field].pop("early_stopping_percentiles")
+    assert stripped == summary
     capsys.readouterr()  # drain
+
+
+def test_main_cli_contract(tmp_path, capsys):
+    # invalid percentile/confidence must exit up front (they would hang or
+    # corrupt the math); --json without --summary is a contract error.
+    events = _write(
+        tmp_path,
+        [
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _ev("sample.complete", 400, "a", _tmo(["x", "one two"])),
+            _ev("session.stop_performance_tracking", 500),
+        ],
+    )
+    with pytest.raises(SystemExit):
+        mod.main([str(events), "--json", str(tmp_path / "o.json")])
     with pytest.raises(SystemExit):
         mod.main([str(events), "--percentiles", "1.0"])
     with pytest.raises(SystemExit):
         mod.main([str(events), "--confidence", "1.0"])
+    capsys.readouterr()  # drain

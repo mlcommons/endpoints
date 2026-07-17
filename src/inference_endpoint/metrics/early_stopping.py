@@ -19,7 +19,7 @@ equals LoadGen's Gauss-hypergeometric ``beta_regularized`` but converges in tens
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -49,34 +49,33 @@ TOLERANCE: Final[float] = 0.0
 ES_MIN_PERCENTILE: Final[float] = 0.5
 
 
-def es_targets_from_grid(grid_percentiles: Iterable[float]) -> dict[str, float]:
+def es_targets_from_grid(grid_percentiles) -> dict[str, float]:
     """{report-grid key: fraction} for every grid entry in the ES domain.
 
-    Keys are ``str()`` of the ORIGINAL grid values so the compact map overlays the
-    ``percentiles`` grid keys byte-for-byte (an int grid entry ``99`` keys as ``"99"``,
-    not ``"99.0"``). Entries below the median are skipped (an ES estimate is a tail
-    certification) and ``>= 100`` is excluded — p1.0 is outside the binomial test's
-    domain and would otherwise crash the terminal snapshot. Fractions are rounded to
-    6 decimals: lossless for grid values (at most a few decimals in 0-100 units) while
-    avoiding float-division artifacts (99.9/100 != 0.999 exactly).
-
-    E.g. the default grid ``(99.9, 99.0, ..., 50.0, 25.0, ...)`` yields
-    ``{"50.0": 0.5, ..., "99.0": 0.99, "99.9": 0.999}``.
+    Keys are ``str()`` of the ORIGINAL grid entries and the map preserves the
+    grid's own order (descending in the default grid), so the compact map
+    overlays the ``percentiles`` grid 1:1 in both naming and ordering. Accepts
+    the entries as numbers (registry grids) or strings (summary-JSON keys — an
+    int grid entry ``99`` keys as ``"99"`` either way). Entries below the median
+    are skipped (an ES estimate is a tail certification) and ``>= 100`` is
+    excluded — p1.0 is outside the binomial test's domain and would otherwise
+    crash the terminal snapshot. Fractions are rounded to 6 decimals: lossless
+    for grid values while avoiding float-division artifacts (99.9/100 != 0.999).
     """
-    pairs = {
-        str(p): round(p / 100.0, 6)
-        for p in grid_percentiles
-        if ES_MIN_PERCENTILE <= p / 100.0 < 1.0
-    }
-    return dict(sorted(pairs.items(), key=lambda kv: kv[1]))
+    targets: dict[str, float] = {}
+    for p in grid_percentiles:
+        fraction = round(float(p) / 100.0, 6)
+        if ES_MIN_PERCENTILE <= fraction < 1.0:
+            targets[str(p)] = fraction
+    return targets
 
 
 def grid_percentile_key(p: float) -> str:
     """Report-grid-style key for a fraction percentile: 0.5 -> "50.0", 0.999 -> "99.9".
 
-    Matches ``str()`` of the grid's 0-100 floats so the compact
-    ``early_stopping_percentiles`` map overlays the ``percentiles`` grid keys 1:1.
-    ``round`` absorbs float-division artifacts (0.97 * 100 != 97.0 exactly).
+    Used for explicit percentile overrides (tests / offline analysis), where no grid
+    string exists to carry through; grid-derived targets keep the grid's own keys via
+    ``es_targets_from_grid``. ``round`` absorbs float artifacts (0.97 * 100 != 97.0).
     """
     return str(round(p * 100.0, 4))
 

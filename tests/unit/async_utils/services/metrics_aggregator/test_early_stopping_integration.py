@@ -24,8 +24,8 @@ from inference_endpoint.metrics.report import _series_to_metric_dict
 pytestmark = pytest.mark.unit
 
 # ES keys derived from the default report grid (>= median) — mirror the
-# `percentiles` grid keys exactly so the two blocks overlay 1:1.
-_GRID_ES_KEYS = ["50.0", "75.0", "80.0", "90.0", "95.0", "97.0", "99.0", "99.9"]
+# `percentiles` grid keys AND its (descending) order so the two overlay 1:1.
+_GRID_ES_KEYS = ["99.9", "99.0", "97.0", "95.0", "90.0", "80.0", "75.0", "50.0"]
 
 
 def _registry(es_spec, series=("ttft_ns",), n=2000, dtype=int):
@@ -74,7 +74,11 @@ def test_complete_snapshot_carries_grid_keyed_estimates():
         if estimate is not None:
             assert estimate >= ttft["percentiles"][key]
     assert "early_stopping_percentiles" not in isl
-    assert _series_to_metric_dict(ttft)["early_stopping_percentiles"] == esp
+    # the report dict keeps the map and places it directly after the grid
+    md = _series_to_metric_dict(ttft)
+    assert md["early_stopping_percentiles"] == esp
+    keys = list(md)
+    assert keys.index("early_stopping_percentiles") == keys.index("percentiles") + 1
 
 
 def test_map_only_on_enabled_complete_snapshots():
@@ -133,7 +137,7 @@ def test_custom_grid_with_p100_and_int_keys_is_safe():
     for _ in range(1000):
         reg.record("ttft_ns", 1_000_000)
     esp = _series(_snap(reg), "ttft_ns")["early_stopping_percentiles"]
-    assert list(esp) == ["50", "99"]  # 100.0 excluded; int keys match the grid
+    assert list(esp) == ["99", "50"]  # 100.0 excluded; int keys + grid order kept
 
 
 def test_repeated_complete_snapshots_are_identical():

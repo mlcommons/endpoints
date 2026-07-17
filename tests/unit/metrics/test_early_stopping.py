@@ -55,20 +55,29 @@ def test_grid_derivation_and_key_format():
     # are not tail certifications.
     grid = (100.0, 99.9, 99.0, 97.0, 95.0, 90.0, 80.0, 75.0, 50.0, 25.0, 1.0)
     targets = es_targets_from_grid(grid)
+    # grid ORDER preserved (descending in the default grid), 100.0/below-median excluded
     assert list(targets) == [
-        "50.0",
-        "75.0",
-        "80.0",
-        "90.0",
-        "95.0",
-        "97.0",
-        "99.0",
         "99.9",
+        "99.0",
+        "97.0",
+        "95.0",
+        "90.0",
+        "80.0",
+        "75.0",
+        "50.0",
     ]
     assert (
         targets["99.9"] == 0.999 and targets["97.0"] == 0.97
     )  # float artifacts absorbed
-    assert es_targets_from_grid((99, 90, 50)) == {"50": 0.5, "90": 0.9, "99": 0.99}
+    assert list(es_targets_from_grid((99, 90, 50))) == [
+        "99",
+        "90",
+        "50",
+    ]  # int keys kept
+    assert list(es_targets_from_grid(("99.0", "50.0"))) == [
+        "99.0",
+        "50.0",
+    ]  # str keys kept
     # explicit-spec overrides still key float-style via grid_percentile_key
     assert grid_percentile_key(0.999) == "99.9"
 

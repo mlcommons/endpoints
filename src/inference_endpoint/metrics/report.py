@@ -44,6 +44,28 @@ SERIES_TO_SUMMARY_FIELD: Final[dict[str, str]] = {
 }
 
 
+def place_early_stopping_percentiles(
+    metric_dict: dict[str, Any], esp: dict[str, float | None]
+) -> dict[str, Any]:
+    """Return ``metric_dict`` with the ES map directly after ``percentiles``.
+
+    Single source of the map's position in every summary-shaped dict — used by
+    the report builder and by ``scripts/early_stopping_estimate_from_events.py``
+    when augmenting a historical ``result_summary.json``. Replaces any existing
+    placement; appends at the end if the dict has no ``percentiles`` key.
+    """
+    out: dict[str, Any] = {}
+    for key, value in metric_dict.items():
+        if key == "early_stopping_percentiles":
+            continue
+        out[key] = value
+        if key == "percentiles":
+            out["early_stopping_percentiles"] = esp
+    if "early_stopping_percentiles" not in out:
+        out["early_stopping_percentiles"] = esp
+    return out
+
+
 def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
     """Convert a series-stat dict into the shape ``display()`` expects.
 
@@ -115,10 +137,10 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
         },
     }
     # Early-stopping estimate map — present only when the feature is enabled
-    # (COMPLETE snapshots for TTFT/TPOT/latency).
+    # (COMPLETE snapshots for TTFT/TPOT/latency); sits right after `percentiles`.
     early_stopping_percentiles = stat.get("early_stopping_percentiles")
     if early_stopping_percentiles is not None:
-        metric["early_stopping_percentiles"] = early_stopping_percentiles
+        metric = place_early_stopping_percentiles(metric, early_stopping_percentiles)
     return metric
 
 

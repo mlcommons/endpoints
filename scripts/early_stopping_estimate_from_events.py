@@ -29,10 +29,14 @@ from ``core/record.py`` / ``core/types.py`` rather than a re-implementation.
 
 usage:
   python scripts/early_stopping_estimate_from_events.py <events.jsonl>
+      [--summary <result_summary.json>]  # the run's summary: enables the in-band
+                                         # cross-check, derives the targets from the
+                                         # run's own percentile grid, powers --json
+      [--json <out.json>]                # write the summary AUGMENTED with
+                                         # early_stopping_percentiles maps — exactly the
+                                         # shape an ES-enabled run would have produced
       [--tokenizer <hf-model-dir-or-tokenizer.json>]   # enables TPOT
-      [--percentiles 0.5,0.9,0.95,0.99] [--confidence 0.99]
-      [--compare <result_summary.json>]                # cross-check vs in-band blocks
-      [--json <out.json>]
+      [--percentiles 0.5,0.9,0.95,0.99] [--confidence 0.99]  # stdout-analysis overrides
 """
 
 from __future__ import annotations
@@ -63,7 +67,10 @@ from inference_endpoint.metrics.early_stopping import (
     es_targets_from_grid,
     grid_percentile_key,
 )
-from inference_endpoint.metrics.report import SERIES_TO_SUMMARY_FIELD
+from inference_endpoint.metrics.report import (
+    SERIES_TO_SUMMARY_FIELD,
+    place_early_stopping_percentiles,
+)
 
 # mirror of the JSONL writer: msgspec.json.Encoder(enc_hook=EventType.encode_hook)
 _DECODER = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
@@ -190,14 +197,6 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
     return {"ttft_ns": ttft, "tpot_ns": tpot, "sample_latency_ns": latency}
 
 
-def es_blocks(sorted_values, percentiles, confidence: float) -> list[dict]:
-    """ES blocks over an ascending-sorted series, same shape as ``early_stopping``."""
-    return [
-        es_percentile_estimate(sorted_values, p, confidence).as_dict()
-        for p in percentiles
-    ]
-
-
 def _make_counter(tokenizer_path: str):
     backend = load_reference_backend(tokenizer_path)
     if backend is None:
@@ -211,21 +210,13 @@ def _fmt(v, unit: str, div: float) -> str:
     return "-" if v is None else f"{v / div:,.2f} {unit}"
 
 
-def _cross_check(summary: dict, series_name: str, values: list, blocks: list) -> None:
+def _cross_check(summary: dict, series_name: str, ours: dict) -> None:
+    """Compare our {grid_key: estimate} against the run's in-band map, if any."""
     md = summary.get(SERIES_TO_SUMMARY_FIELD[series_name]) or {}
-    completed = summary.get("n_samples_completed")
-    if completed is not None and len(values) != completed:
-        # ttft/tpot legitimately count fewer (streaming-only / empty-rest skips);
-        # latency should equal n_samples_completed.
-        note = " ** MISMATCH **" if series_name == "sample_latency_ns" else " (info)"
-        print(
-            f"  XCHECK count: ours={len(values)} n_samples_completed={completed}{note}"
-        )
     inband = md.get("early_stopping_percentiles")
     if not isinstance(inband, dict) or not inband:
         # absent, or an unexpected shape (pre-release artifact) — nothing to compare
         return
-    ours = {grid_percentile_key(b["percentile"]): b["estimate"] for b in blocks}
     for key, est in inband.items():
         if key not in ours:
             continue
@@ -244,6 +235,21 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("events", help="path to a run's events.jsonl")
     ap.add_argument(
+        "--summary",
+        help=(
+            "the run's result_summary.json: enables the in-band cross-check, derives "
+            "targets from the run's own percentile grid, and powers --json"
+        ),
+    )
+    ap.add_argument(
+        "--json",
+        dest="json_out",
+        help=(
+            "write the summary augmented with early_stopping_percentiles maps — "
+            "exactly the shape an ES-enabled run would produce (requires --summary)"
+        ),
+    )
+    ap.add_argument(
         "--tokenizer", help="HF model dir (or tokenizer.json) — enables TPOT"
     )
     ap.add_argument(
@@ -251,72 +257,105 @@ def main(argv=None):
         default=",".join(
             str(f) for f in es_targets_from_grid(DEFAULT_PERCENTILES).values()
         ),
-        help="offline-analysis override; defaults to the report grid at/above the median",
+        help="stdout-analysis override (fractions); --json always uses the summary grid",
     )
     ap.add_argument("--confidence", type=float, default=CONFIDENCE)
-    ap.add_argument("--compare", help="result_summary.json to cross-check against")
-    ap.add_argument("--json", dest="json_out", help="write blocks to this JSON file")
     args = ap.parse_args(argv)
 
-    percentiles = [float(x) for x in args.percentiles.split(",")]
-    if not all(0.0 < p < 1.0 for p in percentiles):
-        raise SystemExit(f"FATAL: percentiles must be in (0, 1), got {percentiles}")
+    if args.json_out and not args.summary:
+        raise SystemExit(
+            "FATAL: --json requires --summary (the augmented output IS the summary)"
+        )
+    fallback_fractions = [float(x) for x in args.percentiles.split(",")]
+    if not all(0.0 < f < 1.0 for f in fallback_fractions):
+        raise SystemExit(
+            f"FATAL: percentiles must be in (0, 1), got {fallback_fractions}"
+        )
     if not 0.0 < args.confidence < 1.0:
         raise SystemExit(f"FATAL: confidence must be in (0, 1), got {args.confidence}")
+
     counter = _make_counter(args.tokenizer) if args.tokenizer else None
     if counter is None:
         print("NOTE: no --tokenizer given -> TPOT skipped", file=sys.stderr)
 
     series = compute_series(args.events, count_tokens=counter, progress=True)
     summary = None
-    if args.compare:
-        with open(args.compare) as f:
+    if args.summary:
+        with open(args.summary) as f:
             summary = json.load(f)
+    augmented = json.loads(json.dumps(summary)) if summary is not None else {}
 
-    result: dict[str, list[dict]] = {}
     rows = []
     for name, values in series.items():
         if not values:
             continue
         values.sort()
-        blocks = es_blocks(values, percentiles, args.confidence)
-        result[SERIES_TO_SUMMARY_FIELD[name]] = blocks
-        unit, div = _UNITS[SERIES_TO_SUMMARY_FIELD[name]]
-        print(f"\n{SERIES_TO_SUMMARY_FIELD[name]} (from {name}, n={len(values)}):")
-        for b in blocks:
+        field = SERIES_TO_SUMMARY_FIELD[name]
+        metric = (summary or {}).get(field) or {}
+        grid = metric.get("percentiles") or {}
+        if grid:
+            # the run's own grid: exact key strings, exact (descending) order
+            targets = es_targets_from_grid(grid.keys())
+        else:
+            targets = {
+                grid_percentile_key(f): f
+                for f in sorted(fallback_fractions, reverse=True)
+            }
+        results = {
+            key: es_percentile_estimate(values, f, args.confidence)
+            for key, f in targets.items()
+        }
+        esp = {key: r.estimate for key, r in results.items()}
+
+        unit, div = _UNITS[field]
+        print(f"\n{field} (from {name}, n={len(values)}):")
+        for key, r in results.items():
             line = (
-                f"  p{b['percentile'] * 100:g}: sufficient={b['sufficient']} "
-                f"min_queries={b['min_queries']} discarded={b['discarded']}  "
-                f"empirical={_fmt(b['empirical'], unit, div)}  "
-                f"estimate={_fmt(b['estimate'], unit, div)}"
+                f"  p{key}: sufficient={r.estimate is not None} "
+                f"min_queries={r.min_queries} discarded={r.discarded}  "
+                f"empirical={_fmt(r.empirical, unit, div)}  "
+                f"estimate={_fmt(r.estimate, unit, div)}"
             )
-            if b["estimate"] is not None and b["empirical"]:
-                gap = b["estimate"] - b["empirical"]
-                line += f"  gap=+{_fmt(gap, unit, div)} (+{100 * gap / b['empirical']:.2f}%)"
+            if r.estimate is not None and r.empirical:
+                gap = r.estimate - r.empirical
+                line += (
+                    f"  gap=+{_fmt(gap, unit, div)} (+{100 * gap / r.empirical:.2f}%)"
+                )
             print(line)
-            rows.append((SERIES_TO_SUMMARY_FIELD[name], b, unit, div))
+            rows.append((field, key, r, unit, div))
         if summary is not None:
-            _cross_check(summary, name, values, blocks)
+            completed = summary.get("n_samples_completed")
+            if completed is not None and len(values) != completed:
+                note = " ** MISMATCH **" if name == "sample_latency_ns" else " (info)"
+                print(
+                    f"  XCHECK count: ours={len(values)} "
+                    f"n_samples_completed={completed}{note}"
+                )
+            _cross_check(summary, name, dict(esp))
+            if metric:  # augment only metrics the run actually reported
+                augmented[field] = place_early_stopping_percentiles(
+                    augmented[field], esp
+                )
 
     print("\n--- markdown ---")
     print("| metric | p | n | empirical | ES-adjusted | gap |")
     print("|---|---|---|---|---|---|")
-    for m, b, unit, div in rows:
-        if b["estimate"] is not None and b["empirical"]:
-            gap = b["estimate"] - b["empirical"]
-            g = f"+{_fmt(gap, unit, div)} (+{100 * gap / b['empirical']:.2f}%)"
+    for field, key, r, unit, div in rows:
+        if r.estimate is not None and r.empirical:
+            gap = r.estimate - r.empirical
+            g = f"+{_fmt(gap, unit, div)} (+{100 * gap / r.empirical:.2f}%)"
         else:
             g = "-"
         print(
-            f"| **{m.upper()}** | p{b['percentile'] * 100:g} | {b['n']} | "
-            f"{_fmt(b['empirical'], unit, div)} | {_fmt(b['estimate'], unit, div)} | {g} |"
+            f"| **{field.upper()}** | p{key} | {r.n} | {_fmt(r.empirical, unit, div)} | "
+            f"{_fmt(r.estimate, unit, div)} | {g} |"
         )
 
     if args.json_out:
         with open(args.json_out, "w") as f:
-            json.dump(result, f, indent=2)
-        print(f"\nblocks written to {args.json_out}")
-    return result
+            json.dump(augmented, f, indent=2)
+        print(f"\naugmented summary written to {args.json_out}")
+    return augmented
 
 
 if __name__ == "__main__":
