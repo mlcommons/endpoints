@@ -64,6 +64,8 @@ settings:
     num_workers: -1  # Worker processes (-1=auto)
     log_level: INFO  # Worker log level
     warmup_connections: -1  # Pre-establish TCP connections (-1=auto, 0=disabled)
+    auto_warmup_budget_fraction: 0.25  # Fraction of the port budget auto warmup pre-establishes (only used when max_connections and warmup_connections are both -1)
+    max_concurrent_warmup_connects: 128  # Max in-flight connect() calls per worker pool. Named for its primary job — pacing the warmup connection stampede — but it bounds ALL pool growth, including t=0 on-demand bursts.
     max_connections: -1  # Max TCP connections (-1=unlimited)
     transport:
       type: zmq  # options: zmq
