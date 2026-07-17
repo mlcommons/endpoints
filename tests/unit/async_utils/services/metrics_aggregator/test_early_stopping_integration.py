@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integration test: early-stopping estimates flow registry -> snapshot -> report dict."""
+"""Integration: early-stopping estimates flow registry -> snapshot -> report dict.
+
+The pure math is covered in tests/unit/metrics/test_early_stopping.py; these tests
+pin only the wiring: which snapshots carry the map, which series get it, its shape,
+and the in-place-sort finalize optimization.
+"""
 
 import random
 
@@ -16,152 +21,103 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
 from inference_endpoint.metrics.early_stopping import EarlyStoppingSpec
 from inference_endpoint.metrics.report import _series_to_metric_dict
 
-# ES keys derived from the default report grid, at or above the median — these mirror
-# the `percentiles` grid keys exactly so the two blocks overlay 1:1.
+pytestmark = pytest.mark.unit
+
+# ES keys derived from the default report grid (>= median) — mirror the
+# `percentiles` grid keys exactly so the two blocks overlay 1:1.
 _GRID_ES_KEYS = ["50.0", "75.0", "80.0", "90.0", "95.0", "97.0", "99.0", "99.9"]
 
 
-def _registry_with_data(es_spec: EarlyStoppingSpec | None) -> MetricsRegistry:
+def _registry(es_spec, series=("ttft_ns",), n=2000, dtype=int):
     reg = MetricsRegistry(early_stopping=es_spec)
-    reg.register_series(
-        "ttft_ns", hdr_low=1, hdr_high=10_000_000_000, tail_latency=True
-    )
+    for name in series:
+        reg.register_series(
+            name, hdr_low=1, hdr_high=10_000_000_000, dtype=dtype, tail_latency=True
+        )
     reg.register_series("isl", hdr_low=1, hdr_high=1_000_000)  # not tail latency
     rng = random.Random(0)
-    for _ in range(2000):
-        reg.record("ttft_ns", rng.randint(1_000_000, 2_000_000))
+    for _ in range(n):
+        for name in series:
+            value = rng.randint(1_000_000, 2_000_000)
+            reg.record(name, float(value) if dtype is float else value)
         reg.record("isl", rng.randint(10, 500))
     return reg
 
 
-def _series(snap_dict: dict, name: str) -> dict:
+def _snap(reg, state=SessionState.COMPLETE, pending=0):
+    return snapshot_to_dict(reg.build_snapshot(state=state, n_pending_tasks=pending))
+
+
+def _series(snap_dict, name):
     return next(m for m in snap_dict["metrics"] if m.get("name") == name)
 
 
-@pytest.mark.unit
-class TestConfigSurface:
-    def test_schema_is_a_single_opt_out_flag(self):
-        # The feature is on by default (cold-path only, additive output field);
-        # `enabled` is the single opt-out. percentiles/confidence/tolerance are
-        # loadgen-parity constants, not YAML/CLI knobs.
-        from inference_endpoint.config.schema import EarlyStoppingConfig
+def test_config_is_a_single_opt_out_flag():
+    # Default-on with one opt-out is the agreed config surface; anything more is
+    # a knob that can weaken the statistical claim.
+    from inference_endpoint.config.schema import EarlyStoppingConfig
 
-        assert set(EarlyStoppingConfig.model_fields) == {"enabled"}
-        assert EarlyStoppingConfig().enabled is True
+    assert set(EarlyStoppingConfig.model_fields) == {"enabled"}
+    assert EarlyStoppingConfig().enabled is True
 
 
-@pytest.mark.unit
-class TestEarlyStoppingIntegration:
-    def test_enabled_emits_grid_keyed_estimates(self):
-        # The report carries a compact {percentile: estimate-or-null} map whose keys
-        # mirror the `percentiles` grid (>= median); rich detail is log-only.
-        reg = _registry_with_data(EarlyStoppingSpec())
-        d = snapshot_to_dict(
-            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
-        )
-        ttft, isl = _series(d, "ttft_ns"), _series(d, "isl")
-        esp = ttft["early_stopping_percentile"]
-        assert isinstance(esp, dict)
-        assert list(esp) == _GRID_ES_KEYS
-        # n=2000 clears every floor except p99.9 (6636) -> null there, values elsewhere
-        assert esp["99.9"] is None
-        for key, estimate in esp.items():
-            if estimate is not None:
-                # conservative: the estimate sits at or above the grid's empirical value
-                assert estimate >= ttft["percentiles"][key]
-        assert "early_stopping_percentile" not in isl  # not registered tail_latency
-        # and it survives the report-dict conversion
-        assert _series_to_metric_dict(ttft)["early_stopping_percentile"] == esp
+def test_complete_snapshot_carries_grid_keyed_estimates():
+    # The one test of the full output contract: grid-mirrored keys, null when the
+    # run is below a percentile's floor, conservative vs the grid's empirical
+    # value, non-tail series untouched, and survival through the report dict.
+    d = _snap(_registry(EarlyStoppingSpec()))
+    ttft, isl = _series(d, "ttft_ns"), _series(d, "isl")
+    esp = ttft["early_stopping_percentiles"]
+    assert list(esp) == _GRID_ES_KEYS
+    assert esp["99.9"] is None  # n=2000 < the p99.9 floor (6636)
+    for key, estimate in esp.items():
+        if estimate is not None:
+            assert estimate >= ttft["percentiles"][key]
+    assert "early_stopping_percentiles" not in isl
+    assert _series_to_metric_dict(ttft)["early_stopping_percentiles"] == esp
 
-    def test_custom_single_percentile(self):
-        reg = _registry_with_data(EarlyStoppingSpec(percentiles=(0.99,)))
-        d = snapshot_to_dict(
-            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
-        )
-        esp = _series(d, "ttft_ns")["early_stopping_percentile"]
-        assert list(esp) == ["99.0"]
-        assert esp["99.0"] is not None
 
-    def test_disabled_by_default_no_block(self):
-        reg = _registry_with_data(None)  # feature off
-        d = snapshot_to_dict(
-            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
-        )
-        assert "early_stopping_percentile" not in _series(d, "ttft_ns")
-        assert "early_stopping_percentile" not in _series_to_metric_dict(
-            _series(d, "ttft_ns")
-        )
+def test_map_only_on_enabled_complete_snapshots():
+    # Disabled registries and non-exact snapshots (LIVE mid-run, INTERRUPTED via
+    # SIGTERM) must not carry the map — partial data would fabricate a bound.
+    assert "early_stopping_percentiles" not in _series(
+        _snap(_registry(None)), "ttft_ns"
+    )
+    enabled = _registry(EarlyStoppingSpec())
+    for state, pending in ((SessionState.LIVE, 1), (SessionState.INTERRUPTED, 0)):
+        d = _snap(enabled, state=state, pending=pending)
+        assert "early_stopping_percentiles" not in _series(d, "ttft_ns")
 
-    def test_live_snapshot_has_no_estimate(self):
-        # ES is COMPLETE-only (needs the exact sorted raw array); LIVE must not carry it.
-        reg = _registry_with_data(EarlyStoppingSpec())
-        d = snapshot_to_dict(
-            reg.build_snapshot(state=SessionState.LIVE, n_pending_tasks=1)
-        )
-        assert "early_stopping_percentile" not in _series(d, "ttft_ns")
 
-    def test_interrupted_snapshot_has_no_estimate(self):
-        # SIGTERM path publishes a terminal INTERRUPTED snapshot via the non-exact
-        # (HDR) path — it must not carry a partial ES map.
-        reg = _registry_with_data(EarlyStoppingSpec())
-        d = snapshot_to_dict(
-            reg.build_snapshot(state=SessionState.INTERRUPTED, n_pending_tasks=0)
+def test_every_tail_latency_series_and_dtype_gets_the_map():
+    # The tail_latency registration flag is the only thing that attaches ES; all
+    # three real series (incl. the float-dtype tpot_ns path) must carry the map.
+    for dtype in (int, float):
+        reg = _registry(
+            EarlyStoppingSpec(),
+            series=("ttft_ns", "tpot_ns", "sample_latency_ns"),
+            n=100,
+            dtype=dtype,
         )
-        assert "early_stopping_percentile" not in _series(d, "ttft_ns")
+        for name in ("ttft_ns", "tpot_ns", "sample_latency_ns"):
+            assert (
+                list(_series(_snap(reg), name)["early_stopping_percentiles"])
+                == _GRID_ES_KEYS
+            )
 
-    def test_empty_target_series_still_reports_estimates(self):
-        # A series that recorded nothing (e.g. all requests failed) must still
-        # self-describe as insufficient — not silently look feature-off.
-        reg = MetricsRegistry(early_stopping=EarlyStoppingSpec())
-        reg.register_series(
-            "ttft_ns", hdr_low=1, hdr_high=10_000_000_000, tail_latency=True
-        )
-        d = snapshot_to_dict(
-            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
-        )
-        esp = _series(d, "ttft_ns")["early_stopping_percentile"]
-        assert list(esp) == _GRID_ES_KEYS
-        assert all(v is None for v in esp.values())
 
-    def test_all_target_series_get_estimates(self):
-        # tpot_ns is the only float-dtype tail-latency series; latency and ttft
-        # are int — all three must carry the map on COMPLETE.
-        reg = MetricsRegistry(early_stopping=EarlyStoppingSpec())
-        reg.register_series(
-            "ttft_ns", hdr_low=1, hdr_high=10_000_000_000, tail_latency=True
-        )
-        reg.register_series(
-            "sample_latency_ns", hdr_low=1, hdr_high=10_000_000_000, tail_latency=True
-        )
-        reg.register_series(
-            "tpot_ns",
-            hdr_low=1,
-            hdr_high=10_000_000_000,
-            dtype=float,
-            tail_latency=True,
-        )
-        rng = random.Random(1)
-        for _ in range(1000):
-            reg.record("ttft_ns", rng.randint(1_000_000, 2_000_000))
-            reg.record("sample_latency_ns", rng.randint(5_000_000, 9_000_000))
-            reg.record("tpot_ns", rng.uniform(50_000.0, 90_000.0))
-        d = snapshot_to_dict(
-            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
-        )
-        for name in ("ttft_ns", "sample_latency_ns", "tpot_ns"):
-            esp = _series(d, name)["early_stopping_percentile"]
-            assert isinstance(esp, dict)
-            assert list(esp) == _GRID_ES_KEYS
+def test_empty_series_reports_all_null():
+    # A tail series that recorded nothing (e.g. every request failed) must still
+    # self-describe as insufficient — silence would look like feature-off.
+    esp = _series(_snap(_registry(EarlyStoppingSpec(), n=0)), "ttft_ns")[
+        "early_stopping_percentiles"
+    ]
+    assert list(esp) == _GRID_ES_KEYS
+    assert all(v is None for v in esp.values())
 
-    def test_repeated_complete_snapshots_are_identical(self):
-        # The exact path sorts the raw array in place (terminal path; avoids a
-        # full transient copy for ES) — a second COMPLETE snapshot must still
-        # produce byte-identical stats.
-        reg = _registry_with_data(EarlyStoppingSpec())
-        d1 = snapshot_to_dict(
-            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
-        )
-        d2 = snapshot_to_dict(
-            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
-        )
-        assert _series(d1, "ttft_ns") == _series(d2, "ttft_ns")
+
+def test_repeated_complete_snapshots_are_identical():
+    # The exact path sorts the raw array IN PLACE (avoids a full transient copy);
+    # a second COMPLETE snapshot must be byte-identical or the mutation leaked.
+    reg = _registry(EarlyStoppingSpec())
+    assert _series(_snap(reg), "ttft_ns") == _series(_snap(reg), "ttft_ns")

@@ -73,7 +73,7 @@ def grid_percentile_key(p: float) -> str:
     """Report-grid-style key for a fraction percentile: 0.5 -> "50.0", 0.999 -> "99.9".
 
     Matches ``str()`` of the grid's 0-100 floats so the compact
-    ``early_stopping_percentile`` map overlays the ``percentiles`` grid keys 1:1.
+    ``early_stopping_percentiles`` map overlays the ``percentiles`` grid keys 1:1.
     ``round`` absorbs float-division artifacts (0.97 * 100 != 97.0 exactly).
     """
     return str(round(p * 100.0, 4))

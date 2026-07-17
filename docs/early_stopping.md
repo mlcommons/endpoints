@@ -52,7 +52,7 @@ config/schema.py            EarlyStoppingConfig (Pydantic, enabled=False)  <- th
     -> metrics_aggregator/__main__.py   parses args -> EarlyStoppingSpec -> MetricsRegistry
       -> metrics_aggregator/registry.py   SeriesSampler.build_stat(exact=True) computes the estimate
                                           (COMPLETE path only; the raw sorted array lives here)
-        -> metrics_aggregator/snapshot.py   SeriesStat.early_stopping_percentile (trailing field)
+        -> metrics_aggregator/snapshot.py   SeriesStat.early_stopping_percentiles (trailing field)
           -> metrics/report.py   surfaces the block into result_summary.json + the text report
 metrics/early_stopping.py   pure math (find_min_passing / es_percentile_estimate) — no I/O, unit-tested
 ```
@@ -81,13 +81,13 @@ way to accidentally weaken the statistical claim.
 
 ## Output (`result_summary.json`)
 
-Each of `ttft`/`tpot`/`latency` gains an `early_stopping_percentile` map (present unless opted out) — keys mirror the `percentiles` grid, values are the conservative estimate or `null`
+Each of `ttft`/`tpot`/`latency` gains an `early_stopping_percentiles` map (present unless opted out) — keys mirror the `percentiles` grid, values are the conservative estimate or `null`
 when the run has too few samples to certify that percentile:
 
 ```json
 "tpot": {
   "percentiles": { "99.0": 71908203.4, "99.9": 72592022.9, ... },
-  "early_stopping_percentile": { "50.0": 68903121.0, ..., "99.0": 71943332.4, "99.9": null }
+  "early_stopping_percentiles": { "50.0": 68903121.0, ..., "99.0": 71943332.4, "99.9": null }
 }
 ```
 

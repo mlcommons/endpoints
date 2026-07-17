@@ -271,7 +271,7 @@ class SeriesSampler(MetricSampler):
             # histogram as "no data yet". Early stopping still self-describes
             # (n=0, sufficient=false) — an empty target series must not look
             # like the feature was disabled.
-            early_stopping_percentile = self._es_estimates(()) if exact else None
+            early_stopping_percentiles = self._es_estimates(()) if exact else None
             return SeriesStat(
                 name=self.name,
                 count=0,
@@ -281,7 +281,7 @@ class SeriesSampler(MetricSampler):
                 sum_sq=self._dtype(),
                 percentiles={str(p): 0.0 for p in self._percentiles},
                 histogram=[],
-                early_stopping_percentile=early_stopping_percentile,
+                early_stopping_percentiles=early_stopping_percentiles,
             )
 
         if exact:
@@ -368,7 +368,7 @@ class SeriesSampler(MetricSampler):
         # Early-stopping estimates (COMPLETE path only): conservative confidence-backed
         # bound per configured percentile, all off one sorted raw array. Cold path —
         # the sort is one-time at run end and each estimate is a few beta evaluations.
-        early_stopping_percentile = self._es_estimates(arr)
+        early_stopping_percentiles = self._es_estimates(arr)
 
         return SeriesStat(
             name=self.name,
@@ -379,7 +379,7 @@ class SeriesSampler(MetricSampler):
             sum_sq=float(self._sum_sq),
             percentiles=perc_dict,
             histogram=histogram,
-            early_stopping_percentile=early_stopping_percentile,
+            early_stopping_percentiles=early_stopping_percentiles,
         )
 
 

@@ -124,7 +124,7 @@ class SeriesStat(
     # ``percentiles``; None value = insufficient samples for that percentile.
     # Optional trailing field so the array_like wire format stays
     # backward-compatible. None field = not computed.
-    early_stopping_percentile: dict[str, float | None] | None = None
+    early_stopping_percentiles: dict[str, float | None] | None = None
 
 
 # Tagged union: msgspec dispatches on the ``tag`` literal at decode time.
@@ -252,11 +252,11 @@ def _metric_to_dict(m: MetricStat) -> dict:
             for rng, c in m.histogram
         ],
     }
-    if m.early_stopping_percentile is not None:
+    if m.early_stopping_percentiles is not None:
         # estimates come from the raw value array — scrub like every other
         # numeric field so json.dumps(..., allow_nan=False) cannot raise.
-        series["early_stopping_percentile"] = {
-            k: _scrub_nonfinite(v) for k, v in m.early_stopping_percentile.items()
+        series["early_stopping_percentiles"] = {
+            k: _scrub_nonfinite(v) for k, v in m.early_stopping_percentiles.items()
         }
     return series
 

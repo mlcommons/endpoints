@@ -1,7 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for scripts/early_stopping_estimate_from_events.py — post-hoc ES from events.jsonl."""
+"""Tests for scripts/early_stopping_estimate_from_events.py.
+
+The script is a thin composition of product pieces (typed EventRecord decode,
+TextModelOutput chunk semantics — covered in tests/unit/test_core_types.py — and the
+ES math — covered in tests/unit/metrics/test_early_stopping.py). These tests pin only
+what the script itself owns: aggregator-parity event gating, robustness to imperfect
+historical logs, the product-mapping drift guard, and the CLI contract.
+"""
 
 import importlib.util
 import json
@@ -32,227 +39,148 @@ def _ev(event_type, ts, uuid="", data=None):
             "event_type": event_type,
             "timestamp_ns": ts,
             "sample_uuid": uuid,
-            "conversation_id": "",
-            "turn": None,
             "data": data,
         }
     )
 
 
-def _tmo(output=None, reasoning=None, tool_calls=None):
+def _tmo(output=None, tool_calls=None):
     # wire form of TextModelOutput (tagged, array_like) as the JSONL writer emits it
-    return ["TextModelOutput", output, reasoning, tool_calls]
+    return ["TextModelOutput", output, None, tool_calls]
 
 
 def _ws_counts(texts):  # deterministic stand-in tokenizer: whitespace tokens
     return [len(t.split()) for t in texts]
 
 
-class TestExtractTpotText:
-    # operates on the DECODED EventRecord.data — a product TextModelOutput —
-    # so all chunk semantics come from types.py, not a re-implementation.
-    def test_streamed_output_drops_first_chunk(self):
-        assert (
-            mod.extract_tpot_text(TextModelOutput(output=("a", "b c", "d"))) == "b cd"
-        )
-
-    def test_single_chunk_output_skips(self):
-        assert not mod.extract_tpot_text(TextModelOutput(output=("only",)))
-
-    def test_nonstreaming_str_output_skips(self):
-        assert not mod.extract_tpot_text(TextModelOutput(output="full text"))
-
-    def test_reasoning_first_chunk_absorbs(self):
-        # first chunk lives in reasoning -> reasoning[1:] plus ALL output chunks
-        assert (
-            mod.extract_tpot_text(
-                TextModelOutput(output=("o1", "o2"), reasoning=("r1", "r2"))
-            )
-            == "r2o1o2"
-        )
-
-    def test_tool_call_samples_return_none(self):
-        # chat-template tokenization is not replicated -> skip, don't guess
-        assert (
-            mod.extract_tpot_text(
-                TextModelOutput(output=("a", "b"), tool_calls=(("tc",),))
-            )
-            is None
-        )
-
-    def test_non_output_data_returns_none(self):
-        assert mod.extract_tpot_text(None) is None
-        assert mod.extract_tpot_text("not a model output") is None
+def _write(tmp_path, lines):
+    p = tmp_path / "events.jsonl"
+    p.write_text("\n".join(lines) + "\n")
+    return p
 
 
-class TestComputeSeries:
-    def _fixture(self, tmp_path):
-        # "w" issued BEFORE tracking starts -> excluded entirely. "a", "b"
-        # tracked; "b" completes after stop (still counted: its row exists).
-        # "c" has no recv_first -> latency only, no ttft/tpot.
-        lines = [
-            _ev("session.started", 0),
-            _ev("sample.issued", 5, "w", ["PromptData", None, [1]]),
-            _ev("session.start_performance_tracking", 10),
-            _ev("sample.issued", 100, "a"),
-            _ev("sample.issued", 200, "b"),
-            _ev("sample.issued", 300, "c"),
-            _ev("sample.recv_first", 150, "a"),
-            _ev("sample.recv_first", 260, "b"),
-            _ev("sample.recv_first", 50, "w"),
-            _ev("sample.complete", 400, "a", _tmo(["x", "one two", "three"])),
-            _ev("sample.complete", 500, "w", _tmo(["x", "y"])),
-            _ev("session.stop_performance_tracking", 550),
-            _ev("sample.complete", 600, "b", _tmo(["only-chunk"])),
-            _ev("sample.complete", 700, "c", _tmo("nonstream full")),
-            _ev("session.ended", 800),
-        ]
-        p = tmp_path / "events.jsonl"
-        p.write_text("\n".join(lines) + "\n")
-        return p
-
-    def test_gating_and_deltas(self, tmp_path):
-        s = mod.compute_series(self._fixture(tmp_path), count_tokens=_ws_counts)
-        # ttft: a=150-100, b=260-200; w excluded (untracked), c has none
-        assert sorted(s["ttft_ns"]) == [50, 60]
-        # latency: a=400-100, b=600-200, c=700-300; w excluded
-        assert sorted(s["sample_latency_ns"]) == [300, 400, 400]
-        # tpot: only "a" — rest = "one two"+"three" -> 2 ws tokens; (400-150)/2
-        assert s["tpot_ns"] == [(400 - 150) / 2]
-
-    def test_no_tokenizer_skips_tpot(self, tmp_path):
-        s = mod.compute_series(self._fixture(tmp_path), count_tokens=None)
-        assert s["tpot_ns"] == []
-        assert len(s["sample_latency_ns"]) == 3
-
-
-class TestEsBlocks:
-    def test_blocks_use_product_math_and_shape(self):
-        # product reference values: n=10000, p99 -> discarded 77, floor 662
-        arr = [float(i) for i in range(10000)]
-        blocks = mod.es_blocks(arr, [0.5, 0.99], 0.99)
-        by_p = {b["percentile"]: b for b in blocks}
-        assert by_p[0.99]["discarded"] == 77
-        assert by_p[0.99]["min_queries"] == 662
-        assert by_p[0.99]["estimate"] == arr[10000 - 77]
-        assert by_p[0.5]["min_queries"] == 11
-        for b in blocks:
-            assert "tolerance" not in b
-            assert b["estimate"] >= b["empirical"]
+def test_extract_tpot_text_gates_on_decoded_type():
+    # The script owns only the gate; chunk semantics are the product's
+    # text_after_first_chunk (tested with TextModelOutput itself).
+    assert mod.extract_tpot_text(TextModelOutput(output=("a", "b c"))) == "b c"
+    assert (
+        mod.extract_tpot_text(TextModelOutput(output=("a",), tool_calls=(("t",),)))
+        is None
+    )
+    assert mod.extract_tpot_text(None) is None
+    assert mod.extract_tpot_text("not a model output") is None
 
 
 def test_metric_mapping_comes_from_product():
-    # The series -> result_summary.json field mapping must be the product's own
-    # (report.py builds the summary from it) — not a copy that can drift.
+    # The series -> summary-field mapping must be report.py's own object (it
+    # builds result_summary.json from it) — a copy would drift.
     from inference_endpoint.metrics.report import SERIES_TO_SUMMARY_FIELD
 
     assert mod.SERIES_TO_SUMMARY_FIELD is SERIES_TO_SUMMARY_FIELD
     assert set(mod._UNITS) == set(SERIES_TO_SUMMARY_FIELD.values())
 
 
-class TestMalformedInput:
-    def _events_with_junk(self, tmp_path):
-        lines = [
-            _ev("session.start_performance_tracking", 10),
-            "this is not json {",
-            "123",  # valid JSON, not an event record
-            '"just a string"',
-            _ev("sample.issued", 100, "a"),
-            json.dumps({"event_type": "sample.issued", "timestamp_ns": 150}),  # no uuid
-            _ev("sample.recv_first", 150, "a"),
-            _ev("sample.complete", 400, "a", _tmo(["x", "one two"])),
-            _ev("session.stop_performance_tracking", 500),
-        ]
-        p = tmp_path / "events.jsonl"
-        p.write_text("\n".join(lines) + "\n")
-        return p
-
-    def test_junk_lines_counted_not_crashed(self, tmp_path, capsys):
-        s = mod.compute_series(
-            self._events_with_junk(tmp_path), count_tokens=_ws_counts
-        )
-        assert s["ttft_ns"] == [50]
-        assert s["sample_latency_ns"] == [300]
-        err = capsys.readouterr().err
-        assert "malformed" in err and "4" in err  # 3 junk lines + 1 missing-uuid event
-
-    def test_tool_call_samples_warned(self, tmp_path, capsys):
-        lines = [
+def test_tracking_window_gating_and_metric_deltas(tmp_path):
+    # Aggregator parity for the happy path: only samples ISSUED inside the
+    # tracking window count; completions after stop still count for open rows;
+    # ttft/latency/tpot use the aggregator's exact formulas.
+    events = _write(
+        tmp_path,
+        [
+            _ev("sample.issued", 5, "w"),  # BEFORE tracking -> excluded entirely
             _ev("session.start_performance_tracking", 10),
             _ev("sample.issued", 100, "a"),
+            _ev("sample.issued", 300, "c"),
             _ev("sample.recv_first", 150, "a"),
-            _ev("sample.complete", 400, "a", _tmo(["x", "y"], None, [["tc"]])),
-            _ev("session.stop_performance_tracking", 500),
-        ]
-        p = tmp_path / "events.jsonl"
-        p.write_text("\n".join(lines) + "\n")
-        s = mod.compute_series(p, count_tokens=_ws_counts)
-        assert s["tpot_ns"] == []  # skipped, not guessed
-        assert "tool-call" in capsys.readouterr().err
+            _ev("sample.recv_first", 50, "w"),
+            _ev("sample.complete", 400, "a", _tmo(["x", "one two", "three"])),
+            _ev("sample.complete", 500, "w", _tmo(["x", "y"])),
+            _ev("session.stop_performance_tracking", 550),
+            _ev("sample.complete", 700, "c", _tmo("nonstream full")),  # no recv_first
+        ],
+    )
+    s = mod.compute_series(events, count_tokens=_ws_counts)
+    assert s["ttft_ns"] == [50]  # a only; w untracked, c never streamed
+    assert sorted(s["sample_latency_ns"]) == [300, 400]  # a and c
+    assert s["tpot_ns"] == [(400 - 150) / 2]  # "one twothree" -> 2 ws tokens
+    # without a tokenizer the tool degrades to ttft/latency only
+    assert mod.compute_series(events, count_tokens=None)["tpot_ns"] == []
 
-    def test_duplicate_issued_mirrors_aggregator(self, tmp_path):
-        # aggregator keeps the row on duplicate ISSUED (recv_first preserved) and
-        # refreshes only the issue timestamp — the script must match, or --compare
-        # reports spurious mismatches on runs with retries.
-        lines = [
+
+def test_imperfect_log_robustness(tmp_path, capsys):
+    # Historical logs are the input domain: corrupt lines and retries must be
+    # counted/warned — never crash, never silently change the series.
+    events = _write(
+        tmp_path,
+        [
             _ev("session.start_performance_tracking", 10),
+            "this is not json {",  # malformed 1
+            "123",  # valid JSON, not an event record -> malformed 2
             _ev("sample.issued", 100, "a"),
+            json.dumps(
+                {"event_type": "sample.issued", "timestamp_ns": 1}
+            ),  # no uuid -> 3
             _ev("sample.recv_first", 150, "a"),
-            _ev("sample.issued", 200, "a"),  # retry between recv_first and complete
-            _ev("sample.complete", 400, "a", _tmo(["x", "one two"])),
-            _ev("session.stop_performance_tracking", 500),
-        ]
-        p = tmp_path / "events.jsonl"
-        p.write_text("\n".join(lines) + "\n")
-        s = mod.compute_series(p, count_tokens=_ws_counts)
-        assert s["ttft_ns"] == [50]  # from the first issue
-        assert s["sample_latency_ns"] == [200]  # complete - refreshed issue ts
-        assert s["tpot_ns"] == [(400 - 150) / 2]  # recv_first survived the retry
+            _ev(
+                "sample.issued", 200, "a"
+            ),  # retry: keep row (recv_first!), refresh issue ts
+            _ev("sample.issued", 300, "b"),
+            _ev("sample.recv_first", 360, "b"),
+            _ev("sample.complete", 400, "b", _tmo(["x", "y"], tool_calls=[["tc"]])),
+            _ev("sample.complete", 600, "a", _tmo(["x", "one two"])),
+            _ev("session.stop_performance_tracking", 700),
+        ],
+    )
+    s = mod.compute_series(events, count_tokens=_ws_counts)
+    assert sorted(s["ttft_ns"]) == [50, 60]
+    # a: complete - REFRESHED issue ts (aggregator duplicate-ISSUED parity)
+    assert sorted(s["sample_latency_ns"]) == [100, 400]
+    # a's tpot survives the retry (recv_first kept); b's is skipped (tool call)
+    assert s["tpot_ns"] == [(600 - 150) / 2]
+    err = capsys.readouterr().err
+    assert "3" in err and "malformed" in err
+    assert "tool-call" in err
 
 
-class TestCrossCheckAndMain:
-    def _summary(self, esp):
+def test_cross_check_against_inband_map(capsys):
+    # --compare must flag real divergence from a run's in-band map, and skip
+    # unexpected shapes (pre-release artifacts) instead of crashing.
+    values = [float(i) for i in range(1000)]
+    blocks = mod.es_blocks(values, [0.99], 0.99)
+    ours = {"99.0": blocks[0]["estimate"]}
+
+    def summary(esp):
         return {
-            "n_samples_completed": 2,
-            "ttft": {"early_stopping_percentile": esp},
-            "tpot": {},
-            "latency": {},
+            "n_samples_completed": 1000,
+            "ttft": {"early_stopping_percentiles": esp},
         }
 
-    def test_cross_check_exact_match_and_mismatch(self, capsys):
-        values = [1.0, 2.0]
-        blocks = mod.es_blocks(values, [0.99], 0.99)
-        inband = {"99.0": blocks[0]["estimate"]}  # matches ours (both None here)
-        mod._cross_check(self._summary(inband), "ttft_ns", values, blocks)
-        assert "EXACT MATCH" in capsys.readouterr().out
-        mod._cross_check(self._summary({"99.0": 123.0}), "ttft_ns", values, blocks)
-        assert "MISMATCH" in capsys.readouterr().out
+    mod._cross_check(summary(ours), "ttft_ns", values, blocks)
+    assert "EXACT MATCH" in capsys.readouterr().out
+    mod._cross_check(summary({"99.0": -1.0}), "ttft_ns", values, blocks)
+    assert "MISMATCH" in capsys.readouterr().out
+    mod._cross_check(summary([{"legacy": "shape"}]), "ttft_ns", values, blocks)
+    assert "MATCH" not in capsys.readouterr().out
 
-    def test_cross_check_skips_non_dict_inband(self, capsys):
-        # unexpected in-band shapes (e.g. pre-release artifacts) are skipped, not fatal
-        values = [1.0, 2.0]
-        blocks = mod.es_blocks(values, [0.99], 0.99)
-        mod._cross_check(
-            self._summary([{"percentile": 0.99}]), "ttft_ns", values, blocks
-        )
-        assert "MATCH" not in capsys.readouterr().out
 
-    def test_main_writes_json_and_validates_args(self, tmp_path, capsys):
-        lines = [
+def test_main_cli_contract(tmp_path, capsys):
+    # --json writes the blocks keyed by summary field; invalid percentile/
+    # confidence must exit up front (they would hang or corrupt the math).
+    events = _write(
+        tmp_path,
+        [
             _ev("session.start_performance_tracking", 10),
             _ev("sample.issued", 100, "a"),
             _ev("sample.recv_first", 150, "a"),
             _ev("sample.complete", 400, "a", _tmo(["x", "one two"])),
             _ev("session.stop_performance_tracking", 500),
-        ]
-        events = tmp_path / "events.jsonl"
-        events.write_text("\n".join(lines) + "\n")
-        out = tmp_path / "blocks.json"
-        result = mod.main([str(events), "--json", str(out)])
-        assert out.exists()
-        assert "ttft" in result and "latency" in result
-        capsys.readouterr()  # drain
-        with pytest.raises(SystemExit):
-            mod.main([str(events), "--percentiles", "1.0"])
-        with pytest.raises(SystemExit):
-            mod.main([str(events), "--confidence", "1.0"])
+        ],
+    )
+    out = tmp_path / "blocks.json"
+    result = mod.main([str(events), "--json", str(out)])
+    assert out.exists() and "ttft" in result and "latency" in result
+    capsys.readouterr()  # drain
+    with pytest.raises(SystemExit):
+        mod.main([str(events), "--percentiles", "1.0"])
+    with pytest.raises(SystemExit):
+        mod.main([str(events), "--confidence", "1.0"])

@@ -113,9 +113,9 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
     }
     # Early-stopping estimate map — present only when the feature is enabled
     # (COMPLETE snapshots for TTFT/TPOT/latency).
-    early_stopping_percentile = stat.get("early_stopping_percentile")
-    if early_stopping_percentile is not None:
-        metric["early_stopping_percentile"] = early_stopping_percentile
+    early_stopping_percentiles = stat.get("early_stopping_percentiles")
+    if early_stopping_percentiles is not None:
+        metric["early_stopping_percentiles"] = early_stopping_percentiles
     return metric
 
 
@@ -518,7 +518,7 @@ def _display_metric(
     for p, val in metric_dict.get("percentiles", {}).items():
         fn(f"  {p:>6}: {_scaled(val)} {unit}{newline}")
 
-    es_map = metric_dict.get("early_stopping_percentile")
+    es_map = metric_dict.get("early_stopping_percentiles")
     if es_map:
         fn(
             f"\n  Early-stopping percentile estimates (N/A = insufficient samples):{newline}"

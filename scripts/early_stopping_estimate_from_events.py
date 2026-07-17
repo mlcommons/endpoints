@@ -216,7 +216,7 @@ def _cross_check(summary: dict, series_name: str, values: list, blocks: list) ->
         print(
             f"  XCHECK count: ours={len(values)} n_samples_completed={completed}{note}"
         )
-    inband = md.get("early_stopping_percentile")
+    inband = md.get("early_stopping_percentiles")
     if not isinstance(inband, dict) or not inband:
         # absent, or an unexpected shape (pre-release artifact) — nothing to compare
         return
