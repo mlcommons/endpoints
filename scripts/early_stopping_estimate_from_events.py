@@ -161,6 +161,9 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
                         rows[uuid] = [ts, None]
                 elif et is SampleEventType.RECV_FIRST:
                     row = rows.get(uuid)
+                    # no row -> the sample was issued outside the tracking window
+                    # (e.g. warmup); its events are expected and skipped, same as
+                    # the aggregator — not malformed input.
                     if row is not None:
                         # aggregator parity: every RECV_FIRST re-fires the ttft
                         # trigger and refreshes the TPOT window start (retried
@@ -259,7 +262,12 @@ def main(argv=None):
         ),
         help="stdout-analysis override (fractions); --json always uses the summary grid",
     )
-    ap.add_argument("--confidence", type=float, default=CONFIDENCE)
+    ap.add_argument(
+        "--confidence",
+        type=float,
+        default=CONFIDENCE,
+        help="stdout-analysis override for the confidence level (default: the LoadGen constant 0.99)",
+    )
     args = ap.parse_args(argv)
 
     if args.json_out and not args.summary:
@@ -290,7 +298,15 @@ def main(argv=None):
         if not values:
             continue
         values.sort()
-        field = SERIES_TO_SUMMARY_FIELD[name]
+        field = SERIES_TO_SUMMARY_FIELD.get(name)
+        if field is None:
+            # a series compute_series learns about before the mapping does —
+            # skip loudly rather than crash an analysis run
+            print(
+                f"WARN: no summary field mapping for series {name!r}; skipped",
+                file=sys.stderr,
+            )
+            continue
         metric = (summary or {}).get(field) or {}
         grid = metric.get("percentiles") or {}
         if grid:

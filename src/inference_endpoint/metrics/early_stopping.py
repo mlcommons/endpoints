@@ -19,7 +19,7 @@ equals LoadGen's Gauss-hypergeometric ``beta_regularized`` but converges in tens
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -49,7 +49,7 @@ TOLERANCE: Final[float] = 0.0
 ES_MIN_PERCENTILE: Final[float] = 0.5
 
 
-def es_targets_from_grid(grid_percentiles) -> dict[str, float]:
+def es_targets_from_grid(grid_percentiles: Iterable[float | str]) -> dict[str, float]:
     """{report-grid key: fraction} for every grid entry in the ES domain.
 
     Keys are ``str()`` of the ORIGINAL grid entries and the map preserves the
@@ -64,8 +64,13 @@ def es_targets_from_grid(grid_percentiles) -> dict[str, float]:
     """
     targets: dict[str, float] = {}
     for p in grid_percentiles:
+        # 6 fraction decimals == grid_percentile_key's 4 percent decimals — same
+        # precision, different spaces.
         fraction = round(float(p) / 100.0, 6)
         if ES_MIN_PERCENTILE <= fraction < 1.0:
+            # str(p) of the ORIGINAL entry, deliberately NOT grid_percentile_key:
+            # reconstructing the key from the fraction would render float-style
+            # ("99.0") and break the 1:1 overlay for int grids keyed as "99".
             targets[str(p)] = fraction
     return targets
 
