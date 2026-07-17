@@ -231,7 +231,7 @@ def test_main_cli_contract(tmp_path, capsys):
     with pytest.raises(SystemExit):
         mod.main([str(events), "--json", str(tmp_path / "o.json")])
     with pytest.raises(SystemExit):
-        mod.main([str(events), "--percentiles", "1.0"])
+        mod.main([str(events), "--percentiles", "150"])  # grid convention: (0, 100)
     with pytest.raises(SystemExit):
         mod.main([str(events), "--confidence", "1.0"])
     capsys.readouterr()  # drain

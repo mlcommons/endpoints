@@ -17,7 +17,6 @@ from inference_endpoint.metrics.early_stopping import (
     es_percentile_estimate,
     es_targets_from_grid,
     find_min_passing,
-    grid_percentile_key,
 )
 
 pytestmark = pytest.mark.unit
@@ -41,7 +40,7 @@ def test_constants_and_spec_defaults():
     # default to grid derivation (percentiles=None), not a private list.
     assert CONFIDENCE == 0.99
     assert TOLERANCE == 0.0
-    assert ES_MIN_PERCENTILE == 0.5
+    assert ES_MIN_PERCENTILE == 50.0  # grid convention (0-100)
     spec = EarlyStoppingSpec()
     assert spec.percentiles is None and spec.confidence == CONFIDENCE
     assert not hasattr(spec, "tolerance")
@@ -49,13 +48,13 @@ def test_constants_and_spec_defaults():
 
 def test_grid_derivation_and_key_format():
     # The ES targets and map keys must overlay the report's percentile grid 1:1
-    # (keys are str() of the ORIGINAL grid values — int grids key as "99"), and
-    # out-of-domain entries must be excluded: a grid containing 100.0 would
-    # otherwise crash the terminal snapshot (default-on!), below-median entries
-    # are not tail certifications.
+    # (keys are str() of the ORIGINAL grid values — int grids key as "99"), in
+    # the grid's own order, with values staying in the grid convention (0-100,
+    # no conversion or rounding). Out-of-domain entries are excluded: 100.0
+    # would crash the terminal snapshot (default-on!), below-median entries are
+    # not tail certifications.
     grid = (100.0, 99.9, 99.0, 97.0, 95.0, 90.0, 80.0, 75.0, 50.0, 25.0, 1.0)
     targets = es_targets_from_grid(grid)
-    # grid ORDER preserved (descending in the default grid), 100.0/below-median excluded
     assert list(targets) == [
         "99.9",
         "99.0",
@@ -66,27 +65,16 @@ def test_grid_derivation_and_key_format():
         "75.0",
         "50.0",
     ]
-    assert (
-        targets["99.9"] == 0.999 and targets["97.0"] == 0.97
-    )  # float artifacts absorbed
-    assert list(es_targets_from_grid((99, 90, 50))) == [
-        "99",
-        "90",
-        "50",
-    ]  # int keys kept
-    assert list(es_targets_from_grid(("99.0", "50.0"))) == [
-        "99.0",
-        "50.0",
-    ]  # str keys kept
-    # explicit-spec overrides still key float-style via grid_percentile_key
-    assert grid_percentile_key(0.999) == "99.9"
+    assert targets["99.9"] == 99.9 and targets["50.0"] == 50.0  # values as given
+    assert list(es_targets_from_grid((99, 90, 50))) == ["99", "90", "50"]
+    assert list(es_targets_from_grid(("99.0", "50.0"))) == ["99.0", "50.0"]
 
 
 def test_estimate_reference_values_and_conservatism():
     # Anchors the end-to-end estimate on a known input: discard count, floor, and
     # the invariant that the estimate never under-reports the empirical value.
     arr = [float(i) for i in range(10000)]
-    r = es_percentile_estimate(arr, 0.99)
+    r = es_percentile_estimate(arr, 99.0)
     # t=77: the estimate is the 77th-highest sample; 76 samples sit above it
     assert (r.discarded, r.min_queries) == (76, 662)
     assert r.estimate == arr[10000 - 77]
@@ -98,12 +86,12 @@ def test_sufficiency_floor_boundary():
     # empirical value must still be reported, and n=0 must not crash. Just above
     # the floor the budget is t=1: nothing is discarded and the estimate IS the
     # maximum observed sample.
-    below = es_percentile_estimate([float(i) for i in range(600)], 0.99)  # < 662
+    below = es_percentile_estimate([float(i) for i in range(600)], 99.0)  # < 662
     assert below.estimate is None and below.empirical is not None
     arr = [float(i) for i in range(663)]
-    at_floor = es_percentile_estimate(arr, 0.99)
+    at_floor = es_percentile_estimate(arr, 99.0)
     assert at_floor.estimate == arr[-1] and at_floor.discarded == 0
-    empty = es_percentile_estimate([], 0.99)
+    empty = es_percentile_estimate([], 99.0)
     assert empty.estimate is None and empty.empirical is None and empty.n == 0
 
 
@@ -124,19 +112,23 @@ def test_empirical_matches_report_grid_convention():
     # method="lower": floor(p*(n-1))) or the block can contradict the grid value
     # in the same summary. n=50/p99 discriminates: floor=48 vs ceil(p*n)-1=49.
     arr = [float(i) for i in range(50)]
-    assert es_percentile_estimate(arr, 0.99).empirical == arr[48]
+    assert es_percentile_estimate(arr, 99.0).empirical == arr[48]
 
 
 def test_invalid_domain_raises():
     # p >= 1 makes the doubling search non-terminating (a real hang, reproduced
     # in review); c >= 1 only exits via float underflow with a garbage result.
     for bad_call in (
+        # kernel (fraction domain, loadgen parity)
         lambda: find_min_passing(1, 1.0),
         lambda: find_min_passing(1, 0.0),
         lambda: find_min_passing(1, 0.99, c=1.0),
         lambda: find_min_passing(1, 0.99, d=0.99),  # tolerance must stay below p
-        lambda: es_percentile_estimate([1.0, 2.0], 1.5),
-        lambda: es_percentile_estimate([1.0, 2.0], 0.99, confidence=0.0),
+        # product surface (grid convention, 0-100)
+        lambda: es_percentile_estimate([1.0, 2.0], 150.0),
+        lambda: es_percentile_estimate([1.0, 2.0], 100.0),
+        lambda: es_percentile_estimate([1.0, 2.0], 0.0),
+        lambda: es_percentile_estimate([1.0, 2.0], 99.0, confidence=0.0),
     ):
         with pytest.raises(ValueError):
             bad_call()
@@ -145,7 +137,7 @@ def test_invalid_domain_raises():
 def test_result_dict_shape():
     # The block dict is the post-hoc script's --json contract; tolerance is an
     # algorithm constant and must not be reported as if it were configuration.
-    d = es_percentile_estimate([float(i) for i in range(10000)], 0.99).as_dict()
+    d = es_percentile_estimate([float(i) for i in range(10000)], 99.0).as_dict()
     assert d["sufficient"] is True
     assert set(d) == {
         "percentile",
