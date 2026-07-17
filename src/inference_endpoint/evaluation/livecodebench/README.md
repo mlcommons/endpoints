@@ -182,14 +182,14 @@ consumer can **pull and run it with no `HF_TOKEN` and no rebuild**.
 Two scripts in this directory wrap the docker build/tag/push/pull steps. Both resolve the image reference from environment variables
 (shared via `_image_env.sh`):
 
-| Variable             | Required | Default              | Meaning                                                                     |
-| -------------------- | -------- | -------------------- | --------------------------------------------------------------------------- |
-| `LCB_IMAGE_REGISTRY` | yes      | —                    | registry + namespace, e.g. `myregistry.com/team`                            |
-| `LCB_IMAGE_NAME`     | no       | `lcb-service`        | image repo name                                                             |
-| `LCB_IMAGE_TAG`      | no       | `release_v6`         | tag; defaults to the baked-in dataset version so the tag is self-describing |
-| `LCB_LOCAL_TAG`      | no       | `lcb-service:latest` | local tag the run command / scorer expect                                   |
+| Variable             | Required             | Default              | Meaning                                                                                                                     |
+| -------------------- | -------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `LCB_IMAGE_REGISTRY` | yes                  | —                    | registry + namespace, e.g. `myregistry.com/team`                                                                            |
+| `LCB_IMAGE_NAME`     | no                   | `lcb-service`        | image repo name                                                                                                             |
+| `LCB_IMAGE_TAG`      | push: no · pull: yes | endpoints short SHA  | image tag; `push_image.sh` defaults it to the endpoints commit SHA (one immutable tag per build). Pull must name the build. |
+| `LCB_LOCAL_TAG`      | no                   | `lcb-service:latest` | local tag the run command / scorer expect                                                                                   |
 
-The resolved remote reference is `${LCB_IMAGE_REGISTRY}/${LCB_IMAGE_NAME}:${LCB_IMAGE_TAG}`.
+The resolved remote reference is `${LCB_IMAGE_REGISTRY}/${LCB_IMAGE_NAME}:${LCB_IMAGE_TAG}`. `push_image.sh` sets `LCB_IMAGE_TAG` to the endpoints commit short SHA by default, so each build publishes an immutable `…/lcb-service:<sha>` — there is no moving `latest`/`release_v6` tag. The same SHA is also baked into the image as the `org.opencontainers.image.revision` label.
 
 #### Push (maintainer)
 
@@ -200,8 +200,14 @@ Requires `docker login dhi.io` (base images) and `docker login` to your target r
 LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<your HuggingFace Token> \
   ./push_image.sh
 
-# Or push an already-built local image without rebuilding:
-LCB_IMAGE_REGISTRY=myregistry.com/team ./push_image.sh --no-build
+# Or push an already-built local image without rebuilding (name the build explicitly):
+LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./push_image.sh --no-build
+```
+
+Each build publishes an immutable `:<sha>` tag, so **re-pushing an existing `:<sha>` is refused** to protect it. Pass `--force` to overwrite deliberately (e.g. re-running a partially failed push):
+
+```bash
+LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<token> ./push_image.sh --force
 ```
 
 **Cross-architecture builds.** To build for an architecture other than the host's (e.g. build `arm64` on an
@@ -227,11 +233,12 @@ docker run --privileged --rm tonistiigi/binfmt --install all
 
 #### Pull (consumer / eval side)
 
-No `HF_TOKEN` needed. By default the image is re-tagged locally as `lcb-service:latest`, so the
-[hardened run command](#hardened-run-command) and the scorer's `ws://localhost:13835/evaluate` expectation work unchanged.
+No `HF_TOKEN` needed. Set `LCB_IMAGE_TAG` to the build (short SHA) you want to pull. By default the image is re-tagged
+locally as `lcb-service:latest`, so the [hardened run command](#hardened-run-command) and the scorer's
+`ws://localhost:13835/evaluate` expectation work unchanged.
 
 ```bash
-LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh
+LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh
 ```
 
 ### (Only if using enroot) Generating a .sqsh file for enroot
@@ -240,8 +247,8 @@ The pull script can produce an enroot `.sqsh` from the pulled image with the `--
 [enroot](https://github.com/NVIDIA/enroot/tree/main) (e.g. SLURM clusters):
 
 ```bash
-LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh --sqsh            # writes lcb_service.sqsh
-LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh --sqsh out.sqsh   # custom output path
+LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh --sqsh            # writes lcb_service.sqsh
+LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh --sqsh out.sqsh   # custom output path
 ```
 
 This runs `enroot import --output <file> dockerd://${LCB_IMAGE_REF}` on the just-pulled image. Running the service via enroot is
