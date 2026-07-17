@@ -40,13 +40,14 @@ def _series(snap_dict: dict, name: str) -> dict:
 
 @pytest.mark.unit
 class TestConfigSurface:
-    def test_schema_is_a_single_flag(self):
-        # The whole feature is one opt-in switch: percentiles/confidence/tolerance
-        # are loadgen-parity constants, not YAML/CLI knobs.
+    def test_schema_is_a_single_opt_out_flag(self):
+        # The feature is on by default (cold-path only, additive output field);
+        # `enabled` is the single opt-out. percentiles/confidence/tolerance are
+        # loadgen-parity constants, not YAML/CLI knobs.
         from inference_endpoint.config.schema import EarlyStoppingConfig
 
         assert set(EarlyStoppingConfig.model_fields) == {"enabled"}
-        assert EarlyStoppingConfig().enabled is False
+        assert EarlyStoppingConfig().enabled is True
 
 
 @pytest.mark.unit
@@ -151,3 +152,16 @@ class TestEarlyStoppingIntegration:
             esp = _series(d, name)["early_stopping_percentile"]
             assert isinstance(esp, dict)
             assert list(esp) == _GRID_ES_KEYS
+
+    def test_repeated_complete_snapshots_are_identical(self):
+        # The exact path sorts the raw array in place (terminal path; avoids a
+        # full transient copy for ES) — a second COMPLETE snapshot must still
+        # produce byte-identical stats.
+        reg = _registry_with_data(EarlyStoppingSpec())
+        d1 = snapshot_to_dict(
+            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        d2 = snapshot_to_dict(
+            reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        assert _series(d1, "ttft_ns") == _series(d2, "ttft_ns")

@@ -1,9 +1,12 @@
 # Early stopping — design
 
-Optional, default-off feature that adds an MLPerf-LoadGen-style **early-stopping percentile
-estimate** to tail-latency metrics (TTFT / TPOT / total latency). It reports a _conservative,
-confidence-backed_ percentile alongside the empirical one, so a run with too few samples to trust its
-raw p99/p90 is surfaced honestly instead of silently under-reporting the tail.
+On-by-default feature that adds an MLPerf-LoadGen-style **early-stopping percentile estimate** to
+tail-latency metrics (TTFT / TPOT / total latency). It reports a _conservative, confidence-backed_
+percentile alongside the empirical one, so a run with too few samples to trust its raw p99/p90 is
+surfaced honestly instead of silently under-reporting the tail. It is on by default because it is
+non-invasive — computed once at run COMPLETE from data the aggregator already keeps (the exact path
+sorts that array once and shares it between the percentile grid and the estimates), with the hot
+path untouched and the output field purely additive.
 
 It is an **estimate only** — no target-latency pass/fail, no dynamic mid-run halt. The gap analysis
 motivating it: at large n the estimate merely certifies the empirical percentile (a small
@@ -69,16 +72,16 @@ counters / ISL / OSL simply don't set it.
 ```yaml
 settings:
   early_stopping:
-    enabled: false # the only knob (or --early-stopping on the CLI)
+    enabled: true # default; the single opt-out (or --no-early-stopping on the CLI)
 ```
 
-Enabling the feature is just `enabled: true` — everything else is a constant (see above), so
-there is nothing to tune per config and no way to accidentally weaken the statistical claim.
+The only knob is the opt-out — for consumers that strictly validate the `result_summary.json`
+schema. Everything else is a constant (see above), so there is nothing to tune per config and no
+way to accidentally weaken the statistical claim.
 
 ## Output (`result_summary.json`)
 
-Each of `ttft`/`tpot`/`latency` gains an `early_stopping_percentile` map (present only when
-enabled) — keys mirror the `percentiles` grid, values are the conservative estimate or `null`
+Each of `ttft`/`tpot`/`latency` gains an `early_stopping_percentile` map (present unless opted out) — keys mirror the `percentiles` grid, values are the conservative estimate or `null`
 when the run has too few samples to certify that percentile:
 
 ```json

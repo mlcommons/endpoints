@@ -334,6 +334,12 @@ class SeriesSampler(MetricSampler):
     def _exact_stat(self) -> SeriesStat:
         np_dtype = _NUMPY_DTYPE[self._dtype]
         arr = np.frombuffer(self._raw, dtype=np_dtype)
+        # Sort ONCE, in place, and share the sorted array across the percentile
+        # grid, the histogram, and the early-stopping estimates. In-place is safe:
+        # this is the terminal COMPLETE path, recording has ended, and none of the
+        # consumers care about arrival order — while a sorted copy would double the
+        # peak memory for multi-million-sample runs.
+        arr.sort()
         # method="lower" returns observed values (not interpolated) so
         # percentiles round-trip through int dtypes cleanly.
         perc_values = np.percentile(arr, self._percentiles, method="lower")
@@ -362,7 +368,7 @@ class SeriesSampler(MetricSampler):
         # Early-stopping estimates (COMPLETE path only): conservative confidence-backed
         # bound per configured percentile, all off one sorted raw array. Cold path —
         # the sort is one-time at run end and each estimate is a few beta evaluations.
-        early_stopping_percentile = self._es_estimates(np.sort(arr))
+        early_stopping_percentile = self._es_estimates(arr)
 
         return SeriesStat(
             name=self.name,
