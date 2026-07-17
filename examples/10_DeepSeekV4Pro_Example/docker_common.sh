@@ -25,7 +25,7 @@ docker_storage_args() {
 }
 
 # Wait for an OpenAI-compatible or SGLang HTTP server (example script preflight).
-# Tries GET /health (SGLang native, vLLM), then GET /v1/models (OpenAI compatibility).
+# Tries GET /health (SGLang native), then GET /v1/models (OpenAI compatibility).
 # Args: base_url [max_wait_seconds]
 wait_openai_compatible_server() {
   local base="${1%/}"

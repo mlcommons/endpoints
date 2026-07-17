@@ -1,10 +1,10 @@
-# DeepSeek-V4-Pro Benchmark (vLLM / SGLang)
+# DeepSeek-V4-Pro Benchmark (SGLang)
 
-End-to-end example for benchmarking `deepseek-ai/DeepSeek-V4-Pro` with vLLM or SGLang, using the same
+End-to-end example for benchmarking `deepseek-ai/DeepSeek-V4-Pro` with SGLang, using the same
 performance and accuracy datasets as the [GPT-OSS-120B example](../04_GPTOSS120B_Example/Readme.md)
 (AIME25, GPQA, LiveCodeBench).
 
-Both backends use `/v1/chat/completions` (`api_type: openai`) with text prompts from the dataset.
+The server uses `/v1/chat/completions` (`api_type: openai`) with text prompts from the dataset.
 The server applies the DeepSeek-V4 chat template and reasoning parser.
 
 ## Getting the Dataset
@@ -31,11 +31,8 @@ export TOKENIZER_MODEL_PATH=${MODEL_PATH}  # host path for ISL/OSL/TPOT metrics
 Preflight scripts (`run_benchmark.sh`, `run_sglang_benchmark.sh`, `run_*_accuracy_benchmark.sh`) probe the inference server with `GET /health` and `GET /v1/models`. Override the base URL or wait time while a server is starting:
 
 ```bash
-export VLLM_BASE_URL=http://127.0.0.1:8000      # default when VLLM_PORT=8000
-export WAIT_FOR_VLLM_S=120                       # seconds; 0 = single attempt
-
 export SGLANG_BASE_URL=http://127.0.0.1:30000    # default when SGLANG_PORT=30000
-export WAIT_FOR_SGLANG_S=120
+export WAIT_FOR_SGLANG_S=120                      # seconds; 0 = single attempt
 ```
 
 ## Download Model
@@ -46,99 +43,6 @@ Download weights to the shared model store and mount them into the serving conta
 mkdir -p "${MODEL_PATH}"
 hf download "${MODEL_NAME}" --local-dir "${MODEL_PATH}"
 ```
-
----
-
-## vLLM
-
-### Launch Server
-
-DeepSeek-V4-Pro requires multiple GPUs. Adjust `--tensor-parallel-size` to match your hardware.
-
-```bash
-docker run --runtime nvidia --gpus all \
-  -v "${MODEL_PATH}:/models/deepseek-ai/DeepSeek-V4-Pro:ro" \
-  -v "${HF_HOME}:/root/.cache/huggingface" \
-  --env "HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}" \
-  -p 8000:8000 \
-  --ipc=host \
-  vllm/vllm-openai-rocm:v0.22.0 \
-  /models/deepseek-ai/DeepSeek-V4-Pro \
-  --tensor-parallel-size 8 \
-  --async-scheduling \
-  --no-enable-prefix-caching \
-  --distributed-executor-backend mp \
-  --gpu-memory-utilization 0.8 \
-  --kv-cache-dtype fp8 \
-  --trust-remote-code \
-  --moe-backend aiter \
-  --tokenizer-mode deepseek_v4 \
-  --reasoning-parser deepseek_v4 \
-  --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE"}'
-```
-
-### Run Benchmark (vLLM)
-
-[`vllm_deepseek_v4_pro_example.yaml`](vllm_deepseek_v4_pro_example.yaml) runs performance +
-AIME25 + GPQA + LiveCodeBench accuracy at concurrency 512:
-
-```bash
-uv run inference-endpoint benchmark from-config \
-  -c examples/10_DeepSeekV4Pro_Example/vllm_deepseek_v4_pro_example.yaml \
-  --timeout 60
-```
-
-Or use the helper script (checks vLLM + lcb-service first):
-
-```bash
-./examples/10_DeepSeekV4Pro_Example/run_benchmark.sh
-```
-
-Performance-only:
-
-```bash
-uv run inference-endpoint benchmark from-config \
-  -c examples/10_DeepSeekV4Pro_Example/vllm_deepseek_v4_pro_perf.yaml \
-  --timeout 60
-```
-
-### Run Accuracy (vLLM)
-
-Same workflow as SGLang: start vLLM, set `HF_TOKEN` (required for gated GPQA), then run the
-accuracy helper (checks prerequisites, tees logs under `results/docker_logs/accuracy/`):
-
-```bash
-export HF_TOKEN=<your HuggingFace token>
-export HF_HOME=~/.cache/huggingface
-
-# Start vLLM (see Launch Server above), then:
-./examples/10_DeepSeekV4Pro_Example/run_vllm_accuracy_benchmark.sh
-```
-
-YAML-only (equivalent):
-
-```bash
-uv run inference-endpoint benchmark from-config \
-  -c examples/10_DeepSeekV4Pro_Example/vllm_deepseek_v4_pro_accuracy.yaml \
-  --timeout 3600
-```
-
-Python script (legacy `run_accuracy.py` path):
-
-```bash
-USE_PYTHON_SCRIPT=true ./examples/10_DeepSeekV4Pro_Example/run_vllm_accuracy_benchmark.sh
-```
-
-| Argument / env         | Default      | Description                                              |
-| ---------------------- | ------------ | -------------------------------------------------------- |
-| `HF_TOKEN`             | _(required)_ | HuggingFace token for GPQA download                      |
-| `VLLM_PORT`            | `8000`       | vLLM HTTP port                                           |
-| `TIMEOUT`              | `3600`       | Benchmark timeout (seconds)                              |
-| `ALLOW_LCB_LOCAL_EVAL` | `true`       | Subprocess LCB scoring when `lcb-service` is unavailable |
-| `USE_PYTHON_SCRIPT`    | `false`      | Use `run_accuracy.py` instead of YAML                    |
-
-Accuracy config uses `max_new_tokens: 88000`, concurrency `num_workers: 64`, and phase order
-AIME25 ×8 → GPQA ×5 → LiveCodeBench ×3 so math scores are recorded before the LCB phase.
 
 ---
 
@@ -242,7 +146,7 @@ curl http://127.0.0.1:30000/health
 ### Run Benchmark (SGLang)
 
 [`sglang_deepseek_v4_pro_example.yaml`](sglang_deepseek_v4_pro_example.yaml) targets
-`http://localhost:30000` with the same datasets and concurrency as the vLLM config:
+`http://localhost:30000` with the performance + AIME25 + GPQA + LiveCodeBench datasets:
 
 ```bash
 uv run inference-endpoint benchmark from-config \
@@ -310,15 +214,14 @@ Scripts also pass `--storage-opt size=16G` on `docker run` when the daemon uses 
 (override with `DOCKER_LOG_STORAGE_GB`). SGLang server stdout is written to
 `results/docker_logs/sglang/server.log`.
 
-### Config notes (both backends)
+### Config notes
 
 - **Performance dataset**: `text_input` → `prompt`. Server applies DeepSeek-V4 chat template.
 - **Accuracy datasets**: `::deepseek_v4` presets (same prompt formatting as GPT-OSS).
 - **Reasoning output**: server streams reasoning separately; client accumulates `reasoning_content`
   and final `content` for scoring.
-- **SGLang `model_params.name`**: use the HuggingFace id (`deepseek-ai/DeepSeek-V4-Pro`). vLLM YAML
-  uses the container mount path (`/models/deepseek-ai/DeepSeek-V4-Pro`). Set `TOKENIZER_MODEL_PATH`
-  to the host weights path for ISL/OSL/TPOT in both cases.
+- **`model_params.name`**: use the HuggingFace id (`deepseek-ai/DeepSeek-V4-Pro`). Set
+  `TOKENIZER_MODEL_PATH` to the host weights path for ISL/OSL/TPOT.
 
 ---
 
@@ -342,12 +245,10 @@ Same fallback as the GPT-OSS example — runs `lcb_serve` as a subprocess on the
 
 ```bash
 export ALLOW_LCB_LOCAL_EVAL=true
-./examples/10_DeepSeekV4Pro_Example/run_vllm_accuracy_benchmark.sh
-# or
 ./examples/10_DeepSeekV4Pro_Example/run_sglang_accuracy_benchmark.sh
 ```
 
-Both accuracy helpers skip the `:13835` preflight when this is set (default `true`).
+The accuracy helper skips the `:13835` preflight when this is set (default `true`).
 WebSocket scoring is attempted first if `lcb-service` is up; otherwise scoring falls
 back to the subprocess path automatically.
 
@@ -361,9 +262,8 @@ If inference completed but scoring failed (e.g. `lcb-service` was not running), 
 ```bash
 cd endpoints
 uv run python examples/10_DeepSeekV4Pro_Example/rescore_accuracy.py \
-  --report-dir results/vllm_deepseek_v4_pro_accuracy \
+  --report-dir results/sglang_deepseek_v4_pro_accuracy \
   --write-results-json
-# or results/sglang_deepseek_v4_pro_accuracy for SGLang runs
 ```
 
 Skip LiveCodeBench until the container is ready:
@@ -377,11 +277,6 @@ uv run python examples/10_DeepSeekV4Pro_Example/rescore_accuracy.py \
 ---
 
 ## Troubleshooting
-
-**Cannot connect to vLLM server**
-
-- Verify: `curl http://localhost:8000/health`
-- Ensure `model_params.name` in the vLLM YAML matches the model path passed to vLLM
 
 **Cannot connect to SGLang server**
 
@@ -408,7 +303,7 @@ uv run python examples/10_DeepSeekV4Pro_Example/rescore_accuracy.py \
 **Out of memory**
 
 - Increase `TP` / `--tensor-parallel-size`
-- Lower `--mem-fraction-static` (SGLang) or `--gpu-memory-utilization` (vLLM)
+- Lower `--mem-fraction-static`
 
 **Model not found in container**
 
