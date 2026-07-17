@@ -274,12 +274,22 @@ def main(argv=None):
         raise SystemExit(
             "FATAL: --json requires --summary (the augmented output IS the summary)"
         )
-    fallback = {tok.strip(): float(tok) for tok in args.percentiles.split(",")}
-    if not all(0.0 < v < 100.0 for v in fallback.values()):
+    values = {float(tok) for tok in args.percentiles.split(",")}
+    if not all(0.0 < v < 100.0 for v in values):
         raise SystemExit(
             f"FATAL: percentiles use the grid convention and must be in (0, 100), "
-            f"got {sorted(fallback.values())}"
+            f"got {sorted(values)}"
         )
+    if any(v < 1.0 for v in values):
+        # a fraction-style value (pre-#423 convention) silently means a sub-1%
+        # percentile here — never a legitimate tail-certification target
+        bad = sorted(v for v in values if v < 1.0)
+        raise SystemExit(
+            f"FATAL: percentiles now use the grid convention (0-100); {bad} would "
+            f"mean sub-1% percentiles — did you mean {[v * 100 for v in bad]}?"
+        )
+    # canonical float-style keys, deduped on the parsed value ("99" == "99.0")
+    fallback = {str(v): v for v in sorted(values, reverse=True)}
     if not 0.0 < args.confidence < 1.0:
         raise SystemExit(f"FATAL: confidence must be in (0, 1), got {args.confidence}")
 
@@ -314,7 +324,7 @@ def main(argv=None):
             # the run's own grid: exact key strings, exact (descending) order
             targets = es_targets_from_grid(grid.keys())
         else:
-            targets = dict(sorted(fallback.items(), key=lambda kv: kv[1], reverse=True))
+            targets = fallback
         results = {
             key: es_percentile_estimate(values, f, args.confidence)
             for key, f in targets.items()
