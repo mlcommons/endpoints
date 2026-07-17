@@ -204,10 +204,13 @@ def _list_item_model(info: object) -> type[BaseModel] | None:
 
 
 def _collect_comments(model: type[BaseModel]) -> dict[str, str]:
-    """Walk model tree, build {yaml_key: "# comment"} for described/enum fields.
+    """Walk model tree, build {dotted_path: "# comment"} for described/enum fields.
 
-    For ambiguous field names (same name, different descriptions across models),
-    falls back to value-specific keys so each enum value gets the right comment.
+    Keys are full dotted paths from the model root (e.g. ``settings.warmup.enabled``),
+    so same-named fields in different sections (``warmup.enabled`` vs
+    ``early_stopping.enabled``) each keep their own comment. Enum/Literal fields also
+    get value-qualified keys (``settings.load_pattern.type: poisson``) so overrides
+    can target one value.
     """
 
     def _enum_vals(tp: object) -> list[str] | None:
@@ -232,13 +235,13 @@ def _collect_comments(model: type[BaseModel]) -> dict[str, str]:
         return None
 
     result: dict[str, str] = {}
-    by_name: dict[str, list[str]] = {}
 
-    def _walk(m: type[BaseModel]) -> None:
+    def _walk(m: type[BaseModel], prefix: str) -> None:
         hints = _resolved_hints(m)
         for name, info in m.model_fields.items():
             if info.annotation is None:
                 continue
+            path = f"{prefix}{name}"
             core = _unwrap(hints.get(name, info.annotation))
             vals = _enum_vals(core)
             parts: list[str] = []
@@ -249,13 +252,13 @@ def _collect_comments(model: type[BaseModel]) -> dict[str, str]:
                 parts.append(f"options: {', '.join(vals)}")
             if parts:
                 comment = "# " + " | ".join(parts)
-                by_name.setdefault(name, []).append(comment)
+                result[path] = comment
                 if vals:
                     for v in vals:
-                        result[f"{name}: {v}"] = comment
+                        result[f"{path}: {v}"] = comment
             # Recurse into nested models
             if isinstance(core, type) and issubclass(core, BaseModel):
-                _walk(core)
+                _walk(core, f"{path}.")
             elif typing.get_origin(core) is list:
                 args = typing.get_args(core)
                 if (
@@ -263,31 +266,42 @@ def _collect_comments(model: type[BaseModel]) -> dict[str, str]:
                     and isinstance(args[0], type)
                     and issubclass(args[0], BaseModel)
                 ):
-                    _walk(args[0])
+                    _walk(args[0], f"{path}.")
 
-    _walk(model)
-    for name, comments in by_name.items():
-        if len(set(comments)) == 1:
-            result[f"{name}: "] = comments[0]
-            # Also match block-style (no trailing space, e.g. "parser:\n")
-            result[f"{name}:"] = comments[0]
-
+    _walk(model, "")
     return result
 
 
+_YAML_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):(.*)$")
+
+
 def _add_comments(text: str, comments: dict[str, str]) -> str:
-    """Inject inline # comments into YAML text."""
-    for key, comment in sorted(comments.items(), key=lambda x: -len(x[0])):
-        text = re.sub(
-            rf"^(\s*{re.escape(key)}.*)$",
-            lambda m, c=comment: (
-                m.group(0) if "#" in m.group(0) else f"{m.group(0)}  {c}"
-            ),
-            text,
-            count=0,
-            flags=re.MULTILINE,
-        )
-    return text
+    """Inject inline # comments into YAML text, matching keys by dotted path.
+
+    Walks the dumped YAML with an indentation stack so ``enabled:`` under
+    ``warmup:`` resolves to ``settings.warmup.enabled`` and gets warmup's comment,
+    not early_stopping's. Value-qualified keys (``path: value``) win over plain
+    path keys. List-item keys on ``- `` lines are left uncommented (their nested
+    block keys still resolve through the enclosing section).
+    """
+    out: list[str] = []
+    stack: list[tuple[int, str]] = []  # (indent, key)
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        m = _YAML_KEY_RE.match(stripped)
+        if m:
+            indent = len(line) - len(stripped)
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            key = m.group(1)
+            path = ".".join([k for _, k in stack] + [key])
+            value = m.group(2).strip()
+            comment = comments.get(f"{path}: {value}") or comments.get(path)
+            if comment and "#" not in line:
+                line = f"{line}  {comment}"
+            stack.append((indent, key))
+        out.append(line)
+    return "\n".join(out) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +403,9 @@ def main(check_only: bool = False):
     # template doesn't list online-only types as valid offline options.
     offline_comments = {
         **base_comments,
-        "type: max_throughput": "# Load pattern type | offline only: max_throughput",
+        "settings.load_pattern.type: max_throughput": (
+            "# Load pattern type | offline only: max_throughput"
+        ),
     }
     stale = False
 

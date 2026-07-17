@@ -119,6 +119,12 @@ class SeriesStat(
     sum_sq: int | float
     percentiles: dict[str, float]
     histogram: list[tuple[tuple[float, float], int]]
+    # Early-stopping percentile estimates (COMPLETE snapshots only, when enabled):
+    # compact {grid_percentile_key: estimate-or-None} map whose keys mirror
+    # ``percentiles``; None value = insufficient samples for that percentile.
+    # Optional trailing field so the array_like wire format stays
+    # backward-compatible. None field = not computed.
+    early_stopping_percentiles: dict[str, float | None] | None = None
 
 
 # Tagged union: msgspec dispatches on the ``tag`` literal at decode time.
@@ -229,7 +235,7 @@ def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
 def _metric_to_dict(m: MetricStat) -> dict:
     if isinstance(m, CounterStat):
         return {"type": "counter", "name": m.name, "value": _scrub_nonfinite(m.value)}
-    return {
+    series: dict = {
         "type": "series",
         "name": m.name,
         "count": m.count,
@@ -238,14 +244,22 @@ def _metric_to_dict(m: MetricStat) -> dict:
         "max": _scrub_nonfinite(m.max),
         "sum_sq": _scrub_nonfinite(m.sum_sq),
         "percentiles": {k: _scrub_nonfinite(v) for k, v in m.percentiles.items()},
-        # Histogram tuples → JSON arrays. Consumers reading the dict can
-        # iterate the two-element ranges directly without coercion.
-        # Bucket edges are floats from log-spacing — scrub for safety.
-        "histogram": [
-            [[_scrub_nonfinite(rng[0]), _scrub_nonfinite(rng[1])], c]
-            for rng, c in m.histogram
-        ],
     }
+    if m.early_stopping_percentiles is not None:
+        # Placed directly after the percentiles grid it overlays. Estimates come
+        # from the raw value array — scrub like every other numeric field so
+        # json.dumps(..., allow_nan=False) cannot raise.
+        series["early_stopping_percentiles"] = {
+            k: _scrub_nonfinite(v) for k, v in m.early_stopping_percentiles.items()
+        }
+    # Histogram tuples → JSON arrays. Consumers reading the dict can
+    # iterate the two-element ranges directly without coercion.
+    # Bucket edges are floats from log-spacing — scrub for safety.
+    series["histogram"] = [
+        [[_scrub_nonfinite(rng[0]), _scrub_nonfinite(rng[1])], c]
+        for rng, c in m.histogram
+    ]
+    return series
 
 
 class MetricsSnapshotCodec:
