@@ -204,6 +204,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # tokenizer unavailable).
     qps: float | None = None
     tps: float | None = None
+    finish_reason_counts: dict[str, int] = msgspec.field(default_factory=dict)
 
     # Run configuration (load_pattern, warmup, and the scheduler/dataloader RNG
     # seeds), from config. Carried so result_summary.json is self-describing and a
@@ -325,6 +326,12 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         # indicator in display().
         state = snap.get("state", "interrupted")
         n_pending_tasks = snap.get("n_pending_tasks", 0)
+        finish_reason_prefix = "tracked_finish_reason_"
+        finish_reason_counts = {
+            name.removeprefix(finish_reason_prefix): int(value)
+            for name, value in counters.items()
+            if name.startswith(finish_reason_prefix) and value
+        }
 
         return cls(
             version=str(version_info.get("version", "unknown")),
@@ -344,6 +351,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
             tps=tps,
+            finish_reason_counts=finish_reason_counts,
             run_config=run_config,
         )
 

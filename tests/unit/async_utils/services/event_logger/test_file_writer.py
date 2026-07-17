@@ -56,15 +56,22 @@ class TestJSONLWriter:
         writer = JSONLWriter(tmp_path / "events", flush_interval=1)
         try:
             writer.write(_record(SampleEventType.ISSUED, uuid="s1", ts=1000))
-            writer.write(_record(SampleEventType.COMPLETE, uuid="s1", ts=2000))
+            writer.write(
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    timestamp_ns=2000,
+                    sample_uuid="s1",
+                    finish_reason="tool_calls",
+                )
+            )
         finally:
             writer.close()
 
         lines = (tmp_path / "events.jsonl").read_text().strip().split("\n")
         assert len(lines) == 2
-        for line in lines:
-            parsed = json.loads(line)
-            assert isinstance(parsed, dict)
+        records = [json.loads(line) for line in lines]
+        assert "finish_reason" not in records[0]
+        assert records[1]["finish_reason"] == "tool_calls"
 
     def test_record_roundtrip_fields(self, tmp_path):
         writer = JSONLWriter(tmp_path / "events", flush_interval=1)

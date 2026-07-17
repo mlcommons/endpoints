@@ -257,6 +257,19 @@ class TestFromSnapshot:
         report = _build_report(registry)
         assert report.n_samples_failed == 1
 
+    def test_finish_reason_counts(self):
+        registry = _make_registry(n_samples=2)
+        registry.increment(MetricCounterKey.TRACKED_FINISH_REASON_STOP.value, 1)
+        registry.increment(MetricCounterKey.TRACKED_FINISH_REASON_LENGTH.value, 1)
+
+        report = _build_report(registry)
+
+        assert report.finish_reason_counts == {"stop": 1, "length": 1}
+        assert json.loads(report.to_json())["finish_reason_counts"] == {
+            "stop": 1,
+            "length": 1,
+        }
+
     def test_complete_flag_true_when_state_complete_and_no_pending(self):
         registry = _make_registry(n_samples=5)
         report = _build_report(registry, state=SessionState.COMPLETE, n_pending_tasks=0)
