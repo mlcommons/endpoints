@@ -367,10 +367,12 @@ Workers are mostly I/O-bound (waiting on HTTP responses).
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-| Component   | Allocation                       | Rationale                                                                 |
-| ----------- | -------------------------------- | ------------------------------------------------------------------------- |
-| **LoadGen** | 2 physical cores (4 logical)     | Session thread + event loop thread. Bottleneck - gets fastest cores.      |
-| **Workers** | 1 physical core each (2 logical) | I/O-bound. Full core isolation prevents context switches, reduces jitter. |
+| Component   | Allocation                                 | Rationale                                                                                      |
+| ----------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| **LoadGen** | `DEFAULT_LOADGEN_CORES` = 5 physical cores | Session thread + event loop thread + up to 4 ZMQ I/O threads. Bottleneck - gets fastest cores. |
+| **Workers** | 1 physical core each (2 logical)           | I/O-bound. Full core isolation prevents context switches, reduces jitter.                      |
+
+> The core-ordering diagram above is schematic — it shows two `LG` cells for illustration; the actual default reserves 5 physical cores for loadgen (`DEFAULT_LOADGEN_CORES` in `cpu_affinity.py`).
 
 ### Why Both Hyperthreads Per Core
 

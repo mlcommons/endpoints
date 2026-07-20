@@ -16,7 +16,7 @@ src/inference_endpoint/load_generator/
 │                        #   BurstStrategy, ConcurrencyStrategy,
 │                        #   create_load_strategy()
 ├── sample_order.py      # SampleOrder, WithoutReplacement, WithReplacement
-└── delay.py             # poisson_delay_fn, uniform_delay_fn
+└── delay.py             # poisson_delay_fn, make_delay_fn
 ```
 
 ## Architecture
