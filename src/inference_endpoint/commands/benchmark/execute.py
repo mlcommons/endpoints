@@ -781,6 +781,8 @@ async def _run_benchmark_async(
             # start() guarantees the publisher exists; narrow it for the type checker.
             publisher = pipe.publisher
             assert publisher is not None
+            if config.settings.early_stopping.enabled:
+                aggregator_args.append("--early-stopping")
 
             try:
                 issuer, http_client = await _create_issuer(ctx, loop)

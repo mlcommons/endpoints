@@ -2,6 +2,11 @@
 # From project root:
 # docker build -f scripts/Dockerfile.dev --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
 # docker run -v $(pwd):/mnt/inference-endpoint -it --shm-size=512m inference-endpoint-dev bash
+#
+# VBench (WAN 2.2) accuracy scorer is ON by default (consistent with the DeepSeek-R1
+# evaluator, PROVISION_DSR1=1). It lives under examples/, not src/, so it is COPYed
+# in explicitly. To skip it (leaner image, no wan22 accuracy), build with PROVISION_VBENCH=0:
+# docker build -f scripts/Dockerfile.dev --build-arg PROVISION_VBENCH=0 --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
 
 FROM python:3.12.11-slim
 
@@ -15,12 +20,11 @@ ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv
 
-# Install system dependencies
-# git + curl + ca-certificates support the legacy_mlperf_deepseek_r1 evaluator's setup_eval.sh
-# (it git-clones prm800k / LiveCodeBench at pinned commits) in the provisioning RUN below;
-# without them that step fails and mlperf_eval/ is never baked. (eval_accuracy.py is vendored.)
+# libgl1 + libglib2.0-0: opencv runtime deps for the VBench scorer.
+# git + curl + ca-certificates: DSR1 setup_eval.sh clones prm800k / LiveCodeBench.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential procps git curl ca-certificates \
+        libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /mnt/inference-endpoint
@@ -38,9 +42,14 @@ RUN if ! getent group ${GROUP_ID}; then \
     fi && \
     useradd -u ${USER_ID} -g ${GROUP_ID} --create-home --shell /bin/bash appuser --no-log-init && \
     chown -R ${USER_ID}:${GROUP_ID} /mnt/inference-endpoint && \
-    mkdir -p /opt/venv && chown ${USER_ID}:${GROUP_ID} /opt/venv
+    mkdir -p /opt/venv /opt/uv-python /opt/vbench_accuracy /opt/vbench_cache && \
+    chown ${USER_ID}:${GROUP_ID} /opt/venv /opt/uv-python /opt/vbench_accuracy /opt/vbench_cache
 USER appuser
-ENV PATH="/opt/venv/bin:/home/appuser/.local/bin:$PATH"
+ENV PATH="/opt/venv/bin:/home/appuser/.local/bin:$PATH" \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+    UV_NO_SYNC=1 \
+    VBENCH_PROJECT_PATH=/opt/vbench_accuracy \
+    VBENCH_CACHE_DIR=/opt/vbench_cache
 
 # Install dependencies first (cached unless pyproject.toml/uv.lock change)
 RUN uv sync --frozen --no-install-project --extra dev --extra test
@@ -76,4 +85,20 @@ RUN if [ "${PROVISION_DSR1}" = "1" ]; then \
         UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" bash setup_eval.sh ; \
     else \
         echo "PROVISION_DSR1=${PROVISION_DSR1}: skipping DeepSeek-R1 evaluator provisioning" ; \
+    fi
+
+# VBench (WAN 2.2) accuracy scorer. Isolated venv at /opt/vbench_accuracy/.venv
+# (Python 3.11; tokenizers 0.13.3 has no cp312 wheel). prefetch_weights.py
+# pre-downloads the three dims that init_submodules would otherwise wget/unzip
+# at evaluation time. PROVISION_VBENCH=0 skips this block.
+ARG PROVISION_VBENCH=1
+COPY --chown=${USER_ID}:${GROUP_ID} examples/09_Wan22_VideoGen_Example/accuracy /opt/vbench_accuracy
+RUN if [ "${PROVISION_VBENCH}" = "1" ]; then \
+        cd /opt/vbench_accuracy && \
+        UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" uv sync --frozen --python 3.11 && \
+        UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" uv run python prefetch_weights.py && \
+        UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" uv run python -c \
+            "import torch, decord, tokenizers, vbench; print('vbench', vbench.__file__, '| decord', decord.__version__, '| tokenizers', tokenizers.__version__, '| torch', torch.__version__)" ; \
+    else \
+        echo "PROVISION_VBENCH=${PROVISION_VBENCH}: skipping VBench provisioning" ; \
     fi

@@ -103,11 +103,57 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # Reduces p99/max latency from cold-start connections.
     #
     # Values:
-    #   -1 = auto (50% of pool, safe default - 100% can overwhelm some servers)
+    #   -1 = auto. With an explicit max_connections: 50% of the pool. With
+    #        max_connections=-1: AUTO_WARMUP_BUDGET_FRACTION of the port
+    #        budget (resolved to an explicit count at config time) — the full
+    #        auto pool is the whole ephemeral range, and warming half of that
+    #        is a connect stampede that can overwhelm servers.
     #    0 = disabled
     #   >0 = explicit total connection count to warmup (split across workers)
     warmup_connections: int = Field(
         -1, ge=-1, description="Pre-establish TCP connections (-1=auto, 0=disabled)"
+    )
+
+    # Fraction of the ephemeral-port budget the auto (max_connections=-1,
+    # warmup_connections=-1) configuration pre-establishes at init. The pool
+    # ceiling stays at the full budget; only the warm set is bounded. Warming
+    # far beyond steady-state concurrency wastes ports (the idle stack is
+    # LIFO, so excess warm connections sit established at the bottom, holding
+    # ephemeral ports until shutdown) and inflates the startup connect burst.
+    # Under-warming is cheap: the pool opens new connections on demand at
+    # runtime.
+    auto_warmup_budget_fraction: float = Field(
+        0.25,
+        gt=0.0,
+        le=1.0,
+        description="Fraction of the port budget auto warmup pre-establishes "
+        "(only used when max_connections and warmup_connections are both -1)",
+    )
+
+    # Bound on simultaneous in-flight connect() calls per worker pool (host-wide
+    # SYN burst ~= value x num_workers). Unbounded establishment (warmup or a
+    # t=0 demand burst growing the pool) delivers one SYN flood: the server
+    # accept queue overflows and the client can transiently exhaust ephemeral
+    # ports (EADDRNOTAVAIL). Paced waves complete in a few RTTs each, so total
+    # establishment time is barely affected. Applies only to pool growth — the
+    # pooled-connection reuse path never touches it.
+    max_concurrent_warmup_connects: Annotated[
+        int,
+        cyclopts.Parameter(
+            alias="--max-concurrent-warmup-connects",
+            help=(
+                "Max in-flight connection establishments per worker pool "
+                "(paces the warmup stampede AND on-demand pool growth)"
+            ),
+        ),
+    ] = Field(
+        128,
+        ge=1,
+        description=(
+            "Max in-flight connect() calls per worker pool. Named for its "
+            "primary job — pacing the warmup connection stampede — but it "
+            "bounds ALL pool growth, including t=0 on-demand bursts."
+        ),
     )
 
     # Maximum concurrent TCP connections.
@@ -281,6 +327,16 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 
             if self.max_connections == -1:
                 object.__setattr__(self, "max_connections", port_budget)
+                # With an auto ceiling the pool is the whole port budget, so
+                # auto warmup must not derive from it (half the port range in
+                # one burst). Warm a bounded fraction instead; the rest of the
+                # pool is opened on demand at runtime.
+                if self.warmup_connections == -1:
+                    object.__setattr__(
+                        self,
+                        "warmup_connections",
+                        max(1, int(port_budget * self.auto_warmup_budget_fraction)),
+                    )
             elif self.max_connections > 0:
                 if self.max_connections > port_budget:
                     raise RuntimeError(
