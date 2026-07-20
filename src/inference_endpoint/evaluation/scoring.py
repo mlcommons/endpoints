@@ -1566,7 +1566,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
             # strict=True surfaces missing/unmounted sources here, not as an
             # opaque decord read failure inside VBench 30 minutes later.
             resolved_src = src.resolve(strict=True)
-            dst = staged_dir / f"{safe_prompt}-{idx}{src.suffix or '.mp4'}"
+            dst = staged_dir / f"{safe_prompt}-{idx}.mp4"
             dst.symlink_to(resolved_src)
 
     def _run_vbench_subprocess(

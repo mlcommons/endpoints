@@ -946,6 +946,8 @@ async def _run_benchmark_async(
                     str(config.settings.drain.metrics_tokenizer_workers),
                 ]
             )
+            if config.settings.early_stopping.enabled:
+                aggregator_args.append("--early-stopping")
 
             # EventLoggerService writes events.jsonl to tmpfs (high-frequency writes)
             event_logger_args: list[str] = [

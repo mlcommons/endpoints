@@ -808,6 +808,40 @@ class TestCounterAccounting:
             finally:
                 agg.close()
 
+    @pytest.mark.asyncio
+    async def test_finish_reason_counters_bucket_unknown_values(self, tmp_path):
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, registry, _ = make_aggregator(ctx, loop, "agg_finish_reasons")
+            try:
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(SampleEventType.ISSUED, "s1", ts=1),
+                        EventRecord(
+                            event_type=SampleEventType.COMPLETE,
+                            timestamp_ns=2,
+                            sample_uuid="s1",
+                            finish_reason="stop",
+                        ),
+                        sample_event(SampleEventType.ISSUED, "s2", ts=3),
+                        EventRecord(
+                            event_type=SampleEventType.COMPLETE,
+                            timestamp_ns=4,
+                            sample_uuid="s2",
+                            finish_reason="future_reason",
+                        ),
+                    ]
+                )
+
+                counters = snapshot_counters(registry)
+                assert counters[MetricCounterKey.TRACKED_FINISH_REASON_STOP.value] == 1
+                assert counters[MetricCounterKey.TRACKED_FINISH_REASON_OTHER.value] == 1
+            finally:
+                agg.close()
+
 
 # ---------------------------------------------------------------------------
 # Token trigger tests (with mock BatchTokenizer and real event loop)

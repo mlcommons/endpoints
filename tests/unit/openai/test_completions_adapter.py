@@ -140,6 +140,7 @@ class TestOpenAITextCompletionsAdapterDecodeResponse:
         assert result.id == "qid-1"
         assert isinstance(result.response_output, TextModelOutput)
         assert result.response_output.output == "hello world"
+        assert result.metadata["finish_reason"] == "stop"
 
     @pytest.mark.unit
     def test_decode_empty_choices_raises(self):
