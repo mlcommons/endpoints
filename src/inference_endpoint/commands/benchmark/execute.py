@@ -1390,23 +1390,24 @@ def _phase_response_counts(
 
 def _accuracy_uuid_bound(
     report_dir: Path | None, eval_configs: list[AccuracyConfiguration]
-) -> set[str]:
+) -> set[str] | None:
     """Union of the accuracy datasets' issued uuids from ``sample_idx_map.json``.
 
     Bounds the finalize-side raw-output read to the accuracy population so it
-    never holds the whole run's (incl. perf) response-text corpus. Returns an
-    empty set (⇒ caller reads unbounded) when there is no report dir; a missing,
-    corrupt, or wrong-shape map is warned and also falls back to unbounded.
+    never holds the whole run's (incl. perf) response-text corpus. An empty set
+    is a valid bound for an external scorer that skips the endpoint phase.
+    Returns ``None`` when the map is unavailable so callers can fall back to an
+    unbounded read.
     """
     if report_dir is None:
-        return set()
+        return None
     try:
         idx_map = msgspec.json.decode((report_dir / "sample_idx_map.json").read_bytes())
     except (OSError, msgspec.DecodeError) as e:
         logger.warning(
             "Accuracy OSL uuid bound unavailable (%s); reading outputs unbounded", e
         )
-        return set()
+        return None
     # A syntactically-valid map of the wrong shape must not crash finalize: this
     # runs outside the per-dataset try, so a raised AttributeError/TypeError would
     # fail scoring (OSL must never do that). Skip anything not dict-shaped.
@@ -1415,7 +1416,7 @@ def _accuracy_uuid_bound(
             "Accuracy OSL uuid bound: sample_idx_map.json is not an object; "
             "reading outputs unbounded"
         )
-        return set()
+        return None
     bound: set[str] = set()
     for ec in eval_configs:
         if ec.dataset_type == DatasetType.ACCURACY:
@@ -1591,7 +1592,7 @@ def _score_accuracy(
                     # for *all* phases' COMPLETE events, bounded to the accuracy
                     # population; intersecting it with each dataset's
                     # sample_index_map yields correct per-dataset counts.
-                    out_df = scorer_instance.get_raw_outputs(accuracy_uuids or None)
+                    out_df = scorer_instance.get_raw_outputs(accuracy_uuids)
                     uuid_to_text = dict(
                         zip(out_df["sample_uuid"], out_df["output"], strict=False)
                     )

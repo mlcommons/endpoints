@@ -482,6 +482,22 @@ class TestScoreAccuracy:
         )
         assert captured["wanted"] == {"u1", "u2"}
 
+    def test_empty_uuid_bound_stays_bounded(self, tmp_path):
+        (tmp_path / "sample_idx_map.json").write_bytes(
+            msgspec.json.encode({"swe_bench": {}})
+        )
+        captured: dict = {}
+
+        class _CaptureScorer(_FakeOSLScorer):
+            def get_raw_outputs(self, wanted_uuids=None):
+                captured["wanted"] = wanted_uuids
+                return super().get_raw_outputs(wanted_uuids)
+
+        cfg = _cfg("swe_bench", 1, 0.8, tmp_path, scorer=_CaptureScorer)
+        _score_accuracy(_ctx([cfg], report_dir=tmp_path), _RESULT)
+
+        assert captured["wanted"] == set()
+
 
 @pytest.mark.unit
 class TestPhaseOslStats:
@@ -572,13 +588,13 @@ class TestAccuracyUuidBound:
 
     def test_none_report_dir_returns_empty_without_warning(self, caplog):
         with caplog.at_level("WARNING"):
-            assert _accuracy_uuid_bound(None, []) == set()
+            assert _accuracy_uuid_bound(None, []) is None
         assert "uuid bound unavailable" not in caplog.text
 
     def test_missing_map_warns_and_falls_back(self, tmp_path, caplog):
         with caplog.at_level("WARNING"):
             assert (
-                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) == set()
+                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) is None
             )
         assert "uuid bound unavailable" in caplog.text
 
@@ -586,7 +602,7 @@ class TestAccuracyUuidBound:
         (tmp_path / "sample_idx_map.json").write_text("{not valid json")
         with caplog.at_level("WARNING"):
             assert (
-                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) == set()
+                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) is None
             )
         assert "uuid bound unavailable" in caplog.text
 
@@ -595,7 +611,7 @@ class TestAccuracyUuidBound:
         (tmp_path / "sample_idx_map.json").write_bytes(msgspec.json.encode(["nope"]))
         with caplog.at_level("WARNING"):
             assert (
-                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) == set()
+                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) is None
             )
         assert "not an object" in caplog.text
 

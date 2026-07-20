@@ -27,6 +27,7 @@ from collections import Counter
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, Self, Union
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import cyclopts
 import yaml
@@ -1430,30 +1431,67 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         return _config_adapter.validate_python(data)
 
     @staticmethod
+    def _is_secret_field_name(key: Any) -> bool:
+        normalized = str(key).strip().lower().replace("-", "_")
+        return (
+            normalized
+            in {
+                "api_key",
+                "access_token",
+                "authorization",
+                "auth_token",
+                "password",
+                "token",
+            }
+            or normalized.endswith(("_key", "_token", "_password"))
+            or "secret" in normalized
+        )
+
+    @staticmethod
+    def _redact_url_secrets(value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return value
+        if parsed.scheme.lower() not in {"http", "https", "ws", "wss"} or not (
+            parsed.netloc
+        ):
+            return value
+
+        changed = False
+        netloc = parsed.netloc
+        if "@" in netloc:
+            netloc = f"<redacted>@{netloc.rsplit('@', 1)[1]}"
+            changed = True
+
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        redacted_query: list[tuple[str, str]] = []
+        for key, item in query:
+            if BenchmarkConfig._is_secret_field_name(key):
+                item = "<redacted>"
+                changed = True
+            redacted_query.append((key, item))
+
+        if not changed:
+            return value
+        return urlunsplit(
+            parsed._replace(netloc=netloc, query=urlencode(redacted_query, doseq=True))
+        )
+
+    @staticmethod
     def _redact_secret_fields(value: Any) -> Any:
         if isinstance(value, dict):
             redacted: dict[str, Any] = {}
             for key, item in value.items():
-                normalized = str(key).strip().lower().replace("-", "_")
-                if (
-                    normalized
-                    in {
-                        "api_key",
-                        "access_token",
-                        "authorization",
-                        "auth_token",
-                        "password",
-                        "token",
-                    }
-                    or normalized.endswith(("_key", "_token", "_password"))
-                    or "secret" in normalized
-                ):
+                if BenchmarkConfig._is_secret_field_name(key):
                     redacted[key] = "<redacted>"
                 else:
                     redacted[key] = BenchmarkConfig._redact_secret_fields(item)
             return redacted
         if isinstance(value, list):
             return [BenchmarkConfig._redact_secret_fields(item) for item in value]
+        if isinstance(value, str):
+            return BenchmarkConfig._redact_url_secrets(value)
         return value
 
     def to_yaml_file(

@@ -503,6 +503,28 @@ class TestBenchmarkConfigMethods:
         assert loaded.model_params.name == "M"
 
     @pytest.mark.unit
+    def test_redact_secret_fields_scrubs_url_credentials(self):
+        value = {
+            "endpoints": [
+                "https://user:password@example.com/v1?token=query-secret&model=m"
+            ],
+            "callback": "wss://example.com/events?access-key=another-secret",
+            "unchanged": "https://example.com/v1?model=a%2Fb",
+            "description": "token=query-secret",
+        }
+
+        redacted = BenchmarkConfig._redact_secret_fields(value)
+
+        endpoint = redacted["endpoints"][0]
+        assert "user" not in endpoint
+        assert "password" not in endpoint
+        assert "query-secret" not in endpoint
+        assert "model=m" in endpoint
+        assert "another-secret" not in redacted["callback"]
+        assert redacted["unchanged"] == value["unchanged"]
+        assert redacted["description"] == value["description"]
+
+    @pytest.mark.unit
     def test_max_duration_zero_converts_to_none_in_runtime_settings(self):
         from inference_endpoint.config.runtime_settings import RuntimeSettings
 
