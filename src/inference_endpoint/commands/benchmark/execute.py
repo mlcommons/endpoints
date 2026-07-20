@@ -356,6 +356,8 @@ def _load_datasets(
             acc_cfg.name, acc_cfg.accuracy_config
         )
         assert acc_cfg.accuracy_config is not None
+        if test_mode == TestMode.PERF and scorer_cls.SKIP_ENDPOINT_PHASE:
+            continue
 
         _validate_accuracy_config_for_scorer(
             scorer_cls, acc_cfg.name, acc_cfg.accuracy_config
@@ -438,32 +440,33 @@ def _load_datasets(
             scorer_cls, extractor_cls = _resolve_accuracy_components(
                 perf_cfg.name, accuracy_config
             )
-            if accuracy_config.num_repeats != 1:
-                raise InputValidationError(
-                    f"Dataset '{perf_cfg.name}' is a performance dataset; "
-                    "accuracy_config.num_repeats must be 1 because scoring runs "
-                    "on already-issued performance outputs"
+            if not (test_mode == TestMode.PERF and scorer_cls.SKIP_ENDPOINT_PHASE):
+                if accuracy_config.num_repeats != 1:
+                    raise InputValidationError(
+                        f"Dataset '{perf_cfg.name}' is a performance dataset; "
+                        "accuracy_config.num_repeats must be 1 because scoring runs "
+                        "on already-issued performance outputs"
+                    )
+                _validate_accuracy_config_for_scorer(
+                    scorer_cls, perf_cfg.name, accuracy_config
                 )
-            _validate_accuracy_config_for_scorer(
-                scorer_cls, perf_cfg.name, accuracy_config
-            )
-            scorer_cls.preflight(accuracy_config.extras or {})
+                scorer_cls.preflight(accuracy_config.extras or {})
 
-            eval_configs.append(
-                AccuracyConfiguration(
-                    scorer_cls,
-                    extractor_cls,
-                    "performance",
-                    dataloader,
-                    report_dir,
-                    accuracy_config.ground_truth,
-                    accuracy_config.num_repeats,
-                    accuracy_config.extras or {},
-                    model_params=perf_model_params,
-                    endpoint_config=config.endpoint_config,
-                    dataset_type=DatasetType.PERFORMANCE,
+                eval_configs.append(
+                    AccuracyConfiguration(
+                        scorer_cls,
+                        extractor_cls,
+                        "performance",
+                        dataloader,
+                        report_dir,
+                        accuracy_config.ground_truth,
+                        accuracy_config.num_repeats,
+                        accuracy_config.extras or {},
+                        model_params=perf_model_params,
+                        endpoint_config=config.endpoint_config,
+                        dataset_type=DatasetType.PERFORMANCE,
+                    )
                 )
-            )
 
     return dataloader, accuracy_datasets, eval_configs
 
@@ -1433,6 +1436,11 @@ def _score_accuracy(
     issued counts instead of unit × repeats (repeats is forced to 1 there).
     """
     accuracy_scores: list[dict[str, Any]] = []
+    eval_configs = [
+        eval_cfg
+        for eval_cfg in ctx.eval_configs
+        if not (ctx.test_mode == TestMode.PERF and eval_cfg.scorer.SKIP_ENDPOINT_PHASE)
+    ]
 
     # Per-phase wall-clock (seconds) keyed by phase name. The accuracy phase name
     # is the dataset_name; the inline-scored perf entry keys on "performance".
@@ -1449,9 +1457,7 @@ def _score_accuracy(
     # client-side OSL is approximate for structured output.) Loaded only when a
     # real accuracy dataset exists; a load failure or a tokenizer with no fast
     # backend disables OSL rather than failing scoring.
-    has_accuracy = any(
-        ec.dataset_type == DatasetType.ACCURACY for ec in ctx.eval_configs
-    )
+    has_accuracy = any(ec.dataset_type == DatasetType.ACCURACY for ec in eval_configs)
     osl_backend: Any = None
     if has_accuracy and ctx.tokenizer_name is not None:
         try:
@@ -1477,13 +1483,11 @@ def _score_accuracy(
     # Bound the raw-output read to the accuracy population so finalize never holds
     # the whole run's (incl. perf) response-text corpus.
     accuracy_uuids = (
-        _accuracy_uuid_bound(ctx.report_dir, ctx.eval_configs)
-        if has_accuracy
-        else set()
+        _accuracy_uuid_bound(ctx.report_dir, eval_configs) if has_accuracy else set()
     )
     uuid_to_text: dict[str, str] | None = None
 
-    for eval_cfg in ctx.eval_configs:
+    for eval_cfg in eval_configs:
         try:
             scorer_kwargs = dict(eval_cfg.extras)
             if (

@@ -76,7 +76,12 @@ class _FakeScorer:
 
 class _FakeSWEBenchScorer(_FakeScorer):
     SCORER_ID = ScorerMethod.SWE_BENCH.value
+    SKIP_ENDPOINT_PHASE = True
     received_kwargs: dict = {}
+
+    @classmethod
+    def external_sample_count(cls, extras):
+        return None
 
     def __init__(self, *args, **kwargs):
         type(self).received_kwargs = kwargs
@@ -205,7 +210,12 @@ _RESULT = SimpleNamespace(perf_results=[], phase_results=[])
 
 @pytest.mark.unit
 class TestScoreAccuracy:
-    def test_swebench_receives_typed_runtime_model_and_endpoint(self, tmp_path):
+    @pytest.mark.parametrize(
+        "test_mode", [config_schema.TestMode.ACC, config_schema.TestMode.BOTH]
+    )
+    def test_swebench_receives_typed_runtime_model_and_endpoint(
+        self, tmp_path, test_mode
+    ):
         model_params = ModelParams(
             name="test-model",
             temperature=0.2,
@@ -230,7 +240,7 @@ class TestScoreAccuracy:
             endpoint_config=endpoint_config,
         )
 
-        _score_accuracy(_ctx([cfg]), _RESULT)
+        _score_accuracy(_ctx([cfg], test_mode=test_mode), _RESULT)
 
         assert _FakeSWEBenchScorer.received_kwargs == {
             "extractor": None,
@@ -297,12 +307,21 @@ class TestScoreAccuracy:
     def test_empty_when_no_datasets(self, tmp_path):
         assert _score_accuracy(_ctx([]), _RESULT) == []
 
-    def test_perf_mode_runs_configured_accuracy_scoring(self, tmp_path):
-        cfg = _cfg("aime25::gptoss", 30, 0.8, tmp_path)
+    def test_perf_mode_skips_only_external_scoring(self, tmp_path):
+        ordinary_cfg = _cfg("aime25::gptoss", 30, 0.8, tmp_path)
+        external_cfg = _cfg("swe_bench", 1, 1.0, tmp_path, scorer=_FakeSWEBenchScorer)
+        _FakeSWEBenchScorer.received_kwargs = {}
         scores = _score_accuracy(
-            _ctx([cfg], test_mode=config_schema.TestMode.PERF), _RESULT
+            _ctx(
+                [ordinary_cfg, external_cfg],
+                test_mode=config_schema.TestMode.PERF,
+            ),
+            _RESULT,
         )
-        assert _by_name(scores)["aime25::gptoss"]["score"] == 0.8
+        assert {entry["dataset_name"]: entry["score"] for entry in scores} == {
+            "aime25::gptoss": 0.8
+        }
+        assert _FakeSWEBenchScorer.received_kwargs == {}
 
     def test_no_osl_without_tokenizer(self, tmp_path):
         # tokenizer_name None (the default) => no output_sequence_lengths attached,

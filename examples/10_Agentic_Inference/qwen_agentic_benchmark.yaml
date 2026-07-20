@@ -23,7 +23,7 @@ datasets:
       turn_timeout_s: 14400.0
       enable_salt: true # do not change.
       inject_tool_delay: true # do not change.
-  - name: swe_bench
+  - name: swe_bench # Default PERF skips external evaluation; use ACC or BOTH.
     type: "accuracy"
     accuracy_config:
       eval_method: "swe_bench_scorer"

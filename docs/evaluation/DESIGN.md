@@ -9,9 +9,7 @@
 ## Overview
 
 `evaluation/` scores model responses against ground-truth answers for accuracy benchmarks.
-Configured scorers run whenever their dataset includes `accuracy_config`.
-`--mode acc` skips the performance phase, while `--mode both` runs performance
-and enables in-process response collection for configured accuracy work.
+It is invoked after a benchmark run that collected responses (i.e. `--mode acc` or `--mode both`).
 Today that orchestration happens in `commands/benchmark/execute.py`, not in `metrics/`.
 
 ## Responsibilities

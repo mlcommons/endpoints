@@ -198,9 +198,8 @@ uv run inference-endpoint benchmark from-config \
 ## SWE-bench Accuracy
 
 Both `qwen_agentic_benchmark.yaml` and `kimi_agentic_benchmark.yaml` include the
-SWE-bench accuracy dataset. Run the config for the model under test with
-`--mode acc` to skip the agentic performance dataset. The benchmark framework
-also skips its built-in endpoint phase for the SWE-bench dataset. Instead,
+SWE-bench accuracy dataset. The benchmark framework skips its built-in endpoint
+phase for the SWE-bench dataset. Instead,
 `SWEBenchScorer` submits the run to a native SWE-bench service. The service host
 owns Docker, `mini-swe-agent`, and the `swebench` evaluation harness, and it
 drives requests to the configured endpoint.
@@ -236,22 +235,24 @@ uv run --project src/inference_endpoint/evaluation/swebench_service \
   python -m swebench_service --host 0.0.0.0 --port 18080
 ```
 
-Then run the matching model config from the repo root:
+Then select the matching model config and run it from the repo root:
 
 ```bash
-# Qwen
-uv run inference-endpoint benchmark from-config \
-  --config examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml \
-  --mode acc
+CONFIG=examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml
+# For Kimi, use examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml.
 
-# Kimi
-uv run inference-endpoint benchmark from-config \
-  --config examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml \
-  --mode acc
+# PERF (default): agentic performance and inline scoring; skips SWE-bench.
+uv run inference-endpoint benchmark from-config --config "$CONFIG"
+
+# BOTH: agentic performance followed by SWE-bench.
+uv run inference-endpoint benchmark from-config --config "$CONFIG" --mode both
+
+# ACC: SWE-bench only; skips the agentic performance dataset.
+uv run inference-endpoint benchmark from-config --config "$CONFIG" --mode acc
 ```
 
-`--mode acc` is used here to skip the performance phase. Without the override,
-the default `TestMode.PERF` still runs the configured SWE-bench scorer.
+The default `PERF` mode does not load, preflight, or submit external evaluation
+scorers. Use `--mode both` or `--mode acc` whenever SWE-bench should run.
 
 See `accuracy/RUNBOOK.md` for preconditions, sanity checks, and common failure
 modes.

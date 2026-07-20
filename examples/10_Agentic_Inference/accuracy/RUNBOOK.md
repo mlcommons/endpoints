@@ -30,23 +30,26 @@ curl http://localhost:18080/health
 
 ## 2. End-to-end test (requires live endpoint)
 
-Run the config for the model under test:
+Select the config for the model under test:
 
 ```bash
-# Qwen
-uv run inference-endpoint benchmark from-config \
-  --config examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml \
-  --mode acc
+CONFIG=examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml
+# For Kimi, use examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml.
 
-# Kimi
-uv run inference-endpoint benchmark from-config \
-  --config examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml \
-  --mode acc
+# PERF (default): agentic performance only; skips SWE-bench.
+uv run inference-endpoint benchmark from-config --config "$CONFIG"
+
+# BOTH: agentic performance followed by SWE-bench.
+uv run inference-endpoint benchmark from-config --config "$CONFIG" --mode both
+
+# ACC: SWE-bench only.
+uv run inference-endpoint benchmark from-config --config "$CONFIG" --mode acc
 ```
 
 Both configs include a performance dataset and the SWE-bench accuracy dataset.
-`--mode acc` skips the performance dataset. Without the override, the default
-`TestMode.PERF` still runs the configured SWE-bench scorer.
+The default `PERF` mode skips external evaluation, so it does not require a
+running SWE-bench service. Client preflight and submission require `--mode acc`
+or `--mode both`; `ACC` also skips the performance dataset.
 
 Scorer preflight calls the service `/health` endpoint. It does not check Docker
 or pre-pull images on the benchmark client.

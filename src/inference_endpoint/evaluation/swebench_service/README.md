@@ -17,6 +17,8 @@ The endpoint URL in the benchmark config must be reachable from the service
 host. Service mode supports exactly one endpoint URL and follows the
 LiveCodeBench-style external-service convention for heavyweight evaluation work.
 Docker is required only on the service host.
+The benchmark client submits a run to this service only in `ACC` or `BOTH`
+mode; the default `PERF` mode skips external evaluation.
 
 For non-loopback deployments, bind only on a private network or set
 `--auth-token TOKEN` and configure the client with:

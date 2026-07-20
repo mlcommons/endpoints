@@ -139,24 +139,23 @@ Format is auto-detected from file extension. Override with `format=<ext>` in the
 
 ## Test Modes
 
-**perf** (default) - Performance plus configured scoring
+**perf** (default) - Performance only (no response storage)
 
 - Max throughput testing
 - Metrics: QPS, latency, TTFT, TPOT
-- No in-process response collection
-- For performance only, omit accuracy datasets and `accuracy_config`
+- Fastest - no response collection overhead
 
-**acc** - Accuracy only
+**acc** - Accuracy only (collect all responses)
 
-- Skips the performance dataset
 - Response collection and evaluation
 - Metrics: Accuracy %
 - Requires `accuracy_config` on datasets (eval_method, extractor)
 
 **both** - Combined (for official submissions)
 
-- Runs performance and configured accuracy work
-- Collects responses for accuracy evaluation
+- Performance datasets: metrics only
+- Accuracy datasets: collect + evaluate
+- Selective collection based on dataset type
 
 Accuracy config is supported in both CLI and YAML:
 
@@ -335,7 +334,7 @@ Note: For submission configs, `model_params.name` is optional when `submission_r
 - Online mode requires `--load-pattern` (poisson or concurrency)
   - `poisson` requires `--target-qps`
   - `concurrency` requires `--concurrency`
-- Use `--mode both` when accuracy response collection must run with performance
+- Use `--mode both` for combined perf + accuracy runs
 - Streaming: auto (default) resolves to off for offline, on for online
 
 **Best Practices:**

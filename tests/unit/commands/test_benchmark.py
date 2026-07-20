@@ -684,10 +684,7 @@ class TestAccuracyOnlyDataset:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        (
-            "datasets, expected_scorer, expected_type, "
-            "expected_accuracy_datasets, swebench_preflight"
-        ),
+        ("datasets, expected_scorer, expected_type, " "expected_accuracy_datasets"),
         [
             (
                 [
@@ -697,25 +694,30 @@ class TestAccuracyOnlyDataset:
                     {
                         "name": "swe_bench",
                         "type": "accuracy",
-                        "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                        "accuracy_config": {
+                            "eval_method": "swe_bench_scorer",
+                            "num_repeats": 2,
+                            "extras": {"subset": "unknown"},
+                        },
                     },
                 ],
-                SWEBenchScorer,
-                DatasetType.ACCURACY,
-                1,
-                True,
+                None,
+                None,
+                0,
             ),
             (
                 [
                     {
                         "type": "performance",
-                        "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                        "accuracy_config": {
+                            "eval_method": "swe_bench_scorer",
+                            "num_repeats": 2,
+                        },
                     },
                 ],
-                SWEBenchScorer,
-                DatasetType.PERFORMANCE,
+                None,
+                None,
                 0,
-                True,
             ),
             (
                 [
@@ -727,24 +729,37 @@ class TestAccuracyOnlyDataset:
                 AgenticInferenceInlineScorer,
                 DatasetType.PERFORMANCE,
                 0,
-                False,
+            ),
+            (
+                [
+                    {
+                        "type": "performance",
+                    },
+                    {
+                        "type": "accuracy",
+                        "accuracy_config": {
+                            "eval_method": "string_match",
+                            "extractor": "identity_extractor",
+                            "ground_truth": "answer",
+                        },
+                    },
+                ],
+                Scorer.get("string_match"),
+                DatasetType.ACCURACY,
+                1,
             ),
         ],
     )
-    def test_perf_mode_loads_configured_scorers(
+    def test_perf_mode_skips_only_external_scorers(
         self,
         tmp_path,
         datasets,
         expected_scorer,
         expected_type,
         expected_accuracy_datasets,
-        swebench_preflight,
     ):
         dummy_jsonl = tmp_path / "dummy.jsonl"
         dummy_jsonl.write_text('{"text_input": "hello"}\n')
-        fake_acc_df = pd.DataFrame(
-            [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
-        )
         resolved_datasets = []
         for dataset in datasets:
             if dataset["type"] == "performance":
@@ -757,7 +772,12 @@ class TestAccuracyOnlyDataset:
                     resolved["accuracy_config"] = accuracy_config
                 resolved_datasets.append(resolved)
             else:
-                resolved_datasets.append(dataset)
+                resolved = {
+                    **dataset,
+                    "path": str(dummy_jsonl),
+                    "parser": {"prompt": "text_input"},
+                }
+                resolved_datasets.append(resolved)
         config = OfflineConfig(
             endpoint_config={"endpoints": ["http://test:8000"]},
             model_params={"name": "test-model"},
@@ -766,23 +786,19 @@ class TestAccuracyOnlyDataset:
 
         with (
             patch.object(SWEBenchScorer, "preflight") as mock_preflight,
-            patch.object(
-                SWEBench, "generate", return_value=fake_acc_df
-            ) as mock_generate,
+            patch.object(SWEBench, "generate") as mock_generate,
         ):
             _, accuracy_datasets, eval_configs = _load_datasets(
                 config, tmp_path, TestMode.PERF
             )
-        if swebench_preflight:
-            mock_preflight.assert_called_once_with({})
-        else:
-            mock_preflight.assert_not_called()
-        assert mock_generate.call_count == expected_accuracy_datasets
+        mock_preflight.assert_not_called()
+        mock_generate.assert_not_called()
 
         assert len(accuracy_datasets) == expected_accuracy_datasets
-        assert len(eval_configs) == 1
-        assert eval_configs[0].scorer is expected_scorer
-        assert eval_configs[0].dataset_type == expected_type
+        assert len(eval_configs) == (1 if expected_scorer is not None else 0)
+        if expected_scorer is not None:
+            assert eval_configs[0].scorer is expected_scorer
+            assert eval_configs[0].dataset_type == expected_type
 
     @pytest.mark.unit
     @pytest.mark.parametrize("test_mode", [TestMode.ACC, TestMode.BOTH])
@@ -1874,7 +1890,7 @@ class TestFinalizeBenchmark:
         )
 
     @pytest.mark.unit
-    def test_perf_mode_runs_all_configured_scorers(self, tmp_path):
+    def test_perf_mode_skips_external_scorers_only(self, tmp_path):
         config = OfflineConfig(**_OFFLINE_KWARGS)
         dataset = _make_loaded_dataset()
         ctx = _make_benchmark_context(
@@ -1927,7 +1943,12 @@ class TestFinalizeBenchmark:
                 end_time_ns=2_000_000_000,
             )
         )
-        finalize_benchmark(ctx, bench)
+        with patch.object(
+            _SelfContainedScorer,
+            "score",
+            side_effect=AssertionError("external scorer should not run in PERF"),
+        ):
+            finalize_benchmark(ctx, bench)
 
         assert json.loads((tmp_path / "scores.json").read_text()) == {"score": 1.0}
         results = json.loads(
@@ -1939,7 +1960,6 @@ class TestFinalizeBenchmark:
         } == {
             "performance": 1.0,
             "accuracy": 0.5,
-            "external_performance": 1.0,
         }
 
     @pytest.mark.unit
