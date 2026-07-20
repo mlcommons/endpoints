@@ -297,12 +297,12 @@ class TestScoreAccuracy:
     def test_empty_when_no_datasets(self, tmp_path):
         assert _score_accuracy(_ctx([]), _RESULT) == []
 
-    def test_perf_mode_skips_accuracy_scoring(self, tmp_path):
+    def test_perf_mode_runs_configured_accuracy_scoring(self, tmp_path):
         cfg = _cfg("aime25::gptoss", 30, 0.8, tmp_path)
-        assert (
-            _score_accuracy(_ctx([cfg], test_mode=config_schema.TestMode.PERF), _RESULT)
-            == []
+        scores = _score_accuracy(
+            _ctx([cfg], test_mode=config_schema.TestMode.PERF), _RESULT
         )
+        assert _by_name(scores)["aime25::gptoss"]["score"] == 0.8
 
     def test_no_osl_without_tokenizer(self, tmp_path):
         # tokenizer_name None (the default) => no output_sequence_lengths attached,

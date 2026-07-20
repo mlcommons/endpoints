@@ -349,11 +349,9 @@ def _load_datasets(
 
     accuracy_datasets: list[Dataset] = []
     eval_configs: list[AccuracyConfiguration] = []
-    load_accuracy = test_mode in (TestMode.ACC, TestMode.BOTH)
 
     # Pack the evaluation parameters for each accuracy dataset
-    accuracy_cfgs_to_load = accuracy_cfgs if load_accuracy else []
-    for acc_cfg in accuracy_cfgs_to_load:
+    for acc_cfg in accuracy_cfgs:
         scorer_cls, extractor_cls = _resolve_accuracy_components(
             acc_cfg.name, acc_cfg.accuracy_config
         )
@@ -391,7 +389,7 @@ def _load_datasets(
             )
         )
 
-    if not accuracy_cfgs and load_accuracy:
+    if not accuracy_cfgs:
         logger.info("No separate accuracy datasets provided")
 
     dataloader: Dataset | None = None
@@ -431,34 +429,32 @@ def _load_datasets(
             scorer_cls, extractor_cls = _resolve_accuracy_components(
                 perf_cfg.name, accuracy_config
             )
-            score_performance = load_accuracy or not scorer_cls.SKIP_ENDPOINT_PHASE
-            if score_performance:
-                if accuracy_config.num_repeats != 1:
-                    raise InputValidationError(
-                        f"Dataset '{perf_cfg.name}' is a performance dataset; "
-                        "accuracy_config.num_repeats must be 1 because scoring runs "
-                        "on already-issued performance outputs"
-                    )
-                _validate_accuracy_config_for_scorer(
-                    scorer_cls, perf_cfg.name, accuracy_config
+            if accuracy_config.num_repeats != 1:
+                raise InputValidationError(
+                    f"Dataset '{perf_cfg.name}' is a performance dataset; "
+                    "accuracy_config.num_repeats must be 1 because scoring runs "
+                    "on already-issued performance outputs"
                 )
-                scorer_cls.preflight(accuracy_config.extras or {})
+            _validate_accuracy_config_for_scorer(
+                scorer_cls, perf_cfg.name, accuracy_config
+            )
+            scorer_cls.preflight(accuracy_config.extras or {})
 
-                eval_configs.append(
-                    AccuracyConfiguration(
-                        scorer_cls,
-                        extractor_cls,
-                        "performance",
-                        dataloader,
-                        report_dir,
-                        accuracy_config.ground_truth,
-                        accuracy_config.num_repeats,
-                        accuracy_config.extras or {},
-                        model_params=perf_model_params,
-                        endpoint_config=config.endpoint_config,
-                        dataset_type=DatasetType.PERFORMANCE,
-                    )
+            eval_configs.append(
+                AccuracyConfiguration(
+                    scorer_cls,
+                    extractor_cls,
+                    "performance",
+                    dataloader,
+                    report_dir,
+                    accuracy_config.ground_truth,
+                    accuracy_config.num_repeats,
+                    accuracy_config.extras or {},
+                    model_params=perf_model_params,
+                    endpoint_config=config.endpoint_config,
+                    dataset_type=DatasetType.PERFORMANCE,
                 )
+            )
 
     return dataloader, accuracy_datasets, eval_configs
 
@@ -1426,21 +1422,8 @@ def _score_accuracy(
     returns a ``score_breakdown()`` (DeepSeek-R1, BFCL) also attaches
     ``breakdown``. The ``"performance"`` inline entry totals the perf phases'
     issued counts instead of unit × repeats (repeats is forced to 1 there).
-    PERF runs execute only inline performance scorers for their owned artifacts
-    and do not return accuracy entries.
     """
     accuracy_scores: list[dict[str, Any]] = []
-    if ctx.test_mode == TestMode.PERF:
-        eval_configs = [
-            eval_cfg
-            for eval_cfg in ctx.eval_configs
-            if eval_cfg.dataset_type == DatasetType.PERFORMANCE
-            and not eval_cfg.scorer.SKIP_ENDPOINT_PHASE
-        ]
-    elif ctx.test_mode in (TestMode.ACC, TestMode.BOTH):
-        eval_configs = ctx.eval_configs
-    else:
-        return accuracy_scores
 
     # Per-phase wall-clock (seconds) keyed by phase name. The accuracy phase name
     # is the dataset_name; the inline-scored perf entry keys on "performance".
@@ -1457,7 +1440,9 @@ def _score_accuracy(
     # client-side OSL is approximate for structured output.) Loaded only when a
     # real accuracy dataset exists; a load failure or a tokenizer with no fast
     # backend disables OSL rather than failing scoring.
-    has_accuracy = any(ec.dataset_type == DatasetType.ACCURACY for ec in eval_configs)
+    has_accuracy = any(
+        ec.dataset_type == DatasetType.ACCURACY for ec in ctx.eval_configs
+    )
     osl_backend: Any = None
     if has_accuracy and ctx.tokenizer_name is not None:
         try:
@@ -1483,11 +1468,13 @@ def _score_accuracy(
     # Bound the raw-output read to the accuracy population so finalize never holds
     # the whole run's (incl. perf) response-text corpus.
     accuracy_uuids = (
-        _accuracy_uuid_bound(ctx.report_dir, eval_configs) if has_accuracy else set()
+        _accuracy_uuid_bound(ctx.report_dir, ctx.eval_configs)
+        if has_accuracy
+        else set()
     )
     uuid_to_text: dict[str, str] | None = None
 
-    for eval_cfg in eval_configs:
+    for eval_cfg in ctx.eval_configs:
         try:
             scorer_kwargs = dict(eval_cfg.extras)
             if (
@@ -1512,11 +1499,6 @@ def _score_accuracy(
                 f"for scorer '{eval_cfg.scorer.__name__}': {e}"
             ) from e
         score, n_repeats = scorer_instance.score()
-        if ctx.test_mode == TestMode.PERF:
-            logger.info(
-                "Completed inline performance scoring for %s", eval_cfg.dataset_name
-            )
-            continue
         # Coerce a numpy scalar score (np.float32/64, numpy ints — e.g. np.mean
         # from the base Scorer) to a native Python float so the entry stays
         # serializable by both msgspec (result_summary.json) and json
@@ -1754,10 +1736,10 @@ def run_benchmark(
 ) -> Path:
     """Orchestrate setup → execute → finalize for the main run.
 
-    ``test_mode`` is the single source of truth for what runs: ``ACC`` is an
-    accuracy-only run (no performance phase), ``PERF`` performance-only, and
-    ``BOTH`` runs performance then accuracy. The CLI ``--accuracy-only`` flag is
-    a convenience alias that resolves to ``TestMode.ACC``.
+    ``ACC`` is an accuracy-only run with no performance phase. In other modes,
+    configured performance and accuracy work runs as declared in the config.
+    The CLI ``--accuracy-only`` flag is a convenience alias that resolves to
+    ``TestMode.ACC``.
 
     Returns the run's ``report_dir`` so the caller can locate artifacts (and, for
     a config with an ``audit:`` block, point ``run_audit`` at ``<report_dir>/audit``).
