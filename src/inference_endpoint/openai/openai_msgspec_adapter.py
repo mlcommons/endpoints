@@ -49,13 +49,15 @@ from .types import (
 
 def _chat_message_from_dict(msg: dict) -> "ChatMessage":
     """Build a ChatMessage from a dict, forwarding all supported fields."""
+    reasoning_value = msg.get("reasoning_content") or msg.get("reasoning")
     return ChatMessage(
         role=msg["role"],
         content=msg.get("content"),
         name=msg.get("name"),
         tool_calls=msg.get("tool_calls"),
         tool_call_id=msg.get("tool_call_id"),
-        reasoning_content=msg.get("reasoning_content"),
+        reasoning_content=reasoning_value,
+        reasoning=reasoning_value,
     )
 
 

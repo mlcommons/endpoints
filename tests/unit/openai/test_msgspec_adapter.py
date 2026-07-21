@@ -166,6 +166,39 @@ def test_chat_message_from_dict_all_fields():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("message_fields", "expected"),
+    [
+        ({"reasoning_content": "thinking via sglang"}, "thinking via sglang"),
+        ({"reasoning": "thinking via vllm"}, "thinking via vllm"),
+        ({"reasoning_content": "sglang", "reasoning": "vllm"}, "sglang"),
+    ],
+    ids=["reasoning_content", "reasoning", "reasoning_content_precedence"],
+)
+def test_to_endpoint_request_forwards_both_reasoning_aliases(message_fields, expected):
+    query = Query(
+        id="q-reasoning",
+        data={
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "answer",
+                    **message_fields,
+                }
+            ],
+        },
+    )
+
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    payload = json.loads(msgspec.json.encode(request))
+
+    msg = payload["messages"][0]
+    assert msg["reasoning_content"] == expected
+    assert msg["reasoning"] == expected
+
+
+@pytest.mark.unit
 def test_chat_message_content_optional():
     """ChatMessage accepts content=None for tool-dispatching assistant turns."""
     msg = ChatMessage(role="assistant", tool_calls=[])

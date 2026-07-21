@@ -974,6 +974,51 @@ def test_build_metadata_pre_built_messages_no_tools():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("message_fields", "expected_field"),
+    [
+        ({"reasoning_content": "thinking"}, "reasoning_content"),
+        ({"reasoning": "thinking"}, "reasoning"),
+        ({"reasoning_content": "thinking", "reasoning": "thinking"}, None),
+    ],
+    ids=["reasoning_content", "reasoning", "both_rejected"],
+)
+def test_pre_built_messages_reasoning_alias_policy(
+    message_fields: dict[str, str], expected_field: str | None
+):
+    df = pd.DataFrame(
+        [
+            {"conversation_id": "c1", "turn": 1, "role": "user", "content": "A"},
+            {
+                "conversation_id": "c1",
+                "turn": 2,
+                "role": "assistant",
+                "content": "B",
+                **message_fields,
+            },
+            {"conversation_id": "c1", "turn": 3, "role": "user", "content": "C"},
+        ]
+    )
+    ds = AgenticInferenceDataset(df)
+
+    if expected_field is None:
+        with pytest.raises(
+            InputValidationError,
+            match=(
+                "conversation 'c1' turn 2 has both "
+                "'reasoning_content' and 'reasoning'"
+            ),
+        ):
+            ds.load()
+        return
+
+    ds.load()
+    assert ds.conversation_metadata is not None
+    msgs = ds.conversation_metadata.pre_built_messages_by_key[("c1", 3)]
+    assert msgs[1][expected_field] == "thinking"
+
+
+@pytest.mark.unit
 def test_load_sample_includes_messages():
     """load_sample returns messages with the complete message list."""
     df = _make_tool_sequence_df()
