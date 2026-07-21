@@ -15,6 +15,7 @@
 
 """Writer base class for event records."""
 
+import time
 from abc import ABC, abstractmethod
 
 from inference_endpoint.core.record import EventRecord
@@ -23,27 +24,48 @@ from inference_endpoint.core.record import EventRecord
 class RecordWriter(ABC):
     """Abstract base class for writing event records.
 
-    Supports an optional flush interval: after every N records written via
-    write(), the writer is automatically flushed.
+    Supports two independent auto-flush triggers: a count-based interval
+    (after every N records) and a time-based latency bound (after this many
+    seconds since the last flush). The time-based trigger keeps low-rate
+    streams durable on disk without waiting to accumulate a full count batch.
     """
 
-    def __init__(self, *args, flush_interval: int | None = None):
+    def __init__(
+        self,
+        *args,
+        flush_interval: int | None = None,
+        max_flush_latency_s: float | None = None,
+    ):
         """Initialize the writer.
 
         Args:
             flush_interval: If set, flush after every this many records written.
-                None means no automatic flushing.
+                None means no count-based flushing.
+            max_flush_latency_s: If set, flush on the next write() once this many
+                seconds have elapsed since the last flush, even if flush_interval
+                has not been reached. Bounds on-disk staleness for low-rate
+                streams. None means no time-based flushing.
         """
         self._flush_interval = flush_interval
+        self._max_flush_latency_s = max_flush_latency_s
         self._n_since_last_flush = 0
+        self._last_flush_monotonic = time.monotonic()
 
     def write(self, record: EventRecord) -> None:
-        """Write a record and optionally flush based on flush_interval."""
+        """Write a record and optionally flush based on count or elapsed time."""
         self._write_record(record)
         self._n_since_last_flush += 1
+        if self._n_since_last_flush == 0:
+            return
         if (
             self._flush_interval is not None
             and self._n_since_last_flush >= self._flush_interval
+        ):
+            self.flush()
+        elif (
+            self._max_flush_latency_s is not None
+            and time.monotonic() - self._last_flush_monotonic
+            >= self._max_flush_latency_s
         ):
             self.flush()
 
@@ -60,7 +82,9 @@ class RecordWriter(ABC):
     def flush(self) -> None:
         """Flush the writer to ensure all data is written to the underlying storage.
 
-        Also resets the flush-interval count so the next flush happens after
-        another N records (whether flush was triggered by the interval or manually).
+        Also resets the flush-interval count and the elapsed-time baseline so the
+        next auto-flush happens after another N records or another latency window
+        (whether flush was triggered by count, time, or manually).
         """
         self._n_since_last_flush = 0
+        self._last_flush_monotonic = time.monotonic()

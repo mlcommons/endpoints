@@ -191,21 +191,14 @@ uv run inference-endpoint benchmark from-config \
   --timeout 3600
 ```
 
-Python script (GPT-OSS `run.py` style):
-
-```bash
-USE_PYTHON_SCRIPT=true ./examples/10_DeepSeekV4Pro_Example/run_sglang_accuracy_benchmark.sh
-```
-
 | Argument / env          | Default      | Description                                  |
 | ----------------------- | ------------ | -------------------------------------------- |
 | `HF_TOKEN`              | _(required)_ | HuggingFace token for GPQA download          |
-| `TIMEOUT`               | `3600`       | Benchmark timeout (seconds)                  |
-| `USE_PYTHON_SCRIPT`     | `false`      | Use `run_accuracy_sglang.py` instead of YAML |
-| `DOCKER_LOG_STORAGE_GB` | `16`         | Container writable layer size when supported |
+| `TIMEOUT`               | `86400`      | Benchmark timeout (seconds)                  |
+| `DOCKER_LOG_STORAGE_GB` | `64`         | Container writable layer size when supported |
 
-Accuracy config uses `max_new_tokens: 88000`, concurrency `num_workers: 64`, and phase order
-AIME25 ×8 → GPQA ×5 → LiveCodeBench ×3.
+Accuracy config uses `max_new_tokens: 320000`, `num_workers: 32`, `num_repeats: 4` per dataset,
+and phase order AIME25 → GPQA → LiveCodeBench.
 
 ### Docker log storage
 
@@ -251,28 +244,6 @@ export ALLOW_LCB_LOCAL_EVAL=true
 The accuracy helper skips the `:13835` preflight when this is set (default `true`).
 WebSocket scoring is attempted first if `lcb-service` is up; otherwise scoring falls
 back to the subprocess path automatically.
-
----
-
-## Re-score from Existing Report
-
-If inference completed but scoring failed (e.g. `lcb-service` was not running), re-score from
-`events.jsonl` without re-running inference:
-
-```bash
-cd endpoints
-uv run python examples/10_DeepSeekV4Pro_Example/rescore_accuracy.py \
-  --report-dir results/sglang_deepseek_v4_pro_accuracy \
-  --write-results-json
-```
-
-Skip LiveCodeBench until the container is ready:
-
-```bash
-uv run python examples/10_DeepSeekV4Pro_Example/rescore_accuracy.py \
-  --report-dir results/sglang_deepseek_v4_pro_accuracy \
-  --skip-lcb
-```
 
 ---
 

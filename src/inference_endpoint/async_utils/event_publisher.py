@@ -35,6 +35,7 @@ class EventPublisherService(ZmqMessagePublisher[EventRecord]):
         extra_eager: bool = False,
         isolated_event_loop: bool = False,
         send_threshold: int = 1000,
+        max_batch_latency_s: float | None = 1.0,
     ):
         """Creates a new EventPublisherService.
 
@@ -46,6 +47,11 @@ class EventPublisherService(ZmqMessagePublisher[EventRecord]):
             isolated_event_loop: If True, runs on a separate event loop thread.
             send_threshold: Minimum number of buffered records before an
                 automatic flush is triggered. See ZmqMessagePublisher.
+            max_batch_latency_s: Upper bound (seconds) on how long a buffered
+                record waits before being sent, even below send_threshold. This
+                keeps low-rate streams (e.g. slow accuracy completions) landing
+                on disk promptly so a crash loses at most this window; high-rate
+                streams still flush by count first. See ZmqMessagePublisher.
         """
         if extra_eager:
             loop = None
@@ -60,4 +66,5 @@ class EventPublisherService(ZmqMessagePublisher[EventRecord]):
             managed_zmq_context,
             loop=loop,
             send_threshold=send_threshold,
+            max_batch_latency_s=max_batch_latency_s,
         )

@@ -15,7 +15,6 @@ LCB_PORT="${LCB_PORT:-13835}"
 TIMEOUT="${TIMEOUT:-86400}"
 # Host log volume for docker --storage-opt when DOCKER_USE_LOG_STORAGE_OPT=true.
 export DOCKER_LOG_STORAGE_GB="${DOCKER_LOG_STORAGE_GB:-64}"
-USE_PYTHON_SCRIPT="${USE_PYTHON_SCRIPT:-false}"
 # Accuracy phases drain with no timeout by default (settings.drain.accuracy_timeout_s).
 export ALLOW_LCB_LOCAL_EVAL="${ALLOW_LCB_LOCAL_EVAL:-true}"
 
@@ -93,32 +92,19 @@ rm -rf "${ENDPOINTS_DIR}/results/sglang_deepseek_v4_pro_accuracy"
 echo "Cleared prior results: results/sglang_deepseek_v4_pro_accuracy/"
 echo ""
 
-if [[ "${USE_PYTHON_SCRIPT}" == "true" ]]; then
-  echo "=== Running accuracy suite (Python script, GPT-OSS style) ==="
-  BENCHMARK_LOG="${LOG_DIR}/accuracy_benchmark.log"
-  set +e
-  uv run python "${SCRIPT_DIR}/run_accuracy_sglang.py" \
-    --endpoint-url "http://127.0.0.1:${SGLANG_PORT}" \
-    --report-dir results/sglang_deepseek_v4_pro_accuracy \
-    --max-duration "${TIMEOUT}" \
-    2>&1 | tee "${BENCHMARK_LOG}"
-  bench_rc=${PIPESTATUS[0]}
-  set -e
-else
-  echo "=== Running accuracy benchmark (from-config) ==="
-  BENCHMARK_LOG="${LOG_DIR}/accuracy_from_config.log"
-  CMD=(
-    uv run inference-endpoint benchmark from-config
-    -c "${CONFIG}"
-    --timeout "${TIMEOUT}"
-    --mode both
-  )
-  echo "${CMD[*]}"
-  set +e
-  "${CMD[@]}" 2>&1 | tee "${BENCHMARK_LOG}"
-  bench_rc=${PIPESTATUS[0]}
-  set -e
-fi
+echo "=== Running accuracy benchmark (from-config) ==="
+BENCHMARK_LOG="${LOG_DIR}/accuracy_from_config.log"
+CMD=(
+  uv run inference-endpoint benchmark from-config
+  -c "${CONFIG}"
+  --timeout "${TIMEOUT}"
+  --mode both
+)
+echo "${CMD[*]}"
+set +e
+"${CMD[@]}" 2>&1 | tee "${BENCHMARK_LOG}"
+bench_rc=${PIPESTATUS[0]}
+set -e
 
 echo ""
 echo "Benchmark log: ${BENCHMARK_LOG}"

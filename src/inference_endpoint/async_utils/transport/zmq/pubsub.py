@@ -16,6 +16,7 @@
 import asyncio
 import logging
 import os
+import time
 from collections import deque
 from typing import TypeVar
 from urllib.parse import urlparse
@@ -75,6 +76,7 @@ class ZmqMessagePublisher(MessagePublisher[T]):
         loop: asyncio.AbstractEventLoop | None = None,
         scheme: str = "ipc",
         send_threshold: int = 1000,
+        max_batch_latency_s: float | None = None,
         sndhwm: int = 0,
         linger: int = -1,
     ):
@@ -96,6 +98,12 @@ class ZmqMessagePublisher(MessagePublisher[T]):
             send_threshold: Minimum buffered records before automatic batch
                 flush. Set to 1 to disable batching (e.g. one snapshot per
                 tick, where batching adds latency).
+            max_batch_latency_s: If set, flush the buffer on the next send()
+                once this many seconds have elapsed since the last flush, even
+                if send_threshold has not been reached. Bounds the on-disk
+                staleness for low-rate streams (e.g. slow accuracy completions)
+                without changing high-rate behavior, where the count threshold
+                fires first. None (default) disables the time-based flush.
             sndhwm: ZMQ SNDHWM. 0 (default, unlimited) for delivery
                 guarantees. A small value (e.g. 4) makes the writer drop
                 instead of stall when subscribers are slow — appropriate
@@ -117,6 +125,8 @@ class ZmqMessagePublisher(MessagePublisher[T]):
 
         self._fd = self._socket.getsockopt(zmq.FD)
         self._send_threshold = send_threshold
+        self._max_batch_latency_s = max_batch_latency_s
+        self._last_batch_flush_monotonic = time.monotonic()
         self._batch_buffer: list[bytes] = []
         self._last_topic: bytes = b""
         self._pending: deque[bytes] = deque()
@@ -146,6 +156,12 @@ class ZmqMessagePublisher(MessagePublisher[T]):
 
         if len(self._batch_buffer) >= self._send_threshold:
             self._flush_batch()
+        elif (
+            self._max_batch_latency_s is not None
+            and time.monotonic() - self._last_batch_flush_monotonic
+            >= self._max_batch_latency_s
+        ):
+            self._flush_batch()
 
     def flush(self) -> None:
         """Force-send any buffered records, regardless of threshold.
@@ -164,6 +180,7 @@ class ZmqMessagePublisher(MessagePublisher[T]):
         buffer is restored so records are not lost.
         """
         buf = self._batch_buffer
+        self._last_batch_flush_monotonic = time.monotonic()
 
         if len(buf) == 1:
             # Single record: send with its own topic (no batch overhead).
