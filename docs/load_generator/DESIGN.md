@@ -478,9 +478,10 @@ class ConcurrencyStrategy(LoadStrategy):
 
 Handles `LoadPatternType.AGENTIC_INFERENCE` (`agentic_inference_strategy.py`). Unlike the open-loop
 strategies, it is **response-driven**: each conversation is a fixed sequence of turns known upfront
-from the dataset, and turn _N+1_ is issued only after turn _N_'s response arrives (its content
-feeds the next turn's prompt). Concurrency is measured in **active conversations**
-(`_target_concurrency`), not in-flight requests.
+from the dataset (turn prompts are pre-built from the dataset history, not synthesized from the
+model's replies), and turn _N+1_ is issued only after turn _N_'s response arrives — the response
+gates the _timing_ of the next turn, it does not alter its prompt. Concurrency is measured in
+**active conversations** (`_target_concurrency`), not in-flight requests.
 
 - `execute(phase_issuer)` seeds up to `_target_concurrency` initial conversations, then awaits
   completion of all of them.
@@ -776,7 +777,11 @@ def create_load_strategy(
         case LoadPatternType.AGENTIC_INFERENCE:
             # Agentic runs are response-driven and need an AgenticInferenceDataset;
             # they are wired up directly, not through this open-loop factory.
-            raise ValueError("AGENTIC_INFERENCE is not created via create_load_strategy")
+            raise ValueError(
+                "AGENTIC_INFERENCE load pattern requires an AgenticInferenceDataset; "
+                "use 'inference-endpoint benchmark from-config' with an "
+                "agentic inference dataset"
+            )
 ```
 
 ---
@@ -905,6 +910,7 @@ phase. The receiver must distinguish stale vs current-phase completions:
 ```python
 def _handle_response(self, resp: QueryResult) -> None:
     query_id = resp.id
+    phase_issuer = self._current_phase_issuer
     # ERROR is published before COMPLETE (the aggregator depends on this order
     # for tracked-failure counting).
     if resp.error is not None:

@@ -86,7 +86,9 @@ Splits the snapshot's `metrics` list into counters and series, then builds the `
 
 Counter keys read: `tracked_samples_issued`, `tracked_samples_completed`,
 `tracked_samples_failed`, `tracked_duration_ns`, `legacy_loadgen_window_duration_ns`, and the
-`tracked_finish_reason_*` counters. Series summarized: `ttft`, `tpot`, `latency`, `osl`.
+`tracked_finish_reason_*` counters. Series read (snapshot key → report field, via
+`SERIES_TO_SUMMARY_FIELD`): `ttft_ns` → `ttft`, `tpot_ns` → `tpot`, `sample_latency_ns` →
+`latency`, and `osl` → `output_sequence_lengths`.
 
 **QPS/TPS window selection.** The snapshot always carries both a native window
 (`tracked_duration_ns`) and the MLPerf LoadGen "completed" window

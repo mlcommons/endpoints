@@ -118,7 +118,9 @@ throughput once:
   both QPS and TPS fall back to the native window so they always share one window, and
   `legacy_loadgen_window_duration_ns` is left `None` so the serialized report honestly records
   which view it holds.
-- `tps` is additionally `None` when no OSL was recorded (non-streaming, or tokenizer unavailable).
+- `tps` is additionally `None` when no OSL was recorded — i.e. no tokenizer is configured (or the
+  output is empty). OSL is captured on `COMPLETE` regardless of streaming, so non-streaming runs
+  still get a TPS when a tokenizer is available.
 
 **Accuracy** is not part of the metrics snapshot; `from_snapshot` leaves `accuracy` empty and the
 finalizer attaches per-dataset accuracy entries after scoring. `run_config` is supplied by the

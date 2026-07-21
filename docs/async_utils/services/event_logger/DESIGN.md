@@ -215,5 +215,6 @@ usage: uv run python -m inference_endpoint.async_utils.services.event_logger
 ## Wiring
 
 `publish(EventRecord(...))` calls are connected in the load generator (`BenchmarkSession`
-publishes STARTED / PROMPT / COMPLETE / ERROR events via its `EventPublisher`), so the event
+publishes STARTED / ISSUED / COMPLETE / ERROR events via its `EventPublisher`; the prompt rides on
+the `ISSUED` event's `PromptData` payload rather than a separate event), so the event
 logger receives and persists all session/sample/error events published during a benchmark run.
