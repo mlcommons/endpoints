@@ -19,15 +19,64 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import msgspec.json
+import msgspec.structs
 
+from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
+    MetricCounterKey,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
+    build_token_series_dict,
+)
+from inference_endpoint.evaluation.accuracy_results import average_accuracy
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
+
+# Aggregator series name -> result_summary.json field. Single source of truth for the
+# summary's latency sections: ``Report.from_snapshot`` builds its fields from this, and
+# ``scripts/early_stopping_estimate_from_events.py`` uses it to key its post-hoc output the same way.
+SERIES_TO_SUMMARY_FIELD: Final[dict[str, str]] = {
+    "ttft_ns": "ttft",
+    "tpot_ns": "tpot",
+    "sample_latency_ns": "latency",
+}
+
+
+def place_early_stopping_percentiles(
+    metric_dict: dict[str, Any], esp: dict[str, float | None]
+) -> dict[str, Any]:
+    """Return ``metric_dict`` with the ES map directly after ``percentiles``.
+
+    Single source of the map's position in every summary-shaped dict — used by
+    the report builder and by ``scripts/early_stopping_estimate_from_events.py``
+    when augmenting a historical ``result_summary.json``. Replaces any existing
+    placement; appends at the end if the dict has no ``percentiles`` key.
+    """
+    out: dict[str, Any] = {}
+    for key, value in metric_dict.items():
+        if key == "early_stopping_percentiles":
+            continue
+        out[key] = value
+        if key == "percentiles":
+            out["early_stopping_percentiles"] = esp
+    if "early_stopping_percentiles" not in out:
+        out["early_stopping_percentiles"] = esp
+    return out
+
+
+_FINISH_REASON_COUNTERS = (
+    MetricCounterKey.TRACKED_FINISH_REASON_STOP,
+    MetricCounterKey.TRACKED_FINISH_REASON_LENGTH,
+    MetricCounterKey.TRACKED_FINISH_REASON_TOOL_CALLS,
+    MetricCounterKey.TRACKED_FINISH_REASON_CONTENT_FILTER,
+    MetricCounterKey.TRACKED_FINISH_REASON_FUNCTION_CALL,
+    MetricCounterKey.TRACKED_FINISH_REASON_OTHER,
+)
 
 
 def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
@@ -44,7 +93,10 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
     """
     count = stat.get("count", 0)
     if count == 0:
-        return {}
+        # No data -> no rollups, but an enabled-ES empty series still self-describes
+        # (all-null map) in the summary instead of looking feature-off.
+        esp = stat.get("early_stopping_percentiles")
+        return {"early_stopping_percentiles": esp} if esp is not None else {}
 
     total = stat.get("total", 0)
     sum_sq = stat.get("sum_sq", 0)
@@ -84,7 +136,7 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
         median = (s_min + s_max) / 2
 
     histogram = stat.get("histogram", [])
-    return {
+    metric: dict[str, Any] = {
         "total": total,
         "min": s_min,
         "max": s_max,
@@ -97,6 +149,26 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
             "counts": [c for _, c in histogram],
         },
     }
+    # Early-stopping estimate map — present only when the feature is enabled
+    # (COMPLETE snapshots for TTFT/TPOT/latency); sits right after `percentiles`.
+    early_stopping_percentiles = stat.get("early_stopping_percentiles")
+    if early_stopping_percentiles is not None:
+        metric = place_early_stopping_percentiles(metric, early_stopping_percentiles)
+    return metric
+
+
+def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
+    """Build a series rollup (same shape as the perf ``output_sequence_lengths``
+    block) from raw integer values, off the hot path.
+
+    Delegates the token-series construction to the aggregator's
+    ``build_token_series_dict`` — the single source of the HDR bounds / sig-figs /
+    bucket count — then applies the same ``_series_to_metric_dict`` shaping the
+    perf report uses, so an accuracy-phase OSL block is byte-for-byte the same
+    shape (avg/min/max/median/std_dev/percentiles/histogram) as the performance
+    one. Returns ``{}`` when ``values`` is empty.
+    """
+    return _series_to_metric_dict(build_token_series_dict(values))
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +217,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # tokenizer unavailable).
     qps: float | None = None
     tps: float | None = None
+    finish_reason_counts: dict[str, int] = msgspec.field(default_factory=dict)
 
     # Run configuration (load_pattern, warmup, and the scheduler/dataloader RNG
     # seeds), from config. Carried so result_summary.json is self-describing and a
@@ -153,6 +226,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # snapshot. (Resolved/effective runtime settings — sample count + ordering,
     # which can differ per audit phase — are deferred to a follow-up.)
     run_config: dict[str, Any] | None = None
+
+    # Per-dataset accuracy entries (one per scored dataset), attached after
+    # scoring in finalize_benchmark. Accuracy is not in the metrics snapshot, so
+    # from_snapshot leaves this empty; perf-only runs keep it empty. Each entry
+    # carries score + sample counts and, for multi-subset scorers, a BFCL-shaped
+    # breakdown. Display-only.
+    accuracy: list[dict[str, Any]] = msgspec.field(default_factory=list)
 
     @classmethod
     def from_snapshot(
@@ -259,6 +339,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         # indicator in display().
         state = snap.get("state", "interrupted")
         n_pending_tasks = snap.get("n_pending_tasks", 0)
+        finish_reason_prefix = "tracked_finish_reason_"
+        finish_reason_counts = {
+            reason.value.removeprefix(finish_reason_prefix): int(
+                counters.get(reason.value, 0)
+            )
+            for reason in _FINISH_REASON_COUNTERS
+        }
 
         return cls(
             version=str(version_info.get("version", "unknown")),
@@ -270,18 +357,27 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             duration_ns=duration_ns,
             state=state,
             complete=(state == "complete" and n_pending_tasks == 0),
-            ttft=_series_dict("ttft_ns"),
-            tpot=_series_dict("tpot_ns"),
-            latency=_series_dict("sample_latency_ns"),
+            **{
+                field: _series_dict(series)
+                for series, field in SERIES_TO_SUMMARY_FIELD.items()
+            },
             output_sequence_lengths=osl,
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
             tps=tps,
+            finish_reason_counts=finish_reason_counts,
             run_config=run_config,
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
-        json_bytes = msgspec.json.format(msgspec.json.encode(self), indent=2)
+        # result_summary.json is the performance report — accuracy lives only in
+        # the dedicated accuracy report (accuracy/accuracy_results.json). The
+        # accuracy field stays on the struct so report.txt / the console summary
+        # still render it; it is just dropped from this serialized perf summary.
+        payload = {
+            k: v for k, v in msgspec.structs.asdict(self).items() if k != "accuracy"
+        }
+        json_bytes = msgspec.json.format(msgspec.json.encode(payload), indent=2)
         if save_to is not None:
             with Path(save_to).open("wb") as f:
                 f.write(json_bytes)
@@ -333,6 +429,61 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         if (tps := self.tps) is not None:
             fn(f"TPS: {tps:.2f}{newline}")
+        else:
+            fn(f"TPS: N/A{newline}")
+
+        if self.accuracy:
+            fn(f"Accuracy:{newline}")
+            for entry in self.accuracy:
+                name = entry.get("dataset_name", "?")
+                score = entry.get("score")
+                if score is None:
+                    score_str = "N/A"
+                elif isinstance(score, bool):
+                    score_str = str(score)
+                elif isinstance(score, int | float):
+                    score_str = f"{score:.4g}"
+                else:
+                    score_str = str(score)
+                unit = entry.get("unit_samples")
+                repeats = entry.get("num_repeats")
+                total = entry.get("total_samples")
+                dur = entry.get("duration_s")
+                dur_str = (
+                    f", duration={dur:.2f}s" if isinstance(dur, int | float) else ""
+                )
+                fn(
+                    f"  {name}: {score_str} "
+                    f"(unit={unit}, repeats={repeats}, total={total}{dur_str}){newline}"
+                )
+                rc = entry.get("response_counts")
+                if isinstance(rc, dict):
+                    fn(
+                        f"    responses: {rc.get('scored', 0)}/{rc.get('issued', 0)} "
+                        f"scored ({rc.get('empty', 0)} empty, "
+                        f"{rc.get('missing', 0)} missing){newline}"
+                    )
+                osl = entry.get("output_sequence_lengths")
+                if isinstance(osl, dict):
+                    fn(
+                        f"    output tokens (avg/min/max): "
+                        f"{osl.get('avg', 0):.1f}/{osl.get('min')}/{osl.get('max')}"
+                        f"{newline}"
+                    )
+                breakdown = entry.get("breakdown")
+                if isinstance(breakdown, dict):
+                    for sub, sub_score in (
+                        breakdown.get("subset_scores") or {}
+                    ).items():
+                        fn(f"    {sub}: {sub_score:.2f}%{newline}")
+                if entry.get("complete") is False:
+                    fn(f"    (incomplete){newline}")
+            avg = average_accuracy(self.accuracy)
+            if avg is not None:
+                fn(f"  Average: {avg:.4g}{newline}")
+            if any("osl_tokenize_s" in e for e in self.accuracy):
+                osl_tok = sum(e.get("osl_tokenize_s", 0.0) for e in self.accuracy)
+                fn(f"  OSL tokenization: {osl_tok:.3g}s{newline}")
 
         if summary_only:
             fn(f"----------------- End of Summary -----------------{newline}")
@@ -384,6 +535,7 @@ def _display_metric(
             return "N/A"
         return f"{v * scale_factor:.2f}"
 
+    # .get(): an empty-but-ES-carrying metric dict has no rollups/histogram.
     for name, key in [
         ("Min", "min"),
         ("Max", "max"),
@@ -391,11 +543,12 @@ def _display_metric(
         ("Avg.", "avg"),
         ("Std Dev.", "std_dev"),
     ]:
-        fn(f"  {name}: {_scaled(metric_dict[key])} {unit}{newline}")
+        fn(f"  {name}: {_scaled(metric_dict.get(key))} {unit}{newline}")
 
     fn(f"\n  Histogram:{newline}")
-    buckets = metric_dict["histogram"]["buckets"]
-    counts = metric_dict["histogram"]["counts"]
+    histogram = metric_dict.get("histogram") or {"buckets": [], "counts": []}
+    buckets = histogram["buckets"]
+    counts = histogram["counts"]
 
     if buckets:
         bucket_strs = [
@@ -413,3 +566,11 @@ def _display_metric(
     fn(f"\n  Percentiles:{newline}")
     for p, val in metric_dict.get("percentiles", {}).items():
         fn(f"  {p:>6}: {_scaled(val)} {unit}{newline}")
+
+    es_map = metric_dict.get("early_stopping_percentiles")
+    if es_map:
+        fn(
+            f"\n  Early-stopping percentile estimates (N/A = insufficient samples):{newline}"
+        )
+        for k, v in es_map.items():
+            fn(f"  {k:>6}: {_scaled(v)} {unit}{newline}")

@@ -45,7 +45,7 @@ from .metrics_table import (
     TtftTrigger,
 )
 from .publisher import MetricsPublisher
-from .registry import MetricsRegistry
+from .registry import TOKEN_HDR_HIGH, TOKEN_HDR_LOW, MetricsRegistry
 from .snapshot import SessionState
 from .token_metrics import BatchTokenizer, TokenBatchQueue
 
@@ -69,6 +69,12 @@ class MetricCounterKey(str, Enum):
     # session.py:_handle_response emitting ERROR before COMPLETE so the
     # tracked row still exists when the aggregator sees the ERROR.
     TRACKED_SAMPLES_FAILED = "tracked_samples_failed"
+    TRACKED_FINISH_REASON_STOP = "tracked_finish_reason_stop"
+    TRACKED_FINISH_REASON_LENGTH = "tracked_finish_reason_length"
+    TRACKED_FINISH_REASON_TOOL_CALLS = "tracked_finish_reason_tool_calls"
+    TRACKED_FINISH_REASON_CONTENT_FILTER = "tracked_finish_reason_content_filter"
+    TRACKED_FINISH_REASON_FUNCTION_CALL = "tracked_finish_reason_function_call"
+    TRACKED_FINISH_REASON_OTHER = "tracked_finish_reason_other"
     TRACKED_DURATION_NS = "tracked_duration_ns"
     # Legacy MLPerf LoadGen Server "completed" window (final_query_all_samples_done_time).
     LEGACY_LOADGEN_WINDOW_DURATION_NS = "legacy_loadgen_window_duration_ns"
@@ -78,6 +84,15 @@ class MetricCounterKey(str, Enum):
     # time.monotonic_ns() has a process-local epoch — a reader in another
     # process would get a meaningless value.
     TOTAL_DURATION_NS = "total_duration_ns"
+
+
+_FINISH_REASON_COUNTERS: Final[dict[str, MetricCounterKey]] = {
+    "stop": MetricCounterKey.TRACKED_FINISH_REASON_STOP,
+    "length": MetricCounterKey.TRACKED_FINISH_REASON_LENGTH,
+    "tool_calls": MetricCounterKey.TRACKED_FINISH_REASON_TOOL_CALLS,
+    "content_filter": MetricCounterKey.TRACKED_FINISH_REASON_CONTENT_FILTER,
+    "function_call": MetricCounterKey.TRACKED_FINISH_REASON_FUNCTION_CALL,
+}
 
 
 _TRACKED_SAMPLE_EVENTS = frozenset(
@@ -95,8 +110,6 @@ _TRACKED_SAMPLE_EVENTS = frozenset(
 # clamped on insert and a warning is logged once per series.
 _NS_HDR_LOW: Final[int] = 1
 _NS_HDR_HIGH: Final[int] = 3_600_000_000_000  # 1 hour in ns
-_TOKEN_HDR_LOW: Final[int] = 1
-_TOKEN_HDR_HIGH: Final[int] = 10_000_000  # 10M tokens
 
 
 class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
@@ -183,20 +196,21 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             MetricSeriesKey.SAMPLE_LATENCY_NS.value,
             hdr_low=_NS_HDR_LOW,
             hdr_high=_NS_HDR_HIGH,
+            tail_latency=True,
             sig_figs=sig_figs,
             n_histogram_buckets=n_histogram_buckets,
         )
         self._registry.register_series(
             MetricSeriesKey.ISL.value,
-            hdr_low=_TOKEN_HDR_LOW,
-            hdr_high=_TOKEN_HDR_HIGH,
+            hdr_low=TOKEN_HDR_LOW,
+            hdr_high=TOKEN_HDR_HIGH,
             sig_figs=sig_figs,
             n_histogram_buckets=n_histogram_buckets,
         )
         self._registry.register_series(
             MetricSeriesKey.OSL.value,
-            hdr_low=_TOKEN_HDR_LOW,
-            hdr_high=_TOKEN_HDR_HIGH,
+            hdr_low=TOKEN_HDR_LOW,
+            hdr_high=TOKEN_HDR_HIGH,
             sig_figs=sig_figs,
             n_histogram_buckets=n_histogram_buckets,
         )
@@ -207,6 +221,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 MetricSeriesKey.TTFT_NS.value,
                 hdr_low=_NS_HDR_LOW,
                 hdr_high=_NS_HDR_HIGH,
+                tail_latency=True,
                 sig_figs=sig_figs,
                 n_histogram_buckets=n_histogram_buckets,
             )
@@ -221,6 +236,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 MetricSeriesKey.TPOT_NS.value,
                 hdr_low=_NS_HDR_LOW,
                 hdr_high=_NS_HDR_HIGH,
+                tail_latency=True,
                 sig_figs=sig_figs,
                 n_histogram_buckets=n_histogram_buckets,
                 dtype=float,
@@ -396,6 +412,12 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_COMPLETED.value)
                 if is_tracked:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_COMPLETED.value)
+                    if isinstance(record.finish_reason, str):
+                        counter = _FINISH_REASON_COUNTERS.get(
+                            record.finish_reason,
+                            MetricCounterKey.TRACKED_FINISH_REASON_OTHER,
+                        )
+                        registry.increment(counter.value)
 
         if saw_shutdown:
             # ENDED has been observed; transition to DRAINING so any tick

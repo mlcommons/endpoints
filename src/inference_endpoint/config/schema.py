@@ -924,6 +924,30 @@ class ProfilingConfig(BaseModel):
         return v
 
 
+class EarlyStoppingConfig(BaseModel):
+    """MLPerf-style early-stopping percentile estimates (on by default).
+
+    Adds conservative, confidence-backed estimates of the tail percentiles to the
+    TTFT / TPOT / latency metrics in ``result_summary.json``. Computed once at run
+    COMPLETE from data the aggregator already keeps (hot path untouched), and the
+    output field is additive — so it is on by default; ``enabled: false`` is the
+    single opt-out (e.g. for consumers that strictly validate the summary schema).
+    Percentile targets, confidence (0.99), and tolerance (0.0) are LoadGen-parity
+    constants in ``metrics/early_stopping.py``, not knobs. Estimate-only: no
+    target-latency pass/fail and no dynamic mid-run halt. See ``docs/early_stopping.md``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--early-stopping",  # --no-early-stopping is the meaningful opt-out
+            help="Report MLPerf early-stopping percentile estimates for TTFT/TPOT/latency",
+        ),
+    ] = Field(True, description="Early-stopping percentile estimates (default on)")
+
+
 @cyclopts.Parameter(name="*")
 class Settings(BaseModel):
     """Test settings."""
@@ -939,6 +963,10 @@ class Settings(BaseModel):
     )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
     profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
+    early_stopping: EarlyStoppingConfig = Field(
+        default_factory=EarlyStoppingConfig,
+        description="MLPerf early-stopping percentile estimates (on by default; enabled: false opts out)",
+    )
     service_ready_timeout_s: Annotated[
         float,
         cyclopts.Parameter(
@@ -1166,7 +1194,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 "SUBMISSION configs must specify benchmark_mode (offline or online)"
             )
 
-        # Duplicate datasets — same (name, type) would collide in results.json
+        # Duplicate datasets — same (name, type) would collide in the accuracy report
         if self.datasets:
             pairs = [(d.name, d.type) for d in self.datasets]
             dupes = [
