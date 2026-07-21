@@ -72,6 +72,10 @@ jobs:
             echo "No changed files to scan (delta empty or all filtered)."
           fi
           [ -s "$OUT" ] || echo '{}' > "$OUT"
+          if [ "$SCAN_RC" -ne 0 ]; then
+            echo "::warning title=SCANOSS scan failed::scanoss-py exited $SCAN_RC; the report below may be incomplete."
+            echo "SCAN_FAILED=1" >> "$GITHUB_ENV"
+          fi
           echo "SCAN_RC=$SCAN_RC" >> "$GITHUB_ENV"
 
       - name: Generate CycloneDX BOM (convert, no re-scan)
