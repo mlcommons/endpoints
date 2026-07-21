@@ -859,6 +859,10 @@ async def _run_benchmark_async(
                 "--metrics-output-dir",
                 str(metrics_output_dir),
             ]
+            # Control live metrics publishing via config parameter
+            # publish_interval_s = 0 disables live tick task in publisher.start()
+            publish_interval_s = 0.25 if ctx.rt_settings.enable_live_metrics else 0.0
+            aggregator_args.extend(["--publish-interval", str(publish_interval_s)])
             if ctx.enable_streaming:
                 aggregator_args.append("--streaming")
             if ctx.tokenizer_name is not None:

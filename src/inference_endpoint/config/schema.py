@@ -638,6 +638,14 @@ class RuntimeConfig(BaseModel):
     ] = Field(None, gt=0)
     scheduler_random_seed: int = Field(42, description="Scheduler RNG seed")
     dataloader_random_seed: int = Field(42, description="Dataloader RNG seed")
+    enable_live_metrics: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--enable-live-metrics",
+            negative="--no-live-metrics",
+            help="Enable live metrics publishing (periodic snapshots); disable for endpoints running on CPUs",
+        ),
+    ] = Field(True, description="Enable live metrics publishing (periodic snapshots)")
 
     @model_validator(mode="after")
     def _validate_durations(self) -> Self:

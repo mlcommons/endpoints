@@ -116,6 +116,10 @@ class MetricsPublisher:
         spurious duplicate ``STARTED`` event or a buggy replay producer)
         is a no-op rather than orphaning the original task. The original
         task remains the one cancelled by ``publish_final`` / ``aclose``.
+
+        If ``publish_interval_s <= 0``, live publishing is disabled and
+        the tick task is not created. Final snapshots will still be
+        published via ``publish_final``.
         """
         if self._tick_task is not None:
             logger.warning(
@@ -125,9 +129,12 @@ class MetricsPublisher:
             )
             return
         if publish_interval_s <= 0:
-            raise ValueError(
-                f"publish_interval_s must be positive, got {publish_interval_s}"
+            logger.info(
+                "Live metrics publishing disabled "
+                "(publish_interval_s=%s, skipping tick task)",
+                publish_interval_s,
             )
+            return
 
         async def _tick() -> None:
             while True:
