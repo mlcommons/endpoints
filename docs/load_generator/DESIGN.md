@@ -277,8 +277,10 @@ The strategy calls `phase_issuer.issue(idx)`. After the phase completes,
 the session reads `phase_issuer.uuid_to_index` and `phase_issuer.issued_count`
 to build the `PhaseResult`.
 
-**UUID generation before Query construction** avoids the old `Sample` catch-22.
-`Query` is a frozen `msgspec.Struct` — all fields set at construction, no mutation.
+**UUID generation before Query construction**: the id is generated first so it can be published on
+the ISSUED event and set as `Query.id` in the same construction. `Query` is a frozen
+`msgspec.Struct` — all fields set at construction, no mutation — so the id cannot be attached after
+the fact.
 
 **`_receive_responses()`** — concurrent coroutine, purely async:
 
@@ -574,7 +576,7 @@ sequenceDiagram
     participant I as SampleIssuer
     participant W as Worker Process
     participant E as EventPublisher
-    participant M as MetricsAggregator
+    participant M as MetricsAggregatorService
 
     S->>B: issue_fn(sample_index)
     B->>D: load_sample(index)
