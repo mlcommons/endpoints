@@ -206,6 +206,26 @@ steady-state result.
 - Reuse existing fixtures where possible; follow the
   `early_stopping_estimate_from_events.py` test pattern.
 
+## Rollout / process ordering
+
+The stopping-rule choice (A vs B) is deferred until real data exists. The build
+order is strategy-agnostic first:
+
+1. **Collect** one very long, high-concurrency run and preserve its
+   `events.jsonl` (the ground-truth corpus).
+2. **Build** the strategy-agnostic tooling: super-pass bucketer + windowing core
+   - per-super-pass series. This alone produces a `steady_state` number for any
+     chosen region.
+3. **Sweep** windows and both stopping rules offline over the corpus via the A/B
+   harness; score against the full-series asymptote.
+4. **Choose** the strategy (and its parameters — `K`, CoV bound, window length)
+   from the sweep results.
+5. **Wire** the chosen rule into the report so `steady_state` is emitted as the
+   official result alongside `total`.
+
+Steps 1–3 carry no dependency on which rule wins, so they are the first
+implementation milestone.
+
 ## Out of scope
 
 - Poisson / fixed-QPS steady-state detection.
