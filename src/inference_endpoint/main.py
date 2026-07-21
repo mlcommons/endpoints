@@ -76,6 +76,9 @@ def launcher(
 # Benchmark subcommands — lazy-loaded from commands/benchmark/cli.py
 app.command("inference_endpoint.commands.benchmark.cli:benchmark_app", name="benchmark")
 
+# Sysinfo subcommands — lazy-loaded from commands/sysinfo/cli.py
+app.command("inference_endpoint.commands.sysinfo.cli:sysinfo_app", name="sysinfo")
+
 
 # --- Misc commands ---
 

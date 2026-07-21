@@ -39,6 +39,7 @@ from inference_endpoint.config.schema import (
     ProfilingConfig,
     StreamingMode,
     SubmissionReference,
+    SysInfoCaptureConfig,
     TestType,
 )
 from inference_endpoint.exceptions import CLIError
@@ -668,6 +669,49 @@ class TestClientAPITypePropagation:
         config = BenchmarkConfig(**self._common(api_type))
         assert config.model_params.min_new_tokens == 1
         assert config.model_params.skip_special_tokens is True
+
+
+class TestEndpointUrlNotPropagated:
+    """endpoint_config.endpoints[0] must never be copied into system_info.endpoint_url.
+
+    The load target is not necessarily the serving node; auto-propagation would
+    silently probe the wrong host.  Users must set system_info.endpoint_url
+    explicitly when they want the HTTP serving-framework probe to run.
+    """
+
+    _BASE = {
+        "type": TestType.OFFLINE,
+        "model_params": {"name": "M"},
+        "datasets": [{"path": "D"}],
+        "endpoint_config": {"endpoints": ["http://10.0.0.1:8000"]},
+    }
+
+    @pytest.mark.unit
+    def test_endpoint_url_stays_none_when_not_set(self) -> None:
+        config = BenchmarkConfig(
+            **self._BASE,
+            system_info=SysInfoCaptureConfig(
+                system_name="TestSystem",
+                ssh_ids=["user@10.0.0.1"],
+                accelerator_backend="cuda",
+            ),
+        )
+        assert config.system_info is not None
+        assert config.system_info.endpoint_url is None
+
+    @pytest.mark.unit
+    def test_explicit_endpoint_url_preserved(self) -> None:
+        config = BenchmarkConfig(
+            **self._BASE,
+            system_info=SysInfoCaptureConfig(
+                system_name="TestSystem",
+                ssh_ids=["user@10.0.0.1"],
+                accelerator_backend="cuda",
+                endpoint_url="http://10.0.0.2:8000",
+            ),
+        )
+        assert config.system_info is not None
+        assert config.system_info.endpoint_url == "http://10.0.0.2:8000"
 
 
 class TestAgenticInferenceValidation:

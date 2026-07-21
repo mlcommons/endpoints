@@ -258,7 +258,7 @@ class ColumnFilter(Transform):
         Returns:
             DataFrame with filtered columns
         """
-        columns_to_keep = self.required_columns
+        columns_to_keep = list(self.required_columns)
         if self.optional_columns is not None:
             found_cols = set(df.columns) & set(self.optional_columns)
             columns_to_keep += list(found_cols)

@@ -31,6 +31,7 @@ uv run inference-endpoint probe --endpoints http://localhost:8765 --model test-m
 uv run inference-endpoint benchmark offline --endpoints URL --model NAME --dataset PATH
 uv run inference-endpoint benchmark online --endpoints URL --model NAME --dataset PATH --load-pattern poisson --target-qps 100
 uv run inference-endpoint benchmark from-config --config config.yaml
+uv run inference-endpoint sysinfo from-config --config config.yaml
 ```
 
 ### Backward-compatible setup (pip + venv)
@@ -60,6 +61,7 @@ inference-endpoint probe --endpoints http://localhost:8765 --model test-model
 inference-endpoint benchmark offline --endpoints URL --model NAME --dataset PATH
 inference-endpoint benchmark online --endpoints URL --model NAME --dataset PATH --load-pattern poisson --target-qps 100
 inference-endpoint benchmark from-config --config config.yaml
+inference-endpoint sysinfo from-config --config config.yaml
 ```
 
 ## Architecture
@@ -129,6 +131,7 @@ CLI is auto-generated from `config/schema.py` Pydantic models via cyclopts. Fiel
 
 - **CLI mode** (`offline`/`online`): cyclopts constructs `OfflineBenchmarkConfig`/`OnlineBenchmarkConfig` (subclasses in `config/schema.py`) directly from CLI args. Type locked via `Literal`. `--dataset` is repeatable with TOML-style format `[perf|acc:]<path>[,key=value...]` (e.g. `--dataset data.csv,samples=500,parser.prompt=article`). Full accuracy support via `accuracy_config.eval_method=pass_at_1` etc.
 - **YAML mode** (`from-config`): `BenchmarkConfig.from_yaml_file()` loads YAML, resolves env vars, and auto-selects the right subclass via Pydantic discriminated union. Optional `--timeout`/`--mode` overrides via `config.with_updates()`.
+- **sysinfo from-config**: `SysInfoFileConfig.from_yaml_file()` reads the `system_info` key from YAML file (extra top-level keys ignored). Invokes `capture_system_info()` which calls the `get-mlperf-multi-node-system-info` mlcflow script. Supports optional `node_config` for function-based node groupings (written to a temp YAML file passed as `node_config_file` to mlcflow). Independent of benchmark runs.
 - **eval**: Not yet implemented (raises `CLIError` with a tracking issue link)
 
 ### Config Construction & Validation
@@ -179,6 +182,9 @@ src/inference_endpoint/
 │   │   ├── __init__.py
 │   │   ├── cli.py             # benchmark_app: offline, online, from-config subcommands
 │   │   └── execute.py         # Phased execution: setup/run_threaded/finalize + BenchmarkContext; run_benchmark runs the main benchmark (cli._run dispatches run_audit when audit: is set)
+│   ├── sysinfo/
+│   │   ├── __init__.py
+│   │   └── cli.py             # sysinfo_app: from-config subcommand (standalone sys info capture)
 │   ├── audit.py               # run_audit() — compliance audit orchestrator (phases → verify → result)
 │   ├── probe.py               # ProbeConfig + execute_probe()
 │   ├── info.py                # execute_info()
