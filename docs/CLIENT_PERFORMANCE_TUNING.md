@@ -32,12 +32,12 @@ enable_cpu_affinity: true # Auto-compute NUMA-aware plan (default)
 # enable_cpu_affinity: false  # Disabled
 ```
 
-**Auto mode allocation** (default 6 physical cores for loadgen):
+**Auto mode allocation** (default 5 physical cores for loadgen, `DEFAULT_LOADGEN_CORES`):
 
 - 1 core: Session thread (scheduler, busy-wait timing)
 - 1 core: Event loop thread (uvloop, response handling)
-- 4 cores: ZMQ I/O threads
-- Remaining physical cores: Workers (one per core with all SMT siblings)
+- Remaining cores: ZMQ I/O threads (up to 4, sharing the leftover loadgen cores)
+- All other physical cores: Workers (one per core with all SMT siblings)
 
 ## Platform Notes
 

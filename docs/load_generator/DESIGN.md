@@ -11,12 +11,14 @@ single-thread, single-event-loop-per-process constraint.
 ```
 src/inference_endpoint/load_generator/
 ├── __init__.py          # Public exports
-├── session.py           # BenchmarkSession, SessionResult
-├── strategy.py          # LoadStrategy protocol, TimedIssueStrategy,
-│                        #   BurstStrategy, ConcurrencyStrategy,
-│                        #   create_load_strategy()
-├── sample_order.py      # SampleOrder, WithoutReplacement, WithReplacement
-└── delay.py             # poisson_delay_fn, uniform_delay_fn
+├── session.py                     # BenchmarkSession, PhaseIssuer, PhaseConfig, SessionResult
+├── strategy.py                    # LoadStrategy protocol, TimedIssueStrategy,
+│                                  #   BurstStrategy, ConcurrencyStrategy,
+│                                  #   create_load_strategy()
+├── agentic_inference_strategy.py  # AgenticInferenceStrategy (multi-turn conversations)
+├── conversation_manager.py        # ConversationManager, ConversationState
+├── sample_order.py                # SampleOrder, WithoutReplacement, WithReplacement
+└── delay.py                       # poisson_delay_fn, make_delay_fn
 ```
 
 ## Architecture
@@ -33,9 +35,9 @@ each producing an independent report.
 BenchmarkSession.run(phases)
     |
     +-- STARTED
-    +-- [warmup]     strategy.execute() → NO drain (keep in-flight saturated)
+    +-- [warmup]     strategy.execute() → drain_after=False (keep in-flight saturated)
     +-- [perf phase 1]   START_PERFORMANCE_TRACKING → strategy.execute() → drain → STOP_PERFORMANCE_TRACKING
-    +-- [warmup]     strategy.execute() → NO drain (keep in-flight saturated)
+    +-- [warmup]     strategy.execute() → drain_after=False (keep in-flight saturated)
     +-- [perf phase 2]   START_PERFORMANCE_TRACKING → strategy.execute() → drain → STOP_PERFORMANCE_TRACKING
     +-- [accuracy x N]   strategy.execute() → drain (uuid maps collected)
     +-- ENDED
@@ -43,10 +45,17 @@ BenchmarkSession.run(phases)
     +-- return SessionResult { perf_results: [PhaseResult, ...], accuracy_results: [...] }
 ```
 
+**Draining is per-phase, not intrinsic to the phase type.** Each `PhaseConfig` carries a
+`drain_after: bool` (default `True`) and an optional `drain_timeout`; `run_phase` drains in-flight
+requests iff `phase.drain_after`. Warmup phases are simply configured with `drain_after=False` so
+the next phase starts with concurrency already saturated — nothing about `PhaseType.WARMUP` itself
+disables draining.
+
 Each performance phase is bracketed by `START_PERFORMANCE_TRACKING` /
-`STOP_PERFORMANCE_TRACKING` events, which the `MetricsAggregator` uses to
-scope its tracked counters and duration. At the end of each perf phase,
-metrics are snapshotted from the KVStoreReader and a `Report` is built.
+`STOP_PERFORMANCE_TRACKING` events, which the metrics aggregator uses to
+scope its tracked counters and duration. The aggregator folds the event stream into rollups and,
+at session end, atomically writes `final_snapshot.json`; the main process reads that snapshot and
+builds the `Report` via `Report.from_snapshot` (see [Integration Points](#eventpublisher--metricsaggregator)).
 
 > **TODO:** The current `MetricsAggregator` does not support per-phase scoping.
 > It maintains a single set of counters and series across all tracking windows.
@@ -68,15 +77,22 @@ already at the target level. Common uses:
 
 ### Load Strategies
 
-Three load patterns, three implementations — each uses the optimal async primitive
-for its scheduling semantics, validated by benchmarking:
+Four load patterns — each uses the async primitive that fits its scheduling semantics, validated
+by benchmarking:
 
-| LoadPatternType   | Strategy              | Mechanism                    | Best At             |
-| ----------------- | --------------------- | ---------------------------- | ------------------- |
-| POISSON           | `TimedIssueStrategy`  | `loop.call_at` (default)     | ≤50k QPS            |
-| POISSON (precise) | `TimedIssueStrategy`  | `run_in_executor(busy_wait)` | Sub-100μs precision |
-| MAX_THROUGHPUT    | `BurstStrategy`       | `loop.call_soon`             | Max fire rate       |
-| CONCURRENCY       | `ConcurrencyStrategy` | `asyncio.Semaphore`          | Fixed concurrency   |
+| LoadPatternType   | Strategy                   | Mechanism                       | Best At                  |
+| ----------------- | -------------------------- | ------------------------------- | ------------------------ |
+| POISSON           | `TimedIssueStrategy`       | `loop.call_at` (default)        | ≤50k QPS                 |
+| POISSON (precise) | `TimedIssueStrategy`       | `run_in_executor(busy_wait)`    | Sub-100μs precision      |
+| MAX_THROUGHPUT    | `BurstStrategy`            | `loop.call_soon`                | Max fire rate            |
+| CONCURRENCY       | `ConcurrencyStrategy`      | `asyncio.Semaphore`             | Fixed concurrency        |
+| AGENTIC_INFERENCE | `AgenticInferenceStrategy` | response-driven next-turn issue | Multi-turn conversations |
+
+The first three are open-loop over independent samples. `AgenticInferenceStrategy` is different:
+it drives multi-turn **conversations** where each turn depends on the previous response (see
+[AgenticInferenceStrategy](#agenticinferencestrategy) below). It is not selected through
+`create_load_strategy` (that path raises for `AGENTIC_INFERENCE`) — it is wired directly when the
+phase uses an `AgenticInferenceDataset`.
 
 **Default for Poisson is `loop.call_at`:** Sub-millisecond timing precision (600–700μs)
 with zero GIL contention and low response latency (0.6–1.4ms). No thread pool overhead.
@@ -135,6 +151,9 @@ class PhaseConfig:
     runtime_settings: RuntimeSettings
     dataset: Dataset
     phase_type: PhaseType = PhaseType.PERFORMANCE
+    drain_after: bool = True             # drain in-flight at phase end (warmup sets False)
+    drain_timeout: float | None = None
+    strategy: LoadStrategy | None = None
 
 
 class BenchmarkSession:
@@ -158,14 +177,15 @@ class BenchmarkSession:
 3. For each phase:
    a. Create `SampleOrder` and `LoadStrategy` from phase settings
    b. Set `self._current_dataset` to phase dataset
-   c. **WARMUP**: execute strategy, **do not drain** in-flight. No tracking
-   events, no report. Purpose: bring endpoint to steady-state concurrency
-   (e.g., fill KV caches, warm up connection pools). The next phase starts
+   c. **WARMUP** (configured `drain_after=False`): execute strategy, do not drain
+   in-flight. No tracking events, no report. Purpose: bring endpoint to steady-state
+   concurrency (e.g., fill KV caches, warm up connection pools). The next phase starts
    immediately with concurrency already at the target level.
-   d. **PERFORMANCE**: publish `START_PERFORMANCE_TRACKING`, execute strategy,
-   drain in-flight, publish `STOP_PERFORMANCE_TRACKING`. Snapshot metrics
-   from KVStoreReader → build `PhaseResult`.
-   e. **ACCURACY**: execute strategy, drain in-flight. No tracking events.
+   d. **PERFORMANCE** (`drain_after=True`): publish `START_PERFORMANCE_TRACKING`, execute
+   strategy, drain in-flight, publish `STOP_PERFORMANCE_TRACKING`. Build `PhaseResult`
+   (issued count + uuid map); the aggregator scopes its tracked counters/duration to the
+   tracking window, and the `Report` is built once at session end from `final_snapshot.json`.
+   e. **ACCURACY** (`drain_after=True`): execute strategy, drain in-flight. No tracking events.
    UUID map collected for eval scoring.
 4. Publish `SessionEventType.ENDED`
 5. Return `SessionResult` (contains `PhaseResult` per perf phase + accuracy maps)
@@ -257,8 +277,10 @@ The strategy calls `phase_issuer.issue(idx)`. After the phase completes,
 the session reads `phase_issuer.uuid_to_index` and `phase_issuer.issued_count`
 to build the `PhaseResult`.
 
-**UUID generation before Query construction** avoids the old `Sample` catch-22.
-`Query` is a frozen `msgspec.Struct` — all fields set at construction, no mutation.
+**UUID generation before Query construction**: the id is generated first so it can be published on
+the ISSUED event and set as `Query.id` in the same construction. `Query` is a frozen
+`msgspec.Struct` — all fields set at construction, no mutation — so the id cannot be attached after
+the fact.
 
 **`_receive_responses()`** — concurrent coroutine, purely async:
 
@@ -454,6 +476,40 @@ class ConcurrencyStrategy(LoadStrategy):
         self._sem.release()
 ```
 
+### AgenticInferenceStrategy
+
+Handles `LoadPatternType.AGENTIC_INFERENCE` (`agentic_inference_strategy.py`). Unlike the open-loop
+strategies, it is **response-driven**: each conversation is a fixed sequence of turns known upfront
+from the dataset (turn prompts are pre-built from the dataset history, not synthesized from the
+model's replies), and turn _N+1_ is issued only after turn _N_'s response arrives — the response
+gates the _timing_ of the next turn, it does not alter its prompt. Concurrency is measured in
+**active conversations** (`_target_concurrency`), not in-flight requests.
+
+- `execute(phase_issuer)` seeds up to `_target_concurrency` initial conversations, then awaits
+  completion of all of them.
+- On each response, `on_sample_complete(result)` synchronously routes it to its conversation and
+  calls `_issue_next_turn()` → `_issue_turn_now()`, which stores the new `query_id → conversation_id`
+  mapping and issues the turn with zero event-loop delay (or an optional per-turn delay). When a
+  conversation's turn cursor reaches the end of its turn list — or a turn fails — the conversation
+  finishes and a fresh conversation is seeded to hold concurrency steady.
+
+Behavior is configured via `AgenticInferenceConfig` (`config/schema.py`): `turn_timeout_s`,
+`enable_salt`, `inject_tool_delay`, `num_trajectories_to_issue`, and
+`stop_issuing_on_first_user_complete`. The dataset is an `AgenticInferenceDataset` (JSONL with
+`conversation_id` / `turn` / `role` / `content` rows grouped consecutively); its
+`ConversationMetadata` supplies the per-turn pre-built message history and any per-turn delays.
+
+### ConversationManager
+
+`conversation_manager.py` tracks per-conversation progress so the strategy knows when each
+conversation is done. `ConversationState` holds `completed_turns`, `failed_turns`, and
+`expected_client_turns`; `ConversationManager` owns the map of conversation → state and exposes
+`mark_turn_complete()` / `mark_turn_failed()` (both advance `completed_turns`; the latter also bumps
+`failed_turns`). A conversation is complete once its completed turns reach the expected count.
+
+Every `EventRecord` the session publishes in agentic mode carries `conversation_id` and `turn`, so
+the metrics aggregator and event log can attribute each sample to its conversation and turn index.
+
 ### SampleIssuer (Protocol)
 
 ```python
@@ -520,7 +576,7 @@ sequenceDiagram
     participant I as SampleIssuer
     participant W as Worker Process
     participant E as EventPublisher
-    participant M as MetricsAggregator
+    participant M as MetricsAggregatorService
 
     S->>B: issue_fn(sample_index)
     B->>D: load_sample(index)
@@ -562,21 +618,19 @@ sequenceDiagram
     participant C as Caller (execute.py)
     participant B as BenchmarkSession
     participant E as EventPublisher
-    participant M as MetricsAggregator
-    participant K as KVStoreReader
+    participant M as MetricsAggregatorService
 
     C->>B: run(phases)
     B->>E: STARTED
 
     Note over B: === Saturation Phase ===
-    B->>B: execute strategy (untracked, no drain)
+    B->>B: execute strategy (untracked, drain_after=False)
 
     Note over B: === Perf Phase 1 (e.g. QPS=1000) ===
     B->>E: START_PERFORMANCE_TRACKING
     B->>B: execute strategy
     B->>B: drain in-flight
     B->>E: STOP_PERFORMANCE_TRACKING
-    B->>K: snapshot metrics → Report
     Note over B: PhaseResult("perf_qps1k", issued_count=N)
 
     Note over B: === Perf Phase 2 (e.g. QPS=5000) ===
@@ -584,7 +638,6 @@ sequenceDiagram
     B->>B: execute strategy
     B->>B: drain in-flight
     B->>E: STOP_PERFORMANCE_TRACKING
-    B->>K: snapshot metrics → Report
     Note over B: PhaseResult("perf_qps5k", issued_count=N)
 
     Note over B: === Accuracy Phase ===
@@ -593,7 +646,10 @@ sequenceDiagram
     Note over B: PhaseResult("accuracy", uuid_map)
 
     B->>E: ENDED
+    E->>M: (event stream throughout)
+    M->>M: write final_snapshot.json
     B-->>C: SessionResult
+    C->>C: Report.from_snapshot(final_snapshot.json)
 ```
 
 ### Separate Timer Process Data Flow
@@ -647,9 +703,9 @@ graph TD
     subgraph "Worker Process N"
         WN["HTTP → endpoint"]
     end
-    subgraph "MetricsAggregator (subprocess)"
-        MA["ZmqEventRecordSubscriber"]
-        KB["KVStore (mmap)"]
+    subgraph "MetricsAggregatorService (subprocess)"
+        MA["EventRecord subscriber"]
+        KB["MetricsRegistry → MetricsSnapshot PUB + final_snapshot.json"]
         MA --> KB
     end
 
@@ -685,8 +741,8 @@ graph TD
     subgraph "Worker Processes"
         W["HTTP → endpoint"]
     end
-    subgraph "MetricsAggregator"
-        MA["Subscriber → KVStore"]
+    subgraph "MetricsAggregatorService"
+        MA["Subscriber → MetricsRegistry → snapshot"]
     end
 
     T -->|"ZMQ IPC"| R
@@ -719,6 +775,15 @@ def create_load_strategy(
 
         case LoadPatternType.CONCURRENCY:
             return ConcurrencyStrategy(lp.target_concurrency, sample_order)
+
+        case LoadPatternType.AGENTIC_INFERENCE:
+            # Agentic runs are response-driven and need an AgenticInferenceDataset;
+            # they are wired up directly, not through this open-loop factory.
+            raise ValueError(
+                "AGENTIC_INFERENCE load pattern requires an AgenticInferenceDataset; "
+                "use 'inference-endpoint benchmark from-config' with an "
+                "agentic inference dataset"
+            )
 ```
 
 ---
@@ -783,15 +848,18 @@ to use `await shutdown_async()`.
 
 ### EventPublisher / MetricsAggregator
 
-Session publishes `EventRecord` instances via `ZmqEventRecordPublisher`. The publisher
-uses non-blocking ZMQ send with fd-based writer fallback — safe to call from sync
-callbacks (like `call_at` fire functions).
+The session publishes `EventRecord` instances via `EventPublisherService` (a per-instance wrapper
+over `ZmqMessagePublisher[EventRecord]`). The publisher uses non-blocking ZMQ send with an fd-based
+writer fallback — safe to call from sync callbacks (like `call_at` fire functions).
 
-> **Key fix:** `Report.from_kv_reader` currently reads counter keys (`n_samples_issued`,
-> `duration_ns`) that don't match the `MetricCounterKey` enum written by the aggregator
-> (`total_samples_issued`, `tracked_duration_ns`). Must update `from_kv_reader` to use
-> the actual key names. Performance reports should use `tracked_*` counters. A
-> `test_started_at` counter must be added to the aggregator (set on `SessionEventType.STARTED`).
+Those records flow to the [`MetricsAggregatorService`](../async_utils/services/metrics_aggregator/DESIGN.md)
+subprocess, which folds them into a `MetricsRegistry` (counters + HDR/series rollups), publishes
+live `MetricsSnapshot` messages, and — on `ENDED` / terminal state — atomically writes
+`final_snapshot.json`. The main process reads that file (`json.loads` → dict) and builds the report
+with `Report.from_snapshot(dict, run_config=...)`; if the file is missing (aggregator SIGKILLed) it
+falls back to the subscriber's last live snapshot and the report is marked `complete=False`. The
+report reads `tracked_*` counters (`tracked_samples_completed`, `tracked_duration_ns`, …) plus the
+LoadGen "completed" window; see [metrics/report_design.md](../metrics/report_design.md).
 
 ### HttpClientSampleIssuer Migration
 
@@ -844,23 +912,31 @@ phase. The receiver must distinguish stale vs current-phase completions:
 ```python
 def _handle_response(self, resp: QueryResult) -> None:
     query_id = resp.id
-    # Always publish the event (aggregator tracks all samples)
-    self._publisher.publish(EventRecord(
-        event_type=SampleEventType.COMPLETE,
-        timestamp_ns=resp.completed_at,
-        sample_uuid=query_id,
-    ))
-    # Only route to current phase strategy if this is a current-phase query
-    if query_id in self._current_phase_issuer.uuid_to_index:
-        self._current_phase_issuer.inflight -= 1
+    phase_issuer = self._current_phase_issuer
+    # ERROR is published before COMPLETE (the aggregator depends on this order
+    # for tracked-failure counting).
+    if resp.error is not None:
+        self._publisher.publish(EventRecord(event_type=ErrorEventType.GENERIC, ...))
+    # COMPLETE is NOT published for WARMUP phases — warmup samples must not
+    # land in the tracked counters/series.
+    if self._current_phase_type != PhaseType.WARMUP:
+        self._publisher.publish(EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            timestamp_ns=resp.completed_at,
+            sample_uuid=query_id,
+        ))
+    # Only route to the current phase's strategy if this is a current-phase query.
+    # Stale completions (arrived from a prior no-drain phase) fall through here.
+    if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
+        phase_issuer.mark_inflight_complete()
         if self._current_strategy:
             self._current_strategy.on_query_complete(query_id)
-    # Stale completions: event published but strategy/inflight not affected
 ```
 
-Same guard applies to `StreamChunk` with `is_complete=True` — check
-`uuid_to_index` membership before decrementing inflight. Non-final
-StreamChunks don't affect inflight and can be published unconditionally.
+The `uuid_to_index` membership gate keeps a stale completion (arriving from a prior warmup/no-drain
+phase) from being attributed to the current phase's strategy or inflight count. Streaming responses
+are handled on the same path: intermediate `StreamChunk`s emit `RECV_FIRST`/chunk events, and the
+final response drives the COMPLETE/inflight bookkeeping above.
 
 ### Sync Per-Sample Work in Callbacks
 
@@ -934,7 +1010,9 @@ async def _run_benchmark_async(ctx, loop) -> BenchmarkResult:
             await http_client.shutdown_async()
             publisher.close()
             await asyncio.to_thread(launcher.wait_for_exit, None)
-            report = Report.from_kv_reader(kv_reader)  # after aggregator exits
+            # After the aggregator exits it has written final_snapshot.json:
+            snap = json.loads((metrics_output_dir / "final_snapshot.json").read_bytes())
+            report = Report.from_snapshot(snap, run_config=run_config)
 
     return BenchmarkResult(session=result, collector=collector, report=report, ...)
 ```
@@ -1005,27 +1083,29 @@ to a child process, with the TUI as the foreground process reading periodic repo
 ```
 TUI Process (foreground):
     - Renders live dashboard (throughput, latency, progress)
-    - Reads BasicKVStoreReader for real-time metrics from /dev/shm
+    - Subscribes to the aggregator's MetricsSnapshot PUB stream (metrics SUB)
     - Receives SessionResult via IPC on completion
 
 Benchmark Process (child):
     - Runs BenchmarkSession on its own event loop
-    - Writes metrics via EventPublisher -> MetricsAggregator -> KVStore
+    - Emits events via EventPublisher -> MetricsAggregatorService (which PUBs snapshots)
     - Returns SessionResult to parent via IPC (pickle over pipe / ZMQ)
 ```
 
 This architecture is enabled by the current design's clean separation:
 
-- **KVStore** is already cross-process readable (mmap on /dev/shm)
+- **Metrics are already cross-process** — the aggregator publishes `MetricsSnapshot` frames over a
+  ZMQ PUB socket at the `--publish-interval` cadence, so any subscriber renders live percentiles
+  without touching the benchmark process.
 - **BenchmarkSession** has no UI dependencies — it takes callbacks
 - **SessionResult** is a frozen dataclass, trivially serializable
-- The `on_sample_complete` callback would not be used in TUI mode (no
-  cross-process callback). Instead, the TUI polls KVStoreReader for
-  `tracked_samples_completed` to update the progress display.
+- The `on_sample_complete` callback would not be used in TUI mode (no cross-process callback).
+  Instead, the TUI reads the latest `MetricsSnapshot` (e.g. `tracked_samples_completed`) to update
+  the progress display.
 
-The TUI process can also read the `Report` from the KVStore at any time for
-live intermediate reports (current QPS, latency distribution so far), not
-just the final report.
+The TUI can render live intermediate reports (current QPS, latency distribution so far) from each
+live snapshot, and build the final `Report` from `final_snapshot.json` once the run ends — the same
+`Report.from_snapshot` path used by the CLI.
 
 > **Constraint:** The benchmark child process must be a **non-daemon** OS process
 > (e.g., `subprocess.Popen` or `multiprocessing.Process(daemon=False)`).

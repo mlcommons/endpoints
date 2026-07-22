@@ -182,7 +182,7 @@ report is already written).
         ╔═══════════ for each spec (back-to-back) ═════════════╗         │
         ║                    ▼                                  ║         │
         ║   ┌──────────────────────────────────────────┐       ║         │
-        ║   │ phase_cfg = perf-only (accuracy datasets  │       ║         │
+        ║   │ phase_cfg = perf-only* (accuracy datasets │       ║         │
         ║   │   dropped; audit=None; report_dir=<label>)│       ║         │
         ║   │ ctx = setup_benchmark(phase_cfg,          │       ║         │
         ║   │   audit_run_spec)                         │       ║         │
@@ -240,6 +240,11 @@ report is already written).
             │ (perf report already written either way)  │
             └──────────────────────────────────────────┘
 ```
+
+\* Perf-only is the **default**. A phase may set `AuditRunSpec.test_mode` (`ACC`/`BOTH`) to keep
+its accuracy datasets instead of dropping them; the orchestrator reads `spec.test_mode` per phase
+rather than hardcoding perf-only. This override is supported but currently **unused** — every
+registered audit (TEST04) leaves `test_mode` at its `PERF` default.
 
 The first-phase gate calls `AuditTest.validate(cfg, N, load_pattern)` once `N` (the loaded
 dataset size) is known: each audit owns its own preconditions there, so the generic loop
@@ -388,8 +393,11 @@ The generic loop never names a specific test:
    phase issues load.
 4. Execute each spec back-to-back via the existing `setup_benchmark` /
    `run_benchmark_async` path (no duplicated report-dir or `config.yaml` logic). Each phase
-   config is performance-only (accuracy datasets dropped so no phase re-issues or re-scores
-   them) and has `audit=None` to prevent re-entry into `run_audit`. If any phase raises
+   config is performance-only **by default** (accuracy datasets dropped so no phase re-issues
+   or re-scores them) and has `audit=None` to prevent re-entry into `run_audit`. A phase can
+   override this per-`AuditRunSpec` via `test_mode` (`ACC`/`BOTH` keeps its accuracy datasets);
+   the orchestrator reads `spec.test_mode` rather than hardcoding perf-only. This override is
+   supported but currently unused — every registered audit (TEST04) runs perf-only. If any phase raises
    (`SetupError` / `ExecutionError`), `run_audit` aborts **without verifying** — a crashed
    phase must never produce a result. A phase that returns but whose `Report.complete` is
    `False` (metrics drain timed out, or the run was interrupted → partial stats) is likewise

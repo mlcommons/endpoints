@@ -40,7 +40,7 @@ This means one receiver socket handles readiness from all subprocesses.
 - Binds a ZMQ PULL socket on an IPC path
 - `wait(timeout)` blocks until `count` signals arrive
 - Returns list of identities in arrival order
-- Closes socket after all signals received (or on timeout)
+- Closes the socket after all signals are received, but deliberately **not** on timeout (the caller may retry)
 - Timeout is a total deadline, not per-message
 
 ### `send_ready_signal()` (subprocess side)
