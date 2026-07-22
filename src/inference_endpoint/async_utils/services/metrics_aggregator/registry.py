@@ -45,7 +45,6 @@ from inference_endpoint.metrics.early_stopping import (
     EarlyStoppingSpec,
     es_percentile_estimate,
     es_targets_from_grid,
-    grid_percentile_key,
 )
 
 from .snapshot import (
@@ -242,11 +241,22 @@ class SeriesSampler(MetricSampler):
         if self._es_spec is None:
             return None
         spec = self._es_spec
+        try:
+            return self._compute_es_estimates(sorted_values, spec)
+        except Exception:
+            # Best-effort by design: this runs inside publish_final's
+            # build_snapshot, where an exception would cost the ENTIRE final
+            # report (the publisher's finalized guard makes retries no-ops).
+            logger.exception(
+                "%s: early-stopping computation failed; omitting the map", self.name
+            )
+            return None
+
+    def _compute_es_estimates(
+        self, sorted_values, spec: EarlyStoppingSpec
+    ) -> dict[str, float | None]:
         if spec.percentiles is not None:  # explicit override: tests / offline analysis
-            targets = {
-                grid_percentile_key(f): f
-                for f in sorted(spec.percentiles, reverse=True)
-            }
+            targets = {str(v): float(v) for v in sorted(spec.percentiles, reverse=True)}
         else:
             targets = es_targets_from_grid(self._percentiles)
         results = {

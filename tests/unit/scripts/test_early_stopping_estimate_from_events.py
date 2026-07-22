@@ -215,6 +215,26 @@ def test_main_augments_summary_in_run_shape(tmp_path, capsys):
     capsys.readouterr()  # drain
 
 
+def test_fallback_percentiles_dedupe_on_value(tmp_path, capsys):
+    # "99" and "99.0" are the same target — one computation, one canonical key.
+    events = _write(
+        tmp_path,
+        [
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _ev("sample.complete", 400, "a", _tmo(["x", "one two"])),
+            _ev("session.stop_performance_tracking", 500),
+        ],
+    )
+    mod.main([str(events), "--percentiles", "99,99.0,90"])
+    out = capsys.readouterr().out
+    # one row per metric section for the canonical key; a bare "p99:" row would
+    # mean "99" survived as a second target alongside "99.0"
+    assert out.count("p99.0:") == out.count("p90.0:") > 0
+    assert "p99: " not in out
+
+
 def test_main_cli_contract(tmp_path, capsys):
     # invalid percentile/confidence must exit up front (they would hang or
     # corrupt the math); --json without --summary is a contract error.
@@ -231,7 +251,10 @@ def test_main_cli_contract(tmp_path, capsys):
     with pytest.raises(SystemExit):
         mod.main([str(events), "--json", str(tmp_path / "o.json")])
     with pytest.raises(SystemExit):
-        mod.main([str(events), "--percentiles", "1.0"])
+        mod.main([str(events), "--percentiles", "150"])  # grid convention: (0, 100)
+    with pytest.raises(SystemExit):
+        # pre-#423 fraction style must hard-error, not silently mean p0.99%
+        mod.main([str(events), "--percentiles", "0.99"])
     with pytest.raises(SystemExit):
         mod.main([str(events), "--confidence", "1.0"])
     capsys.readouterr()  # drain

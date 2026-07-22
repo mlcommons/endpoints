@@ -289,9 +289,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         def _series_dict(key: str) -> dict[str, Any]:
             stat = series.get(key)
-            if stat is None or stat.get("count", 0) == 0:
-                return {}
-            return _series_to_metric_dict(stat)
+            # count==0 handling lives in _series_to_metric_dict, which preserves
+            # the all-null early_stopping_percentiles map for enabled-but-empty
+            # series — short-circuiting here would silently drop it.
+            return _series_to_metric_dict(stat) if stat is not None else {}
 
         version_info = get_version_info()
         raw_duration_ns = _counter("tracked_duration_ns")
