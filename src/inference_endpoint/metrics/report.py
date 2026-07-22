@@ -26,6 +26,9 @@ from typing import Any, Final
 import msgspec.json
 import msgspec.structs
 
+from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
+    MetricCounterKey,
+)
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     build_token_series_dict,
 )
@@ -64,6 +67,16 @@ def place_early_stopping_percentiles(
     if "early_stopping_percentiles" not in out:
         out["early_stopping_percentiles"] = esp
     return out
+
+
+_FINISH_REASON_COUNTERS = (
+    MetricCounterKey.TRACKED_FINISH_REASON_STOP,
+    MetricCounterKey.TRACKED_FINISH_REASON_LENGTH,
+    MetricCounterKey.TRACKED_FINISH_REASON_TOOL_CALLS,
+    MetricCounterKey.TRACKED_FINISH_REASON_CONTENT_FILTER,
+    MetricCounterKey.TRACKED_FINISH_REASON_FUNCTION_CALL,
+    MetricCounterKey.TRACKED_FINISH_REASON_OTHER,
+)
 
 
 def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
@@ -204,6 +217,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # tokenizer unavailable).
     qps: float | None = None
     tps: float | None = None
+    finish_reason_counts: dict[str, int] = msgspec.field(default_factory=dict)
 
     # Run configuration (load_pattern, warmup, and the scheduler/dataloader RNG
     # seeds), from config. Carried so result_summary.json is self-describing and a
@@ -325,6 +339,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         # indicator in display().
         state = snap.get("state", "interrupted")
         n_pending_tasks = snap.get("n_pending_tasks", 0)
+        finish_reason_prefix = "tracked_finish_reason_"
+        finish_reason_counts = {
+            reason.value.removeprefix(finish_reason_prefix): int(
+                counters.get(reason.value, 0)
+            )
+            for reason in _FINISH_REASON_COUNTERS
+        }
 
         return cls(
             version=str(version_info.get("version", "unknown")),
@@ -344,6 +365,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
             tps=tps,
+            finish_reason_counts=finish_reason_counts,
             run_config=run_config,
         )
 

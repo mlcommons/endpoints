@@ -52,7 +52,6 @@ Represents one SSE delta from a streaming response.
 | ---------------- | ---------------- | ------------------------------ |
 | `id`             | `str`            | Matches originating `Query.id` |
 | `response_chunk` | `str`            | Incremental token text         |
-| `is_complete`    | `bool`           | True for the final chunk       |
 | `metadata`       | `dict[str, Any]` | Per-chunk metadata             |
 
 ### `TextModelOutput`
