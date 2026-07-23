@@ -17,11 +17,11 @@
 
 import random
 import re
-from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.exceptions import DatasetValidationError
 
 
 def _make_loaded_dataset(rows: list[dict]) -> Dataset:
@@ -31,7 +31,6 @@ def _make_loaded_dataset(rows: list[dict]) -> Dataset:
     ds.transforms = None
     ds.repeats = 1
     ds.data = list(rows)
-    ds.logger = MagicMock()
     ds._salt_rng = None
     return ds
 
@@ -143,77 +142,84 @@ class TestSaltBehavior:
 
 
 @pytest.mark.unit
-class TestSaltPassthrough:
-    """Samples without a 'prompt' key, or non-dict samples, are passed through unchanged."""
+class TestSaltValidation:
+    """with_salt() hard-errors up front unless every sample has a text 'prompt'.
 
-    def test_dict_without_prompt_key_is_unchanged(self):
+    salt=True guarantees a KV-cache-busting prefix; a sample it cannot salt is a
+    configuration error, not something to skip silently. Validation runs in
+    with_salt() (before any load is issued), so the error names the offending
+    sample and no partial warmup runs against an unsalted dataset.
+    """
+
+    def test_dict_without_prompt_key_raises(self):
         inner = _make_loaded_dataset([{"question": "what is 2+2?", "answer": "4"}])
-        sd = inner.with_salt(random.Random())
-        assert sd.load_sample(0) == {"question": "what is 2+2?", "answer": "4"}
+        with pytest.raises(DatasetValidationError, match="prompt"):
+            inner.with_salt(random.Random())
 
-    def test_empty_dict_is_unchanged(self):
+    def test_empty_dict_raises(self):
         inner = _make_loaded_dataset([{}])
-        sd = inner.with_salt(random.Random())
-        assert sd.load_sample(0) == {}
+        with pytest.raises(DatasetValidationError, match="prompt"):
+            inner.with_salt(random.Random())
 
-    def test_non_dict_sample_is_returned_as_is(self):
+    def test_non_dict_sample_raises(self):
         inner = _make_loaded_dataset([{"prompt": "x"}])
         inner.data = ["raw string sample"]
-        sd = inner.with_salt(random.Random())
-        assert sd.load_sample(0) == "raw string sample"
+        with pytest.raises(DatasetValidationError, match="dict"):
+            inner.with_salt(random.Random())
 
-    def test_multimodal_list_prompt_first_text_part_is_salted(self):
+    def test_multimodal_list_prompt_raises(self):
         content_parts = [
             {"type": "text", "text": "describe this image"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
         ]
         inner = _make_loaded_dataset([{"prompt": content_parts}])
-        sd = inner.with_salt(random.Random())
-        parts = sd.load_sample(0)["prompt"]
-        assert isinstance(parts, list)
-        assert len(parts) == 2
-        assert re.match(r"^\[([0-9a-f]{16})\] describe this image$", parts[0]["text"])
-        assert parts[1] == content_parts[1]
+        with pytest.raises(DatasetValidationError, match="str"):
+            inner.with_salt(random.Random())
 
-    def test_multimodal_image_first_text_at_index_1_is_salted(self):
-        content_parts = [
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
-            {"type": "text", "text": "what do you see?"},
-        ]
-        inner = _make_loaded_dataset([{"prompt": content_parts}])
-        sd = inner.with_salt(random.Random())
-        parts = sd.load_sample(0)["prompt"]
-        assert parts[0] == content_parts[0]
-        assert re.match(r"^\[([0-9a-f]{16})\] what do you see\?$", parts[1]["text"])
-
-    def test_multimodal_list_prompt_original_not_mutated(self):
-        content_parts = [{"type": "text", "text": "original text"}]
-        inner = _make_loaded_dataset([{"prompt": content_parts}])
-        sd = inner.with_salt(random.Random())
-        sd.load_sample(0)
-        assert inner.data[0]["prompt"][0]["text"] == "original text"
-
-    def test_unknown_prompt_type_is_not_salted(self):
+    def test_non_str_prompt_raises(self):
         inner = _make_loaded_dataset([{"prompt": 42}])
-        sd = inner.with_salt(random.Random())
-        assert sd.load_sample(0) == {"prompt": 42}
+        with pytest.raises(DatasetValidationError, match="str"):
+            inner.with_salt(random.Random())
 
-    def test_input_tokens_only_warns_and_passes_through(self):
+    def test_input_tokens_only_raises(self):
         inner = _make_loaded_dataset([{"input_tokens": [1, 2, 3]}])
-        sd = inner.with_salt(random.Random())
-        result = sd.load_sample(0)
-        assert result == {"input_tokens": [1, 2, 3]}
-        sd.logger.warning.assert_called_once()
-        assert "input_tokens" in sd.logger.warning.call_args[0][0]
+        with pytest.raises(DatasetValidationError, match="input_tokens"):
+            inner.with_salt(random.Random())
 
-    def test_input_tokens_and_prompt_warns_and_salts_prompt(self):
+    def test_input_tokens_and_prompt_raises(self):
         inner = _make_loaded_dataset([{"input_tokens": [1, 2, 3], "prompt": "hello"}])
+        with pytest.raises(DatasetValidationError, match="input_tokens"):
+            inner.with_salt(random.Random())
+
+    def test_error_names_offending_sample_index(self):
+        inner = _make_loaded_dataset([{"prompt": "ok"}, {"prompt": 42}])
+        with pytest.raises(DatasetValidationError, match=r"\b1\b"):
+            inner.with_salt(random.Random())
+
+    def test_valid_str_prompt_dataset_does_not_raise(self):
+        inner = _make_loaded_dataset([{"prompt": "a"}, {"prompt": "b"}])
         sd = inner.with_salt(random.Random())
-        result = sd.load_sample(0)
-        assert result["input_tokens"] == [1, 2, 3]
-        assert result["prompt"].startswith("[")
-        sd.logger.warning.assert_called_once()
-        assert "input_tokens" in sd.logger.warning.call_args[0][0]
+        assert sd.load_sample(0)["prompt"].startswith("[")
+
+    def test_data_none_does_not_raise(self):
+        inner = _make_loaded_dataset([{"prompt": "x"}])
+        inner.data = None
+        # No samples to salt (e.g. EmptyDataset) — nothing to validate.
+        assert inner.with_salt(random.Random())._salt_rng is not None
+
+    def test_data_empty_list_does_not_raise(self):
+        inner = _make_loaded_dataset([])
+        # Zero samples — no violation, so no error.
+        assert inner.with_salt(random.Random())._salt_rng is not None
+
+    def test_validate_saltable_noop_on_valid(self):
+        inner = _make_loaded_dataset([{"prompt": "a"}, {"prompt": "b"}])
+        assert inner.validate_saltable() is None
+
+    def test_validate_saltable_raises_on_bad_sample(self):
+        inner = _make_loaded_dataset([{"prompt": "ok"}, {"input_tokens": [1, 2]}])
+        with pytest.raises(DatasetValidationError, match="input_tokens"):
+            inner.validate_saltable()
 
 
 @pytest.mark.unit
