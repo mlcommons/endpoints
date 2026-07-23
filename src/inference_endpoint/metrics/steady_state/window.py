@@ -70,6 +70,9 @@ def windowed_metrics(
         tpot.extend(sp.tpot_ns)
         latency.extend(sp.latency_ns)
         out_tokens += sp.out_tokens
+        # QPS numerator is issued-count (offered rate); latency percentiles are
+        # over completed samples. Equal for a clean full run; a truncated log can
+        # count an issued-but-uncompleted sample toward QPS only.
         n_samples += sp.n_issued
     issue_span_ns = window[-1].last_issue_ns - window[0].first_issue_ns
     span_s = issue_span_ns / 1e9

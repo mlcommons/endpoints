@@ -28,6 +28,7 @@ from inference_endpoint.core.record import (
 
 _CLI = Path(__file__).resolve().parents[4] / "scripts" / "steady_state_from_events.py"
 _spec = importlib.util.spec_from_file_location("steady_state_cli", _CLI)
+assert _spec is not None and _spec.loader is not None
 cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cli)
 

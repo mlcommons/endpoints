@@ -8,7 +8,10 @@ Cold-path companion to ``scripts/early_stopping_estimate_from_events.py``. Bucke
 performance-tracked samples into super-passes by issue order, computes the
 issue-time steady-state window, and scores fixed-budget (A) vs adaptive-CoV (B)
 stopping rules against the full-series asymptote. ``steady_state`` is the official
-number; ``total`` is reported alongside so their divergence is visible.
+number; ``total`` is reported alongside so their divergence is visible. Note
+``total`` here is the full-series *issue-time* window (warmup included), so the
+difference from ``steady_state`` isolates the warmup crop — a drain-inclusive
+wall-clock total is deferred to the Milestone-2 report wiring.
 
 usage:
   uv run python scripts/steady_state_from_events.py <events.jsonl> \
