@@ -51,6 +51,27 @@ def super_pass_size(dataset_size: int, concurrency: int) -> int:
     return dataset_size * s
 
 
+def coverage_status(
+    n_issued: int, dataset_size: int, concurrency: int, warmup: int = 1
+) -> str:
+    """Classify how much steady-state signal a run's issue count supports.
+
+    - ``partial_dataset``: fewer samples issued than one full dataset pass (e.g.
+      a low-concurrency run time-capped mid-pass). The measured workload is a
+      biased ISL/OSL subset, so even the raw number is unreliable.
+    - ``insufficient_passes``: at least one full pass but fewer than
+      ``warmup + 1`` full super-passes, so the warmup crop cannot be dropped
+      while keeping a measured region.
+    - ``windowable``: enough super-passes for a normal warmup-cropped window.
+    """
+    if n_issued < dataset_size:
+        return "partial_dataset"
+    n_full_super_passes = n_issued // super_pass_size(dataset_size, concurrency)
+    if n_full_super_passes < warmup + 1:
+        return "insufficient_passes"
+    return "windowable"
+
+
 def build_super_pass_series(
     events_path: str,
     dataset_size: int,

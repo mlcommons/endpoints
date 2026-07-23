@@ -30,7 +30,11 @@ from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics im
     load_reference_backend,
 )
 from inference_endpoint.metrics.steady_state.harness import sweep
-from inference_endpoint.metrics.steady_state.series import build_super_pass_series
+from inference_endpoint.metrics.steady_state.series import (
+    build_super_pass_series,
+    coverage_status,
+    super_pass_size,
+)
 from inference_endpoint.metrics.steady_state.window import windowed_metrics
 
 
@@ -58,21 +62,39 @@ def main(argv=None):
     series = build_super_pass_series(
         args.events, args.dataset_size, args.concurrency, count_tokens=counter
     )
-    if len(series) <= args.warmup:
-        raise SystemExit(
-            f"FATAL: only {len(series)} super-passes; need > warmup ({args.warmup})"
-        )
+    if not series:
+        raise SystemExit("FATAL: no performance-tracked samples in the events log")
+
+    n_issued = sum(sp.n_issued for sp in series)
+    status = coverage_status(n_issued, args.dataset_size, args.concurrency, args.warmup)
+    sp_samples = super_pass_size(args.dataset_size, args.concurrency)
+    n_full = n_issued // sp_samples
+
+    # windowable: measure whole super-passes after the warmup crop. Otherwise
+    # best-effort — window everything (including any partial tail), no warmup
+    # crop — and flag it low-confidence via ``status``.
+    if status == "windowable":
+        measured = series[:n_full]
+        eff_warmup = args.warmup
+    else:
+        measured = series
+        eff_warmup = 0
 
     total = windowed_metrics(series, 0, len(series))
     ref, scores = sweep(
-        series,
+        measured,
         k=args.k,
         cov_window=args.cov_window,
         cov_bound=args.cov_bound,
-        warmup=args.warmup,
+        warmup=eff_warmup,
     )
 
-    print(f"super-passes: {len(series)}  (warmup dropped: {args.warmup})")
+    print(
+        f"status: {status}  |  issued={n_issued}  super_pass_samples={sp_samples}  "
+        f"full_super_passes={n_full}  (warmup dropped: {eff_warmup})"
+    )
+    if status != "windowable":
+        print(f"  WARNING: {status} — best-effort steady_state, low confidence")
     print(f"total     : qps={total.qps:,.2f}  ttft_p99={total.ttft.get(0.99)}")
     print(f"steady(ref): qps={ref.qps:,.2f}  ttft_p99={ref.ttft.get(0.99)}")
     print("\n| rule | super-passes | region | qps | qps_rel_err | ttft_p99_rel_err |")
@@ -87,6 +109,12 @@ def main(argv=None):
         )
 
     doc = {
+        "status": status,
+        "windowable": status == "windowable",
+        "n_issued": n_issued,
+        "super_pass_samples": sp_samples,
+        "n_full_super_passes": n_full,
+        "warmup_applied": eff_warmup,
         "total": asdict(total),
         "steady_state": asdict(ref),
         "rules": [asdict(s) for s in scores],

@@ -24,6 +24,7 @@ from inference_endpoint.core.record import (
 from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.metrics.steady_state.series import (
     build_super_pass_series,
+    coverage_status,
     super_pass_size,
 )
 
@@ -244,3 +245,33 @@ def test_completion_after_stop_tracking_still_counts(tmp_path):
     assert series[0].n_issued == 1
     assert series[0].ttft_ns == [100.0]  # 200 - 100
     assert series[0].latency_ns == [400.0]  # 500 - 100
+
+
+@pytest.mark.unit
+def test_coverage_status_windowable():
+    # dataset_size=100, concurrency=10 -> super_pass=100. warmup=1 needs >=2 full
+    # super-passes -> n_issued >= 200.
+    assert coverage_status(500, dataset_size=100, concurrency=10, warmup=1) == (
+        "windowable"
+    )
+    # dataset_size < concurrency: dataset_size=10, concurrency=100 -> super_pass=100
+    assert coverage_status(250, dataset_size=10, concurrency=100, warmup=1) == (
+        "windowable"
+    )
+
+
+@pytest.mark.unit
+def test_coverage_status_insufficient_passes():
+    # >= 1 full pass (n_issued 150 >= dataset_size 100) but only 1 full super-pass
+    # (150 // 100 = 1) < warmup+1 = 2.
+    assert coverage_status(150, dataset_size=100, concurrency=10, warmup=1) == (
+        "insufficient_passes"
+    )
+
+
+@pytest.mark.unit
+def test_coverage_status_partial_dataset():
+    # fewer samples issued than one full dataset pass (time-capped low-C run)
+    assert coverage_status(50, dataset_size=100, concurrency=10, warmup=1) == (
+        "partial_dataset"
+    )

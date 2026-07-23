@@ -99,3 +99,49 @@ def test_cli_writes_json(tmp_path):
     doc = json.loads(out.read_text())
     assert "total" in doc and "steady_state" in doc and "rules" in doc
     assert doc["total"]["sp_start"] == 0
+    assert doc["status"] == "windowable" and doc["windowable"] is True
+
+
+@pytest.mark.unit
+def test_cli_partial_dataset_best_effort(tmp_path):
+    # 8 samples issued but --dataset-size 100 => < 1 full pass => partial_dataset.
+    # Must NOT crash: emit a flagged best-effort steady_state.
+    p = tmp_path / "events.jsonl"
+    recs = [
+        EventRecord(
+            event_type=SessionEventType.START_PERFORMANCE_TRACKING, timestamp_ns=0
+        )
+    ]
+    t = 100
+    for i in range(8):
+        u = f"s{i}"
+        recs += [
+            EventRecord(
+                event_type=SampleEventType.ISSUED, sample_uuid=u, timestamp_ns=t
+            ),
+            EventRecord(
+                event_type=SampleEventType.RECV_FIRST,
+                sample_uuid=u,
+                timestamp_ns=t + 10,
+            ),
+            EventRecord(
+                event_type=SampleEventType.COMPLETE, sample_uuid=u, timestamp_ns=t + 50
+            ),
+        ]
+        t += 1_000_000_000
+    recs.append(
+        EventRecord(
+            event_type=SessionEventType.STOP_PERFORMANCE_TRACKING, timestamp_ns=t
+        )
+    )
+    _write(p, recs)
+
+    out = tmp_path / "steady.json"
+    doc = cli.main(
+        [str(p), "--dataset-size", "100", "--concurrency", "8", "--json", str(out)]
+    )
+    assert doc["status"] == "partial_dataset"
+    assert doc["windowable"] is False
+    assert doc["n_issued"] == 8
+    # best-effort steady_state is still emitted (not null)
+    assert doc["steady_state"]["n_samples"] > 0
