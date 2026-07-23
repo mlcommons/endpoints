@@ -99,6 +99,35 @@ S = ceil(N / dataset_size)   # passes needed to hold N distinct samples in fligh
 For `point_28080`: `S = ceil(28080 / 4388) = 7` passes/super-pass; 150 passes ≈
 21 super-passes total; warmup crop drops 1 super-pass.
 
+## Insufficient-data handling (best-effort + status)
+
+Not every run has enough issued samples for a clean steady-state window. At low
+concurrency a single *full* dataset pass can exceed the job's time budget, so the
+run stops mid-pass — issuing a biased subset of the dataset's ISL/OSL mix. Other
+runs complete only one or two super-passes. The tool MUST NOT hard-fail on these
+(a batch sweep over many runs cannot abort because one short run is unwindowable).
+
+Instead it always emits a best-effort `steady_state` plus a `status` marker that
+records how trustworthy that number is:
+
+| `status`               | condition                                       | windowing behavior                                                             |
+| ---------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------ |
+| `windowable`           | `≥ warmup + 1` full super-passes                | normal: drop the first `warmup` super-passes, window the rest                   |
+| `insufficient_passes`  | `≥ 1` full pass but `< warmup + 1` super-passes | best-effort over **all** available super-passes (`warmup = 0`), low-confidence  |
+| `partial_dataset`      | `< 1` full dataset pass                         | best-effort over the partial issued set, low-confidence — the measured workload is a biased ISL/OSL subset, so even the raw number is unreliable |
+
+`n_full_super_passes = n_issued // super_pass_samples`; the partial-dataset case
+is `n_issued < dataset_size`.
+
+**Rationale.** Low concurrency has negligible ramp — filling `N` in-flight is
+trivial, so steady-state correction is unnecessary there, and the `status` flag
+documents that the reported number is the raw measurement rather than a
+ramp-corrected one. High concurrency is where the correction matters and where
+runs naturally accumulate many super-passes. Every run in a batch sweep therefore
+yields a row: `windowable` rows carry the official steady-state number;
+`insufficient_passes` / `partial_dataset` rows carry a flagged best-effort value
+so the sweep stays complete and honest about what it could and could not measure.
+
 ## Architecture
 
 The computation is **cold-path only**. It re-ingests the durable `events.jsonl`
