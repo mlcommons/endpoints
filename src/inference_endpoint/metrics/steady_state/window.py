@@ -56,7 +56,9 @@ def windowed_metrics(
     confidence: float = CONFIDENCE,
 ) -> WindowMetrics:
     if not 0 <= sp_start < sp_end <= len(series):
-        raise ValueError(f"bad window [{sp_start},{sp_end}) over {len(series)} super-passes")
+        raise ValueError(
+            f"bad window [{sp_start},{sp_end}) over {len(series)} super-passes"
+        )
     window = series[sp_start:sp_end]
     ttft: list[float] = []
     tpot: list[float] = []
@@ -77,7 +79,10 @@ def windowed_metrics(
     def _valid(vals: list[float]) -> bool:
         if not vals:
             return False
-        return es_percentile_estimate(sorted(vals), es_percentile, confidence).estimate is not None
+        return (
+            es_percentile_estimate(sorted(vals), es_percentile, confidence).estimate
+            is not None
+        )
 
     return WindowMetrics(
         sp_start=sp_start,

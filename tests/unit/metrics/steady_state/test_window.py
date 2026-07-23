@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import pytest
-
 from inference_endpoint.metrics.steady_state.series import SuperPassRollup
 from inference_endpoint.metrics.steady_state.window import (
     percentile_lower,
@@ -65,7 +64,12 @@ def test_window_issue_span_excludes_drain():
 @pytest.mark.unit
 def test_window_subrange():
     sp0 = SuperPassRollup(
-        index=0, n_issued=1, first_issue_ns=0, last_issue_ns=0, ttft_ns=[10.0], latency_ns=[100.0]
+        index=0,
+        n_issued=1,
+        first_issue_ns=0,
+        last_issue_ns=0,
+        ttft_ns=[10.0],
+        latency_ns=[100.0],
     )
     sp1 = SuperPassRollup(
         index=1,
