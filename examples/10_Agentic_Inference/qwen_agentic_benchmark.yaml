@@ -44,6 +44,10 @@ settings:
     type: agentic_inference
     target_concurrency: 8 # Submission-specific concurrency.
 
+  client:
+    warmup_connections: 0
+    max_idle_time: 0.5
+
 endpoint_config:
   endpoints:
     - "http://localhost:30000"
