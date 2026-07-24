@@ -281,6 +281,9 @@ class Dataset:
     DATASET_ID: ClassVar[str]
     """The unique identifier for the dataset. Automatically set by __init_subclass__."""
 
+    ACCURACY_ONLY: ClassVar[bool] = False
+    """Whether this dataset may only be used for accuracy."""
+
     def __init_subclass__(
         cls,
         dataset_id: str | None = None,

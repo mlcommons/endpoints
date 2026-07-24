@@ -143,6 +143,7 @@ Format is auto-detected from file extension. Override with `format=<ext>` in the
 
 - Max throughput testing
 - Metrics: QPS, latency, TTFT, TPOT
+- Ordinary configured scoring remains available, but external scorers are skipped
 - Fastest - no response collection overhead
 
 **acc** - Accuracy only (collect all responses)
@@ -172,6 +173,10 @@ inference-endpoint benchmark offline \
 ```
 
 > **Note:** Submission runs (`type: submission`) are YAML-only — they require `submission_ref` and `benchmark_mode` fields not exposed in CLI.
+
+Report directories contain a sanitized `config.yaml`: credentials and other
+secret values are replaced with `<redacted>`. Restore those values before
+reusing that file as benchmark input.
 
 ## Load Patterns
 

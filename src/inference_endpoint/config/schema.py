@@ -27,6 +27,7 @@ from collections import Counter
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, Self, Union
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import cyclopts
 import yaml
@@ -147,6 +148,7 @@ class ScorerMethod(str, Enum):
     VBENCH = "vbench"
     BFCL_V4 = "bfcl_v4"
     LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
+    SWE_BENCH = "swe_bench_scorer"
 
 
 class AuditTestId(str, Enum):
@@ -206,11 +208,12 @@ AuditConfig = OutputCachingTestConfig
 
 
 class TestMode(str, Enum):
-    """Test mode determining what to collect.
+    """Test mode controlling performance issuance and response collection.
 
-    - PERF: Performance metrics only (no response storage)
-    - ACC: Accuracy metrics (collect and evaluate responses)
-    - BOTH: Both performance and accuracy (selective collection by dataset type)
+    - PERF: Run performance and ordinary configured scoring without in-process
+      collection; skip scorers that own an external evaluation run
+    - ACC: Skip performance and collect responses for configured scoring
+    - BOTH: Run performance and configured scoring with response collection
     """
 
     PERF = "perf"
@@ -1144,6 +1147,17 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
 
+        uses_swe_bench = any(
+            dataset.accuracy_config is not None
+            and dataset.accuracy_config.eval_method == ScorerMethod.SWE_BENCH
+            for dataset in self.datasets
+        )
+        if uses_swe_bench and len(self.endpoint_config.endpoints) != 1:
+            raise ValueError(
+                "SWE-bench service mode supports exactly one endpoint URL; "
+                f"got {len(self.endpoint_config.endpoints)}."
+            )
+
         # TODO(vir): Move API-type-specific validation out of this generic
         # cross-model validator and into the selected adapter. Requires a larger refactor.
         #
@@ -1262,6 +1276,32 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 "load_pattern.type=agentic_inference, "
                 f"got '{lp.type}'"
             )
+
+        # Forward target_concurrency as SWE-bench workers when unset.
+        concurrency = (
+            lp.target_concurrency
+            if lp.type
+            in (LoadPatternType.CONCURRENCY, LoadPatternType.AGENTIC_INFERENCE)
+            and lp.target_concurrency
+            else None
+        )
+        if concurrency is not None and self.datasets:
+            updated_datasets = []
+            changed = False
+            for ds in self.datasets:
+                acc = ds.accuracy_config
+                if (
+                    acc is not None
+                    and acc.eval_method == ScorerMethod.SWE_BENCH
+                    and (acc.extras is None or acc.extras.get("workers") is None)
+                ):
+                    new_extras = {**(acc.extras or {}), "workers": concurrency}
+                    new_acc = acc.model_copy(update={"extras": new_extras})
+                    ds = ds.model_copy(update={"accuracy_config": new_acc})
+                    changed = True
+                updated_datasets.append(ds)
+            if changed:
+                object.__setattr__(self, "datasets", updated_datasets)
 
         # Pin RNG seeds from the submission ruleset. Done last so the values
         # are baked into the config before any consumer reads them — the config
@@ -1400,20 +1440,94 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         return _config_adapter.validate_python(data)
 
-    def to_yaml_file(self, path: Path, exclude_none: bool = True) -> None:
+    @staticmethod
+    def _is_secret_field_name(key: Any) -> bool:
+        normalized = str(key).strip().lower().replace("-", "_")
+        return (
+            normalized
+            in {
+                "api_key",
+                "access_token",
+                "authorization",
+                "auth_token",
+                "password",
+                "token",
+            }
+            or normalized.endswith(("_key", "_token", "_password"))
+            or "secret" in normalized
+        )
+
+    @staticmethod
+    def _redact_url_secrets(value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return value
+        if parsed.scheme.lower() not in {"http", "https", "ws", "wss"} or not (
+            parsed.netloc
+        ):
+            return value
+
+        changed = False
+        netloc = parsed.netloc
+        if "@" in netloc:
+            netloc = f"<redacted>@{netloc.rsplit('@', 1)[1]}"
+            changed = True
+
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        redacted_query: list[tuple[str, str]] = []
+        for key, item in query:
+            if BenchmarkConfig._is_secret_field_name(key):
+                item = "<redacted>"
+                changed = True
+            redacted_query.append((key, item))
+
+        if not changed:
+            return value
+        return urlunsplit(
+            parsed._replace(netloc=netloc, query=urlencode(redacted_query, doseq=True))
+        )
+
+    @staticmethod
+    def _redact_secret_fields(value: Any) -> Any:
+        if isinstance(value, dict):
+            redacted: dict[str, Any] = {}
+            for key, item in value.items():
+                if BenchmarkConfig._is_secret_field_name(key):
+                    redacted[key] = "<redacted>"
+                else:
+                    redacted[key] = BenchmarkConfig._redact_secret_fields(item)
+            return redacted
+        if isinstance(value, list):
+            return [BenchmarkConfig._redact_secret_fields(item) for item in value]
+        if isinstance(value, str):
+            return BenchmarkConfig._redact_url_secrets(value)
+        return value
+
+    def to_yaml_file(
+        self,
+        path: Path,
+        exclude_none: bool = True,
+        *,
+        redact_secrets: bool = False,
+    ) -> None:
         """Save BenchmarkConfig to YAML file.
 
         Args:
             path: Path to save YAML file
             exclude_none: Whether to exclude None values (default: True)
+            redact_secrets: Replace secret-like values before persistence.
         """
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self.model_dump(exclude_none=exclude_none, mode="json")
+        if redact_secrets:
+            payload = self._redact_secret_fields(payload)
 
         with open(path, "w") as f:
             yaml.dump(
-                self.model_dump(exclude_none=exclude_none, mode="json"),
+                payload,
                 f,
                 default_flow_style=False,
                 sort_keys=False,
