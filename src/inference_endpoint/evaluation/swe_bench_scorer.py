@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -29,6 +30,16 @@ if TYPE_CHECKING:
     from ..config.schema import EndpointConfig, ModelParams
 
 logger = logging.getLogger(__name__)
+
+_SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+class _RejectRedirectHandler(urllib_request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_ARTIFACT_OPENER = urllib_request.build_opener(_RejectRedirectHandler())
 
 
 class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
@@ -215,6 +226,12 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             )
         return health
 
+    @staticmethod
+    def _validate_run_id(value: Any) -> str:
+        if not isinstance(value, str) or not _SAFE_RUN_ID_RE.fullmatch(value):
+            raise SetupError("SWE-bench service returned an invalid run_id")
+        return value
+
     @classmethod
     def _download_artifact(
         cls,
@@ -224,6 +241,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         run_id: str,
         auth_token: str | None = None,
     ) -> None:
+        run_id = cls._validate_run_id(run_id)
         name = str(artifact.get("name") or "")
         href = str(artifact.get("url") or "")
         if name not in cls.SAFE_ARTIFACT_NAMES or not href:
@@ -252,7 +270,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         tmp = target.with_suffix(target.suffix + ".tmp")
         try:
             with (
-                urllib_request.urlopen(req, timeout=60.0) as resp,
+                _ARTIFACT_OPENER.open(req, timeout=60.0) as resp,
                 tmp.open("wb") as output,
             ):
                 shutil.copyfileobj(resp, output, length=1024 * 1024)
@@ -272,9 +290,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         report_dir: Path,
         auth_token: str | None = None,
     ) -> None:
-        run_id = str(status.get("run_id") or "")
-        if not run_id:
-            return
+        run_id = cls._validate_run_id(status.get("run_id"))
         artifacts = status.get("artifacts") or []
         if isinstance(artifacts, dict):
             artifacts = [
@@ -304,11 +320,9 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         except SetupError:
             logger.warning("Could not cancel SWE-bench service run %s", run_id)
 
-    @staticmethod
-    def _write_service_status(report_dir: Path, status: dict[str, Any]) -> None:
-        run_id = str(status.get("run_id") or "")
-        if not run_id:
-            return
+    @classmethod
+    def _write_service_status(cls, report_dir: Path, status: dict[str, Any]) -> None:
+        run_id = cls._validate_run_id(status.get("run_id"))
         run_dir = report_dir / "swe_bench_runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "swe_bench_service_status.json").write_bytes(
@@ -637,9 +651,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 timeout_s=30.0,
                 auth_token=self.swebench_service_auth_token,
             )
-            run_id = str(submitted.get("run_id") or "")
-            if not run_id:
-                raise SetupError("SWE-bench service did not return run_id")
+            run_id = type(self)._validate_run_id(submitted.get("run_id"))
             type(self)._update_progress_bars(submitted, progress_state)
 
             deadline = time.monotonic() + self.service_timeout_s
@@ -655,6 +667,12 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                     timeout_s=30.0,
                     auth_token=self.swebench_service_auth_token,
                 )
+                status_run_id = type(self)._validate_run_id(status.get("run_id"))
+                if status_run_id != run_id:
+                    raise SetupError(
+                        "SWE-bench service returned a mismatched run_id: "
+                        f"expected {run_id!r}, got {status_run_id!r}"
+                    )
                 type(self)._update_progress_bars(status, progress_state)
         except (KeyboardInterrupt, SystemExit):
             if run_id:
@@ -674,6 +692,14 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             logger.error("SWE-bench service run failed", exc_info=True)
             self.complete = False
             return None, 1
+        except Exception:
+            if run_id:
+                type(self)._cancel_service_run(
+                    self.swebench_service_url,
+                    run_id,
+                    self.swebench_service_auth_token,
+                )
+            raise
         finally:
             type(self)._close_progress_bars(progress_state)
 

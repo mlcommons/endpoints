@@ -613,4 +613,8 @@ class SweBenchRunner:
         candidates = sorted(output_dir.rglob(f"*{run_id}*.json"))
         if not candidates:
             raise RunnerError(f"SWE-bench result file not found for run_id={run_id}")
+        if len(candidates) > 1:
+            raise RunnerError(
+                f"multiple SWE-bench result files found for run_id={run_id}"
+            )
         return candidates[0]

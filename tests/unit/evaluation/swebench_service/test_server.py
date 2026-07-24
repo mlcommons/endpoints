@@ -191,14 +191,27 @@ async def test_health_response_schema(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_post_run_validates_requests(tmp_path):
-    client = await _client(tmp_path, FakeRunner())
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"model_name": ""},
+        {"endpoint_urls": ["ftp://endpoint"]},
+        {"endpoint_urls": ["http:///v1"]},
+        {"num_instances": 2},
+    ],
+)
+async def test_post_run_validates_requests(tmp_path, updates):
+    runner = FakeRunner()
+    client = await _client(tmp_path, runner)
+    payload = _payload()
+    payload.update(updates)
     try:
-        resp = await client.post("/v1/runs", json={"model_name": ""})
+        resp = await client.post("/v1/runs", json=payload)
     finally:
         await client.close()
 
     assert resp.status == 400
+    assert runner.requests == []
 
 
 @pytest.mark.asyncio

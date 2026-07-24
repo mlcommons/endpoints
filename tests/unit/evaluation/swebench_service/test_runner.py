@@ -314,7 +314,8 @@ def test_logged_subprocess_publishes_redacted_log(tmp_path):
     assert not (tmp_path / ".agent.log.raw").exists()
 
 
-def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path):
+@pytest.mark.parametrize("ambiguous_fallback", [False, True])
+def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path, ambiguous_fallback):
     monkeypatch.setenv("OPENAI_API_KEY", "ambient-secret")
     runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     request = _request(["http://endpoint:30000"])
@@ -330,15 +331,25 @@ def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path):
         assert "OPENAI_API_KEY" not in env
         run_id = cmd[cmd.index("--run_id") + 1]
         assert (run_dir / "swe_bench_eval_run_id.txt").read_text() == run_id
-        (cwd / f"test-model.{run_id}.json").write_text(
-            '{"resolved_instances":1,"submitted_instances":1}'
-        )
+        if ambiguous_fallback:
+            for directory in ("first", "second"):
+                candidate_dir = cwd / directory
+                candidate_dir.mkdir()
+                (candidate_dir / f"{directory}.{run_id}.json").write_text("{}")
+        else:
+            (cwd / f"test-model.{run_id}.json").write_text(
+                '{"resolved_instances":1,"submitted_instances":1}'
+            )
 
     monkeypatch.setattr(runner_mod, "_run_subprocess", fake_run_subprocess)
 
-    result_path = runner._run_eval(request, preds_path, output_dir, run_dir, set())
+    if ambiguous_fallback:
+        with pytest.raises(RunnerError, match="multiple SWE-bench result files"):
+            runner._run_eval(request, preds_path, output_dir, run_dir, set())
+    else:
+        result_path = runner._run_eval(request, preds_path, output_dir, run_dir, set())
+        assert result_path.exists()
 
-    assert result_path.exists()
     assert (run_dir / "swe_bench_eval_run_id.txt").read_text().startswith("endpoints_")
 
 

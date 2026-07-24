@@ -346,6 +346,42 @@ class TestSWEBenchScorerScore:
         assert score == pytest.approx(1 / 3)
         assert calls[-1] == "http://service-host:18080/v1/runs/run-1"
 
+    @pytest.mark.parametrize(
+        ("responses", "expected_cancel"),
+        [
+            ([{"run_id": "../outside", "status": "succeeded"}], False),
+            (
+                [
+                    {"run_id": "run-1", "status": "running"},
+                    {"run_id": "run-2", "status": "succeeded"},
+                ],
+                True,
+            ),
+        ],
+    )
+    def test_score_rejects_unsafe_or_changed_run_id(
+        self, report_dir, monkeypatch, responses, expected_cancel
+    ):
+        response_iter = iter(responses)
+        cancel_service_run = MagicMock()
+        monkeypatch.setattr(
+            SWEBenchScorer,
+            "_http_json",
+            lambda *args, **kwargs: next(response_iter),
+        )
+        monkeypatch.setattr(SWEBenchScorer, "_cancel_service_run", cancel_service_run)
+        scorer = _make_scorer(report_dir)
+
+        assert scorer.score() == (None, 1)
+        assert scorer.complete is False
+        assert not (report_dir / "outside").exists()
+        if expected_cancel:
+            cancel_service_run.assert_called_once_with(
+                "http://service-host:18080/", "run-1", None
+            )
+        else:
+            cancel_service_run.assert_not_called()
+
     def test_score_forwards_auth_token_to_service_calls(self, report_dir, monkeypatch):
         calls: list[tuple[str, str, str | None]] = []
         downloads: list[tuple[str, str | None]] = []
@@ -493,7 +529,12 @@ class TestSWEBenchScorerScore:
 
         assert score == pytest.approx(1 / 3)
 
-    def test_interrupt_cancels_service_run(self, report_dir, monkeypatch):
+    @pytest.mark.parametrize(
+        "error", [KeyboardInterrupt(), RuntimeError("poll failed")]
+    )
+    def test_polling_exception_cancels_service_run(
+        self, report_dir, monkeypatch, error
+    ):
         calls: list[tuple[str, str]] = []
 
         def fake_http_json(url, *, method="GET", payload=None, **kwargs):
@@ -505,12 +546,12 @@ class TestSWEBenchScorerScore:
                 and url == "http://service-host:18080/v1/runs/run-1/cancel"
             ):
                 return {"run_id": "run-1", "status": "cancelled"}
-            raise KeyboardInterrupt
+            raise error
 
         monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
         scorer = _make_scorer(report_dir)
 
-        with pytest.raises(KeyboardInterrupt):
+        with pytest.raises(type(error)):
             scorer.score()
 
         assert ("http://service-host:18080/v1/runs/run-1/cancel", "POST") in calls
@@ -652,10 +693,8 @@ class TestSWEBenchScorerScore:
         assert scorer.complete is False
 
     def test_unsafe_artifact_url_is_not_downloaded(self, report_dir, monkeypatch):
-        def fail_urlopen(*args, **kwargs):
-            pytest.fail("unsafe artifact URL must not be fetched")
-
-        monkeypatch.setattr(swe_bench_mod.urllib_request, "urlopen", fail_urlopen)
+        opener = MagicMock()
+        monkeypatch.setattr(swe_bench_mod, "_ARTIFACT_OPENER", opener)
 
         SWEBenchScorer._download_artifact(
             "http://service-host:18080/",
@@ -664,7 +703,34 @@ class TestSWEBenchScorerScore:
             "run-1",
         )
 
-        assert not (report_dir / "preds.json").exists()
+        opener.open.assert_not_called()
+
+        redirect = swe_bench_mod.urllib_error.HTTPError(
+            "http://service-host:18080/v1/runs/run-1/artifacts/preds.json",
+            302,
+            "Found",
+            Message(),
+            io.BytesIO(),
+        )
+        opener.open.side_effect = redirect
+        SWEBenchScorer._download_artifact(
+            "http://service-host:18080/",
+            {
+                "name": "preds.json",
+                "url": "/v1/runs/run-1/artifacts/preds.json",
+            },
+            report_dir,
+            "run-1",
+        )
+
+        opener.open.assert_called_once()
+        assert not (report_dir / "swe_bench_runs" / "run-1" / "preds.json").exists()
+        assert (
+            swe_bench_mod._RejectRedirectHandler().redirect_request(
+                None, None, 302, "Found", Message(), "http://evil/preds.json"
+            )
+            is None
+        )
 
     def test_downloaded_artifact_is_streamed_and_namespaced(
         self, report_dir, monkeypatch
@@ -678,9 +744,9 @@ class TestSWEBenchScorerScore:
             b'"patch"}',
             b"",
         ]
-        monkeypatch.setattr(
-            swe_bench_mod.urllib_request, "urlopen", MagicMock(return_value=response)
-        )
+        opener = MagicMock()
+        opener.open.return_value = response
+        monkeypatch.setattr(swe_bench_mod, "_ARTIFACT_OPENER", opener)
 
         SWEBenchScorer._download_artifact(
             "http://service-host:18080/",
@@ -709,9 +775,9 @@ class TestSWEBenchScorerScore:
             b"partial",
             OSError("download interrupted"),
         ]
-        monkeypatch.setattr(
-            swe_bench_mod.urllib_request, "urlopen", MagicMock(return_value=response)
-        )
+        opener = MagicMock()
+        opener.open.return_value = response
+        monkeypatch.setattr(swe_bench_mod, "_ARTIFACT_OPENER", opener)
 
         SWEBenchScorer._download_artifact(
             "http://service-host:18080/",

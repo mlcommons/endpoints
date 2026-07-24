@@ -16,8 +16,9 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 RunState = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 RunProgressPhase = Literal[
@@ -45,6 +46,31 @@ class RunRequest(BaseModel):
     max_eval_workers: int = Field(ge=1)
     evaluated_instance_ids: list[str] = Field(min_length=1)
     template: TemplateName = "default"
+
+    @field_validator("endpoint_urls")
+    @classmethod
+    def _validate_endpoint_urls(cls, endpoint_urls: list[str]) -> list[str]:
+        for endpoint_url in endpoint_urls:
+            try:
+                parsed = urlparse(endpoint_url)
+                _ = parsed.port
+            except ValueError as exc:
+                raise ValueError(
+                    f"endpoint URL must be HTTP(S) with a hostname: {endpoint_url!r}"
+                ) from exc
+            if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+                raise ValueError(
+                    f"endpoint URL must be HTTP(S) with a hostname: {endpoint_url!r}"
+                )
+        return endpoint_urls
+
+    @model_validator(mode="after")
+    def _validate_instance_count(self) -> RunRequest:
+        if self.num_instances != len(self.evaluated_instance_ids):
+            raise ValueError(
+                "num_instances must equal the number of evaluated_instance_ids"
+            )
+        return self
 
 
 class ArtifactInfo(BaseModel):
