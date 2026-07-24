@@ -194,3 +194,66 @@ Update the first `datasets` entry (`name` and `path`), `model_params.name`, and
 uv run inference-endpoint benchmark from-config \
   --config examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml
 ```
+
+## SWE-bench Accuracy
+
+Both `qwen_agentic_benchmark.yaml` and `kimi_agentic_benchmark.yaml` include the
+SWE-bench accuracy dataset. The benchmark framework skips its built-in endpoint
+phase for the SWE-bench dataset. Instead,
+`SWEBenchScorer` submits the run to a native SWE-bench service. The service host
+owns Docker, `mini-swe-agent`, and the `swebench` evaluation harness, and it
+drives requests to the configured endpoint.
+
+Keep `accuracy_config.num_repeats: 1`: the scorer performs one external
+evaluation run per benchmark. Optional `accuracy_config.extras.subset` and
+`split` are used consistently for dataset loading, preflight, and scoring.
+
+`accuracy_config.extras.swebench_service_url` points the benchmark client to
+the service. Service mode follows the LiveCodeBench-style external-service
+convention for heavyweight evaluation work and supports exactly one endpoint URL
+in `endpoint_config.endpoints`; that URL must be reachable from the service
+host. Treat the service host as trusted infrastructure: it receives the endpoint
+URL and optional endpoint API key needed to run mini-swe-agent.
+Start the service with `--auth-token` and set
+`accuracy_config.extras.swebench_service_auth_token`. Only isolated local
+development should use the explicit `--allow-unauthenticated` override.
+
+`accuracy_config.extras.workers` sets the agent run's parallelism (`--workers`).
+If unset, it defaults to the load pattern's `target_concurrency` (for
+`concurrency`/`agentic_inference` patterns), else 10. `max_eval_workers`
+(default 10, `--max_workers`) sets the eval harness's parallelism.
+
+Qwen tool-call runs should set
+`accuracy_config.extras.swebench_template: qwen_tools`. The selected packaged
+template also activates the service's `QwenToolsModel` through mini-swe-agent's
+`model_class` hook.
+
+Start the service on the host that has Docker:
+
+```bash
+uv run --project src/inference_endpoint/evaluation/swebench_service \
+  python -m swebench_service --host 0.0.0.0 --port 18080 \
+  --auth-token "$SWEBENCH_SERVICE_AUTH_TOKEN"
+```
+
+Then select the matching model config and run it from the repo root:
+
+```bash
+CONFIG=examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml
+# For Kimi, use examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml.
+
+# PERF (default): agentic performance and inline scoring; skips SWE-bench.
+uv run inference-endpoint benchmark from-config --config "$CONFIG"
+
+# BOTH: agentic performance followed by SWE-bench.
+uv run inference-endpoint benchmark from-config --config "$CONFIG" --mode both
+
+# ACC: SWE-bench only; skips the agentic performance dataset.
+uv run inference-endpoint benchmark from-config --config "$CONFIG" --mode acc
+```
+
+The default `PERF` mode does not load, preflight, or submit external evaluation
+scorers. Use `--mode both` or `--mode acc` whenever SWE-bench should run.
+
+See `accuracy/RUNBOOK.md` for preconditions, sanity checks, and common failure
+modes.

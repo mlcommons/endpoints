@@ -25,4 +25,13 @@ This section lists third-party assets and their attributions.
   (instance IDs such as `django__django-16899`). Cite: Jimenez et al.,
   "SWE-bench: Can Language Models Resolve Real-world Github Issues?", ICLR 2024.
 
+### mini-swe-agent
+
+- Source: https://github.com/SWE-agent/mini-swe-agent/tree/v2.3.0
+- License: MIT
+- Copyright: Copyright (c) 2025 Kilian A. Lieret and Carlos E. Jimenez
+- Description: The SWE-bench service templates and optional Qwen tool schemas,
+  parser, and model extension are derived from mini-swe-agent v2.3.0. The full
+  upstream notice is retained in the swebench_service package.
+
 For a complete list of dependencies and their licenses, see the requirements files in the `requirements/` directory.

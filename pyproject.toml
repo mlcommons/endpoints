@@ -33,6 +33,8 @@ source-exclude = [
     # numpy<2 / prm800k that conflict with the parent env). Invoked only via
     # `uv run --project`, never imported - keep it out of the parent wheel.
     "inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/**",
+    # Isolated native uv service that owns SWE-bench Docker execution.
+    "inference_endpoint/evaluation/swebench_service/**",
 ]
 
 [project]
@@ -94,6 +96,7 @@ dependencies = [
     # Fix pytz-2024 import warning
     "pytz==2026.1.post1",
     "urllib3==2.7.0",
+    "pyyaml==6.0.3",
 ]
 
 [project.optional-dependencies]

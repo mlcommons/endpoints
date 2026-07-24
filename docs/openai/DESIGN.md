@@ -61,13 +61,13 @@ class HttpRequestAdapter(ABC):
     def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult: ...
 
     @classmethod
-    def decode_sse_message(cls, json_bytes: bytes) -> str: ...
+    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice: ...
 ```
 
 `dataset_transforms()` returns adapter-specific transforms that shape dataset rows into the
 expected `Query.data` schema. `encode_query()` serialises a `Query` to HTTP request bytes.
-`decode_response()` parses a non-streaming response. `decode_sse_message()` extracts the content
-string from a single SSE JSON payload; `parse_sse_chunk()` (concrete, on the base class) iterates
+`decode_response()` parses a non-streaming response. `decode_sse_message()` decodes a single SSE
+JSON payload into an `SSEChoice`; `parse_sse_chunk()` (concrete, on the base class) iterates
 the SSE buffer and calls it repeatedly.
 
 ### `SSEAccumulatorProtocol` (protocol, defined in `endpoint_client/accumulator_protocol.py`)
@@ -87,15 +87,16 @@ than shared across a connection.
 
 ## Key Files
 
-| File                        | Purpose                                                      |
-| --------------------------- | ------------------------------------------------------------ |
-| `openai_msgspec_adapter.py` | Hot-path adapter; uses msgspec for request encoding          |
-| `openai_adapter.py`         | Standard adapter; uses stdlib json                           |
-| `accumulator.py`            | Per-request streaming accumulator for OpenAI SSE deltas      |
-| `types.py`                  | Python type annotations for OpenAI response objects          |
-| `openai_types_gen.py`       | Auto-generated from `openapi.yaml`; do not edit manually     |
-| `harmony.py`                | Optional `openai-harmony` integration for compatibility shim |
-| `openapi.yaml`              | OpenAI API spec snapshot; excluded from pre-commit           |
+| File                        | Purpose                                                                                                                       |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `openai_msgspec_adapter.py` | Hot-path chat adapter; uses msgspec for request encoding                                                                      |
+| `openai_adapter.py`         | Standard chat adapter; uses stdlib json                                                                                       |
+| `completions_adapter.py`    | Pre-tokenized `/v1/completions` adapter (`OpenAITextCompletionsAdapter`) — sends token IDs, bypasses the server chat template |
+| `accumulator.py`            | Per-request streaming accumulator for OpenAI SSE deltas                                                                       |
+| `types.py`                  | Python type annotations for OpenAI response objects                                                                           |
+| `openai_types_gen.py`       | Auto-generated from `openapi.yaml`; do not edit manually                                                                      |
+| `harmony.py`                | Optional `openai-harmony` integration for compatibility shim                                                                  |
+| `openapi.yaml`              | OpenAI API spec snapshot; excluded from pre-commit                                                                            |
 
 ## Design Decisions
 

@@ -15,6 +15,8 @@
 
 """Tests for per-dataset accuracy scoring in finalize_benchmark."""
 
+# ruff: noqa: I001
+
 from __future__ import annotations
 
 import sys
@@ -29,7 +31,13 @@ from inference_endpoint.commands.benchmark.execute import (
     _phase_response_counts,
     _score_accuracy,
 )
-from inference_endpoint.config.schema import DatasetType
+from inference_endpoint.config import schema as config_schema
+from inference_endpoint.config.schema import (
+    DatasetType,
+    EndpointConfig,
+    ModelParams,
+    ScorerMethod,
+)
 
 # Module object for the tests that monkeypatch execute's own module-level symbols
 # (load_reference_backend) so _score_accuracy resolves the patched one. Taken from
@@ -51,6 +59,8 @@ class _FakeDataset:
 class _FakeScorer:
     """Duck-typed scorer stand-in with no breakdown."""
 
+    SKIP_ENDPOINT_PHASE = False
+
     def __init__(
         self, name, dataset, report_dir, extractor=None, ground_truth_column=None, **x
     ):
@@ -62,6 +72,20 @@ class _FakeScorer:
 
     def score_breakdown(self):
         return None
+
+
+class _FakeSWEBenchScorer(_FakeScorer):
+    SCORER_ID = ScorerMethod.SWE_BENCH.value
+    SKIP_ENDPOINT_PHASE = True
+    received_kwargs: dict = {}
+
+    @classmethod
+    def external_sample_count(cls, extras):
+        return None
+
+    def __init__(self, *args, **kwargs):
+        type(self).received_kwargs = kwargs
+        super().__init__(*args, **kwargs)
 
 
 class _FakeBreakdownScorer(_FakeScorer):
@@ -158,11 +182,19 @@ def _by_name(scores: list[dict]) -> dict[str, dict]:
     return {e["dataset_name"]: e for e in scores}
 
 
-def _ctx(cfgs, tokenizer_name=None, report_dir=None):
+def _ctx(
+    cfgs,
+    tokenizer_name=None,
+    report_dir=None,
+    test_mode: config_schema.TestMode = config_schema.TestMode.ACC,
+):
     # tokenizer_name None => OSL is skipped (fake scorers have no get_raw_outputs).
     # report_dir None => the uuid bound falls back to an unbounded read (no map).
     return SimpleNamespace(
-        eval_configs=cfgs, tokenizer_name=tokenizer_name, report_dir=report_dir
+        eval_configs=cfgs,
+        tokenizer_name=tokenizer_name,
+        report_dir=report_dir,
+        test_mode=test_mode,
     )
 
 
@@ -178,6 +210,46 @@ _RESULT = SimpleNamespace(perf_results=[], phase_results=[])
 
 @pytest.mark.unit
 class TestScoreAccuracy:
+    @pytest.mark.parametrize(
+        "test_mode", [config_schema.TestMode.ACC, config_schema.TestMode.BOTH]
+    )
+    def test_swebench_receives_typed_runtime_model_and_endpoint(
+        self, tmp_path, test_mode
+    ):
+        model_params = ModelParams(
+            name="test-model",
+            temperature=0.2,
+            seed=7,
+            max_new_tokens=2048,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        endpoint_config = EndpointConfig(
+            endpoints=["http://endpoint:8000"],
+            api_key="runtime-secret",
+        )
+        cfg = AccuracyConfiguration(
+            scorer=_FakeSWEBenchScorer,  # type: ignore[arg-type]
+            extractor=None,
+            dataset_name="swe_bench",
+            dataset=_FakeDataset(1, 1.0),  # type: ignore[arg-type]
+            report_dir=tmp_path,
+            ground_truth_column=None,
+            num_repeats=1,
+            extras={"swebench_service_auth_token": "service-secret"},
+            model_params=model_params,
+            endpoint_config=endpoint_config,
+        )
+
+        _score_accuracy(_ctx([cfg], test_mode=test_mode), _RESULT)
+
+        assert _FakeSWEBenchScorer.received_kwargs == {
+            "extractor": None,
+            "ground_truth_column": None,
+            "swebench_service_auth_token": "service-secret",
+            "model_params": model_params,
+            "endpoint_config": endpoint_config,
+        }
+
     def test_each_dataset_gets_its_own_entry(self, tmp_path):
         cfgs = [
             _cfg("aime25::gptoss", 30, 0.8, tmp_path, repeats=8),
@@ -234,6 +306,22 @@ class TestScoreAccuracy:
 
     def test_empty_when_no_datasets(self, tmp_path):
         assert _score_accuracy(_ctx([]), _RESULT) == []
+
+    def test_perf_mode_skips_only_external_scoring(self, tmp_path):
+        ordinary_cfg = _cfg("aime25::gptoss", 30, 0.8, tmp_path)
+        external_cfg = _cfg("swe_bench", 1, 1.0, tmp_path, scorer=_FakeSWEBenchScorer)
+        _FakeSWEBenchScorer.received_kwargs = {}
+        scores = _score_accuracy(
+            _ctx(
+                [ordinary_cfg, external_cfg],
+                test_mode=config_schema.TestMode.PERF,
+            ),
+            _RESULT,
+        )
+        assert {entry["dataset_name"]: entry["score"] for entry in scores} == {
+            "aime25::gptoss": 0.8
+        }
+        assert _FakeSWEBenchScorer.received_kwargs == {}
 
     def test_no_osl_without_tokenizer(self, tmp_path):
         # tokenizer_name None (the default) => no output_sequence_lengths attached,
@@ -413,6 +501,22 @@ class TestScoreAccuracy:
         )
         assert captured["wanted"] == {"u1", "u2"}
 
+    def test_empty_uuid_bound_stays_bounded(self, tmp_path):
+        (tmp_path / "sample_idx_map.json").write_bytes(
+            msgspec.json.encode({"swe_bench": {}})
+        )
+        captured: dict = {}
+
+        class _CaptureScorer(_FakeOSLScorer):
+            def get_raw_outputs(self, wanted_uuids=None):
+                captured["wanted"] = wanted_uuids
+                return super().get_raw_outputs(wanted_uuids)
+
+        cfg = _cfg("swe_bench", 1, 0.8, tmp_path, scorer=_CaptureScorer)
+        _score_accuracy(_ctx([cfg], report_dir=tmp_path), _RESULT)
+
+        assert captured["wanted"] == set()
+
 
 @pytest.mark.unit
 class TestPhaseOslStats:
@@ -503,13 +607,13 @@ class TestAccuracyUuidBound:
 
     def test_none_report_dir_returns_empty_without_warning(self, caplog):
         with caplog.at_level("WARNING"):
-            assert _accuracy_uuid_bound(None, []) == set()
+            assert _accuracy_uuid_bound(None, []) is None
         assert "uuid bound unavailable" not in caplog.text
 
     def test_missing_map_warns_and_falls_back(self, tmp_path, caplog):
         with caplog.at_level("WARNING"):
             assert (
-                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) == set()
+                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) is None
             )
         assert "uuid bound unavailable" in caplog.text
 
@@ -517,7 +621,7 @@ class TestAccuracyUuidBound:
         (tmp_path / "sample_idx_map.json").write_text("{not valid json")
         with caplog.at_level("WARNING"):
             assert (
-                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) == set()
+                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) is None
             )
         assert "uuid bound unavailable" in caplog.text
 
@@ -526,7 +630,7 @@ class TestAccuracyUuidBound:
         (tmp_path / "sample_idx_map.json").write_bytes(msgspec.json.encode(["nope"]))
         with caplog.at_level("WARNING"):
             assert (
-                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) == set()
+                _accuracy_uuid_bound(tmp_path, [_cfg("ds", 1, 0.8, tmp_path)]) is None
             )
         assert "not an object" in caplog.text
 

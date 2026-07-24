@@ -200,7 +200,7 @@ The endpoint client uses three core message types defined in the parent project 
 | Type          | Direction     | Purpose                                                                 |
 | ------------- | ------------- | ----------------------------------------------------------------------- |
 | `Query`       | Main → Worker | Request payload with `id`, `data` (prompt/params), `headers`            |
-| `StreamChunk` | Worker → Main | Intermediate streaming token with `response_chunk`, `is_complete` flag  |
+| `StreamChunk` | Worker → Main | Intermediate streaming token with `response_chunk` and `metadata`       |
 | `QueryResult` | Worker → Main | Final response with `response_output`, `error`, auto-set `completed_at` |
 | `QueryStatus` | Internal      | Enum: `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED`          |
 
@@ -221,7 +221,6 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True,
 class StreamChunk(msgspec.Struct, tag="stream_chunk", frozen=True, kw_only=True, array_like=True, omit_defaults=True, gc=False):
     id: str
     response_chunk: str
-    is_complete: bool
     metadata: dict[str, Any]
 
 class QueryStatus(Enum):
@@ -790,29 +789,29 @@ Each worker maintains its own `ConnectionPool` to its assigned endpoint. The poo
 
 **Idle Connection Validation (`is_stale`):**
 
-When `acquire()` pops a connection from the idle stack, it must verify the server hasn't closed it. `PooledConnection.is_stale()` combines a fast-path skip with a zero-cost kernel probe:
+When `acquire()` pops a connection from the idle stack, it must verify the server hasn't closed it. `PooledConnection.is_stale()` combines a fast-path skip with a zero-cost kernel probe. It uses `poll()` rather than `select()` to avoid the `FD_SETSIZE` limit on high fds, and reuses a persistent per-connection poller (registered lazily on first call, since the fd is stable per connection):
 
 ```python
 def is_stale(self) -> bool:
-    # Fast path: skip select() for recently-used connections.
+    # Fast path: skip the probe for recently-used connections.
     # A server won't close a connection within 1s of last use,
     # so the syscall is unnecessary. Saves ~1µs per acquire.
     if time.monotonic() - self.last_used < 1.0:
         return False
 
-    # Zero-timeout select(): asks the kernel if any data or
-    # errors are pending. A healthy idle socket has neither.
-    readable, _, exceptional = select.select([fd], [], [fd], 0)
-    return bool(readable or exceptional)
+    # Zero-timeout poll() on a persistent per-connection poller:
+    # asks the kernel if any data or errors are pending. A healthy
+    # idle socket has neither. A raised poll event means the server
+    # sent FIN (readable EOF) or the socket errored.
+    return bool(self._stale_poller.poll(0))
 ```
 
-| `select()` Result  | Kernel State                                             | Pool Action                       |
-| ------------------ | -------------------------------------------------------- | --------------------------------- |
-| `readable=True`    | Server sent FIN, indicating it is closing the connection | Discard connection, try next idle |
-| `exceptional=True` | Socket error such as a TCP reset from the server         | Discard connection, try next idle |
-| Both empty         | No pending data or errors on the socket                  | Connection is healthy, use it     |
+| `poll()` Result | Kernel State                                         | Pool Action                       |
+| --------------- | ---------------------------------------------------- | --------------------------------- |
+| Event raised    | Server sent FIN (readable EOF) or socket error/reset | Discard connection, try next idle |
+| No event        | No pending data or errors on the socket              | Connection is healthy, use it     |
 
-The fast-path skip (`< 1.0s`) avoids the `select()` syscall entirely for connections in active rotation — reducing validation from ~1.2µs to ~161ns (see latencies below).
+The fast-path skip (`< 1.0s`) avoids the `poll()` syscall entirely for connections in active rotation — reducing validation from ~1.2µs to ~161ns (see latencies below).
 
 **Operation Latencies:**
 
@@ -839,17 +838,17 @@ Per-operation latency measurements for `ConnectionPool` (localhost TCP, uvloop):
 
 The `_SocketConfig` class (`http.py`) defines socket options applied to all TCP connections created by the connection pool. These options are tuned for low-latency streaming workloads where individual request latency directly impacts benchmark measurements.
 
-| Option             | Value | Effect                                                                                                            | Interaction                                                                                                                                                                          |
-| ------------------ | ----- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `TCP_NODELAY`      | 1     | Disables Nagle's algorithm, allowing small packets to be sent immediately rather than being buffered for batching | With `TCP_QUICKACK`: eliminates both send batching (Nagle) and receive-side delayed ACK, removing the two primary sources of TCP-induced latency                                     |
-| `TCP_QUICKACK`     | 1     | Immediately acknowledge received packets instead of delaying acknowledgments (Linux-specific)                     | Not sticky — kernel may revert to delayed ACK mode; re-applied per connection. Together with `TCP_NODELAY`, ensures neither side introduces artificial delays                        |
-| `SO_KEEPALIVE`     | 1     | Enable TCP keepalive probes at the socket level                                                                   | Activates the kernel keepalive mechanism; actual probe timing controlled by `TCP_KEEPIDLE`, `TCP_KEEPCNT`, `TCP_KEEPINTVL`                                                           |
-| `TCP_KEEPIDLE`     | 1s    | Start probing after 1 second idle (Linux-specific)                                                                | With `TCP_KEEPCNT=1` + `TCP_KEEPINTVL=1s`: total dead-connection detection time is 2 seconds (1s idle + 1 probe × 1s interval)                                                       |
-| `TCP_KEEPCNT`      | 1     | 1 failed probe = connection declared dead                                                                         | Aggressive: default is 9. Appropriate here because a failed probe to a local/VPC endpoint indicates genuine failure, not transient packet loss                                       |
-| `TCP_KEEPINTVL`    | 1s    | 1 second between probes                                                                                           | With only 1 probe needed (`TCP_KEEPCNT=1`), a single missed probe triggers connection close                                                                                          |
-| `SO_RCVBUF`        | 4 MB  | Receive buffer size                                                                                               | 4 MB buffer accommodates approximately 1M tokens (at 4 bytes per token) for offline-mode full responses. Prevents the kernel from dropping data when the application is briefly busy |
-| `SO_SNDBUF`        | 4 MB  | Send buffer size                                                                                                  | Sized for large request payloads (long prompts). Allows `write()` to complete without blocking even for large HTTP bodies                                                            |
-| `TCP_USER_TIMEOUT` | 0     | Disabled — no timeout on unacknowledged sent data (Linux-specific)                                                | Keepalive handles dead-connection detection; setting this to 0 avoids interfering with long-running SSE streams where the server may take seconds between chunks                     |
+| Option             | Value  | Effect                                                                                                            | Interaction                                                                                                                                                                                                                                                                                                                                         |
+| ------------------ | ------ | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TCP_NODELAY`      | 1      | Disables Nagle's algorithm, allowing small packets to be sent immediately rather than being buffered for batching | With `TCP_QUICKACK`: eliminates both send batching (Nagle) and receive-side delayed ACK, removing the two primary sources of TCP-induced latency                                                                                                                                                                                                    |
+| `TCP_QUICKACK`     | 1      | Immediately acknowledge received packets instead of delaying acknowledgments (Linux-specific)                     | Not sticky — kernel may revert to delayed ACK mode; re-applied per connection. Together with `TCP_NODELAY`, ensures neither side introduces artificial delays                                                                                                                                                                                       |
+| `SO_KEEPALIVE`     | 0      | Disabled — kernel TCP keepalive is turned off                                                                     | Dead connections are detected in the pool via `connection_lost`/`eof_received`, not kernel keepalive; keepalive probes produced connection-timeout errors in offline and high-concurrency modes. `_SocketConfig.apply` gates the `TCP_KEEP*` options below behind `if cls.SO_KEEPALIVE`, so they are not applied at all while keepalive is disabled |
+| `TCP_KEEPIDLE`     | 1s     | Start probing after 1 second idle (Linux-specific)                                                                | Inert while `SO_KEEPALIVE=0`; only takes effect if keepalive is re-enabled                                                                                                                                                                                                                                                                          |
+| `TCP_KEEPCNT`      | 5      | 5 failed probes = connection declared dead                                                                        | Inert while `SO_KEEPALIVE=0`; only takes effect if keepalive is re-enabled                                                                                                                                                                                                                                                                          |
+| `TCP_KEEPINTVL`    | 1s     | 1 second between probes                                                                                           | Inert while `SO_KEEPALIVE=0`; only takes effect if keepalive is re-enabled                                                                                                                                                                                                                                                                          |
+| `SO_RCVBUF`        | 128 KB | Receive buffer size                                                                                               | Sliding-window buffer, not a full-message buffer: the event loop reads eagerly, so it only holds data between kernel delivery and application read (~one RTT). Larger responses stream through fine via the TCP sliding window                                                                                                                      |
+| `SO_SNDBUF`        | 128 KB | Send buffer size                                                                                                  | Sliding-window send buffer; large request bodies stream through without blocking `write()`                                                                                                                                                                                                                                                          |
+| `TCP_USER_TIMEOUT` | 0      | Disabled — no timeout on unacknowledged sent data (Linux-specific)                                                | Dead-connection detection is handled in the pool via `connection_lost`/`eof_received` (kernel keepalive is disabled); setting this to 0 avoids interfering with long-running SSE streams where the server may take seconds between chunks                                                                                                           |
 
 **Cross-platform compatibility:** Applied via `_SocketConfig.apply(sock)` with `hasattr()` checks for Linux-specific options (`TCP_KEEPIDLE`, `TCP_QUICKACK`, `TCP_USER_TIMEOUT`). On non-Linux platforms, these options are silently skipped — the system runs with reduced tuning but remains functional.
 
@@ -861,9 +860,9 @@ The `_SocketConfig` class (`http.py`) defines socket options applied to all TCP 
 | Idle connection strategy | LIFO stack                                                                                                                                                                        | Random from idle list                  | Lower error rate: high load reuses hot connections; low load (long idle) stale ones sink to bottom                                                                                                                                                                                                                                     |
 | Waiter queue             | FIFO via `OrderedDict`                                                                                                                                                            | List, deque                            | Fair scheduling; O(1) insert/remove                                                                                                                                                                                                                                                                                                    |
 | Connection limiting      | `max_connections` cap; tracks `len(all_connections) + _creating`                                                                                                                  | Unlimited                              | Prevents ephemeral port exhaustion — a real production failure mode at high concurrency (see [§8.6](#86-benchmark-results-vs-aiohttp)). Counting in-progress connections (`_creating`) prevents race where concurrent `acquire()` calls overshoot the limit during TCP handshake                                                       |
-| Staleness detection      | `select()` probe on FD with zero timeout                                                                                                                                          | Timeout-based, `poll()`                | Detects server FIN without I/O. `select()` over `poll()` avoids poll object creation overhead                                                                                                                                                                                                                                          |
-| Preclose skip            | `time.monotonic() - last_used < 1.0` → return not-stale immediately                                                                                                               | Always probe                           | Server unlikely to close within 1s of last use; skips `select()` syscall entirely on hot connections under load                                                                                                                                                                                                                        |
-| Socket tuning            | `TCP_NODELAY` + `TCP_QUICKACK` [7], 4MB buffers                                                                                                                                   | Defaults                               | `TCP_NODELAY` disables Nagle batching; `TCP_QUICKACK` disables delayed ACK; together they eliminate both send and receive latency sources. 4MB buffers sized for offline-mode full responses. See [§8.4](#84-socket-config) for full socket option table                                                                               |
+| Staleness detection      | `poll()` on the FD with zero timeout via a persistent per-connection `_stale_poller`                                                                                              | Timeout-based, `select()`              | Detects server FIN without I/O. A persistent `poll` object registered once per connection avoids rebuilding the fd set on every probe                                                                                                                                                                                                  |
+| Preclose skip            | `time.monotonic() - last_used < 1.0` → return not-stale immediately                                                                                                               | Always probe                           | Server unlikely to close within 1s of last use; skips the `poll()` syscall entirely on hot connections under load                                                                                                                                                                                                                      |
+| Socket tuning            | `TCP_NODELAY` + `TCP_QUICKACK` [7], 128KB buffers                                                                                                                                 | Defaults                               | `TCP_NODELAY` disables Nagle batching; `TCP_QUICKACK` disables delayed ACK; together they eliminate both send and receive latency sources. 128KB sliding-window buffers (not full-message buffers — the event loop reads eagerly). See [§8.4](#84-socket-config) for full socket option table                                          |
 | Ephemeral port detection | Read `/proc/sys/net/ipv4/ip_local_port_range`                                                                                                                                     | Manual configuration                   | Auto-sizes `max_connections` to the port budget (range x distinct endpoints); raises `RuntimeError` if explicit value exceeds it. Live socket occupancy is not subtracted (racy, counts unrelated destinations)                                                                                                                        |
 | Connection warmup        | Auto: 50% of an explicit pool, 25% of the port budget for the full-auto config; establishment paced by a per-pool connect limiter (`max_concurrent_warmup_connects`, default 128) | 0% or 100%, unbounded `gather`         | 100% = SYN flood risk to server; 0% = ~100x cold-start penalty per [§8.3](#83-connection-pool). Pacing bounds in-flight `connect()` for warmup AND runtime pool growth, so bursts can't overflow the server accept queue or exhaust ephemeral ports. `return_exceptions=True` ensures individual failures don't abort the warmup batch |
 | Idle connection discard  | `max_idle_time=4.0s` proactive close                                                                                                                                              | Rely on staleness only                 | Proactive discard avoids keepalive race with server timeout; 4s chosen to be shorter than typical server keepalive (5-60s)                                                                                                                                                                                                             |
@@ -1351,7 +1350,7 @@ Per-message round-trip: **4 context switches** (sender↔IO thread↔kernel↔IO
 | Event loop daemon      | 1                        | uvloop in `HTTPEndpointClient` |
 | Transport I/O          | `io_threads` (default 4) | Background threads for IPC     |
 
-Default `loadgen_cores=2` accommodates the 2 Python threads (Session + Event loop).
+Default `loadgen_cores=5` (`DEFAULT_LOADGEN_CORES` in `cpu_affinity.py`) reserves headroom for the loadgen-side threads (Session + event loop) plus the transport I/O threads that share those cores.
 
 **Performance ranking sources (checked in order):**
 
