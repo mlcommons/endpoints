@@ -1,10 +1,11 @@
-# Steady-State Windowing — Findings (Working Draft)
+# Steady-State Windowing — Strategy, Findings & Production Options
 
-**Status:** Living document — updated as analysis proceeds. Not yet team-final.
+**Status:** Living document — team review draft.
 **Date started:** 2026-07-24
 **Scope:** Concurrency-mode LLM inference benchmarks. Offline analysis from `events.jsonl`.
 **Related:** design `docs/design/2026-07-21-steady-state-windowing-design.md`, plan
 `docs/design/2026-07-21-steady-state-windowing-plan.md`.
+**Branch:** `design/steady-state-windowing`.
 
 ## 1. Problem
 
@@ -13,166 +14,268 @@ latency. Two non-steady regions contaminate the measured window:
 
 - **Ramp-up:** the client must issue enough samples to fill the target in-flight
   concurrency `N`. Until the pipe is full, a fill-burst of `N` requests queues
-  against a finite-rate server and their TTFT inflates dramatically; the effect
-  grows with `N`.
+  against a finite-rate server; those requests' TTFT inflates dramatically, and
+  the effect grows with `N`.
 - **Ramp-down (drain):** after issuance stops, in-flight decays below `N` and
   throughput deflates.
 
-## 2. Approach (implemented)
+The goal is **per-run steady-state correctness** — ensure a single run's report
+reflects sustained steady behavior — not cross-run comparison (absolute latencies
+are not comparable across points that use different deployments).
 
-- **Issue-time window, unified sample set.** Measured set = requests _issued_
-  during the steady region. Throughput denominator = issue-time span
-  (`first_issue → last_issue`); latency = full lifetime of that same set. Drain
-  is excluded from the denominator for free (it lives after `last_issue`), yet
-  drain completions still count for latency. No end-crop needed; only the
-  ramp-up start is cropped.
-- **Super-pass unit:** `S = ceil(N / dataset_size)` passes = enough issuance to
-  hold `N` distinct samples in flight. `super_pass_samples = dataset_size * S`.
-  Everything (warmup crop, convergence windows) measures in super-passes.
-- **Warmup crop:** drop the first super-pass (the fill region).
-- **Stopping rules (pure functions over the per-super-pass series):**
-  - A — fixed budget (`k` super-passes).
-  - B — adaptive CoV: stop when the coefficient of variation (`stdev/mean`) of
-    per-super-pass scalar percentiles (p50/p99 of TTFT + latency) across a
-    trailing window falls below a bound. CoV, not KL divergence, because the HDR
-    histogram bucket edges shift per snapshot.
-- **Best-effort branch (`status`):** `windowable` / `insufficient_passes` /
-  `partial_dataset` — never hard-fails; short runs get a flagged best-effort
-  window so a batch sweep stays complete.
+## 2. The strategy, end to end
 
-Tooling (all cold-path, mirror `scripts/early_stopping_estimate_from_events.py`):
+The pipeline is a sequence of pure functions over a run's event log. Each stage
+is independently testable; nothing touches the hot path.
 
-- `src/inference_endpoint/metrics/steady_state/` — `series`, `window`, `stopping`, `harness`.
-- `scripts/steady_state_from_events.py` — total vs steady + A/B table + JSON.
-- `scripts/steady_state_cov_sweep.py` — `cov_window × cov_bound` ablation.
+### 2.1 Ingest → per-super-pass series
 
-## 3. Corpus
+Re-read `events.jsonl` (the durable log; mirrors
+`scripts/early_stopping_estimate_from_events.py`). For each performance-tracked
+sample, record issue / first-token / complete timestamps. Bucket samples by
+**issue order** into **super-passes**.
 
-GB300-NVL72 gpt-oss-120b, TRT-LLM disagg, dataset `perf_eval_ref.parquet`
-(**dataset_size = 6396**), concurrency mode. Runs analyzed:
+- **Super-pass:** `S = ceil(N / dataset_size)` dataset passes = the minimum
+  issuance to hold `N` distinct samples in flight; `super_pass_samples =
+dataset_size * S`. The k-th first-time-issued sample belongs to
+  `super_pass = k // super_pass_samples`. (Duplicate ISSUED = retry; does not
+  advance the counter.) The super-pass is the atomic unit for every downstream
+  decision, so windows always contain a representative full-dataset workload mix
+  even when `dataset_size < N`.
 
-| run    | concurrency | issued | full super-passes | status                                   |
-| ------ | ----------- | ------ | ----------------- | ---------------------------------------- |
-| C8     | 8           | 2226   | 0                 | `partial_dataset` (time-capped < 1 pass) |
-| C140   | 140         | 29915  | 4                 | windowable                               |
-| C1024  | 1024        | 141169 | 22                | windowable                               |
-| C2048  | 2048        | 216535 | 33                | windowable                               |
-| C7168  | 7168        | 445756 | 34                | windowable (but drifting — see §6)       |
-| C22528 | 22528       | 647616 | 25                | windowable                               |
+Each super-pass rollup carries raw TTFT / latency / TPOT values, output-token
+count, and first/last issue timestamps.
 
-DSR1 GB300 (`dataset_size 4388`) available but not yet analyzed here. A tentative
-DSR1 c28080 run (`_numa`, sha `e072ac2`) is being pulled.
+### 2.2 Issue-time window (the core correction)
 
-## 4. Finding — ramp deflation is real and scales with concurrency
+The measured set for any window `[sp_start, sp_end)` is every request **issued**
+in that span. Metrics are computed as:
 
-p99 TTFT, total (warmup-included) vs steady (asymptote):
+- **Throughput denominator = issue-time span** `last_issue − first_issue`. In
+  concurrency mode in-flight is held at `N` by construction until issuance stops,
+  so issue-rate = completion-rate across the span, and the **drain lives after
+  `last_issue` — it never enters the denominator**. No end-crop is needed.
+- **Latency / tokens = full lifetime of that same set**, including the high-OSL
+  requests that complete during drain (those are wanted for the tail).
 
-| C     | total p99 TTFT | steady p99 TTFT | recovery | QPS Δ |
-| ----- | -------------- | --------------- | -------- | ----- |
-| 140   | 0.294 s        | 0.247 s         | −16%     | ~0    |
-| 1024  | 1.29 s         | 1.11 s          | −14%     | ~0    |
-| 2048  | 1.18 s         | 0.96 s          | −19%     | ~0    |
-| 22528 | 15.72 s        | 2.47 s          | **−84%** | −1%   |
+One membership set feeds both metric families, so throughput and latency can
+never disagree on which samples they measured. This is the key insight: define
+the window on **issue time, not completion time**.
 
-**QPS (offered-rate throughput) is barely affected by the ramp (~0–1%).** The
-ramp deflates **tail latency**, not throughput — a request issued during a fill
-burst of `N` waits behind the burst for its first token, but the completion rate
-is unchanged. At the extreme (C=22528, a 22528-deep fill), cropping one warmup
-super-pass recovers **6.4×** on p99 TTFT.
+### 2.3 Coverage status (never hard-fail)
 
-Note: absolute latencies are **not** comparable across concurrency points here —
-each point uses a different disagg deployment (ng/nc/dep counts differ), so this
-is not a controlled sweep. The goal is per-run steady-state correctness, not
-cross-run comparison.
+`n_full_super_passes = n_issued // super_pass_samples`; classify the run:
 
-## 5. Finding — no universal `(cov_window, cov_bound)`
+- `partial_dataset` — issued < 1 full dataset pass (a low-C run time-capped
+  mid-pass): biased ISL/OSL subset, low confidence.
+- `insufficient_passes` — ≥1 pass but `< warmup+1` super-passes.
+- `windowable` — enough for a normal warmup-cropped window.
 
-Best config per run (scored vs the full-series asymptote; target p99-TTFT err ≤ 5%):
+Non-windowable runs get a flagged best-effort window instead of an error, so a
+batch sweep over runs of any length stays complete.
 
-| C     | best (window, bound) | super-passes | p99-TTFT err                |
-| ----- | -------------------- | ------------ | --------------------------- |
-| 140   | (3, 0.05)            | 3            | 0.0%                        |
-| 1024  | (3, 0.03)            | 3            | 1.5%                        |
-| 2048  | (3, 0.08)            | 3            | 0.3%                        |
-| 22528 | (6, 0.15)            | 8            | 1.6%                        |
-| 7168  | (5, 0.05)            | 11           | **35.7% — none met target** |
+### 2.4 Adaptive warmup (drop the settling transient)
 
-- Low/mid concurrency settles fast; `cov_window=3` with almost any bound is fine.
-- High concurrency (C=22528) needs a **longer window + looser bound** (`w=6, b=0.15`):
-  each super-pass's p99 is estimated from ~256 tail samples, so it carries a
-  few-percent sampling jitter — a CoV bound below that floor (≤0.02) never
-  converges, and a short window triggers on spurious early dips.
-- **A fixed config cannot serve all concurrencies.** This motivates an adaptive
-  approach (§7).
+The fill burst drains over **many** super-passes at high concurrency — a fixed
+one-super-pass crop is far too small (c28080 keeps settling for ~7 super-passes /
+20 min). Warmup is chosen by a **band rule**:
 
-## 6. Finding (key) — p99 TTFT has no steady state; it drifts
+1. Estimate the steady level = median of the driver metric (p99 TTFT — the
+   slowest to settle) over the series' back half.
+2. Drop leading super-passes whose driver value exceeds `steady * (1 + band)`.
 
-Per-super-pass p99 TTFT trajectory (after the dropped fill super-pass):
+Band-based (not slope-based) so a single settling outlier can't collapse the
+crop, and only HIGH leading values are dropped — a brief settle followed by an
+upward drift still leaves the drift measurable.
 
-- **C=7168:** sp1 2.9 s → sp7 5.7 → sp15 7.3 → sp21 8.3 → sp33 **10.9 s** — a
-  **3.8× monotonic climb** over ~40 min. Meanwhile **p50 TTFT falls** 1.73 → 0.80 s.
-- **C=22528:** sp3 0.65 s (settles fast) → sp10 1.22 → sp17 1.55 → sp25 **3.21 s**
-  — ~5× climb off a lower floor. p50 flat ~0.37 s.
+### 2.5 Per-metric drift detection (does a steady state even exist?)
 
-**p99 TTFT drifts monotonically upward through the entire run — there is no
-plateau.** The median settles (even improves) while the tail worsens. So
-steady-state is **metric-dependent**:
+For each metric (QPS, p50/p99 TTFT, p50/p99 latency), fit an OLS trend to the
+post-warmup per-super-pass trajectory and classify:
 
-- **Has a steady state:** QPS, p50 TTFT, e2e latency (p50 latency flat).
-- **Does NOT:** p99 TTFT — still climbing at end-of-run.
+- **`steady`** — the run-length change is small relative to both the typical
+  value AND the super-pass-to-super-pass residual scatter.
+- **`drifting_up`** — sustained upward trend: **pathological, no steady state**
+  (e.g. p99 TTFT worsening across the whole run). Do NOT report a single steady
+  value; surface the trend.
+- **`drifting_down`** — sustained downward trend after warmup: **residual
+  settling** (the driver-based warmup under-cropped this slower-settling metric),
+  not pathological.
 
-This is why no CoV config works for C=7168: there is no flat region to detect, so
-the "asymptote" is just a point on a rising ramp, not a steady value.
+This is the crucial addition: **steady state is metric-dependent.** A run can be
+steady in QPS and median but have no steady p99 TTFT.
 
-**Not throttling.** The decode-server logs show zero preempt / evict / OOM, and a
-global slowdown would raise p50 too. Median-down / tail-up over a sustained run
-points to **progressive tail degradation** — a growing scheduling imbalance or KV
-fragmentation starving the worst-case requests while the bulk speeds up. Root
-cause (prefill-queue-depth trend) is not yet pinned; the _measurement_ conclusion
-holds regardless.
+### 2.6 CoV-detector ensemble (corroboration)
 
-## 7. Implication — detect steady-vs-drift, don't assume steady
+Run the adaptive-CoV stopping rule at several `(window, bound)` settings and
+measure **concordance** (do most detectors converge near the same super-pass?).
+A single fixed `(window, bound)` cannot serve all concurrencies, but the ensemble
+is robust: tight concordance corroborates a steady state; **0/N converged
+corroborates "no steady state."** CoV, not KL divergence — the HDR histogram
+bucket edges shift per snapshot, so KL compares mismatched bins.
 
-The real question is not "what is the steady value" but **"does this metric even
-have a steady state, or a persistent trend?"** Reporting a single "steady" p99
-TTFT for a drifting run is a false number.
+### 2.7 Output
 
-Proposed direction (prototype in progress): an **ensemble of CoV detectors** at
-varied `(window, bound)` plus a **plateau-vs-trend comparator**:
+Per run: `status`, adaptive warmup (+ settle passes / samples / wall-clock time),
+ensemble concordance, and a per-metric verdict table. A `steady` metric reports
+its windowed value; a `drifting_up` metric is flagged instead of reporting a
+false steady number.
 
-- Fit a slope of the per-super-pass metric across the post-warmup series; test its
-  significance relative to the per-super-pass noise floor.
-- Metric classification: **steady** (detectors concur on a region AND slope
-  insignificant) vs **drifting** (detectors scatter OR slope significant).
-- Extend the `status` field with `drifting`; for a drifting metric, surface the
-  trend (and a caveated last-window value) instead of a bogus steady point.
+## 3. Production implementation
 
-## 8. Data-validity note — client concurrency cap
+### 3.1 Today: pure post-processing (offline)
+
+Everything above is **cold-path**: it re-ingests the durable `events.jsonl` after
+the run, exactly like `early_stopping_estimate_from_events.py`. No hot-path
+change, no dependency on live snapshots (which can lag under load). The run
+report grows a `steady_state` block alongside `total`; steady-state is the
+official number and the `total`-vs-steady divergence is itself a signal. This is
+the most accurate mode — it has the whole series, so the band warmup and the
+drift trend both see the full run.
+
+### 3.2 Can it work in flight? Partially — with caveats
+
+The per-super-pass series can be built **incrementally** as events stream (the
+metrics aggregator already sees them live; super-pass boundaries are known from
+the issue count). Which stages can run live:
+
+- **Forward CoV ensemble → yes.** `rule_cov_converged` is a forward/streaming
+  detector; it can fire "steady reached" during the run (early-stopping style),
+  enabling an **adaptive run duration** — stop once steady is detected plus a few
+  measurement super-passes have accumulated.
+- **Band adaptive warmup → no (retrospective).** The band needs the steady level
+  = median of the back half, which only exists once the run is mostly done. A
+  live surrogate is **forward settling detection** (declare settling complete
+  when the driver stops decreasing beyond the noise floor), but it is less robust
+  than the retrospective band.
+- **Drift (`drifting_up`) detection → inherently needs duration.** You cannot
+  know a metric will keep drifting up until you have watched it for a while. Live,
+  the best you can do is _not_ declare steady while a trend is still present, and
+  warn "no steady state reached yet."
+
+### 3.3 Recommended: hybrid
+
+- **Live (in aggregator):** forward CoV ensemble + forward settling detector to
+  drive **adaptive stopping** — end the run when steady is detected and enough
+  measurement super-passes exist, or warn/extend when it will not settle. Saves
+  wall-clock on runs that stabilize fast; flags runs that never do.
+- **Offline (in report):** the full pipeline (band warmup + per-metric drift +
+  asymptote) as the **official, audited number**. If a metric is `drifting_up`,
+  the report says so instead of publishing a false steady value.
+
+Integration point: the aggregator already produces per-sample series; add a
+super-pass-boundary snapshot cadence for the live path, and run the pure
+functions in `Report.from_snapshot` for the offline path (design-doc Milestone 2).
+
+## 4. Corpus
+
+GB300-NVL72, TRT-LLM disagg, concurrency mode.
+
+| workload     | dataset_size | runs analyzed                                              |
+| ------------ | ------------ | ---------------------------------------------------------- |
+| gpt-oss-120b | 6396         | c8 (partial), c140, c1024, c2048, c7168, c22528            |
+| DeepSeek-R1  | 4388         | c28080 (`_numa`, sha `e072ac2`, tentative — trust pending) |
+
+Absolute latencies are **not** comparable across concurrency points — each uses a
+different disagg deployment (ng/nc/dep differ). Per-run correctness only.
+
+## 5. Findings
+
+### 5.1 Ramp deflates tail latency, not throughput
+
+p99 TTFT, total (warmup-included) vs steady:
+
+| C     | total p99 TTFT | steady p99 TTFT | recovery        | QPS Δ |
+| ----- | -------------- | --------------- | --------------- | ----- |
+| 140   | 0.294 s        | 0.247 s         | −16%            | ~0    |
+| 1024  | 1.29 s         | 1.11 s          | −14%            | ~0    |
+| 2048  | 1.18 s         | 0.96 s          | −19%            | ~0    |
+| 22528 | 15.72 s        | 2.47 s          | **−84% (6.4×)** | −1%   |
+
+QPS (offered-rate throughput) is barely touched by the ramp; the artifact is
+almost entirely in the **tail latency**.
+
+### 5.2 No universal `(cov_window, cov_bound)`
+
+Low/mid concurrency settles in ~3 super-passes (`cov_window=3`, any bound, ~0–1.5%
+error). c22528 needs `cov_window=6, cov_bound=0.15`. c7168 has no config under
+35% error. Each super-pass's p99 is ~256 tail samples, so a CoV bound below that
+sampling-noise floor (≤0.02) never converges. A fixed config cannot serve all
+concurrencies — hence the ensemble.
+
+### 5.3 p99 TTFT often has no steady state; it drifts up
+
+Per-super-pass p99 TTFT climbs monotonically through the whole run while the
+median settles:
+
+- c7168: post-fill 2.9 s → 10.9 s (3.8×) over ~40 min.
+- c22528: 0.65 s → 3.2 s (~5×). The drift detector (after 2-super-pass band
+  warmup) flags this `drifting_up` (rel_drift +1.64, snr 7.8).
+- c28080 (DSR1): p99 TTFT starts at 80.7 s (the 28080-deep fill), settles to a
+  ~7 s plateau by super-pass 7, then holds — `steady` after warmup. (This
+  reproduces the original ~82 s c28k+16k observation.)
+
+Median-down / tail-up over a sustained run is **not throttling** (decode logs
+show zero preempt/evict/OOM; a global slowdown would raise the median too). It is
+progressive tail degradation — a growing scheduling imbalance or KV fragmentation
+starving the worst-case requests. Root cause not yet pinned; the measurement
+conclusion holds regardless.
+
+### 5.4 Warmup scales with concurrency
+
+The settling region is not one super-pass. c28080 needs **~7 super-passes = 49
+dataset passes = ~215k samples = ~19 min** of warmup before the p99 TTFT plateau.
+The adaptive band warmup computes this automatically and reports the settle cost,
+answering "how long / how many samples to reach steady" directly. The c28080 run
+(22 super-passes, 658k samples, 67 min) had ~2× margin; `n_samples_to_issue`
+could drop to ~400k and still capture a solid steady window.
+
+## 6. Alternatives considered
+
+| approach                                                                    | verdict                                                                                                                                                                                                                                                                                                       |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Fixed-budget stop (rule A)**                                              | Too short at high C — 46% p99 error at c22528 (stops before steady). Kept only as a baseline.                                                                                                                                                                                                                 |
+| **Single-config adaptive CoV (rule B)**                                     | Right idea, but no universal `(window, bound)` (§5.2). Superseded by the ensemble.                                                                                                                                                                                                                            |
+| **KL divergence for convergence**                                           | Rejected: HDR bucket edges shift per snapshot, so KL compares mismatched bins. CoV of scalar percentiles is bucket-independent.                                                                                                                                                                               |
+| **Feathered / staggered start** (issuance ramp-in so the fill never bursts) | Orthogonal — attacks the ramp at _issuance_ time, not measurement. Non-reproducible for MLPerf and impossible to time perfectly with high-variance OSL (can't predict when a request ends). Complementary to, not a replacement for, post-hoc windowing; a gentle ramp-in could shrink the region we discard. |
+| **Measure [fill-complete → first-drain]** (occupancy framing)               | Equivalent to our issue-time window in concurrency mode: in-flight never drops below `N` until issuance stops, so "first drain" = `last_issue`. Convergent design.                                                                                                                                            |
+| **Ensemble of CoV checkers + significance** (adopted)                       | Evolved into per-metric plateau-vs-trend detection + ensemble concordance — the current strategy.                                                                                                                                                                                                             |
+| **OLS trend + band adaptive warmup + directional verdict** (current)        | Catches upward drift, distinguishes it from settling, computes settle cost. Open gap: single-driver warmup under-crops slower-settling metrics (labeled `drifting_down`, not wrong). Per-metric warmup is the follow-up.                                                                                      |
+
+## 7. Data-validity note — client concurrency cap
 
 The single-process endpoints-client hits the Linux ephemeral-port limit, so
 **effective concurrency caps at ~28k** (verified via `ss`). Configured c32768 /
 c65536 runs could not reach their targets — their behavior clustered just above
 c16k. Those logs are debugging artifacts and **must not be used**; the max
-concurrency config was capped to **28080** (the achieved ceiling). For the c32768
+concurrency config was capped to **28080** (the achieved ceiling). For c32768
 events, super-pass math must use the achieved concurrency (28080), not 32768.
 
-## 9. Open questions
+## 8. Open questions
 
-- Does the p99 TTFT drift reproduce on DSR1 (different workload) and on a clean
-  capped-28080 re-run? (C=7168 excluded from the prototype for now.)
-- Root cause of progressive tail degradation (prefill queue vs KV fragmentation).
-- Ensemble parameters: detector grid, slope-significance threshold, how to report
-  a drifting metric in the run report.
-- MLPerf policy: how to define/attest a steady window when the tail drifts.
+- Does `drifting_up` reproduce on DSR1 (different workload) and on a clean
+  capped-28080 re-run? (The tentative c28080 `_numa` is not yet trusted.)
+- Root cause of the progressive tail degradation (prefill queue vs KV
+  fragmentation).
+- Per-metric adaptive warmup (metrics settle at different rates).
+- Live/in-flight forward detectors: how aggressively to adaptively stop vs. the
+  reproducibility a fixed duration gives.
+- MLPerf policy: how to define/attest a steady window, and how to report a
+  metric that has no steady state (drift).
 
-## Appendix — reproduction
+## Appendix — code & reproduction
 
-Tests + tooling run in the Linux dev container (`inference-endpoint-dev`,
-`--shm-size=8G`); pre-commit on host. Example:
+- Library: `src/inference_endpoint/metrics/steady_state/`
+  (`series`, `window`, `stopping`, `harness`, `drift`).
+- Scripts: `steady_state_from_events.py` (total vs steady + A/B),
+  `steady_state_cov_sweep.py` (`cov_window × cov_bound` ablation),
+  `steady_state_drift.py` (adaptive warmup + per-metric drift + ensemble).
+- Tests + tooling run in the Linux dev container (`inference-endpoint-dev`,
+  `--shm-size=8G`); pre-commit on host. Example:
 
 ```
 docker run --rm --shm-size=8G -v "$PWD":/mnt/inference-endpoint -w /mnt/inference-endpoint \
   -v <artifacts>:/data inference-endpoint-dev bash -lc \
-  "uv run python scripts/steady_state_cov_sweep.py /data/C22528/events.jsonl \
-     --dataset-size 6396 --concurrency 22528 --windows 3,4,5,6"
+  "uv run python scripts/steady_state_drift.py /data/C22528/events.jsonl \
+     --dataset-size 6396 --concurrency 22528"
 ```
