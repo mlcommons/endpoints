@@ -76,8 +76,16 @@ def test_run_subprocess_reports_bounded_failure_tail(tmp_path):
     assert "early-marker" not in failure_tail
 
 
-def test_run_subprocess_timeout_preserves_partial_log(tmp_path):
+def test_run_subprocess_timeout_preserves_partial_log(monkeypatch, tmp_path):
     log_path = tmp_path / "subprocess.log"
+    communicate_timeouts: list[float | None] = []
+    original_communicate = subprocess.Popen.communicate
+
+    def communicate_with_spy(process, *args, **kwargs):
+        communicate_timeouts.append(kwargs.get("timeout"))
+        return original_communicate(process, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", communicate_with_spy)
 
     with pytest.raises(RunnerError, match="timed out after 1s"):
         runner_mod._run_subprocess(
@@ -92,6 +100,8 @@ def test_run_subprocess_timeout_preserves_partial_log(tmp_path):
         )
 
     assert log_path.read_text() == "started\n"
+    assert communicate_timeouts
+    assert all(timeout is not None for timeout in communicate_timeouts)
 
 
 def test_run_subprocess_cancellation_preserves_partial_log(tmp_path):

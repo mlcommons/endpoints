@@ -166,12 +166,10 @@ def _run_subprocess(
             while True:
                 if cancel_token is not None and cancel_token.is_cancelled():
                     _terminate_process(process)
-                    process.communicate()
                     raise RunCancelled(f"subprocess cancelled: {cmd}")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     _terminate_process(process)
-                    process.communicate()
                     raise RunnerError(f"subprocess timed out after {timeout_s}s: {cmd}")
                 try:
                     process.communicate(timeout=min(0.5, remaining))
