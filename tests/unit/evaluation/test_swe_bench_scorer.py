@@ -5,6 +5,7 @@
 
 import io
 import json
+from email.message import Message
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -19,6 +20,9 @@ from inference_endpoint.evaluation import swe_bench_scorer as swe_bench_mod
 from inference_endpoint.evaluation.scoring import Scorer, SWEBenchScorer
 from inference_endpoint.evaluation.swe_bench_scorer import (
     SWEBenchScorer as ExtractedSWEBenchScorer,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service.artifacts import (
+    SAFE_ARTIFACT_NAMES,
 )
 from inference_endpoint.exceptions import SetupError
 
@@ -117,6 +121,9 @@ class TestSWEBenchScorerRegistration:
     def test_skip_endpoint_phase(self):
         assert SWEBenchScorer.SKIP_ENDPOINT_PHASE is True
 
+    def test_artifact_allowlist_matches_service(self):
+        assert SWEBenchScorer.SAFE_ARTIFACT_NAMES == SAFE_ARTIFACT_NAMES
+
     def test_external_sample_count(self):
         assert SWEBenchScorer.external_sample_count({"num_instances": 50}) == 50
         assert (
@@ -187,54 +194,50 @@ class TestSWEBenchScorerPreflight:
         with pytest.raises(SetupError, match="swebench_service_url is required"):
             SWEBenchScorer.preflight({})
 
-    def test_non_root_service_url_raises(self):
-        with pytest.raises(SetupError, match="service root URL"):
-            SWEBenchScorer._normalize_service_url("http://service-host:18080/v1")
-
     @pytest.mark.parametrize(
         "service_url",
         [
+            "http://service-host:18080/v1",
             "http://user@service-host:18080",
             "http://user:password@service-host:18080",
         ],
     )
-    def test_service_url_userinfo_raises_before_network(self, service_url, monkeypatch):
-        urlopen = MagicMock()
-        monkeypatch.setattr(swe_bench_mod.urllib_request, "urlopen", urlopen)
+    def test_invalid_service_url_raises_before_network(self, service_url, monkeypatch):
+        http_json = MagicMock()
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", http_json)
 
         with pytest.raises(SetupError, match="service root URL"):
             SWEBenchScorer.preflight({"swebench_service_url": service_url})
 
-        urlopen.assert_not_called()
+        http_json.assert_not_called()
 
-    def test_http_json_translates_http_error(self, monkeypatch):
-        url = "http://service-host:18080/health"
-        error = swe_bench_mod.urllib_error.HTTPError(
-            url,
-            503,
-            "unavailable",
-            {},
-            io.BytesIO(b"service down"),
-        )
+    @pytest.mark.parametrize(
+        ("error", "match"),
+        [
+            (
+                swe_bench_mod.urllib_error.HTTPError(
+                    "http://service-host:18080/health",
+                    503,
+                    "unavailable",
+                    Message(),
+                    io.BytesIO(b"service down"),
+                ),
+                "HTTP 503: service down",
+            ),
+            (
+                swe_bench_mod.urllib_error.URLError("connection refused"),
+                "unreachable.*connection refused",
+            ),
+        ],
+    )
+    def test_http_json_translates_transport_error(self, error, match, monkeypatch):
         monkeypatch.setattr(
             swe_bench_mod.urllib_request,
             "urlopen",
             MagicMock(side_effect=error),
         )
 
-        with pytest.raises(SetupError, match="HTTP 503: service down"):
-            SWEBenchScorer._http_json(url)
-
-    def test_http_json_translates_connection_error(self, monkeypatch):
-        monkeypatch.setattr(
-            swe_bench_mod.urllib_request,
-            "urlopen",
-            MagicMock(
-                side_effect=swe_bench_mod.urllib_error.URLError("connection refused")
-            ),
-        )
-
-        with pytest.raises(SetupError, match="unreachable.*connection refused"):
+        with pytest.raises(SetupError, match=match):
             SWEBenchScorer._http_json("http://service-host:18080/health")
 
     def test_http_json_translates_invalid_json(self, monkeypatch):
@@ -513,27 +516,23 @@ class TestSWEBenchScorerScore:
         assert ("http://service-host:18080/v1/runs/run-1/cancel", "POST") in calls
 
     def test_service_timeout_cancels_service_run(self, report_dir, monkeypatch):
-        calls: list[tuple[str, str]] = []
-
         def fake_http_json(url, *, method="GET", payload=None, **kwargs):
-            calls.append((url, method))
             if url == "http://service-host:18080/v1/runs":
                 return {"run_id": "run-1", "status": "running"}
-            if url.endswith("/cancel"):
-                return {"run_id": "run-1", "status": "cancelled"}
             raise AssertionError(f"unexpected polling request: {url}")
 
+        cancel_service_run = MagicMock()
         monotonic = iter([0.0, 1.0])
         monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+        monkeypatch.setattr(SWEBenchScorer, "_cancel_service_run", cancel_service_run)
         monkeypatch.setattr(swe_bench_mod.time, "monotonic", lambda: next(monotonic))
         scorer = _make_scorer(report_dir, service_timeout_s=1)
 
         assert scorer.score() == (None, 1)
         assert scorer.complete is False
-        assert (
-            "http://service-host:18080/v1/runs/run-1/cancel",
-            "POST",
-        ) in calls
+        cancel_service_run.assert_called_once_with(
+            "http://service-host:18080/", "run-1", None
+        )
 
     def test_service_failure_marks_incomplete(self, report_dir, monkeypatch):
         monkeypatch.setattr(

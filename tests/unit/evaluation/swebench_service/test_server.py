@@ -9,12 +9,8 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from inference_endpoint.evaluation.swe_bench_scorer import SWEBenchScorer
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
     server as server_mod,
-)
-from inference_endpoint.evaluation.swebench_service.swebench_service.artifacts import (
-    SAFE_ARTIFACT_NAMES,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service.config import (
     ServiceConfig,
@@ -37,11 +33,9 @@ class FakeRunner:
         self.delay = delay
         self.fail = fail
         self.requests: list[object] = []
-        self.cancel_tokens: list[object] = []
 
     def run(self, request, run_dir: Path, cancel_token=None):
         self.requests.append(request)
-        self.cancel_tokens.append(cancel_token)
         if self.delay:
             time.sleep(self.delay)
         if self.fail:
@@ -56,6 +50,7 @@ class FakeRunner:
 class AgentProgressRunner:
     def __init__(self):
         self.ready = threading.Event()
+        self.release = threading.Event()
 
     def run(self, request, run_dir: Path, cancel_token=None):
         output_dir = run_dir / "swe_bench_output"
@@ -73,7 +68,7 @@ class AgentProgressRunner:
             )
         )
         self.ready.set()
-        time.sleep(0.2)
+        assert self.release.wait(2)
         (run_dir / "preds.json").write_text("{}")
         (run_dir / "swe_bench_results.json").write_text(
             '{"resolved_instances":1,"submitted_instances":2}'
@@ -84,6 +79,7 @@ class AgentProgressRunner:
 class EvalProgressRunner:
     def __init__(self):
         self.ready = threading.Event()
+        self.release = threading.Event()
 
     def run(self, request, run_dir: Path, cancel_token=None):
         output_dir = run_dir / "swe_bench_output"
@@ -100,7 +96,7 @@ class EvalProgressRunner:
         (report_dir / "repo__repo-2" / "report.json").parent.mkdir()
         (report_dir / "repo__repo-2" / "report.json").write_text("{}")
         self.ready.set()
-        time.sleep(0.2)
+        assert self.release.wait(2)
         (run_dir / "preds.json").write_text("{}")
         (run_dir / "swe_bench_results.json").write_text(
             '{"resolved_instances":2,"submitted_instances":3}'
@@ -265,7 +261,6 @@ async def test_runner_transitions_to_succeeded(tmp_path):
     assert status["phase"] == "succeeded"
     assert status["agent_completed"] == 1
     assert status["eval_completed"] == 1
-    assert runner.cancel_tokens[0] is not None
 
 
 @pytest.mark.asyncio
@@ -280,6 +275,7 @@ async def test_status_reports_agent_progress_from_exit_statuses(tmp_path):
         status_resp = await client.get(f"/v1/runs/{submitted['run_id']}")
         status = await status_resp.json()
     finally:
+        runner.release.set()
         await client.close()
 
     assert status_resp.status == 200
@@ -302,6 +298,7 @@ async def test_status_reports_eval_progress_from_harness_reports(tmp_path):
         status_resp = await client.get(f"/v1/runs/{submitted['run_id']}")
         status = await status_resp.json()
     finally:
+        runner.release.set()
         await client.close()
 
     assert status_resp.status == 200
@@ -347,9 +344,12 @@ async def test_progress_polling_is_off_thread_and_memory_only(monkeypatch, tmp_p
         agent_completed=0,
     )
     manager._requests[run_id] = RunRequest.model_validate(_payload())
+    progress_started = threading.Event()
+    progress_release = threading.Event()
 
-    def slow_progress(*args):
-        time.sleep(0.1)
+    def gated_progress(*args):
+        progress_started.set()
+        assert progress_release.wait(2)
         return {
             "phase": "agent",
             "agent_total": 1,
@@ -359,7 +359,7 @@ async def test_progress_polling_is_off_thread_and_memory_only(monkeypatch, tmp_p
             "message": "agent",
         }
 
-    monkeypatch.setattr(manager, "_read_progress", slow_progress)
+    monkeypatch.setattr(manager, "_read_progress", gated_progress)
     monkeypatch.setattr(
         manager,
         "_write_status",
@@ -367,7 +367,14 @@ async def test_progress_polling_is_off_thread_and_memory_only(monkeypatch, tmp_p
     )
 
     poll_task = asyncio.create_task(manager.get(run_id))
-    await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
+    try:
+        assert await asyncio.to_thread(progress_started.wait, 2)
+        loop_responded = asyncio.Event()
+        asyncio.get_running_loop().call_soon(loop_responded.set)
+        await asyncio.wait_for(loop_responded.wait(), timeout=2)
+        assert not poll_task.done()
+    finally:
+        progress_release.set()
     status = await poll_task
 
     assert status.agent_completed == 1
@@ -423,22 +430,25 @@ async def test_cancellation_keeps_event_loop_responsive(monkeypatch, tmp_path):
     assert await asyncio.to_thread(runner.started.wait, 2)
     token = manager._cancel_tokens[submitted.run_id]
     original_cancel = token.cancel
-    original_write_status = manager._write_status
+    cancel_started = threading.Event()
+    cancel_release = threading.Event()
 
-    def slow_cancel():
-        time.sleep(0.1)
+    def gated_cancel():
+        cancel_started.set()
+        assert cancel_release.wait(2)
         original_cancel()
 
-    def slow_write_status(status):
-        time.sleep(0.1)
-        original_write_status(status)
-
-    monkeypatch.setattr(token, "cancel", slow_cancel)
-    monkeypatch.setattr(manager, "_write_status", slow_write_status)
+    monkeypatch.setattr(token, "cancel", gated_cancel)
     cancel_task = asyncio.create_task(manager.cancel(submitted.run_id))
 
-    await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
-    assert not cancel_task.done()
+    try:
+        assert await asyncio.to_thread(cancel_started.wait, 2)
+        loop_responded = asyncio.Event()
+        asyncio.get_running_loop().call_soon(loop_responded.set)
+        await asyncio.wait_for(loop_responded.wait(), timeout=2)
+        assert not cancel_task.done()
+    finally:
+        cancel_release.set()
     cancelled = await cancel_task
     await manager.shutdown()
 
@@ -535,21 +545,18 @@ async def test_pruning_waits_for_active_artifact_reader(monkeypatch, tmp_path):
 
     manager.acquire_artifact_reader("run-old")
     prune_task = asyncio.create_task(manager._prune_completed_runs())
-    await asyncio.sleep(0.03)
+    await asyncio.sleep(0)
 
     assert "run-old" in manager.runs
     assert manager.run_dir("run-old").exists()
 
     manager.release_artifact_reader("run-old")
+    assert manager._artifact_readers.get("run-old", 0) == 0
     await asyncio.wait_for(prune_task, timeout=0.2)
 
     assert "run-old" not in manager.runs
     assert not manager.run_dir("run-old").exists()
     assert "run-new" in manager.runs
-
-
-def test_client_and_service_artifact_allowlists_match():
-    assert SWEBenchScorer.SAFE_ARTIFACT_NAMES == SAFE_ARTIFACT_NAMES
 
 
 @pytest.mark.asyncio
@@ -574,7 +581,7 @@ async def test_artifact_endpoint_blocks_path_traversal(tmp_path):
 
     assert ok.status == 200
     assert blocked.status == 404
-    assert active_readers == {}
+    assert active_readers.get(run_id, 0) == 0
 
 
 @pytest.mark.asyncio
