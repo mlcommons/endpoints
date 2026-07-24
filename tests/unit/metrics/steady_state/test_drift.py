@@ -3,6 +3,7 @@
 
 import pytest
 from inference_endpoint.metrics.steady_state.drift import (
+    adaptive_warmup,
     analyze_trend,
     classify_run,
     ensemble_vote,
@@ -16,7 +17,7 @@ def test_analyze_trend_monotonic_rise_is_drifting():
     # 2.9 -> 10.9 over 10 points, near-linear: large rel_drift, high snr.
     vals = [2.9, 3.8, 4.7, 5.6, 6.5, 7.4, 8.3, 9.2, 10.1, 10.9]
     t = analyze_trend(vals)
-    assert t.verdict == "drifting"
+    assert t.verdict == "drifting_up"
     assert t.rel_drift > 0.5 and t.snr > 2.0
 
 
@@ -63,7 +64,7 @@ def test_classify_run_flags_only_the_drifting_metric():
         ttft = [1_000_000_000 + i * 1_000_000_000] * 10  # 1s -> 8s
         series.append(_sp(i, ttft, [5.0e9] * 10))
     verdicts = classify_run(series, warmup=0)
-    assert verdicts["ttft_p99"].verdict == "drifting"
+    assert verdicts["ttft_p99"].verdict == "drifting_up"
     assert verdicts["qps"].verdict == "steady"
     assert verdicts["lat_p50"].verdict == "steady"
 
@@ -77,3 +78,24 @@ def test_ensemble_vote_counts_converged():
     v = ensemble_vote(series, warmup=1)
     assert v.n_detectors == 6
     assert 0.0 <= v.concordance <= 1.0
+
+
+def _sp_level(index, ttft_level_ns, lat_ns=5.0e9, k=20):
+    return _sp(index, [ttft_level_ns] * k, [lat_ns] * k)
+
+
+@pytest.mark.unit
+def test_adaptive_warmup_advances_past_settling():
+    # p99 TTFT settles over sp0..4 (30->4s) then plateaus flat at 4s.
+    levels = [30e9, 20e9, 12e9, 7e9, 4e9] + [4e9] * 10
+    series = [_sp_level(i, lv) for i, lv in enumerate(levels)]
+    w = adaptive_warmup(series, driver_kind="ttft_p99")
+    assert w > 1  # advanced past the fixed one-super-pass crop
+    assert w <= 6  # and did not consume the whole series
+
+
+@pytest.mark.unit
+def test_adaptive_warmup_flat_series_returns_min():
+    # no settling transient -> minimal warmup
+    series = [_sp_level(i, 4e9) for i in range(12)]
+    assert adaptive_warmup(series, driver_kind="ttft_p99") == 1

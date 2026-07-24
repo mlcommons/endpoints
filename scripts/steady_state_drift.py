@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 
 from inference_endpoint.metrics.steady_state.drift import (
+    adaptive_warmup,
     classify_run,
     ensemble_vote,
     super_pass_metric,
@@ -42,21 +43,37 @@ def main(argv=None):
     ap.add_argument("events")
     ap.add_argument("--dataset-size", type=int, required=True)
     ap.add_argument("--concurrency", type=int, required=True)
-    ap.add_argument("--warmup", type=int, default=1)
+    ap.add_argument(
+        "--warmup", type=int, default=None, help="fixed warmup; default = adaptive"
+    )
     args = ap.parse_args(argv)
 
     series = build_super_pass_series(args.events, args.dataset_size, args.concurrency)
     if not series:
         raise SystemExit("FATAL: no performance-tracked samples in the events log")
     n_issued = sum(sp.n_issued for sp in series)
-    status = coverage_status(n_issued, args.dataset_size, args.concurrency, args.warmup)
-    n_full = n_issued // super_pass_size(args.dataset_size, args.concurrency)
+    status = coverage_status(n_issued, args.dataset_size, args.concurrency, 1)
+    sp_samples = super_pass_size(args.dataset_size, args.concurrency)
+    n_full = n_issued // sp_samples
     measured = series[:n_full] if status == "windowable" else series
-    warmup = args.warmup if status == "windowable" else 0
 
+    if args.warmup is not None:
+        warmup = args.warmup
+    else:
+        warmup = adaptive_warmup(measured) if status == "windowable" else 0
+
+    passes_per_sp = sp_samples // args.dataset_size
+    settle_ns = (
+        measured[warmup - 1].last_issue_ns - measured[0].first_issue_ns
+        if warmup >= 1
+        else 0
+    )
     vote = ensemble_vote(measured, warmup=warmup)
+    print(f"status={status}  full_super_passes={n_full}  measured={len(measured)}")
     print(
-        f"status={status}  full_super_passes={n_full}  measured={len(measured)}  warmup={warmup}"
+        f"adaptive warmup = {warmup} super-passes  "
+        f"(= {warmup * passes_per_sp} passes, {warmup * sp_samples} samples, "
+        f"{settle_ns / 1e9 / 60:.1f} min to reach steady)"
     )
     print(
         f"CoV ensemble: {vote.n_converged}/{vote.n_detectors} converged  "
@@ -72,8 +89,12 @@ def main(argv=None):
             f"| {kind} | {_fmt(kind, t.first)} | {_fmt(kind, t.last)} | "
             f"{t.rel_drift:+.2f} | {t.snr:.1f} | **{t.verdict}** |"
         )
-    drifting = [k for k, t in trends.items() if t.verdict == "drifting"]
-    print(f"\nDRIFTING metrics: {drifting or 'none'}")
+    up = [k for k, t in trends.items() if t.verdict == "drifting_up"]
+    down = [k for k, t in trends.items() if t.verdict == "drifting_down"]
+    print(f"\nDRIFTING UP (pathological, no steady state): {up or 'none'}")
+    print(
+        f"DRIFTING DOWN (residual settling — warmup short for this metric): {down or 'none'}"
+    )
     return trends
 
 

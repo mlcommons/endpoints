@@ -85,6 +85,12 @@ def analyze_trend(
     rel_drift = total_change / med
     snr = abs(total_change) / (resid_std + 1e-12)
     drifting = abs(rel_drift) >= rel_threshold and snr >= snr_threshold
+    if not drifting:
+        verdict = "steady"
+    elif rel_drift > 0:
+        verdict = "drifting_up"  # pathological: tail worsening across the run
+    else:
+        verdict = "drifting_down"  # residual settling (warmup slightly short)
     return MetricTrend(
         n=n,
         first=values[0],
@@ -94,7 +100,7 @@ def analyze_trend(
         rel_drift=rel_drift,
         resid_std=resid_std,
         snr=snr,
-        verdict="drifting" if drifting else "steady",
+        verdict=verdict,
     )
 
 
@@ -147,6 +153,37 @@ def ensemble_vote(
         spread = (max(ends) - min(ends)) / max(1, len(series) - warmup)
         concordance = max(0.0, 1.0 - spread)
     return EnsembleVote(len(configs), n_conv, tuple(ends), concordance)
+
+
+def adaptive_warmup(
+    series: list[SuperPassRollup],
+    driver_kind: str = "ttft_p99",
+    band: float = 0.5,
+    min_warmup: int = 1,
+    max_frac: float = 0.5,
+) -> int:
+    """Smallest warmup that removes the initial settling transient.
+
+    The fill burst drains over many super-passes at high concurrency, so a fixed
+    one-super-pass crop leaves a downward-settling tail that masks (or fakes) a
+    drift verdict. Estimate the steady level from the median of the series' back
+    half, then drop leading super-passes whose driver value sits above
+    ``steady * (1 + band)``. Band-based (not slope-based) so a single settling
+    outlier can't collapse the crop, and only HIGH leading values are dropped —
+    a brief settle followed by an upward drift still leaves the drift measurable.
+    Capped at ``max_frac`` of the series.
+    """
+    vals = super_pass_metric(series, driver_kind, warmup=0)
+    n = len(vals)
+    if n < 4:
+        return min_warmup
+    steady = median(vals[n // 2 :]) or 1e-9
+    thresh = steady * (1.0 + band)
+    cap = max(min_warmup, int(n * max_frac))
+    w = 0
+    while w < cap and vals[w] > thresh:
+        w += 1
+    return max(min_warmup, w)
 
 
 def classify_run(
