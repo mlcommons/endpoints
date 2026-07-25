@@ -15,6 +15,8 @@
 
 """Custom exceptions for CLI error handling."""
 
+from enum import Enum
+
 
 class CLIError(Exception):
     """Base exception for CLI errors.
@@ -37,9 +39,32 @@ class InputValidationError(CLIError):
 
 
 class DatasetValidationError(InputValidationError):
-    """Invalid --dataset string or dataset configuration."""
+    """Invalid --dataset string or dataset configuration.
 
-    pass
+    The failure category is a ``Reason``; ``detail`` carries the specifics
+    (offending sample index, remediation hint, parser error text).
+    """
+
+    class Reason(Enum):
+        """Why a dataset failed validation."""
+
+        TYPE_MISMATCH = "sample is not a dict"
+        INPUT_TOKENS_SHADOWING = (
+            "sample has 'input_tokens'; salt cannot bust a pre-tokenized cache"
+        )
+        PROMPT_MISSING = "sample has no 'prompt' field"
+        PROMPT_TYPE_MISMATCH = "sample 'prompt' is not a str"
+        UNSPECIFIED = "dataset validation failed"
+
+    def __init__(
+        self,
+        reason: "DatasetValidationError.Reason",
+        detail: str | None = None,
+    ) -> None:
+        self.reason = reason
+        self.detail = detail
+        message = reason.value if detail is None else f"{reason.value}: {detail}"
+        super().__init__(message)
 
 
 class SetupError(CLIError):

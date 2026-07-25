@@ -186,6 +186,16 @@ class TestSaltValidation:
         with pytest.raises(DatasetValidationError, match="input_tokens"):
             inner.with_salt(random.Random())
 
+    def test_agentic_messages_sample_raises_prompt_missing(self):
+        # Agentic datasets store dict samples keyed by 'messages', not 'prompt' —
+        # salt has no text field to prepend, so it's a clear PROMPT_MISSING error.
+        inner = _make_loaded_dataset(
+            [{"messages": [{"role": "user", "content": "hi"}]}]
+        )
+        with pytest.raises(DatasetValidationError) as exc_info:
+            inner.with_salt(random.Random())
+        assert exc_info.value.reason is DatasetValidationError.Reason.PROMPT_MISSING
+
     def test_input_tokens_and_prompt_raises(self):
         inner = _make_loaded_dataset([{"input_tokens": [1, 2, 3], "prompt": "hello"}])
         with pytest.raises(DatasetValidationError, match="input_tokens"):
@@ -193,7 +203,7 @@ class TestSaltValidation:
 
     def test_error_names_offending_sample_index(self):
         inner = _make_loaded_dataset([{"prompt": "ok"}, {"prompt": 42}])
-        with pytest.raises(DatasetValidationError, match=r"\b1\b"):
+        with pytest.raises(DatasetValidationError, match=r"sample 1\b"):
             inner.with_salt(random.Random())
 
     def test_valid_str_prompt_dataset_does_not_raise(self):
@@ -201,11 +211,13 @@ class TestSaltValidation:
         sd = inner.with_salt(random.Random())
         assert sd.load_sample(0)["prompt"].startswith("[")
 
-    def test_data_none_does_not_raise(self):
+    def test_data_none_raises_not_loaded(self):
         inner = _make_loaded_dataset([{"prompt": "x"}])
         inner.data = None
-        # No samples to salt (e.g. EmptyDataset) — nothing to validate.
-        assert inner.with_salt(random.Random())._salt_rng is not None
+        # None means "not loaded" — load() always sets a list. Validating an
+        # unloaded dataset is a programming error, not a silent no-op.
+        with pytest.raises(AssertionError, match="not loaded"):
+            inner.with_salt(random.Random())
 
     def test_data_empty_list_does_not_raise(self):
         inner = _make_loaded_dataset([])
@@ -220,6 +232,26 @@ class TestSaltValidation:
         inner = _make_loaded_dataset([{"prompt": "ok"}, {"input_tokens": [1, 2]}])
         with pytest.raises(DatasetValidationError, match="input_tokens"):
             inner.validate_saltable()
+
+    @pytest.mark.parametrize(
+        "sample, expected_reason",
+        [
+            ("raw string", DatasetValidationError.Reason.TYPE_MISMATCH),
+            (
+                {"input_tokens": [1, 2]},
+                DatasetValidationError.Reason.INPUT_TOKENS_SHADOWING,
+            ),
+            ({"question": "?"}, DatasetValidationError.Reason.PROMPT_MISSING),
+            ({"prompt": 42}, DatasetValidationError.Reason.PROMPT_TYPE_MISMATCH),
+        ],
+    )
+    def test_error_exposes_typed_reason(self, sample, expected_reason):
+        inner = _make_loaded_dataset([{"prompt": "ok"}])
+        inner.data = [sample]
+        with pytest.raises(DatasetValidationError) as exc_info:
+            inner.validate_saltable()
+        assert exc_info.value.reason is expected_reason
+        assert exc_info.value.detail is not None
 
 
 @pytest.mark.unit

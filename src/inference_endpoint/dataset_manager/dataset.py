@@ -258,20 +258,21 @@ def load_from_huggingface(
     return ds[split].to_pandas()
 
 
-def _salt_violation(sample: Any) -> str | None:
-    """Return a human-readable reason a sample cannot be salted, or None if it can.
+def _can_salt(sample: Any) -> DatasetValidationError.Reason | None:
+    """Return the Reason a sample cannot be salted, or None if it can.
 
     Salt requires a dict sample with a str 'prompt' and no 'input_tokens' (which
     adapters send verbatim, so a salted 'prompt' would not reach the server).
     """
+    Reason = DatasetValidationError.Reason
     if not isinstance(sample, dict):
-        return f"is a {type(sample).__name__}, not a dict"
+        return Reason.TYPE_MISMATCH
     if "input_tokens" in sample:
-        return "has 'input_tokens' (salt cannot bust a pre-tokenized cache)"
+        return Reason.INPUT_TOKENS_SHADOWING
     if "prompt" not in sample:
-        return "has no 'prompt' field"
+        return Reason.PROMPT_MISSING
     if not isinstance(sample["prompt"], str):
-        return f"has a 'prompt' of type {type(sample['prompt']).__name__}, not str"
+        return Reason.PROMPT_TYPE_MISMATCH
     return None
 
 
@@ -463,23 +464,28 @@ class Dataset:
 
         salt requires a dict sample with a text ('str') 'prompt' and no
         'input_tokens' (adapters send those verbatim, so a salted 'prompt' would
-        never reach the server). A sample salt cannot bust would silently defeat
-        cache-busting, so it is rejected rather than skipped. Called before any
-        load is issued — at benchmark setup and again from with_salt().
+        never reach the server). A non-saltable sample is an error, not a silent
+        skip: skipping would leave the KV cache un-busted. Every sample is
+        checked — a single invalid item fails the run, because the seeded warmup
+        subset can draw any index and salt correctness is all-or-nothing. Called
+        before any load is issued — at benchmark setup and again from with_salt().
 
         Raises:
-            DatasetValidationError: naming the first offending sample.
+            DatasetValidationError: naming the first offending sample. The index
+                is into the loaded, post-transform sample order, not the source
+                file line.
         """
-        if self.data is None:
-            return
+        assert self.data is not None, "Dataset not loaded. Call load() first."
         for i, sample in enumerate(self.data):
-            reason = _salt_violation(sample)
+            reason = _can_salt(sample)
             if reason is not None:
                 raise DatasetValidationError(
-                    f"salt=True requires every sample to be a dict with a text "
-                    f"'prompt' and no 'input_tokens', but sample {i} {reason}. "
-                    f"Disable salt (--warmup-salt / warmup.salt: false) or use a "
-                    f"text-prompt dataset."
+                    reason,
+                    detail=(
+                        f"sample {i} (index into the loaded, post-transform "
+                        f"order); disable salt (--warmup-salt / warmup.salt: "
+                        f"false) or use a text-prompt dataset"
+                    ),
                 )
 
     def with_salt(self, rng: random.Random) -> "Dataset":
@@ -489,8 +495,8 @@ class Dataset:
         Each load_sample() call on the returned dataset prepends a unique hex salt
         derived from rng to the 'prompt' field, preventing KV-cache reuse.
 
-        Validates every sample first (see validate_saltable), so a dataset salt
-        cannot bust fails here rather than silently issuing unsalted prompts.
+        Validates every sample first (see validate_saltable): a non-saltable
+        dataset raises here, before any load is issued.
 
         Raises:
             DatasetValidationError: if any sample cannot be salted.

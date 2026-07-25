@@ -436,7 +436,9 @@ def _load_datasets(
             raise SetupError(f"Failed to load dataset: {e}") from e
 
         # Fail fast on a warmup dataset that salt cannot bust — at load time,
-        # before any worker/aggregator subprocess is spawned.
+        # before any worker/aggregator subprocess is spawned. with_salt() runs
+        # the same check later; this earlier call is deliberate (not redundant),
+        # so an invalid dataset aborts before the subprocess fan-out.
         warmup = config.settings.warmup
         if warmup.enabled and warmup.salt:
             dataloader.validate_saltable()

@@ -759,10 +759,19 @@ class WarmupConfig(BaseModel):
         bool,
         cyclopts.Parameter(
             alias="--warmup-salt",
-            help="Prepend a unique random hex salt to each warmup prompt",
+            help=(
+                "Prepend a unique random hex salt to each warmup prompt. Requires "
+                "text-'prompt' samples; enabling it on a pre-tokenized "
+                "('input_tokens') dataset is a hard error."
+            ),
         ),
     ] = Field(
-        True, description="Prepend a unique random hex salt to each warmup prompt"
+        False,
+        description=(
+            "Prepend a unique random hex salt to each warmup prompt. Requires "
+            "text-'prompt' samples; enabling it on a pre-tokenized "
+            "('input_tokens') dataset is a hard error."
+        ),
     )
     drain: Annotated[
         bool,
