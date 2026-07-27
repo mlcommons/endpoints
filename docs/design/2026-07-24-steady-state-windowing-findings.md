@@ -2,7 +2,7 @@
 
 **Status:** Living document — team review draft.
 **Date started:** 2026-07-24
-**Scope:** Concurrency-mode LLM inference benchmarks. Offline analysis from `events.jsonl`.
+**Scope:** Concurrency, offline (max-throughput), and poisson LLM inference benchmarks. Post-hoc analysis from `events.jsonl`.
 **Related:** design `docs/design/2026-07-21-steady-state-windowing-design.md`, plan
 `docs/design/2026-07-21-steady-state-windowing-plan.md`.
 **Branch:** `design/steady-state-windowing`.
