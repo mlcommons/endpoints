@@ -251,7 +251,172 @@ c16k. Those logs are debugging artifacts and **must not be used**; the max
 concurrency config was capped to **28080** (the achieved ceiling). For c32768
 events, super-pass math must use the achieved concurrency (28080), not 32768.
 
-## 8. Open questions
+## 8. Cross-mode detection — algorithms, criteria, ablations, failure modes
+
+The load pattern determines both _what deflates_ and _which detector applies_. Three
+modes, three worked examples from real DSR1/gpt-oss GB300 runs.
+
+### 8.1 Mode taxonomy + worked examples
+
+| mode                    | issuance           | deflation source                    | metric that matters     | detector                                                          | worked example                                                                                                |
+| ----------------------- | ------------------ | ----------------------------------- | ----------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| **concurrency**         | hold `N` in flight | fill ramp + **p99 TTFT drifts up**  | tail latency            | issue-time super-pass window + adaptive warmup + per-metric drift | c22528: total p99 TTFT 15.7 s → steady 2.47 s (−84%); p99 TTFT `drifting_up` (rel_drift +1.64)                |
+| **offline** (max-tput)  | burst at `t=0`     | **throughput drain tail** (backlog) | sustained throughput    | completion-rate plateau-edge                                      | 293038: plateau min 11–95, 279 req/s vs 191 full-run (**31% undercount**); 272936: plateau min 7–72 (**12%**) |
+| **poisson** (under-sat) | fixed rate `qps`   | short queue-fill ramp only          | latency (rate is fixed) | _pass-unit = the concurrency tool, `--concurrency 1`_             | 232386 (37 qps): adaptive warmup 2 passes, **all metrics steady**, qps=37, ttft_p99 flat ~330 ms              |
+
+Key cross-mode facts learned from the data:
+
+- **Concurrency is the only mode where a metric has no steady state** (p99 TTFT drifts up).
+- **Offline's tail is a backlog artifact**, not present in the workload's steady behavior;
+  its metric is a _rate over the plateau_, which sidesteps the dataset-boundary/OSL-bias
+  concern entirely (§5, §6).
+- **Under-saturated poisson is genuinely steady** — completion≈offered rate, ~3-min drain;
+  it needs no new machinery. A _near-saturation_ poisson would backlog like offline (untested).
+- Offline is typically **non-streaming** → no `recv_first`/TTFT; throughput-only.
+
+### 8.2 Concurrency algorithm (exact criteria)
+
+1. **Super-pass unit.** `S = ceil(N / dataset_size)`; `super_pass_samples = dataset_size * S`.
+   The k-th first-time-issued sample (retries excluded) → `super_pass = k // super_pass_samples`.
+2. **Coverage status.** `partial_dataset` if `n_issued < dataset_size`; else
+   `insufficient_passes` if `n_full = n_issued // super_pass_samples < warmup + 1`; else
+   `windowable`. Non-windowable → flagged best-effort, never a hard error.
+3. **Issue-time window** `[sp_start, sp_end)`: throughput denominator =
+   `last_issue − first_issue`; latency/token percentiles over the full lifetime of the
+   same issued set (drain completions kept). `percentile_lower` (method="lower",
+   index `int(p·(n−1))`).
+4. **Adaptive warmup (band).** `steady = median(driver p99 TTFT over the back half)`;
+   drop leading super-passes while `value > steady · (1 + band)`, `band = 0.5`, `min_warmup = 1`,
+   cap `0.5·len`. Band-based (not slope) so a single settling outlier can't collapse the crop,
+   and only HIGH leading values are dropped (a brief settle then upward drift stays measurable).
+5. **Per-metric trend.** OLS fit over the post-warmup per-super-pass series;
+   `total_change = slope·(n−1)`; `rel_drift = total_change / median`; `resid_std = pstdev(residuals)`;
+   `snr = |total_change| / resid_std`. **Drift iff `|rel_drift| ≥ 0.15` AND `snr ≥ 2.0`.**
+   Verdict `drifting_up` (rel_drift > 0, pathological) / `drifting_down` (< 0, residual settling) / `steady`.
+   `n < 4` → `insufficient`.
+6. **CoV ensemble (corroboration).** Run `rule_cov_converged` at 6 configs
+   `(window,bound) ∈ {(3,.03),(3,.05),(4,.05),(5,.08),(6,.10),(6,.15)}`;
+   `concordance = max(0, 1 − (max sp_end − min sp_end)/(len − warmup))`.
+   **`0/6` converged ⇒ no steady state.**
+
+### 8.3 Offline algorithm (exact criteria)
+
+1. **Completion-rate series.** Bin `sample.complete` events by completion time into 1-min
+   bins; `rate[b] = completions in bin b`. (Issue-time is degenerate — all at `t=0`.)
+2. **Plateau-edge (band + longest run).** `steady = median(rate)`;
+   `lo = steady·(1−band)`, `hi = steady·(1+band)`, `band = 0.10`. The **plateau is the longest
+   contiguous run of bins with `lo ≤ rate ≤ hi`.** Its start = end of the leading ramp/settle;
+   its end = **drain-onset**.
+3. **Report.** Sustained throughput = `median(rate[plateau])` (× tokens/req for tok/s). No
+   dataset-boundary snap — a rate over the plateau reflects the steady ISL/OSL mix, so there is
+   no sample-set to bias.
+
+Why "longest in-band run" and not "drop until in band then until out of band": the leading
+region can be _below_ the band (partial first bin), _above_ it (ramp overshoot / fast-request
+settle), or both — a single directional scan mis-handles it. The longest-run picks the flat
+plateau regardless of leading shape (verified: 293038 settles _down_ into the band, 272936 ramps
+_up_ into it; both resolve correctly).
+
+### 8.4 Poisson (reuse, unchanged)
+
+Poisson issues over time in dataset passes, so it is the concurrency algorithm with `N`
+undefined ⇒ `S = 1` (one pass per super-pass, run with `--concurrency 1`). The adaptive warmup
+crops the queue-fill ramp; the per-metric drift test runs on per-pass TTFT/latency. Verified on
+232386 with no code changes. Throughput = offered `qps` (not a measured quantity); latency is
+the target.
+
+### 8.5 Hyperparameters & ablations
+
+**Concurrency `(cov_window, cov_bound)` — best per run** (scored vs full-series asymptote, target p99-TTFT err ≤ 5%):
+
+| C     | best `(w, b)` | super-passes | p99-TTFT err                           |
+| ----- | ------------- | ------------ | -------------------------------------- |
+| 140   | (3, 0.05)     | 3            | 0.0%                                   |
+| 1024  | (3, 0.03)     | 3            | 1.5%                                   |
+| 2048  | (3, 0.08)     | 3            | 0.3%                                   |
+| 22528 | (6, 0.15)     | 8            | 1.6%                                   |
+| 7168  | (5, 0.05)     | 11           | 35.7% (none met target — drifting run) |
+
+- **Noise floor:** each super-pass's p99 is estimated from ≈256 tail samples, so it carries
+  a few-percent sampling jitter; `cov_bound ≤ 0.02` is below that floor and **never converges**
+  at high C. This is structural, not a tuning miss — it motivates the _ensemble_ (mix of bounds)
+  over one fixed pair.
+- **Universal-ish default:** `(6, 0.15)` is the only single config under 5% at c22528 while
+  still fine at c1024 (0.9%). Longer window + looser bound wins at high C (smooths the jitter).
+
+**Drift thresholds `(rel_drift ≥ 0.15, snr ≥ 2.0)`:** chosen so a _noisy-but-flat_ series
+(large residual scatter, small net change) is not mistaken for a trend. Lowering `snr` toward 1
+starts flagging noise; raising `rel_drift` past ~0.25 misses the slow c1024-scale drifts.
+`band = 0.5` (warmup): large enough to keep the plateau, small enough to drop the fill spike
+(c28k fill p99 100 s ≫ 7 s plateau → dropped; c22528 sp1 5.3 s vs ~1.6 s steady → dropped).
+
+**Offline `band = 0.10`:** resolves both example runs (plateaus are flat to ±few %). Tighter
+(0.05) risks fragmenting a slightly-sloped plateau into multiple short runs; looser (0.20) risks
+swallowing the ramp shoulder or early drain. Robust because `median` lands in the plateau
+whenever plateau bins outnumber tail bins (true for both examples: 85/157 and 66/88).
+
+### 8.6 Failure modes & how they're handled
+
+**Concurrency:**
+
+- _A metric has no steady state (p99 TTFT drifts up)._ Detected: `drifting_up` verdict + the
+  ensemble fails to converge tightly. Handled by **flagging** rather than reporting a false steady
+  value. c7168 is the extreme — _no_ `(w,b)` lands within 5% of the asymptote because the
+  asymptote itself sits on a rising ramp; the detector reports drift instead of a number.
+- _Metrics settle at different rates._ A single `ttft_p99`-driven warmup under-crops a
+  slower-settling metric (c28k `lat_p99`), which then reads `drifting_down`. Handled by the
+  **directional label** (down = residual settling, transparent — not a false alarm). Follow-up:
+  per-metric warmup.
+- _Settling outlier (c22528 sp1)._ A single high post-fill bin would collapse a slope-based
+  warmup. The **band + back-half-median** warmup ignores it (drops only values above the band).
+- _Too-short run._ `partial_dataset` / `insufficient_passes` → best-effort window over all
+  available super-passes (`warmup = 0`) with the status flag; trend returns `insufficient` for
+  `n < 4`.
+
+**Offline:**
+
+- _Variable ramp shape_ (settle-down vs ramp-up): the **longest-in-band run** is shape-agnostic
+  (§8.3). Verified on both.
+- _Second-issuance blip._ Both example runs re-issue exactly one dataset pass late in the run
+  (293038 @ min 150, 272936 @ min 81), producing a small completion bump inside the drain tail.
+  It falls **after** drain-onset (outside the longest in-band run) and does not perturb the
+  plateau. Handled implicitly.
+- _Short or very tail-heavy plateau._ If tail bins outnumber plateau bins, `median` can slip
+  below the plateau and mis-center the band. Mitigation for such runs: estimate `steady` from an
+  upper quantile (e.g. p75) or the histogram mode instead of the median. Not needed on the
+  examples (plateau dominates); flagged as a known limitation.
+- _Few bins_ (very short run): with < ~10 bins the plateau/band is unreliable — fall back to
+  reporting the full-run rate with a low-confidence flag.
+
+**Poisson:**
+
+- _Near saturation._ At an offered rate above capacity, poisson backlogs and grows an
+  offline-style drain tail; the pass-unit latency view alone would miss it. Handling: detect the
+  backlog (completion rate falling below offered rate) and switch to / add the offline
+  completion-rate plateau-edge. **Untested — needs a near-saturation poisson run (the missing
+  279320 case).**
+
+**Cross-cutting:**
+
+- _Non-streaming runs_ (offline): `recv_first` absent ⇒ TTFT metrics are simply N/A; the tool
+  reports throughput/e2e only rather than erroring.
+- _Malformed/truncated log lines_ are skipped (count logged), so a partially-written
+  `events.jsonl` yields a best-effort series rather than a crash.
+
+### 8.7 Edge cases summary
+
+| edge case                                | detection                          | handling                                                      |
+| ---------------------------------------- | ---------------------------------- | ------------------------------------------------------------- |
+| < 1 full dataset pass                    | `n_issued < dataset_size`          | `partial_dataset`, best-effort, low-confidence flag           |
+| ≥1 pass, `< warmup+1` super-passes       | `n_full < warmup+1`                | `insufficient_passes`, window all super-passes (`warmup=0`)   |
+| metric drifts up (no steady state)       | trend `rel_drift ≥ 0.15 ∧ snr ≥ 2` | `drifting_up` flag; do not emit a steady value                |
+| metric still settling after warmup       | trend, `rel_drift < 0`             | `drifting_down` flag (residual settling, not pathological)    |
+| CoV bound below the sampling-noise floor | `0/6` ensemble converge            | reported as "no steady state"                                 |
+| offline second-issuance blip             | occurs after drain-onset           | outside the longest in-band run; ignored                      |
+| tail-heavy offline plateau               | plateau bins < tail bins           | switch `steady` estimator to upper-quantile/mode (limitation) |
+| non-streaming (no TTFT)                  | `recv_first` absent                | TTFT N/A; throughput/e2e only                                 |
+
+## 9. Open questions
 
 - Does `drifting_up` reproduce on DSR1 (different workload) and on a clean
   capped-28080 re-run? (The tentative c28080 `_numa` is not yet trusted.)
