@@ -604,6 +604,7 @@ class BenchmarkSession:
                 )
             if self._current_phase_type != PhaseType.WARMUP:
                 finish_reason = resp.metadata.get("finish_reason")
+                worker_id = resp.metadata.get("worker_id")
                 self._publisher.publish(
                     EventRecord(
                         event_type=SampleEventType.COMPLETE,
@@ -618,6 +619,9 @@ class BenchmarkSession:
                             finish_reason
                             if isinstance(finish_reason, str)
                             else msgspec.UNSET
+                        ),
+                        worker_id=(
+                            worker_id if isinstance(worker_id, int) else msgspec.UNSET
                         ),
                     )
                 )

@@ -433,7 +433,7 @@ class Worker:
         self._pool.release(conn)
 
         # Send final complete back to main rank
-        self._responses.send(accumulator.get_final_output())
+        self._responses.send(self._with_worker_id(accumulator.get_final_output()))
 
     @profile
     async def _handle_non_streaming_body(self, req: InFlightRequest) -> None:
@@ -451,7 +451,7 @@ class Worker:
         result = self._adapter.decode_response(response_bytes, query_id)
 
         # Send result back to main rank
-        self._responses.send(result)
+        self._responses.send(self._with_worker_id(result))
 
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
         """Send error response for a query."""
@@ -469,9 +469,23 @@ class Worker:
         error_response = QueryResult(
             id=query_id,
             response_output=None,
+            metadata={"worker_id": self.worker_id},
             error=error_data,
         )
         self._responses.send(error_response)
+
+    def _with_worker_id(self, result: QueryResult) -> QueryResult:
+        """Rebuild QueryResult with worker_id in metadata (adapters are worker-agnostic)."""
+        # Build a new struct with a fresh metadata dict instead of mutating the
+        # existing one in place: QueryResult is frozen and gc=False, and its
+        # contract requires metadata to stay unmutated after construction (see the
+        # AT-RISK note in core/types.py) so gc=False stays safe.
+        return QueryResult(
+            id=result.id,
+            response_output=result.response_output,
+            metadata={**result.metadata, "worker_id": self.worker_id},
+            error=result.error,
+        )
 
     @profile
     async def _iter_sse_lines(

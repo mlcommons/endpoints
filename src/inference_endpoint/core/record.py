@@ -157,6 +157,7 @@ class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type:
     turn: int | None = None
     data: OUTPUT_TYPE | PromptData | ErrorData | None = None
     finish_reason: str | msgspec.UnsetType = msgspec.UNSET
+    worker_id: int | msgspec.UnsetType = msgspec.UNSET
 
 
 class EventRecordCodec:
