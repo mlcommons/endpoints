@@ -826,6 +826,7 @@ async def _run_benchmark_async(
     )
     report: Report | None = None
     profiler: ProfileController
+    drained = False
 
     try:
         try:
@@ -919,6 +920,7 @@ async def _run_benchmark_async(
                 # paths (BenchmarkSession.run publishes ENDED in its own finally, so
                 # a failed run still has a terminal snapshot worth draining).
                 report = await pipe.drain_and_build_report()
+                drained = True
         finally:
             # Cleanup runs on every path. pipe.close() (ZMQ scope exit) must run
             # even if pbar.close() raises, and a failure here propagates to the
@@ -927,6 +929,15 @@ async def _run_benchmark_async(
             try:
                 pbar.close()
             finally:
+                # A setup failure between pipe.start() and session.run never
+                # reaches the drain above, so the aggregator/event-logger
+                # subprocesses were launched but never signalled to end. Kill them
+                # (abort) so they can't linger — the aggregator's drain-timeout
+                # defaults to unlimited. On the clean-finish and session-failure
+                # paths the drain already waited for their exit, so only the ZMQ
+                # scope needs closing.
+                if not drained:
+                    await pipe.abort()
                 pipe.close()
     except BaseException:
         if tmpfs_dir.exists():

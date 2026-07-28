@@ -24,7 +24,7 @@ import random
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error as urllib_error
 
 import inference_endpoint.commands.benchmark.execute as execute_mod
@@ -1275,6 +1275,61 @@ class TestAggregatorArgs:
         tmpfs_base = shm if shm.exists() else Path(tempfile.gettempdir())
         tmpfs_dir = tmpfs_base / "benchmark_cli_benchmark_deadbeef"
         assert not tmpfs_dir.exists()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_setup_failure_after_launch_kills_services(self, tmp_path):
+        """A setup failure *after* the services launch but *before* session.run
+        must kill the aggregator/event-logger subprocesses, not orphan them.
+
+        The graceful drain (which waits for the services to self-exit on ENDED)
+        is only reached once session.run runs; a failure before it never sends
+        ENDED, and with drain-timeout defaulting to unlimited the services would
+        otherwise linger. Here launch succeeds and _create_issuer then raises a
+        non-SetupError, so the explicit `except SetupError: pipe.abort()` is
+        bypassed — the finally must still abort (kill=True).
+        """
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None  # services are now "running"
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(side_effect=RuntimeError("setup boom")),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="setup boom"):
+                await _run_benchmark_async(ctx, loop)
+
+        # abort() → _teardown(kill=True) → launcher.kill_all(); called exactly
+        # once (the SetupError branch never ran) and never for a clean run.
+        MockLauncher.return_value.kill_all.assert_called_once()
 
 
 class TestAccuracyOnlyDatasetLoading:
