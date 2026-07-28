@@ -33,7 +33,7 @@ import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
     SessionState,
 )
-from inference_endpoint.commands.benchmark.execute import (
+from inference_endpoint.commands.benchmark.pipeline import (
     _load_final_snapshot_from_disk,
 )
 from inference_endpoint.metrics.report import Report
