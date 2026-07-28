@@ -337,7 +337,14 @@ class MetricsPipeline:
             except Exception as e:  # noqa: BLE001 — teardown best-effort
                 logger.warning("Publisher close error: %s", e)
         if kill and self._launcher is not None:
-            self._launcher.kill_all()
+            try:
+                self._launcher.kill_all()
+            except Exception as e:  # noqa: BLE001 — teardown best-effort
+                # Must not propagate: _teardown runs from a finally during
+                # exception unwind, and the ZMQ __exit__ below must still run
+                # (a raised kill_all would mask the original error and leak the
+                # ZMQ scope, since _closed is already set so a later close() no-ops).
+                logger.warning("Service kill_all error: %s", e)
         if self.subscriber is not None:
             try:
                 self.subscriber.close()
