@@ -293,6 +293,18 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         if self.num_workers == -1:
             object.__setattr__(self, "num_workers", _get_auto_num_workers())
 
+        # Workers are pinned round-robin: endpoint_urls[worker_id % len(urls)].
+        # Require an even split so each URL gets the same number of workers.
+        if self.endpoint_urls:
+            n_endpoints = len(self.endpoint_urls)
+            if self.num_workers % n_endpoints != 0:
+                raise ValueError(
+                    f"num_workers ({self.num_workers}) must be a multiple of the "
+                    f"number of endpoint URLs ({n_endpoints}) so each endpoint gets "
+                    f"the same number of workers. Got remainder "
+                    f"{self.num_workers % n_endpoints}."
+                )
+
         if self.adapter is None:
             adapter_path = ADAPTER_MAP.get(self.api_type)
             if not adapter_path:

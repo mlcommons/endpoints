@@ -62,7 +62,7 @@ class TestEndpointBudgetScaling:
                     "http://10.0.0.2:8000",
                     "http://10.0.0.3:8000",
                 ],
-                num_workers=10,
+                num_workers=9,  # must be a multiple of len(endpoint_urls)
             )
         assert c.max_connections == 30000  # 10000 ports x 3 distinct endpoints
 
@@ -92,7 +92,7 @@ class TestEndpointBudgetScaling:
                     "http://10.0.0.1:8000/v1/b",
                     "http://10.0.0.1:8000",
                 ],
-                num_workers=10,
+                num_workers=9,  # must be a multiple of len(endpoint_urls)
             )
         assert c.max_connections == 10000  # 1 distinct (host, port)
 
@@ -105,7 +105,7 @@ class TestEndpointBudgetScaling:
                     "http://10.0.0.2:8000",
                     "http://10.0.0.3:8000",
                 ],
-                num_workers=10,
+                num_workers=9,  # must be a multiple of len(endpoint_urls)
                 max_connections=25000,
             )
         assert c.max_connections == 25000
@@ -118,6 +118,30 @@ class TestEndpointBudgetScaling:
                     num_workers=10,
                     max_connections=40000,  # > 2 x 10000
                 )
+
+    def test_num_workers_must_be_multiple_of_endpoint_count(self):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
+            with pytest.raises(ValueError, match="must be a multiple"):
+                cfg.HTTPClientConfig(
+                    endpoint_urls=[
+                        "http://10.0.0.1:8000",
+                        "http://10.0.0.2:8000",
+                        "http://10.0.0.3:8000",
+                    ],
+                    num_workers=10,  # 10 % 3 != 0
+                )
+
+    def test_num_workers_multiple_of_endpoint_count_ok(self):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
+            c = cfg.HTTPClientConfig(
+                endpoint_urls=[
+                    "http://10.0.0.1:8000",
+                    "http://10.0.0.2:8000",
+                    "http://10.0.0.3:8000",
+                ],
+                num_workers=12,
+            )
+        assert c.num_workers == 12
 
 
 @pytest.mark.unit
@@ -181,7 +205,7 @@ class TestAutoWarmupResolution:
                     "http://10.0.0.2:8000",
                     "http://10.0.0.3:8000",
                 ],
-                num_workers=10,
+                num_workers=9,  # must be a multiple of len(endpoint_urls)
             )
         assert c.warmup_connections == int(30000 * c.auto_warmup_budget_fraction)
 

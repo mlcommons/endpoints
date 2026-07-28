@@ -728,13 +728,14 @@ class TestBenchmarkSession:
             QueryResult(
                 id="q-ok",
                 response_output="ok",
-                metadata={"finish_reason": "stop"},
+                metadata={"finish_reason": "stop", "worker_id": 3},
                 completed_at=12345,
             )
         )
         complete = publisher.events_of_type(SampleEventType.COMPLETE)
         assert [(e.conversation_id, e.turn) for e in complete] == [("conv-9", 5)]
         assert complete[0].finish_reason == "stop"
+        assert complete[0].worker_id == 3
         assert "q-ok" not in phase_issuer.uuid_to_conv_info
         assert "q-ok" not in phase_issuer.completed_uuids
 
