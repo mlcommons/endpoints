@@ -105,11 +105,11 @@ main run's output:
 <report_dir>/audit/
 ├── reference/                    # reference-phase report dir
 ├── output_caching/               # audit-phase report dir
-├── audit_result.json             # full result + comparison details (written first)
+├── audit_output_caching_test.json             # full result + comparison details (written first)
 └── verify_OUTPUT_CACHING_TEST.txt  # "Performance check pass: True|False"
 ```
 
-`audit_result.json`:
+`audit_output_caching_test.json`:
 
 ```json
 {

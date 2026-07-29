@@ -84,7 +84,7 @@ _intent_ over this repo's own artifacts.
 This repo names MLPerf **TEST04** the **output-caching test**: id `output_caching_test`
 (`AuditTestId.OUTPUT_CACHING_TEST`), config class `OutputCachingTestConfig`, audit
 `OutputCachingAudit`, and artifacts (under `<report_dir>/audit/`)
-`audit_result.json` + `verify_OUTPUT_CACHING_TEST.txt`. Where this doc writes
+`audit_output_caching_test.json` + `verify_OUTPUT_CACHING_TEST.txt`. Where this doc writes
 "TEST04" it means the upstream MLPerf test the output-caching audit re-implements.
 
 ---
@@ -134,7 +134,7 @@ benchmark from-config
             │
             │ 3. verify(runs, cfg) ; 4. write_result (atomic)
             ▼
-   <report_dir>/audit/ : audit_result.json  +  verify_OUTPUT_CACHING_TEST.txt
+   <report_dir>/audit/ : audit_output_caching_test.json  +  verify_OUTPUT_CACHING_TEST.txt
 ```
 
 ### Program flow (output-caching audit / MLPerf TEST04, two phases)
@@ -182,7 +182,7 @@ report is already written).
         ╔═══════════ for each spec (back-to-back) ═════════════╗         │
         ║                    ▼                                  ║         │
         ║   ┌──────────────────────────────────────────┐       ║         │
-        ║   │ phase_cfg = perf-only (accuracy datasets  │       ║         │
+        ║   │ phase_cfg = perf-only* (accuracy datasets │       ║         │
         ║   │   dropped; audit=None; report_dir=<label>)│       ║         │
         ║   │ ctx = setup_benchmark(phase_cfg,          │       ║         │
         ║   │   audit_run_spec)                         │       ║         │
@@ -227,7 +227,7 @@ report is already written).
                            ▼
             ┌──────────────────────────────────────────┐
             │ write_result → <report_dir>/audit/ [atomic]│
-            │   audit_result.json        (durable first) │
+            │   audit_output_caching_test.json        (durable first) │
             │   verify_OUTPUT_CACHING_TEST.txt  (marker) │
             └──────────────┬───────────────────────────┘
                            ▼
@@ -240,6 +240,11 @@ report is already written).
             │ (perf report already written either way)  │
             └──────────────────────────────────────────┘
 ```
+
+\* Perf-only is the **default**. A phase may set `AuditRunSpec.test_mode` (`ACC`/`BOTH`) to keep
+its accuracy datasets instead of dropping them; the orchestrator reads `spec.test_mode` per phase
+rather than hardcoding perf-only. This override is supported but currently **unused** — every
+registered audit (TEST04) leaves `test_mode` at its `PERF` default.
 
 The first-phase gate calls `AuditTest.validate(cfg, N, load_pattern)` once `N` (the loaded
 dataset size) is known: each audit owns its own preconditions there, so the generic loop
@@ -388,8 +393,11 @@ The generic loop never names a specific test:
    phase issues load.
 4. Execute each spec back-to-back via the existing `setup_benchmark` /
    `run_benchmark_async` path (no duplicated report-dir or `config.yaml` logic). Each phase
-   config is performance-only (accuracy datasets dropped so no phase re-issues or re-scores
-   them) and has `audit=None` to prevent re-entry into `run_audit`. If any phase raises
+   config is performance-only **by default** (accuracy datasets dropped so no phase re-issues
+   or re-scores them) and has `audit=None` to prevent re-entry into `run_audit`. A phase can
+   override this per-`AuditRunSpec` via `test_mode` (`ACC`/`BOTH` keeps its accuracy datasets);
+   the orchestrator reads `spec.test_mode` rather than hardcoding perf-only. This override is
+   supported but currently unused — every registered audit (TEST04) runs perf-only. If any phase raises
    (`SetupError` / `ExecutionError`), `run_audit` aborts **without verifying** — a crashed
    phase must never produce a result. A phase that returns but whose `Report.complete` is
    `False` (metrics drain timed out, or the run was interrupted → partial stats) is likewise
@@ -404,7 +412,7 @@ The generic loop never names a specific test:
    `sys.exit` — `0` (PASS) / `1` (FAIL). Errors are not flattened to a single code:
    they propagate to `main.py`'s handler, which uses the repo-wide scheme
    (`InputValidationError` → `2`, `SetupError` → `3`, `ExecutionError` → `4`). The on-disk
-   `audit_result.json` is the durable record; the exit code is the automation signal.
+   `audit_output_caching_test.json` is the durable record; the exit code is the automation signal.
 
 ### Verifier — one core + in-process adapter
 
@@ -440,7 +448,7 @@ re-check-from-disk adapter — the audit runs only via `benchmark from-config`.
 ```
 src/inference_endpoint/compliance/
 ├── __init__.py        # AuditTest protocol, AuditRunSpec/Stats/Artifacts, AUDIT_TESTS map, get_audit_test()
-├── result.py          # AuditResult + atomic write → audit_result.json + verify_<TEST>.txt
+├── result.py          # AuditResult + atomic write → audit_<test_id>.json + verify_<TEST>.txt
 └── audit_test/
     ├── __init__.py     # package marker for the AuditTest implementations
     ├── output_caching_test.py  # OutputCachingAudit: plan_runs (reference + audit specs) + validate + verify_output_caching core
@@ -478,7 +486,7 @@ report_dir/
     ├── reference/               # audit reference phase    (samples=64)
     ├── output_caching/          # audit fixed-sample phase (samples=64)
     ├── verify_OUTPUT_CACHING_TEST.txt
-    └── audit_result.json
+    └── audit_output_caching_test.json
 ```
 
 ### WAN2.2-T2V — the first target
@@ -598,7 +606,7 @@ run; `verify` reads `events.jsonl` and checks mean OSL within `[ref × 0.9, ref 
 ## 8. Success criteria (goal-driven; verify before done)
 
 1. **Integration** — `benchmark from-config` with an `audit:` block runs both phases
-   back-to-back and writes `audit_result.json` + `verify_OUTPUT_CACHING_TEST.txt`; PASS against a
+   back-to-back and writes `audit_output_caching_test.json` + `verify_OUTPUT_CACHING_TEST.txt`; PASS against a
    no-caching `mock_http_echo_server`, FAIL against a caching mock.
 2. **Completion guard** — a phase that completes far fewer than its _requested_ count fails
    the result (`completed < requested × (1 − threshold)` → FAIL), independent of the other

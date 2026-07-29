@@ -212,9 +212,9 @@ usage: uv run python -m inference_endpoint.async_utils.services.event_logger
 | `--socket-name` | Yes      | —       | Socket name within socket-dir                             |
 | `--writers`     | No       | `jsonl` | Writer backends: `jsonl`, `sql`, or both                  |
 
-## Not Yet Wired
+## Wiring
 
-The EventRecord pub/sub infrastructure is ready, but actual `publish(EventRecord(...))`
-calls have not been connected in the load generator or worker processes. Once wired,
-the event logger will receive and persist all session/sample/error events published
-during a benchmark run.
+`publish(EventRecord(...))` calls are connected in the load generator (`BenchmarkSession`
+publishes STARTED / ISSUED / COMPLETE / ERROR events via its `EventPublisher`; the prompt rides on
+the `ISSUED` event's `PromptData` payload rather than a separate event), so the event
+logger receives and persists all session/sample/error events published during a benchmark run.

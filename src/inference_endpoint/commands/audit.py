@@ -58,8 +58,8 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
     Args:
         config: Main benchmark config (must have config.audit set).
         base_report_dir: Audit output directory (e.g. ``<report_dir>/audit``);
-            the per-phase subdirs and verify_<TEST>.txt + audit_result.json all
-            live here.
+            the per-phase subdirs and verify_<TEST>.txt + audit_<test_id>.json
+            (e.g. ``audit_output_caching_test.json``) all live here.
 
     Returns:
         AuditResult — always returned; caller maps passed/failed to exit code.

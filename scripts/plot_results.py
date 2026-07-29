@@ -39,8 +39,8 @@ def main() -> int:
         "report_dir",
         nargs="+",
         type=Path,
-        help="Run report directory (contains results.json / scores.json / "
-        "result_summary.json).",
+        help="Run report directory (contains accuracy/accuracy_results.json / "
+        "scores.json / performance/result_summary.json).",
     )
     parser.add_argument(
         "--out-dir",

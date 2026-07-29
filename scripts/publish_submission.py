@@ -23,15 +23,16 @@ emits in each run's ``report_dir``:
 
   * ``result_summary.json``  (highest priority)  -- perf rollups: latency /
     ttft / tpot percentiles (keys are float-formatted, e.g. ``"99.0"``),
-    ``n_samples_issued``, ``duration_ns``, ``git_sha``, ``version``.
-  * ``results.json``         -- ``results.total/failed/qps`` and, for accuracy
-    runs, the ``accuracy_scores`` map.
+    ``n_samples_issued``, ``duration_ns``, ``qps``, ``tps``, ``git_sha``,
+    ``version``.
+  * ``accuracy/accuracy_results.json`` -- for accuracy runs, the
+    ``accuracy_scores`` list (each entry's ``score`` + optional ``breakdown``).
   * ``config.yaml``          (lowest priority)   -- run configuration
     (``type``, ``model_params.streaming``, ``settings.runtime.*``,
     ``settings.load_pattern.*``).
 
-So "publishing a log the checker can parse" is purely a matter of copying that
-trio into the directory layout the checker walks::
+So "publishing a log the checker can parse" is purely a matter of copying those
+artifacts into the directory layout the checker walks::
 
   {division}/{submitter}/results/{system}/{benchmark}/{scenario}/performance/run_1/
   {division}/{submitter}/results/{system}/{benchmark}/{scenario}/accuracy/
@@ -72,8 +73,22 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Artifacts the endpoints parser reads, in priority order.
-_RUN_ARTIFACTS = ("result_summary.json", "results.json", "config.yaml")
+# Artifacts the endpoints parser reads, as (source-path-in-run-dir, dest-name),
+# in priority order. Perf and accuracy runs emit different files: perf rollups
+# live in performance/result_summary.json; accuracy scores in
+# accuracy/accuracy_results.json. Each is copied flat into its MLPerf layout dir
+# (performance/run_1 and accuracy/); config.yaml accompanies both.
+_PERF_ARTIFACTS = (
+    ("performance/result_summary.json", "result_summary.json"),
+    ("config.yaml", "config.yaml"),
+)
+_ACC_ARTIFACTS = (
+    ("accuracy/accuracy_results.json", "accuracy_results.json"),
+    ("config.yaml", "config.yaml"),
+)
+_ALL_ARTIFACT_NAMES = tuple(
+    dict.fromkeys(n for _, n in (*_PERF_ARTIFACTS, *_ACC_ARTIFACTS))
+)
 
 # v6.1 ("default") endpoints submission layout, mirroring
 # tools/submission/submission_checker/constants.py in mlcommons/inference.
@@ -95,18 +110,20 @@ def _load_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _copy_artifacts(src_dir: Path, dst_dir: Path) -> list[str]:
-    """Copy the parseable trio from ``src_dir`` to ``dst_dir``.
+def _copy_artifacts(
+    src_dir: Path, dst_dir: Path, artifacts: tuple[tuple[str, str], ...]
+) -> list[str]:
+    """Copy the given parseable artifacts from ``src_dir`` to ``dst_dir``.
 
     Returns the list of artifact filenames actually copied.
     """
     dst_dir.mkdir(parents=True, exist_ok=True)
     copied = []
-    for name in _RUN_ARTIFACTS:
-        src = src_dir / name
+    for src_rel, dst_name in artifacts:
+        src = src_dir / src_rel
         if src.is_file():
-            shutil.copy2(src, dst_dir / name)
-            copied.append(name)
+            shutil.copy2(src, dst_dir / dst_name)
+            copied.append(dst_name)
     return copied
 
 
@@ -135,15 +152,14 @@ def _percentile(metric: dict[str, Any], key: str) -> Any:
 def _verify_performance(run_dir: Path) -> list[str]:
     """Return human-readable findings for the performance artifacts."""
     findings: list[str] = []
-    summary = _load_json(run_dir / "result_summary.json")
-    results = _load_json(run_dir / "results.json")
+    summary = _load_json(run_dir / "performance" / "result_summary.json")
     if not summary:
         findings.append("  MISSING: result_summary.json (perf rollups unreadable)")
         return findings
 
     duration_ns = summary.get("duration_ns")
     n_issued = summary.get("n_samples_issued")
-    qps = (results.get("results") or {}).get("qps")
+    qps = summary.get("qps")
     if not qps and duration_ns and n_issued:
         qps = n_issued / (duration_ns / 1e9)
     findings.append(f"  QPS (primary metric): {qps if qps else 'N/A'}")
@@ -169,26 +185,26 @@ def _verify_performance(run_dir: Path) -> list[str]:
 
 def _verify_accuracy(run_dir: Path) -> list[str]:
     findings: list[str] = []
-    results = _load_json(run_dir / "results.json")
+    results = _load_json(run_dir / "accuracy" / "accuracy_results.json")
     scores = results.get("accuracy_scores")
     if not scores:
         findings.append(
-            "  MISSING: results.json has no non-null 'accuracy_scores' "
-            "(endpoints accuracy check requires this)."
+            "  MISSING: accuracy/accuracy_results.json has no non-null "
+            "'accuracy_scores' (endpoints accuracy check requires this)."
         )
         return findings
-    for name, entry in scores.items():
-        if isinstance(entry, dict):
-            score = entry.get("score")
-            findings.append(f"  accuracy_scores[{name}].score = {score}")
-            breakdown = entry.get("breakdown")
-            if isinstance(breakdown, dict):
-                findings.append(
-                    f"  accuracy_scores[{name}].breakdown.overall_accuracy = "
-                    f"{breakdown.get('overall_accuracy')}"
-                )
-        else:
-            findings.append(f"  accuracy_scores[{name}] = {entry}")
+    for entry in scores:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("dataset_name", "?")
+        score = entry.get("score")
+        findings.append(f"  accuracy_scores[{name}].score = {score}")
+        breakdown = entry.get("breakdown")
+        if isinstance(breakdown, dict):
+            findings.append(
+                f"  accuracy_scores[{name}].breakdown.overall_accuracy = "
+                f"{breakdown.get('overall_accuracy')}"
+            )
     return findings
 
 
@@ -252,7 +268,8 @@ def main() -> int:
     src.add_argument(
         "--accuracy-run",
         type=Path,
-        help="report_dir of the accuracy run (has accuracy_scores in results.json).",
+        help="report_dir of the accuracy run "
+        "(has accuracy_scores in accuracy/accuracy_results.json).",
     )
 
     coords = parser.add_argument_group("submission coordinates")
@@ -305,13 +322,13 @@ def main() -> int:
 
     if perf_run is not None:
         perf_dst = results_root / _PERF_SUBDIR
-        copied = _copy_artifacts(perf_run, perf_dst)
+        copied = _copy_artifacts(perf_run, perf_dst, _PERF_ARTIFACTS)
         print(f"[performance] {perf_run}  ->  {perf_dst}")
         print(f"             copied: {', '.join(copied) or '(none!)'}")
         if not copied:
             print(
                 f"             ERROR: no parseable artifacts "
-                f"({', '.join(_RUN_ARTIFACTS)}) found under {perf_run}"
+                f"({', '.join(n for _, n in _PERF_ARTIFACTS)}) found under {perf_run}"
             )
             empty_runs.append(f"--performance-run {perf_run}")
         for line in _verify_performance(perf_run):
@@ -320,13 +337,13 @@ def main() -> int:
 
     if acc_run is not None:
         acc_dst = results_root / _ACC_SUBDIR
-        copied = _copy_artifacts(acc_run, acc_dst)
+        copied = _copy_artifacts(acc_run, acc_dst, _ACC_ARTIFACTS)
         print(f"[accuracy]    {acc_run}  ->  {acc_dst}")
         print(f"             copied: {', '.join(copied) or '(none!)'}")
         if not copied:
             print(
                 f"             ERROR: no parseable artifacts "
-                f"({', '.join(_RUN_ARTIFACTS)}) found under {acc_run}"
+                f"({', '.join(n for _, n in _ACC_ARTIFACTS)}) found under {acc_run}"
             )
             empty_runs.append(f"--accuracy-run {acc_run}")
         for line in _verify_accuracy(acc_run):
@@ -360,7 +377,7 @@ def main() -> int:
             "FAILED: no parseable artifacts were copied for: "
             f"{', '.join(empty_runs)}. The submission tree is incomplete "
             "(check the run path(s) and that the run emitted "
-            f"{', '.join(_RUN_ARTIFACTS)})."
+            f"{', '.join(_ALL_ARTIFACT_NAMES)})."
         )
         return 1
 

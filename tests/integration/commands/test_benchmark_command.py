@@ -137,24 +137,6 @@ class TestBenchmarkCommandIntegration:
         assert "successful" in caplog.text
 
     @pytest.mark.integration
-    def test_results_json_output(
-        self, mock_http_echo_server, ds_dataset_path, tmp_path
-    ):
-        config = _config(
-            mock_http_echo_server.url,
-            ds_dataset_path,
-            report_dir=tmp_path,
-        )
-        run_benchmark(config, TestMode.PERF)
-
-        results_path = tmp_path / "results.json"
-        assert results_path.exists()
-        results = json.loads(results_path.read_text())
-        assert "config" in results
-        assert results["results"]["total"] > 0
-        assert results["results"]["successful"] >= 0
-
-    @pytest.mark.integration
     def test_result_summary_self_complete(
         self, mock_http_echo_server, ds_dataset_path, tmp_path
     ):
@@ -164,7 +146,9 @@ class TestBenchmarkCommandIntegration:
             TestMode.PERF,
         )
 
-        summary = json.loads((tmp_path / "result_summary.json").read_text())
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
         assert summary["qps"] > 0
         assert "tps" in summary
         # report.txt is the human-readable companion — kept alongside the JSON.
@@ -269,7 +253,7 @@ class TestBenchmarkCommandIntegration:
         # always FAILs, or mis-plumbs the threshold, would otherwise slip by).
         assert result.passed is True
         assert result.test_id == AuditTestId.OUTPUT_CACHING_TEST.value
-        result_path = tmp_path / "audit" / "audit_result.json"
+        result_path = tmp_path / "audit" / "audit_output_caching_test.json"
         assert result_path.exists()
         verify_txt = (tmp_path / "audit" / "verify_OUTPUT_CACHING_TEST.txt").read_text()
         assert "Performance check pass: True" in verify_txt
@@ -325,7 +309,7 @@ class TestBenchmarkCommandIntegration:
 
         assert call_order == ["benchmark", "audit"]
         # Both phases still land under the one shared report_dir.
-        assert (tmp_path / "audit" / "audit_result.json").exists()
+        assert (tmp_path / "audit" / "audit_output_caching_test.json").exists()
         assert (tmp_path / "config.yaml").exists()
 
 

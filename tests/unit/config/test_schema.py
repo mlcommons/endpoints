@@ -503,6 +503,28 @@ class TestBenchmarkConfigMethods:
         assert loaded.model_params.name == "M"
 
     @pytest.mark.unit
+    def test_redact_secret_fields_scrubs_url_credentials(self):
+        value = {
+            "endpoints": [
+                "https://user:password@example.com/v1?token=query-secret&model=m"
+            ],
+            "callback": "wss://example.com/events?access-key=another-secret",
+            "unchanged": "https://example.com/v1?model=a%2Fb",
+            "description": "token=query-secret",
+        }
+
+        redacted = BenchmarkConfig._redact_secret_fields(value)
+
+        endpoint = redacted["endpoints"][0]
+        assert "user" not in endpoint
+        assert "password" not in endpoint
+        assert "query-secret" not in endpoint
+        assert "model=m" in endpoint
+        assert "another-secret" not in redacted["callback"]
+        assert redacted["unchanged"] == value["unchanged"]
+        assert redacted["description"] == value["description"]
+
+    @pytest.mark.unit
     def test_max_duration_zero_converts_to_none_in_runtime_settings(self):
         from inference_endpoint.config.runtime_settings import RuntimeSettings
 
@@ -692,6 +714,27 @@ class TestAgenticInferenceValidation:
         assert config.settings.load_pattern.target_concurrency == 16
 
     @pytest.mark.unit
+    def test_agentic_inference_forwards_concurrency_to_swe_bench_workers(self):
+        values = self._make_online_agentic_inference(concurrency=16)
+        values["datasets"].append(
+            {
+                "name": "swe_bench",
+                "type": "accuracy",
+                "accuracy_config": {"eval_method": "swe_bench_scorer"},
+            }
+        )
+
+        config = BenchmarkConfig(**values)
+
+        accuracy_dataset = next(
+            dataset
+            for dataset in config.datasets
+            if dataset.type == DatasetType.ACCURACY
+        )
+        assert accuracy_dataset.accuracy_config is not None
+        assert accuracy_dataset.accuracy_config.extras == {"workers": 16}
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "controls", [{"min_new_tokens": 0}, {"skip_special_tokens": False}]
     )
@@ -791,6 +834,66 @@ class TestAgenticInferenceValidation:
                     "runtime": {"n_samples_to_issue": 200},
                 },
             )
+
+
+class TestSWEBenchValidation:
+    @staticmethod
+    def _config(datasets, endpoints=None):
+        return {
+            "type": TestType.OFFLINE,
+            "model_params": {"name": "M"},
+            "endpoint_config": {
+                "endpoints": endpoints
+                or ["http://endpoint-a:30000", "http://endpoint-b:30000"]
+            },
+            "datasets": datasets,
+        }
+
+    @pytest.mark.unit
+    def test_rejects_multiple_endpoints_for_accuracy_dataset(self):
+        values = self._config(
+            [
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                }
+            ]
+        )
+
+        with pytest.raises(ValidationError, match="exactly one endpoint URL"):
+            BenchmarkConfig(**values)
+
+    @pytest.mark.unit
+    def test_rejects_multiple_endpoints_for_inline_performance_scoring(self):
+        values = self._config(
+            [
+                {
+                    "path": "D",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                }
+            ]
+        )
+
+        with pytest.raises(ValidationError, match="exactly one endpoint URL"):
+            BenchmarkConfig(**values)
+
+    @pytest.mark.unit
+    def test_accepts_one_endpoint(self):
+        values = self._config(
+            [
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                }
+            ],
+            endpoints=["http://endpoint:30000"],
+        )
+
+        config = BenchmarkConfig(**values)
+
+        assert config.endpoint_config.endpoints == ["http://endpoint:30000"]
 
 
 class TestAgenticInferenceTotalSamples:

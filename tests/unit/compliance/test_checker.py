@@ -70,20 +70,28 @@ def _write_valid_config(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_VALID_CONFIG_YAML)
 
 
+def _write_accuracy_results(tmp_path, payload: dict) -> None:
+    acc_dir = tmp_path / "accuracy"
+    acc_dir.mkdir(parents=True, exist_ok=True)
+    (acc_dir / "accuracy_results.json").write_text(json.dumps(payload))
+
+
 def _accuracy_results(
     overall: float | str, normalized: float | str, total: int | str
 ) -> dict:
     return {
-        "accuracy_scores": {
-            "bfcl_v4::function_calling": {
+        "accuracy_scores": [
+            {
+                "dataset_name": "bfcl_v4::function_calling",
                 "score": 0.8623,
                 "breakdown": {
                     "overall_accuracy": overall,
                     "normalized_single_turn_score": normalized,
+                    "subset_scores": {"simple": overall},
                     "total_samples": total,
                 },
             }
-        }
+        ]
     }
 
 
@@ -184,9 +192,7 @@ def test_accuracy_gate_handles_string_total_samples():
 def test_check_submission_accuracy_dir_string_scores(tmp_path):
     # End-to-end with string-valued breakdown metrics (defensive coercion path).
     _write_valid_config(tmp_path)
-    (tmp_path / "results.json").write_text(
-        json.dumps(_accuracy_results("86.23", "87.96", 995))
-    )
+    _write_accuracy_results(tmp_path, _accuracy_results("86.23", "87.96", 995))
     report = check_submission(tmp_path)
     assert report.passed
 
@@ -196,6 +202,58 @@ def test_accuracy_gate_fails_on_too_few_samples():
     checks = check_accuracy(_accuracy_results(90.0, 90.0, 500), GOLDEN, FACTORS, 995)
     samples = next(c for c in checks if c.name == "min_sample_count")
     assert not samples.passed
+
+
+@pytest.mark.unit
+def test_accuracy_gate_accepts_non_bfcl_breakdown():
+    """A DeepSeek-R1-style breakdown omits overall_accuracy from the block and
+    keeps the headline on the entry's scalar ``score`` (a percentage). The gate
+    falls back to that entry score, so it is still gated on overall_accuracy."""
+    results = {
+        "accuracy_scores": [
+            {
+                "dataset_name": "deepseek_r1",
+                # Headline percentage on the entry, NOT duplicated in the block.
+                "score": 83.0,
+                "breakdown": {
+                    "subset_scores": {"aime25": 80.0, "gpqa": 88.0},
+                    "total_samples": 1283,
+                },
+            }
+        ]
+    }
+    golden = {"bfcl_overall_accuracy": 82.0}
+    factors = {"bfcl_overall_accuracy": (0.97,)}
+    checks = check_accuracy(results, golden, factors, 1000)
+
+    overall = next(c for c in checks if c.name == "accuracy:overall_accuracy")
+    assert overall.passed  # 83.0 >= 82.0 x 0.97, via the entry-score fallback
+    samples = next(c for c in checks if c.name == "min_sample_count")
+    assert samples.passed  # total_samples read from the breakdown
+
+
+@pytest.mark.unit
+def test_accuracy_gate_reports_missing_when_no_overall_anywhere():
+    """The fallback is bounded: a breakdown without overall_accuracy AND without a
+    scalar entry score reports the metric missing rather than passing silently."""
+    results = {
+        "accuracy_scores": [
+            {
+                "dataset_name": "deepseek_r1",
+                "breakdown": {
+                    "subset_scores": {"aime25": 80.0},
+                    "total_samples": 1283,
+                },
+            }
+        ]
+    }
+    golden = {"bfcl_overall_accuracy": 82.0}
+    factors = {"bfcl_overall_accuracy": (0.97,)}
+    checks = check_accuracy(results, golden, factors, None)
+
+    overall = next(c for c in checks if c.name == "accuracy:overall_accuracy")
+    assert not overall.passed
+    assert "missing" in overall.detail
 
 
 @pytest.mark.unit
@@ -226,9 +284,7 @@ def test_perf_validity_fails_with_dropped_turns():
 @pytest.mark.unit
 def test_check_submission_accuracy_dir(tmp_path):
     _write_valid_config(tmp_path)
-    (tmp_path / "results.json").write_text(
-        json.dumps(_accuracy_results(86.23, 87.96, 995))
-    )
+    _write_accuracy_results(tmp_path, _accuracy_results(86.23, 87.96, 995))
     report = check_submission(tmp_path)
     assert report.passed
     assert report.notes  # server-side attestation surfaced
@@ -267,9 +323,7 @@ def test_check_submission_uses_ruleset_thresholds(tmp_path):
     assert threshold == pytest.approx(83.6431)
 
     _write_valid_config(tmp_path)
-    (tmp_path / "results.json").write_text(
-        json.dumps(_accuracy_results(83.0, 87.0, 995))
-    )
+    _write_accuracy_results(tmp_path, _accuracy_results(83.0, 87.0, 995))
     report = check_submission(tmp_path)
     assert not report.passed
 
