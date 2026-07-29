@@ -52,6 +52,10 @@ from .generate import generate_dataset
 
 logger = logging.getLogger(__name__)
 
+# Grading assumes fork semantics; under Python 3.14's forkserver default the
+# grading children die at startup and the service reports 0/N forever.
+_MP_CTX = mp.get_context("fork")
+
 
 def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
     # Run code with lcb_runner. Note that the lcb_runner has a very rudimentary sandbox
@@ -117,9 +121,9 @@ def run_code_subprocess(
         suite["inputs"]
     ) + flat_timeout_extension
 
-    manager = mp.Manager()
+    manager = _MP_CTX.Manager()
     resp_buffer = manager.list()
-    p = mp.Process(
+    p = _MP_CTX.Process(
         target=execute_code_single_suppressed_errors,
         args=(
             test_suite_json,
@@ -270,8 +274,11 @@ class _LCBWorker:
         for qid, test_codes in zip(question_ids, codes, strict=False):
             results[qid] = [False] * len(test_codes)
         futures = {}
+        execution_errors = 0
 
-        with ProcessPoolExecutor(max_workers=self.n_lcb_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=self.n_lcb_workers, mp_context=_MP_CTX
+        ) as executor:
             for qid, test_codes in zip(question_ids, codes, strict=False):
                 test_suite_json = self.test_loader[qid]
                 for i, code in enumerate(test_codes):
@@ -290,9 +297,8 @@ class _LCBWorker:
                 qid, code_idx = futures[future]
                 res, metadata = future.result()
                 if "error" in metadata:
-                    logger.warning(
-                        f"Test execution error for question {qid}: {metadata}"
-                    )
+                    execution_errors += 1
+                    logger.error(f"Test execution error for question {qid}: {metadata}")
 
                 # LCB uses any result > 0 as a 'pass' since:
                 # Negative numbers indicate error codes
@@ -316,6 +322,15 @@ class _LCBWorker:
                             e,
                             exc_info=True,
                         )
+
+        # All subprocesses erroring means the judge itself is broken, not that
+        # every code sample failed its tests.
+        if futures and execution_errors == len(futures):
+            raise RuntimeError(
+                f"All {len(futures)} grading subprocesses reported execution "
+                "errors - the LCB judging infrastructure is broken; refusing "
+                "to report a 0 score. See the logged error metadata above."
+            )
 
         return results
 
