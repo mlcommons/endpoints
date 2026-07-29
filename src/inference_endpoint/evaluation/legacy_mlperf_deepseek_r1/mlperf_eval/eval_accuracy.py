@@ -567,12 +567,18 @@ def evaluate_livecodebench(code: Optional[str], question_id: str) -> bool:
         os.environ.pop('TQDM_DISABLE', None)
 
 
+# Infrastructure failures (broken judge) must not be scored as wrong answers.
+_LCB_INFRA_ERRORS = (ImportError, FileNotFoundError, RuntimeError)
+
+
 def evaluate_livecodebench_worker(args: Tuple[str, str]) -> Tuple[str, bool]:
     """Worker function for parallel LiveCodeBench evaluation."""
     code, question_id = args
 
     try:
         return question_id, evaluate_livecodebench(code, question_id)
+    except _LCB_INFRA_ERRORS:
+        raise
     except Exception:
         return question_id, False
 
@@ -655,6 +661,10 @@ def process_livecodebench_parallel(
     if not work_items:
         return 0, 0
 
+    # Pre-flight: a broken judge (missing dependency/dataset) must raise here
+    # with a real traceback, not be scored as 0.0 by every worker.
+    load_lcb_benchmark()
+
     # Process in parallel
     max_workers = min(multiprocessing.cpu_count(), len(work_items))
     logger.info(
@@ -679,6 +689,8 @@ def process_livecodebench_parallel(
                 total_evaluated += 1
                 if is_correct:
                     correct_count += 1
+            except _LCB_INFRA_ERRORS:
+                raise
             except Exception as e:
                 logger.error(f"Error evaluating row {idx}: {e}")
                 df.at[idx, 'prompt_accuracy'] = 0.0
