@@ -81,12 +81,12 @@ datasets:
   - path: "test.jsonl"
 submission_ref:
   model: "llama"
-  ruleset: "mlperf-v6"
+  ruleset: "mlperf-inference-v6.1"
 """)
         with caplog.at_level("INFO"):
             execute_validate(config_file)
         assert "Submission:" in caplog.text
-        assert "mlperf-v6" in caplog.text
+        assert "mlperf-inference-v6.1" in caplog.text
 
     @pytest.mark.unit
     def test_invalid_yaml(self, tmp_path):

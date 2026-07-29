@@ -16,8 +16,9 @@
 """Standardized result plots for Edge-Agentic benchmark runs.
 
 Consumes a run's report directory (the artifacts written by a benchmark run:
-``results.json`` for accuracy, ``scores.json`` for the agentic performance run,
-``result_summary.json`` for latency/throughput distributions) and renders a fixed
+``accuracy/accuracy_results.json`` for accuracy, ``scores.json`` for the agentic
+performance run, ``result_summary.json`` for latency/throughput distributions)
+and renders a fixed
 set of PNGs for leaderboard / report use:
 
 * accuracy — overall + normalized vs the ruleset gate, per-category and per-subset
@@ -40,6 +41,16 @@ from pathlib import Path
 from typing import Any
 
 from ..config.ruleset_registry import get_ruleset
+from ..config.schema import DatasetType
+from ..evaluation.accuracy_results import (
+    find_accuracy_entry as _find_accuracy_entry,
+)
+from ..evaluation.accuracy_results import (
+    to_float as _to_float,
+)
+from ..evaluation.bfcl_v4_metrics import (
+    ACCURACY_METRIC_KEYS as _ACCURACY_METRIC_KEYS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +62,6 @@ try:
 except ImportError:
     matplotlib = None  # type: ignore[assignment]
     plt = None  # type: ignore[assignment]
-
-# Accuracy: ruleset golden-metric name -> key in the scorer's breakdown block.
-_ACCURACY_METRIC_KEYS = {
-    "bfcl_overall_accuracy": "overall_accuracy",
-    "bfcl_normalized_accuracy": "normalized_single_turn_score",
-}
 
 # Latency-style summary blocks are nanoseconds; report in seconds.
 _NS_TO_S = 1e-9
@@ -94,39 +99,67 @@ class RunArtifacts:
     distributions: dict[str, Distribution] = field(default_factory=dict)
 
 
-def _to_float(value: Any) -> float | None:
-    """Coerce a metric to float (older artifacts stored strings like "86.23")."""
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+def _breakdown_from_scalars(results: dict[str, Any]) -> AccuracyBreakdown | None:
+    """Build a plot breakdown from per-dataset scalar scores when no scorer emits
+    a subset breakdown.
 
-
-def _find_accuracy_score(results: dict[str, Any]) -> dict[str, Any] | None:
-    accuracy_scores = results.get("accuracy_scores")
-    if not isinstance(accuracy_scores, dict):
+    gpt-oss runs three single-metric datasets (``aime25``/``gpqa``/``lcb``) scored
+    by ``PassAt1Scorer``/``LiveCodeBenchScorer``, which don't emit a
+    ``score_breakdown``. Without this, ``extract_accuracy`` returns ``None`` and
+    the accuracy plot is empty. One bar per accuracy dataset; overall is their mean.
+    """
+    scores = results.get("accuracy_scores")
+    if not isinstance(scores, list):
         return None
-    for entry in accuracy_scores.values():
-        if not isinstance(entry, dict):
+    subset: dict[str, float] = {}
+    total = 0
+    for e in scores:
+        if (
+            not isinstance(e, dict)
+            or e.get("dataset_type") == DatasetType.PERFORMANCE.value
+        ):
             continue
-        # Prefer the structured breakdown; fall back to score-as-dict (older runs).
-        for block in (entry.get("breakdown"), entry.get("score")):
-            if isinstance(block, dict) and "overall_accuracy" in block:
-                return block
-    return None
+        s = _to_float(e.get("score"))
+        if s is not None:
+            # Scalar scorers (PassAt1Scorer/LiveCodeBenchScorer) return fractions
+            # in [0, 1], but plot_accuracy renders on a 0-100 axis and gates in
+            # percent — scale fractions up so gpt-oss bars read 80, not 0.8.
+            subset[str(e.get("dataset_name", "?"))] = s * 100 if s <= 1 else s
+            total += int(e.get("total_samples", 0) or 0)
+    if not subset:
+        return None
+    overall = sum(subset.values()) / len(subset)
+    return AccuracyBreakdown(
+        overall=overall,
+        normalized=overall,
+        total_samples=total,
+        category_scores={},
+        subset_scores=subset,
+    )
 
 
 def extract_accuracy(results: dict[str, Any]) -> AccuracyBreakdown | None:
-    """Pull the accuracy breakdown from a BFCL ``results.json`` dict."""
-    score = _find_accuracy_score(results)
-    if score is None:
-        return None
+    """Pull the accuracy breakdown from an ``accuracy_results.json`` dict.
+
+    Prefers a scorer-emitted subset breakdown (BFCL, DeepSeek-R1); falls back to
+    per-dataset scalar scores (gpt-oss) so the plot is never empty.
+    """
+    entry = _find_accuracy_entry(results)
+    if entry is None:
+        return _breakdown_from_scalars(results)
+    score = entry.get("breakdown") or {}
+    # BFCL keeps the headline in its block; DeepSeek-R1 does not duplicate it there,
+    # so fall back to the entry's scalar score (the headline accuracy).
     overall = _to_float(score.get("overall_accuracy"))
-    normalized = _to_float(score.get("normalized_single_turn_score"))
-    if overall is None or normalized is None:
+    if overall is None:
+        overall = _to_float(entry.get("score"))
+    if overall is None:
         return None
+    # BFCL carries a distinct normalized single-turn score; DeepSeek-R1 / gpt-oss
+    # breakdowns don't, so fall back to the overall accuracy for those.
+    normalized = _to_float(score.get("normalized_single_turn_score"))
+    if normalized is None:
+        normalized = overall
 
     def _floats(block: Any) -> dict[str, float]:
         if not isinstance(block, dict):
@@ -204,7 +237,7 @@ def load_run(report_dir: str | Path) -> RunArtifacts:
     report_dir = Path(report_dir)
     artifacts = RunArtifacts(report_dir=report_dir)
 
-    results_path = report_dir / "results.json"
+    results_path = report_dir / "accuracy" / "accuracy_results.json"
     if results_path.exists():
         artifacts.accuracy = extract_accuracy(json.loads(results_path.read_text()))
 
@@ -216,7 +249,7 @@ def load_run(report_dir: str | Path) -> RunArtifacts:
             artifacts.turn_summary = scores["turns"]
         artifacts.inline_score = _to_float(scores.get("score"))
 
-    summary_path = report_dir / "result_summary.json"
+    summary_path = report_dir / "performance" / "result_summary.json"
     if summary_path.exists():
         summary = json.loads(summary_path.read_text())
         for key, unit in (("ttft", "s"), ("latency", "s"), ("tpot", "s")):

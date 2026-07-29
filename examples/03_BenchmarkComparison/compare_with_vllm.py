@@ -349,7 +349,7 @@ def run_inference_endpoint(
     results = parse_inference_endpoint_output(full_output)
 
     # Load report JSON to enrich or backfill metrics from stdout (e.g., detailed TTFT/TPOT stats, output lengths)
-    report_json_path = report_dir / "result_summary.json"
+    report_json_path = report_dir / "performance" / "result_summary.json"
     if report_json_path.exists():
         try:
             with open(report_json_path) as f:

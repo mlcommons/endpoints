@@ -111,6 +111,27 @@ def _normalize_tool_calls_for_template(
 _WORKER_BACKEND: Any = None
 
 
+def load_reference_tokenizer(tokenizer_name: str) -> Any:
+    """Load the run's reference tokenizer.
+
+    ``trust_remote_code`` is required for tokenizers that ship custom code (e.g.
+    DeepSeek-R1). The single construction point shared by the perf-window
+    tokenizer, the sharded length-counting workers, and finalize-side accuracy
+    OSL, so every OSL number in a run comes from the same tokenizer.
+    """
+    return AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+
+
+def load_reference_backend(tokenizer_name: str) -> Any | None:
+    """Raw tokenizers backend (fast Rust path) for length counting.
+
+    Counting through the backend avoids the transformers "sequence longer than
+    model_max_length" warning the Python wrapper emits, so no ``model_max_length``
+    override is needed. ``None`` if the tokenizer has no fast backend.
+    """
+    return getattr(load_reference_tokenizer(tokenizer_name), "backend_tokenizer", None)
+
+
 def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
     """Pin this worker to ``core_set``, then load the raw tokenizers backend.
 
@@ -133,18 +154,16 @@ def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
             # unpinned shards from oversubscribing each other.
             logger.debug("could not pin tokenizer worker to %s", core_set)
     transformers_logging.set_verbosity_error()
-    # trust_remote_code is required: supported tokenizers (e.g. DeepSeek-R1)
-    # ship custom code. The tokenizer name is operator-supplied (not a new
-    # trust boundary vs. the pre-PR main-process load), but sharding now
-    # executes that code in each worker process.
-    tok = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+    # Sharding executes the tokenizer's (possibly custom) code in each worker
+    # process; the name is operator-supplied — same trust boundary as the
+    # in-process load.
     global _WORKER_BACKEND
-    _WORKER_BACKEND = getattr(tok, "backend_tokenizer", None)
+    _WORKER_BACKEND = load_reference_backend(tokenizer_name)
     if _WORKER_BACKEND is not None:
         _WORKER_BACKEND.encode("warmup", add_special_tokens=False)
 
 
-def _encode_batch_lengths(backend: Any, texts: list[str]) -> list[int]:
+def encode_lengths(backend: Any, texts: list[str]) -> list[int]:
     """Per-text token counts via the raw tokenizers backend, one rayon call."""
     encode_batch = getattr(backend, "encode_batch_fast", None) or backend.encode_batch
     return [len(e.ids) for e in encode_batch(texts, add_special_tokens=False)]
@@ -155,7 +174,7 @@ def _worker_encode_lengths(texts: list[str]) -> list[int]:
     backend = _WORKER_BACKEND
     if backend is None:
         raise RuntimeError("tokenizer worker backend unavailable")
-    return _encode_batch_lengths(backend, texts)
+    return encode_lengths(backend, texts)
 
 
 def _worker_ready(_: int) -> bool:
@@ -239,9 +258,7 @@ class BatchTokenizer:
     # -- setup --------------------------------------------------------------
 
     def _load_tokenizer(self) -> None:
-        tok = AutoTokenizer.from_pretrained(
-            self._tokenizer_name, trust_remote_code=True
-        )
+        tok = load_reference_tokenizer(self._tokenizer_name)
         self._tokenizer = tok
         # Baseline = tokens from a [user, empty-assistant] pair minus the [user]
         # prefix alone, so the assistant frame is subtracted from message counts.
@@ -350,7 +367,7 @@ class BatchTokenizer:
         tok = self._tokenizer
         backend = getattr(tok, "backend_tokenizer", None)
         if backend is not None:
-            return _encode_batch_lengths(backend, texts)
+            return encode_lengths(backend, texts)
         return [len(tok.tokenize(t)) for t in texts]  # type: ignore[union-attr]
 
     async def count_texts_async(

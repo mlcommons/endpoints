@@ -24,7 +24,11 @@ import cyclopts
 import yaml
 from pydantic import ValidationError  # noqa: F401 (used in from_config)
 
-from inference_endpoint.commands.benchmark.execute import run_benchmark
+from inference_endpoint.commands.audit import run_audit
+from inference_endpoint.commands.benchmark.execute import (
+    resolve_report_dir,
+    run_benchmark,
+)
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
     OfflineBenchmarkConfig,
@@ -32,7 +36,11 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
-from inference_endpoint.exceptions import DatasetValidationError, InputValidationError
+from inference_endpoint.exceptions import (
+    CLIError,
+    DatasetValidationError,
+    InputValidationError,
+)
 
 benchmark_app = cyclopts.App(name="benchmark", help="Run benchmarks.")
 
@@ -62,7 +70,29 @@ def _run(
             raise DatasetValidationError(f"Invalid --dataset: {msgs}") from e
         except ValueError as e:
             raise DatasetValidationError(f"Invalid --dataset: {e}") from e
-    run_benchmark(config, mode)
+    if config.audit is None:
+        run_benchmark(config, mode)
+        return
+
+    audit_only = config.audit.only
+    # Shared report dir for both stages.
+    report_dir = resolve_report_dir(config)
+    config = config.with_updates(report_dir=str(report_dir))
+    # Main run first, then the audit — same order as upstream MLPerf inference
+    # (perf run, then TEST04). Unlike upstream there is no SUT reset between
+    # stages, so a response-caching SUT can serve the audit's reference phase
+    # from cache warmed by the main run. See docs/compliance_audit_plan.md
+    # ("Run ordering") and https://github.com/mlcommons/endpoints/issues/399.
+    # audit.only skips the main run — upstream-style standalone TEST04.
+    if not audit_only:
+        run_benchmark(config, mode)
+    result = run_audit(config, report_dir / "audit")
+    # main.run() maps CLIError -> exit 1; PASS returns 0.
+    if not result.passed:
+        raise CLIError(
+            f"Compliance audit {result.test_id} FAILED: "
+            f"{result.details.get('reason', '')}"
+        )
 
 
 @benchmark_app.command

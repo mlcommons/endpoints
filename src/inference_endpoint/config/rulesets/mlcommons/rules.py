@@ -19,6 +19,7 @@ These values are derived directly from the MLPerf Inference Policies document:
 https://github.com/mlcommons/inference_policies/blob/master/inference_rules.adoc
 """
 
+import copy
 import random
 from dataclasses import dataclass, field
 from enum import Enum
@@ -272,7 +273,30 @@ _v5_1 = RoundRuleset(
 )
 
 
-CURRENT = _v5_1
+# v6.1 per-model latency targets are unchanged from v5.1 (they match the
+# current mlperf.conf); only the round RNG seeds rotate. Seeds are the
+# schedule_rng_seed / sample_index_rng_seed values from loadgen/mlperf.conf,
+# pinned to a specific upstream commit for traceability:
+# https://github.com/mlcommons/inference/blob/10f823448fd38bb739e52690efe8191c3a55412b/loadgen/mlperf.conf#L42-L43
+# qsl_rng_seed is intentionally not modeled: it only selects the load order of
+# the first-N working set, which the sample-index shuffle already covers.
+_v6_1 = RoundRuleset(
+    version="v6.1",
+    scheduler_rng_seed=16159082839903944936,
+    sample_index_rng_seed=2747215439041700203,
+    benchmark_rulesets={
+        # Keep the model-singleton keys; deep-copy only the per-model rules so
+        # v6.1's mutable leaves (e.g. reported_metrics) can't leak into v5.1.
+        model: copy.deepcopy(rules)
+        for model, rules in _v5_1.benchmark_rulesets.items()
+    },
+)
+
+
+# All known rounds, registered by version in the ruleset registry.
+ALL_ROUNDS = [_v5_1, _v6_1]
+
+CURRENT = _v6_1
 
 
 # --- Edge-Agentic (BFCL v4) ruleset ---

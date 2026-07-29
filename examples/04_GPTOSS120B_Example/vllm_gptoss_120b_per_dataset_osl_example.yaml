@@ -1,0 +1,89 @@
+# gpt-oss-120b — MLPerf-style per-dataset output budgets in a single run.
+#
+# The MLPerf Inference gpt-oss-120b rules use DIFFERENT max output lengths for the
+# performance and accuracy phases:
+#   - performance: max_output_len = 10240  (reasoning_effort low)
+#   - accuracy:    max_output_len = 32768  (reasoning_effort high)
+# See https://github.com/mlcommons/inference/tree/master/language/gpt-oss-120b
+#
+# This config expresses that with the per-dataset `generation_config_override`
+# mechanism: model_params.max_new_tokens sets the global perf budget (10240) and the
+# accuracy datasets override it to 32768 so their harmony CoT is not truncated before
+# the `assistantfinal` answer. Only the OUTPUT budget is set here; reasoning_effort is
+# applied client-side by the `openai_completions` adapter's Harmony encoding — baked
+# into the pre-tokenized perf dataset, and fixed at "high" (the Harmonize default) for
+# the text-prompt accuracy datasets.
+name: "gpt-oss-120b-per-dataset-osl"
+version: "1.0"
+type: "online"
+timeout: 9000
+
+model_params:
+  name: "openai/gpt-oss-120b"
+  temperature: 1.0
+  top_p: 1.0
+  top_k: 0
+  skip_special_tokens: false
+  max_new_tokens: 10240 # global default = MLPerf perf budget; accuracy datasets override to 32768
+  streaming: "on"
+
+datasets:
+  - name: "perf-test" # PERF phase: capped at the MLPerf perf budget (10240)
+    type: "performance"
+    path: "examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet"
+    parser:
+      input_tokens: "input_tokens"
+    generation_config_override:
+      max_new_tokens: 10240 # same as the global default; stated per-dataset so both phases use the mechanism
+  - name: "aime25::gptoss" # ACCURACY: raised to the MLPerf accuracy budget (32768)
+    type: "accuracy"
+    generation_config_override:
+      max_new_tokens: 32768
+    accuracy_config:
+      eval_method: "pass_at_1"
+      ground_truth: "answer"
+      extractor: "boxed_math_extractor"
+      num_repeats: 8
+  - name: "gpqa::gptoss"
+    type: "accuracy"
+    generation_config_override:
+      max_new_tokens: 32768
+    accuracy_config:
+      eval_method: "pass_at_1"
+      extractor: "abcd_extractor"
+      ground_truth: "ground_truth"
+      num_repeats: 5
+  - name: "livecodebench::gptoss"
+    type: "accuracy"
+    generation_config_override:
+      max_new_tokens: 32768
+    accuracy_config:
+      eval_method: "code_bench_scorer"
+      extractor: "python_code_extractor"
+      num_repeats: 3
+
+settings:
+  runtime:
+    min_duration_ms: 30000
+    max_duration_ms: 14400000 # 4h whole-session deadline (perf + all accuracy phases)
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+    n_samples_to_issue: 2000 # PERF phase only; accuracy phases issue their own sample counts
+
+  load_pattern:
+    type: "concurrency"
+    target_concurrency: 1024
+
+  client:
+    num_workers: 16
+    worker_initialization_timeout: 300.0
+    log_level: "WARN"
+    worker_gc_mode: "disabled"
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_key: null
+  api_type: "openai_completions"
+
+report_dir: "results/vllm_gptoss_120b_per_dataset_osl/"

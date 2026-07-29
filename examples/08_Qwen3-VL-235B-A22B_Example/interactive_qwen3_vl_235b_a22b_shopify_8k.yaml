@@ -7,7 +7,6 @@ timeout: 1800 # 30 minutes for quick interactive runs
 
 model_params:
   name: "Qwen/Qwen3-VL-235B-A22B-Instruct"
-  top_p: 1
   max_new_tokens: 150
   streaming: "on" # Required for TTFT/TPOT measurement
 

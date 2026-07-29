@@ -51,7 +51,11 @@ repos:
 
       - id: regenerate-templates
         name: Regenerate YAML templates from schema defaults
-        entry: python scripts/regenerate_templates.py
+        # uv pins the interpreter to this project's environment: a bare
+        # `python` resolves whatever is first on PATH, which can import
+        # inference_endpoint from a sibling checkout and regenerate the
+        # templates against the wrong schema.
+        entry: uv run --no-sync python scripts/regenerate_templates.py
         language: system
         pass_filenames: false
         files: ^(src/inference_endpoint/config/(schema\.py|templates/.*)|src/inference_endpoint/endpoint_client/config\.py|scripts/regenerate_templates\.py)$

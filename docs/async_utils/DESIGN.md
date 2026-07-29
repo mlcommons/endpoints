@@ -69,17 +69,18 @@ short-lived coroutines on the hot path.
 
 ### `EventPublisherService`
 
-Singleton via `SingletonMixin` — after the first construction, subsequent calls return the
-cached instance. The first construction requires a `ManagedZMQContext`. Subscribers receive
-`EventRecord` messages over a ZMQ SUB socket.
+A plain per-instance class wrapping `ZmqMessagePublisher[EventRecord]` with `LoopManager`
+integration and auto-generated socket names. Each construction requires a `ManagedZMQContext`.
+Subscribers receive `EventRecord` messages over a ZMQ SUB socket.
 
 ```python
-class EventPublisherService(SingletonMixin, ZmqEventRecordPublisher):
+class EventPublisherService(ZmqMessagePublisher[EventRecord]):
     def __init__(
         self,
         managed_zmq_context: ManagedZMQContext,
         extra_eager: bool = False,
         isolated_event_loop: bool = False,
+        send_threshold: int = 1000,
     ) -> None
 
     def publish(self, record: EventRecord) -> None

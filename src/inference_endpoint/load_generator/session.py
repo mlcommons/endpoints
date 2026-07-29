@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
+import msgspec
+
 from ..config.runtime_settings import RuntimeSettings
 from ..config.schema import LoadPatternType
 from ..core.record import (
@@ -601,6 +603,8 @@ class BenchmarkSession:
                     )
                 )
             if self._current_phase_type != PhaseType.WARMUP:
+                finish_reason = resp.metadata.get("finish_reason")
+                worker_id = resp.metadata.get("worker_id")
                 self._publisher.publish(
                     EventRecord(
                         event_type=SampleEventType.COMPLETE,
@@ -611,6 +615,14 @@ class BenchmarkSession:
                         conversation_id=conv_id_str,
                         turn=turn_num,
                         data=resp.response_output,
+                        finish_reason=(
+                            finish_reason
+                            if isinstance(finish_reason, str)
+                            else msgspec.UNSET
+                        ),
+                        worker_id=(
+                            worker_id if isinstance(worker_id, int) else msgspec.UNSET
+                        ),
                     )
                 )
 

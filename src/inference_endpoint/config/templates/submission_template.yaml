@@ -7,7 +7,7 @@ benchmark_mode: "offline" # Required for submission: "offline" or "online"
 # Submission reference (model + ruleset for compliance checks)
 submission_ref:
   model: "llama-2-70b"
-  ruleset: "mlperf-inference-v6.0"
+  ruleset: "mlperf-inference-v6.1"
 
 model_params:
   name: "meta-llama/Llama-2-70B-Chat-HF"
