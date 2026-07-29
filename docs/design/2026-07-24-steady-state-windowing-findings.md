@@ -299,6 +299,76 @@ Key cross-mode facts learned from the data:
    `concordance = max(0, 1 − (max sp_end − min sp_end)/(len − warmup))`.
    **`0/6` converged ⇒ no steady state.**
 
+**The CoV convergence test in depth — math → `events.jsonl` → ensemble.**
+
+_The statistic._ The coefficient of variation is the population standard deviation
+over the mean:
+
+```
+CoV = σ / μ = √( (1/N) Σ (xᵢ − μ)² ) / μ
+```
+
+It is **dimensionless** (σ and μ share units and cancel), so `CoV = 0.05` means
+"the spread is ≤ 5 % of the typical value" for _any_ metric. The code:
+
+```python
+from statistics import pstdev
+def cov(values):
+    if len(values) < 2: return 0.0     # no spread definable for <2 points
+    m = sum(values) / len(values)
+    if m == 0: return 0.0              # guard: CoV undefined at mean 0
+    return pstdev(values) / abs(m)     # POPULATION stdev / |mean|
+```
+
+Population stdev (÷ N, not ÷ N−1): we describe the window we hold, not infer a
+larger population. Unitless is the point — one `bound` works across TTFT (~2 s),
+e2e latency (~180 s), and QPS alike, where a raw-stdev threshold would have to be
+retuned per metric and per concurrency. CoV of scalar percentiles, **not KL
+divergence over the histograms**, because HDR bucket edges are re-derived per
+snapshot so KL would compare mismatched bins.
+
+_What `x` is — application to `events.jsonl`._
+
+1. Ingest → per-super-pass series (§8.2 step 1): each super-pass holds that
+   super-pass's raw TTFT/latency arrays.
+2. Reduce each super-pass to **scalar percentiles** via `percentile_lower` over
+   its own values: p50 and p99 of TTFT and of latency → one number per
+   (metric, super-pass). These per-super-pass scalars are the `xᵢ`.
+3. `rule_cov_converged(window=W, bound=b, warmup)` scans `sp_end` from
+   `warmup + W` upward; over the **trailing window** `series[sp_end − W : sp_end]`
+   it computes `cov(...)` of each of the four metric series (p50/p99 × TTFT/latency).
+4. **Converged at `sp_end` iff _every_ metric's CoV `< b`.** The first such
+   `sp_end` yields the steady region `(warmup, sp_end)`; `None` if it never flattens.
+
+So CoV is measured _across super-passes within a sliding window_, per metric —
+"has this percentile stopped moving, relative to its own level, over the last `W`
+super-passes?"
+
+_The ensemble (exact configs)._ No single `(window, bound)` serves all
+concurrencies (§8.5), so a **fixed 6-detector ensemble** runs in parallel:
+
+```
+(window, bound) ∈ { (3, 0.03), (3, 0.05), (4, 0.05), (5, 0.08), (6, 0.10), (6, 0.15) }
+```
+
+— from short-window/tight-bound (fast, converges early at low C) to
+long-window/loose-bound (averages down the jitter, needed at high C). Each detector
+returns its own `sp_end` (or nothing). **Concordance** measures agreement:
+
+```
+concordance = max(0, 1 − (max sp_end − min sp_end) / (len − warmup))
+```
+
+≈ 1 when detectors agree on where steady begins (corroborated steady state), lower
+when they scatter. **`0 / 6` converged ⇒ no steady state** — e.g. c7168's p99 TTFT
+drifts the whole run, so no window ever flattens under any bound.
+
+_The noise floor._ Each super-pass p99 is estimated from ≈256 tail samples, so it
+jitters a few percent super-pass to super-pass even in true steady state; CoV cannot
+fall below that sampling floor. Bounds `≤ 0.02` therefore **never** converge at high
+C — structural, not a tuning miss, and precisely why the ensemble mixes bounds
+rather than pinning one tight value.
+
 ### 8.3 Offline algorithm (exact criteria)
 
 1. **Completion-rate series.** Bin `sample.complete` events by completion time into 1-min
