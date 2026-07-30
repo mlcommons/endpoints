@@ -829,120 +829,115 @@ async def _run_benchmark_async(
     )
     report: Report | None = None
     profiler: ProfileController
-    drained = False
 
     try:
-        try:
-            tmpfs_dir.mkdir(parents=True, exist_ok=True)
-            event_log_dir.mkdir(parents=True, exist_ok=True)
-            metrics_output_dir.mkdir(parents=True, exist_ok=True)
-            # Pre-derive profile URLs (inside the run scope so a bad config —
-            # engine set but no endpoints — fails before the run yet still triggers
-            # the tmpfs/pbar cleanup in the except/finally below).
-            profiler = ProfileController(
-                config.settings.profiling.engine,
-                config.endpoint_config.endpoints,
-                config.settings.profiling.urls,
-            )
-            await pipe.start()
-            # start() guarantees the publisher exists; narrow it for the type checker.
-            publisher = pipe.publisher
-            assert publisher is not None
-
+        tmpfs_dir.mkdir(parents=True, exist_ok=True)
+        event_log_dir.mkdir(parents=True, exist_ok=True)
+        metrics_output_dir.mkdir(parents=True, exist_ok=True)
+        # Pre-derive profile URLs (before the run so a bad config — engine set but
+        # no endpoints — fails here yet still triggers the tmpfs/pbar cleanup below).
+        profiler = ProfileController(
+            config.settings.profiling.engine,
+            config.endpoint_config.endpoints,
+            config.settings.profiling.urls,
+        )
+        # MetricsPipeline is an async context manager: __aenter__ brings up ZMQ +
+        # services; __aexit__ kills the services iff the run never drained (publisher
+        # still set) else just releases the ZMQ scope. So the setup/connect-failure
+        # paths need no explicit abort — skipping the drain below leaves the
+        # publisher set and __aexit__ kills.
+        async with pipe:
             try:
+                # start() guarantees the publisher exists; narrow it for the checker.
+                publisher = pipe.publisher
+                assert publisher is not None
+
                 issuer, http_client = await _create_issuer(ctx, loop)
-            except SetupError:
-                await pipe.abort()
-                raise
 
-            agentic_inference_strategy = _build_agentic_strategy(ctx)
-            on_sample_complete = _wire_on_sample_complete(
-                collector, agentic_inference_strategy, publisher
-            )
+                agentic_inference_strategy = _build_agentic_strategy(ctx)
+                on_sample_complete = _wire_on_sample_complete(
+                    collector, agentic_inference_strategy, publisher
+                )
 
-            session = BenchmarkSession(
-                issuer=issuer,
-                event_publisher=publisher,
-                loop=loop,
-                on_sample_complete=on_sample_complete,
-                session_id=session_id,
-            )
-            phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
+                session = BenchmarkSession(
+                    issuer=issuer,
+                    event_publisher=publisher,
+                    loop=loop,
+                    on_sample_complete=on_sample_complete,
+                    session_id=session_id,
+                )
+                phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
 
-            max_duration_ms = (
-                ctx.rt_settings.max_duration_ms if ctx.rt_settings is not None else None
-            )
-            _timeout_done = False
-            session_completed_normally = False
+                max_duration_ms = (
+                    ctx.rt_settings.max_duration_ms
+                    if ctx.rt_settings is not None
+                    else None
+                )
+                _timeout_done = False
+                session_completed_normally = False
 
-            def _on_global_timeout() -> None:
-                if not _timeout_done:
-                    logger.warning(
-                        "Performance phase max_duration reached (%d ms); "
-                        "ending performance phase.",
-                        max_duration_ms,
-                    )
-                    # Stop only the perf phase, not the whole session, so a combined
-                    # perf+accuracy run still runs accuracy after the perf cap.
-                    session.stop_current_phase()
+                def _on_global_timeout() -> None:
+                    if not _timeout_done:
+                        logger.warning(
+                            "Performance phase max_duration reached (%d ms); "
+                            "ending performance phase.",
+                            max_duration_ms,
+                        )
+                        # Stop only the perf phase, not the whole session, so a
+                        # combined perf+accuracy run still runs accuracy after the
+                        # perf cap.
+                        session.stop_current_phase()
 
-            perf_timeout = _PerfPhaseTimeout(loop, max_duration_ms, _on_global_timeout)
+                perf_timeout = _PerfPhaseTimeout(
+                    loop, max_duration_ms, _on_global_timeout
+                )
 
-            def _on_phase_start(phase: PhaseConfig) -> None:
-                # _PerfPhaseTimeout arms the perf cap on PERFORMANCE and cancels it
-                # when any later phase starts, so a combined perf+accuracy run can
-                # never have its accuracy phase truncated by the perf cap.
-                perf_timeout.on_phase_start(phase.phase_type)
-                if phase.phase_type != PhaseType.PERFORMANCE:
-                    return
-                # Fire /start_profile sequentially before any perf request is
-                # issued, so the server is armed when traffic begins.
-                profiler.start()
+                def _on_phase_start(phase: PhaseConfig) -> None:
+                    # _PerfPhaseTimeout arms the perf cap on PERFORMANCE and cancels
+                    # it when any later phase starts, so a combined perf+accuracy run
+                    # can never have its accuracy phase truncated by the perf cap.
+                    perf_timeout.on_phase_start(phase.phase_type)
+                    if phase.phase_type != PhaseType.PERFORMANCE:
+                        return
+                    # Fire /start_profile sequentially before any perf request is
+                    # issued, so the server is armed when traffic begins.
+                    profiler.start()
 
-            loop.add_signal_handler(signal.SIGINT, session.stop)
-            try:
-                result = await session.run(phases, on_phase_start=_on_phase_start)
-                session_completed_normally = True
-            except Exception as e:
-                raise ExecutionError(f"Benchmark execution failed: {e}") from e
-            finally:
-                _timeout_done = True
-                perf_timeout.cancel()
-                loop.remove_signal_handler(signal.SIGINT)
-                # Fire /stop_profile for URLs whose /start_profile succeeded.
-                # Unifies the clean phase-end path and the abort path — both reach
-                # this block.
-                profiler.stop(session_completed_normally)
-                logger.info("Cleaning up...")
+                loop.add_signal_handler(signal.SIGINT, session.stop)
                 try:
-                    if http_client:
-                        await http_client.shutdown_async()
+                    result = await session.run(phases, on_phase_start=_on_phase_start)
+                    session_completed_normally = True
                 except Exception as e:
-                    logger.warning(f"Client cleanup error: {e}")
-                # Graceful drain runs on both the clean-finish and session-failure
-                # paths (BenchmarkSession.run publishes ENDED in its own finally, so
-                # a failed run still has a terminal snapshot worth draining).
-                report = await pipe.drain_and_build_report()
-                drained = True
-        finally:
-            # pbar.close() is cosmetic: a failure here (e.g. BrokenPipeError on a
-            # closed stderr) must not mask the exception being unwound or turn a
-            # clean run into a failure. Swallow it; pipe teardown still runs.
-            try:
-                pbar.close()
-            except Exception as e:  # noqa: BLE001 — progress bar is cosmetic
-                logger.warning("Progress bar close error: %s", e)
+                    raise ExecutionError(f"Benchmark execution failed: {e}") from e
+                finally:
+                    _timeout_done = True
+                    perf_timeout.cancel()
+                    loop.remove_signal_handler(signal.SIGINT)
+                    # Fire /stop_profile for URLs whose /start_profile succeeded.
+                    # Unifies the clean phase-end path and the abort path — both
+                    # reach this block.
+                    profiler.stop(session_completed_normally)
+                    logger.info("Cleaning up...")
+                    try:
+                        if http_client:
+                            await http_client.shutdown_async()
+                    except Exception as e:
+                        logger.warning(f"Client cleanup error: {e}")
+                    # Graceful drain runs on both the clean-finish and session-
+                    # failure paths (BenchmarkSession.run publishes ENDED in its own
+                    # finally, so a failed run still has a terminal snapshot worth
+                    # draining). Nulls pipe.publisher so __aexit__ releases the ZMQ
+                    # scope without killing the services.
+                    report = await pipe.drain_and_build_report()
             finally:
-                # A setup failure between pipe.start() and session.run never
-                # reaches the drain above, so the aggregator/event-logger
-                # subprocesses were launched but never signalled to end. Kill them
-                # (abort) so they can't linger — the aggregator's drain-timeout
-                # defaults to unlimited. On the clean-finish and session-failure
-                # paths the drain already waited for their exit, so only the ZMQ
-                # scope needs closing.
-                if not drained:
-                    await pipe.abort()
-                pipe.close()
+                # pbar.close() is cosmetic: a failure here (e.g. BrokenPipeError on a
+                # closed stderr) must not mask the exception being unwound or turn a
+                # clean run into a failure. Swallow it; pipe teardown runs via the
+                # async-with __aexit__.
+                try:
+                    pbar.close()
+                except Exception as e:  # noqa: BLE001 — progress bar is cosmetic
+                    logger.warning("Progress bar close error: %s", e)
     except BaseException:
         if tmpfs_dir.exists():
             _salvage_tmpfs(ctx.report_dir, tmpfs_dir)

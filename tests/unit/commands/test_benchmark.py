@@ -1285,9 +1285,9 @@ class TestAggregatorArgs:
         The graceful drain (which waits for the services to self-exit on ENDED)
         is only reached once session.run runs; a failure before it never sends
         ENDED, and with drain-timeout defaulting to unlimited the services would
-        otherwise linger. Here launch succeeds and _create_issuer then raises a
-        non-SetupError, so the explicit `except SetupError: pipe.abort()` is
-        bypassed — the finally must still abort (kill=True).
+        otherwise linger. Here launch succeeds and _create_issuer then raises, so
+        the run never drains — MetricsPipeline.__aexit__ sees the publisher still
+        set and kills the services (kill_all).
         """
         config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
         ctx = self._make_ctx(config, tmp_path)
@@ -1327,18 +1327,16 @@ class TestAggregatorArgs:
             with pytest.raises(RuntimeError, match="setup boom"):
                 await _run_benchmark_async(ctx, loop)
 
-        # abort() → _teardown(kill=True) → launcher.kill_all(); called exactly
-        # once (the SetupError branch never ran) and never for a clean run.
+        # __aexit__ kills the services (drain never ran) → launcher.kill_all();
+        # called exactly once, and never for a clean run.
         MockLauncher.return_value.kill_all.assert_called_once()
 
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_setup_error_after_launch_aborts_exactly_once(self, tmp_path):
-        """A SetupError after launch hits BOTH abort() sites — the explicit
-        `except SetupError: pipe.abort()` and the finally's `if not drained:
-        pipe.abort()`. _teardown's `_closed` guard must make the second a no-op,
-        so kill_all() runs exactly once (not twice). Locks in the idempotency the
-        finally-abort relies on.
+        """A SetupError after launch never drains, so MetricsPipeline.__aexit__
+        kills the services exactly once — kill_all() runs a single time (there is
+        one teardown path now, not an explicit abort plus a finally abort).
         """
         config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
         ctx = self._make_ctx(config, tmp_path)
@@ -1378,8 +1376,7 @@ class TestAggregatorArgs:
             with pytest.raises(SetupError, match="connect boom"):
                 await _run_benchmark_async(ctx, loop)
 
-        # Both abort() sites fire, but _teardown's _closed guard collapses them:
-        # kill_all runs once, the ZMQ scope is exited once.
+        # The setup-error path never drains, so __aexit__ kills the services once.
         MockLauncher.return_value.kill_all.assert_called_once()
 
 

@@ -17,29 +17,33 @@
 
 ``MetricsPipeline`` owns the ZMQ context, the event publisher, the metrics-snapshot
 subscriber, and the two service subprocesses (metrics aggregator + event logger).
-It exposes explicit lifecycle methods rather than a context manager because the run
-has three distinct teardown paths that a single ``__aexit__`` cannot express cleanly:
+It is an async context manager. ``__aenter__`` brings the infrastructure up;
+``__aexit__`` releases it — killing the service subprocesses iff the run never
+drained (see below), then unwinding publisher, subscriber, and the ZMQ scope via a
+``contextlib.ExitStack`` (which runs every release even under ``BaseException`` and
+chains them, so a signal mid-teardown can't leak a child or the ZMQ context).
 
-* ``start()`` — bring the infrastructure up; unwind partially-acquired resources if
-  service launch fails (so a launch error can't leak the ZMQ context).
+The one value-producing step stays an explicit method:
+
 * ``drain_and_build_report()`` — the graceful end-of-run drain (close publisher →
   wait for services → source the final snapshot → build the Report). Runs on both a
   clean finish and a session-run failure, since ``BenchmarkSession.run`` publishes
-  ``ENDED`` in its own ``finally`` and the aggregator writes a terminal snapshot.
-* ``abort()`` — the connect-failure fast path: kill the services without a graceful
-  drain (no ``ENDED`` was ever published).
-
-``close()`` exits the ZMQ scope and is idempotent, so the orchestrator can call it
-unconditionally in its ``finally``.
+  ``ENDED`` in its own ``finally`` and the aggregator writes a terminal snapshot. It
+  nulls ``self.publisher`` on success — the signal ``__aexit__`` reads to choose
+  release-only vs. kill: a still-set publisher means the drain never ran (setup /
+  connect / session error before it), so the services are killed rather than left to
+  linger on the aggregator's unlimited drain-timeout.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
 from pathlib import Path
+from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -212,11 +216,38 @@ class MetricsPipeline:
         self._metrics_output_dir = metrics_output_dir
         self._loop = loop
 
-        self._zmq_cm: Any = None
+        self._stack: contextlib.ExitStack | None = None
         self._launcher: ServiceLauncher | None = None
         self.publisher: EventPublisherService | None = None
         self.subscriber: MetricsSnapshotSubscriber | None = None
-        self._closed = False
+
+    async def __aenter__(self) -> MetricsPipeline:
+        await self.start()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        """Release the pipeline. Kill the services iff the run never drained.
+
+        ``drain_and_build_report`` nulls ``self.publisher`` on success; a still-set
+        publisher means we never drained (setup / connect / session error before it),
+        so the service subprocesses are killed rather than left on the aggregator's
+        unlimited drain-timeout. The ``ExitStack`` then releases publisher, subscriber
+        and the ZMQ scope — running every step even under ``BaseException``.
+        """
+        if self._stack is None:
+            return
+        stack, self._stack = self._stack, None
+        if self.publisher is not None and self._launcher is not None:
+            try:
+                self._launcher.kill_all()
+            except Exception as e:  # noqa: BLE001 — teardown best-effort
+                logger.warning("Service kill_all error: %s", e)
+        stack.close()
 
     async def start(self) -> None:
         """Bring up ZMQ + publisher + subscriber + service subprocesses.
@@ -225,14 +256,16 @@ class MetricsPipeline:
         the matching PUB socket (ZMQ tolerates connect-before-bind on IPC; starting
         the SUB reader early lets the subscription handshake complete during the
         ~1-2s subprocess-launch window, avoiding the slow-joiner risk of dropping
-        early live ticks — or, worst case, missing COMPLETE). On any failure the
-        partially-acquired resources are unwound so nothing (notably the ZMQ
-        context) leaks.
+        early live ticks — or, worst case, missing COMPLETE). An ``ExitStack`` owns
+        the ZMQ scope + socket closers; on any failure it is unwound (and any
+        already-spawned children killed) so nothing — notably the ZMQ context —
+        leaks, and ``self._stack`` is committed only on full success.
         """
-        self._zmq_cm = ManagedZMQContext.scoped(io_threads=2)
-        zmq_ctx = self._zmq_cm.__enter__()
+        stack = contextlib.ExitStack()
         try:
+            zmq_ctx = stack.enter_context(ManagedZMQContext.scoped(io_threads=2))
             self.publisher = EventPublisherService(zmq_ctx)
+            stack.callback(self._close_publisher)
             pub_socket_name = self.publisher.socket_name
             metrics_socket_name = f"metrics_pub_{uuid.uuid4().hex[:8]}"
 
@@ -242,6 +275,7 @@ class MetricsPipeline:
                 metrics_socket_name, zmq_ctx, self._loop
             )
             self.subscriber.start()
+            stack.callback(self._close_subscriber)
 
             self._launcher = ServiceLauncher(zmq_ctx)
             drain = self._config.settings.drain
@@ -269,8 +303,14 @@ class MetricsPipeline:
                 timeout=self._config.settings.service_ready_timeout_s,
             )
         except BaseException:
-            self._teardown(kill=True)
+            if self._launcher is not None:  # launch may have spawned children
+                try:
+                    self._launcher.kill_all()
+                except Exception as e:  # noqa: BLE001 — teardown best-effort
+                    logger.warning("Service kill_all error: %s", e)
+            stack.close()
             raise
+        self._stack = stack
 
     async def drain_and_build_report(self) -> Report | None:
         """Graceful drain: close publisher, wait for services, build the Report.
@@ -311,46 +351,26 @@ class MetricsPipeline:
             if snap_dict is not None
             else None
         )
-        # Null the closed handles so the caller's unconditional close() does not
-        # re-close them (close() is idempotent, but this keeps the invariant clean).
+        # Null the publisher so __aexit__ sees "drained cleanly" and releases the
+        # scope without killing the services. The subscriber and ZMQ scope are
+        # released by the ExitStack in __aexit__.
         self.publisher = None
-        if self.subscriber is not None:
-            self.subscriber.close()
-            self.subscriber = None
         return report
 
-    async def abort(self) -> None:
-        """Connect-failure fast path: kill services without a graceful drain."""
-        self._teardown(kill=True)
-
-    def close(self) -> None:
-        """Exit the ZMQ scope (idempotent) — safe to call unconditionally."""
-        self._teardown(kill=False)
-
-    def _teardown(self, *, kill: bool) -> None:
-        if self._closed:
-            return
-        self._closed = True
+    def _close_publisher(self) -> None:
+        """Best-effort publisher close (ExitStack callback)."""
         if self.publisher is not None:
             try:
                 self.publisher.close()
             except Exception as e:  # noqa: BLE001 — teardown best-effort
                 logger.warning("Publisher close error: %s", e)
-        if kill and self._launcher is not None:
-            try:
-                self._launcher.kill_all()
-            except Exception as e:  # noqa: BLE001 — teardown best-effort
-                # Must not propagate: _teardown runs from a finally during
-                # exception unwind, and the ZMQ __exit__ below must still run
-                # (a raised kill_all would mask the original error and leak the
-                # ZMQ scope, since _closed is already set so a later close() no-ops).
-                logger.warning("Service kill_all error: %s", e)
+            self.publisher = None
+
+    def _close_subscriber(self) -> None:
+        """Best-effort subscriber close (ExitStack callback)."""
         if self.subscriber is not None:
             try:
                 self.subscriber.close()
             except Exception as e:  # noqa: BLE001 — teardown best-effort
                 logger.warning("Subscriber close error: %s", e)
             self.subscriber = None
-        if self._zmq_cm is not None:
-            self._zmq_cm.__exit__(None, None, None)
-            self._zmq_cm = None
