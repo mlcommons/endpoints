@@ -829,6 +829,11 @@ async def _run_benchmark_async(
     )
     report: Report | None = None
     profiler: ProfileController
+    # Bound up front so the outer finally can always shut it down: a setup error
+    # after _create_issuer (e.g. _build_agentic_strategy/_build_phases raising)
+    # would otherwise leak the client's worker subprocesses. shutdown_async() is
+    # idempotent, so the clean-path shutdown below is a harmless second call.
+    http_client: HTTPEndpointClient | None = None
 
     try:
         tmpfs_dir.mkdir(parents=True, exist_ok=True)
@@ -917,27 +922,35 @@ async def _run_benchmark_async(
                     # Unifies the clean phase-end path and the abort path — both
                     # reach this block.
                     profiler.stop(session_completed_normally)
-                    logger.info("Cleaning up...")
-                    try:
-                        if http_client:
-                            await http_client.shutdown_async()
-                    except Exception as e:
-                        logger.warning(f"Client cleanup error: {e}")
                     # Graceful drain runs on both the clean-finish and session-
                     # failure paths (BenchmarkSession.run publishes ENDED in its own
                     # finally, so a failed run still has a terminal snapshot worth
                     # draining). Nulls pipe.publisher so __aexit__ releases the ZMQ
-                    # scope without killing the services.
-                    report = await pipe.drain_and_build_report()
+                    # scope without killing the services. Best-effort: a drain error
+                    # (publisher.close / wait_for_exit) must not replace the run's
+                    # in-flight exception on the session-failure path.
+                    try:
+                        report = await pipe.drain_and_build_report()
+                    except Exception as e:  # noqa: BLE001 — drain best-effort; keep run error
+                        logger.warning("Drain/report build error: %s", e)
             finally:
-                # pbar.close() is cosmetic: a failure here (e.g. BrokenPipeError on a
-                # closed stderr) must not mask the exception being unwound or turn a
-                # clean run into a failure. Swallow it; pipe teardown runs via the
-                # async-with __aexit__.
+                # Runs on every path, including a setup error before session.run
+                # (which never reaches the session finally above). pbar.close() is
+                # cosmetic — a failure here (e.g. BrokenPipeError on a closed stderr)
+                # must not mask the exception being unwound; swallow it. The HTTP
+                # client is shut down here rather than in the session finally so a
+                # setup error can't leak its worker subprocesses; shutdown_async()
+                # is idempotent, so the clean-path call after the drain is a no-op.
+                # pipe teardown runs via the async-with __aexit__.
                 try:
                     pbar.close()
                 except Exception as e:  # noqa: BLE001 — progress bar is cosmetic
                     logger.warning("Progress bar close error: %s", e)
+                if http_client is not None:
+                    try:
+                        await http_client.shutdown_async()
+                    except Exception as e:  # noqa: BLE001 — best-effort; idempotent
+                        logger.warning(f"Client cleanup error: {e}")
     except BaseException:
         if tmpfs_dir.exists():
             try:

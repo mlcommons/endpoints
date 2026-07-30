@@ -27,6 +27,7 @@ malformed-file behavior, since this is the load-bearing path for the
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -290,3 +291,31 @@ class TestDrainFallback:
             report = await pipe.drain_and_build_report()
         assert report is None
         assert any("No metrics snapshot available" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+class TestAexitKillPolicy:
+    """``__aexit__`` kills the service subprocesses iff the run never drained. A
+    clean drain nulls ``pipe.publisher``; killing then would tear down a still-
+    writing aggregator. The negative arm (clean drain ⇒ no kill) is the core
+    invariant of the async-context-manager rewrite and must be pinned."""
+
+    @pytest.mark.asyncio
+    async def test_clean_drain_does_not_kill(self, tmp_path):
+        pipe = _make_pipe(tmp_path)
+        pipe._stack = contextlib.ExitStack()
+        pipe._launcher = MagicMock()
+        pipe.publisher = None  # drain_and_build_report nulled it on a clean drain
+        pipe.subscriber = None
+        await pipe.__aexit__(None, None, None)
+        pipe._launcher.kill_all.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_never_drained_kills_once(self, tmp_path):
+        pipe = _make_pipe(tmp_path)
+        pipe._stack = contextlib.ExitStack()
+        pipe._launcher = MagicMock()
+        pipe.publisher = MagicMock()  # still set ⇒ setup/session error before drain
+        pipe.subscriber = None
+        await pipe.__aexit__(None, None, None)
+        pipe._launcher.kill_all.assert_called_once()

@@ -1380,6 +1380,64 @@ class TestAggregatorArgs:
         # The setup-error path never drains, so __aexit__ kills the services once.
         MockLauncher.return_value.kill_all.assert_called_once()
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_http_client_shut_down_on_setup_error_after_create_issuer(
+        self, tmp_path
+    ):
+        """A setup error AFTER _create_issuer (client already created) but before
+        session.run must still shut the HTTP client down — otherwise its worker
+        subprocesses leak (the session finally that used to own the shutdown is
+        never reached on this path)."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        mock_client = MagicMock()
+        mock_client.shutdown_async = AsyncMock()
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(return_value=(MagicMock(), mock_client)),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_agentic_strategy",
+                side_effect=RuntimeError("setup boom after client create"),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="setup boom"):
+                await _run_benchmark_async(ctx, loop)
+
+        # Client was created; the run failed before the session finally, so the
+        # outer finally must have shut it down (idempotent, called once here).
+        mock_client.shutdown_async.assert_awaited_once()
+
 
 class TestAccuracyOnlyDatasetLoading:
     """`--accuracy-only` must skip the performance dataset even when the config
