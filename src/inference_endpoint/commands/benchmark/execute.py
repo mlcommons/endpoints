@@ -925,12 +925,13 @@ async def _run_benchmark_async(
                 report = await pipe.drain_and_build_report()
                 drained = True
         finally:
-            # Cleanup runs on every path. pipe.close() (ZMQ scope exit) must run
-            # even if pbar.close() raises, and a failure here propagates to the
-            # outer except → tmpfs salvage — matching the monolith's guarantees
-            # (pbar.close was inside the ZMQ `with`, whose __exit__ always ran).
+            # pbar.close() is cosmetic: a failure here (e.g. BrokenPipeError on a
+            # closed stderr) must not mask the exception being unwound or turn a
+            # clean run into a failure. Swallow it; pipe teardown still runs.
             try:
                 pbar.close()
+            except Exception as e:  # noqa: BLE001 — progress bar is cosmetic
+                logger.warning("Progress bar close error: %s", e)
             finally:
                 # A setup failure between pipe.start() and session.run never
                 # reaches the drain above, so the aggregator/event-logger
