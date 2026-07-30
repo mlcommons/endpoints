@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
 import msgspec.json
@@ -52,14 +52,14 @@ from transformers.utils import logging as transformers_logging
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.commands.benchmark.accuracy import (
     AccuracyConfiguration,
-    _effective_external_sample_count,
-    _score_accuracy,
+    effective_external_sample_count,
+    score_accuracy,
     write_accuracy_results,
 )
 from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
 from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
-    _write_profiling_section,
+    write_profiling_section,
 )
 from inference_endpoint.compliance import AuditRunSpec
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -100,6 +100,9 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
+
+if TYPE_CHECKING:
+    from inference_endpoint.async_utils.event_publisher import EventPublisherService
 
 transformers_logging.set_verbosity_error()
 
@@ -537,7 +540,7 @@ def setup_benchmark(
         logger.info(f"Accuracy-only mode, Expected samples: {total_samples}")
     for ec in eval_configs:
         if ec.scorer.SKIP_ENDPOINT_PHASE:
-            n = _effective_external_sample_count(ec)
+            n = effective_external_sample_count(ec)
             if n is not None:
                 logger.info(
                     "Accuracy dataset '%s' (%s): %d instances evaluated externally",
@@ -764,7 +767,7 @@ def _build_agentic_strategy(
 def _wire_on_sample_complete(
     collector: ResponseCollector,
     agentic_inference_strategy: AgenticInferenceStrategy | None,
-    publisher: Any,
+    publisher: EventPublisherService,
 ) -> Callable[[QueryResult], None]:
     """Compose the per-sample completion callback (agentic strategy + collector)."""
     if agentic_inference_strategy is None:
@@ -1024,7 +1027,7 @@ def _write_report_artifacts(
     with report_txt.open("w") as f:
         report.display(fn=lambda s: print(s, file=f))
         if profiling is not None:
-            _write_profiling_section(f, profiling)
+            write_profiling_section(f, profiling)
     logger.info("Report written to %s", report_txt)
 
 
@@ -1095,7 +1098,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # then the exception propagates as before.
     accuracy_scores: list[dict[str, Any]] = []
     try:
-        accuracy_scores = _score_accuracy(ctx, result)
+        accuracy_scores = score_accuracy(ctx, result)
     finally:
         # Attach the per-dataset accuracy list so result_summary.json, the
         # console summary, and report.txt all carry it (stays [] on a scoring

@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class AccuracyConfiguration:
     scorer: type[Scorer]
     extractor: type[Extractor] | None
@@ -73,7 +73,7 @@ class AccuracyConfiguration:
     dataset_type: DatasetType = DatasetType.ACCURACY
 
 
-def _effective_external_sample_count(
+def effective_external_sample_count(
     eval_cfg: AccuracyConfiguration,
 ) -> int | None:
     """Clamp an external scorer's requested count to its loaded dataset size."""
@@ -216,7 +216,7 @@ def _load_osl_backend(has_accuracy: bool, tokenizer_name: str | None) -> Any | N
     return osl_backend
 
 
-def _score_accuracy(
+def score_accuracy(
     ctx: BenchmarkContext, result: SessionResult
 ) -> list[dict[str, Any]]:
     """Run configured scorers and return reportable accuracy entries.
@@ -301,7 +301,7 @@ def _score_accuracy(
         else:
             total_samples = unit_samples * num_repeats
         if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
-            ext = _effective_external_sample_count(eval_cfg)
+            ext = effective_external_sample_count(eval_cfg)
             if ext is not None:
                 unit_samples = ext
                 total_samples = ext

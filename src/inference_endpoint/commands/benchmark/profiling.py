@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
-from typing import Any, TextIO
+from typing import Any, Literal, TextIO
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -42,9 +42,12 @@ _PROFILE_PATHS: dict[ProfilerEngine, tuple[str, str]] = {
     ProfilerEngine.VLLM: ("/start_profile", "/stop_profile"),
 }
 
+# Timeout (seconds) for a single /start_profile or /stop_profile POST.
+_PROFILE_POST_TIMEOUT_S = 2
+
 
 def _derive_profile_urls(
-    endpoints: list[str], engine: ProfilerEngine, action: str
+    endpoints: list[str], engine: ProfilerEngine, action: Literal["start", "stop"]
 ) -> list[str]:
     """One profile URL per endpoint, derived from the engine's HTTP protocol.
 
@@ -79,7 +82,7 @@ def _post_profile(url: str) -> dict[str, Any]:
     }
     req = urllib_request.Request(url, method="POST", data=b"")
     try:
-        with urllib_request.urlopen(req, timeout=2) as resp:
+        with urllib_request.urlopen(req, timeout=_PROFILE_POST_TIMEOUT_S) as resp:
             record["status"] = resp.status
     except urllib_error.HTTPError as e:
         record["status"] = e.code
@@ -106,7 +109,7 @@ def _render_profile_status(rec: dict[str, Any]) -> str:
     return "ERROR"
 
 
-def _write_profiling_section(f: TextIO, profiling: dict[str, Any]) -> None:
+def write_profiling_section(f: TextIO, profiling: dict[str, Any]) -> None:
     """Append the Profiling section to report.txt (called after report.display)."""
     starts = profiling.get("starts", [])
     stops = profiling.get("stops", [])
@@ -166,10 +169,6 @@ class ProfileController:
             profile_endpoints = urls_override or endpoints
             self._start_urls = _derive_profile_urls(profile_endpoints, engine, "start")
             self._stop_urls = _derive_profile_urls(profile_endpoints, engine, "stop")
-
-    @property
-    def enabled(self) -> bool:
-        return self._engine is not None
 
     def start(self) -> None:
         """Fire /start_profile sequentially before any perf request is issued."""

@@ -52,7 +52,7 @@ from inference_endpoint.commands.benchmark.profiling import (
     _derive_profile_urls,
     _post_profile,
     _render_profile_status,
-    _write_profiling_section,
+    write_profiling_section,
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -2791,7 +2791,7 @@ class TestProfilingHelpers:
             ],
         }
         buf = io.StringIO()
-        _write_profiling_section(buf, payload)
+        write_profiling_section(buf, payload)
         text = buf.getvalue()
         assert "Profiling" in text
         assert "http://h/start_profile" in text
