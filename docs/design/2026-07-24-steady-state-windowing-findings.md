@@ -486,6 +486,52 @@ whenever plateau bins outnumber tail bins (true for both examples: 85/157 and 66
 | tail-heavy offline plateau               | plateau bins < tail bins           | switch `steady` estimator to upper-quantile/mode (limitation) |
 | non-streaming (no TTFT)                  | `recv_first` absent                | TTFT N/A; throughput/e2e only                                 |
 
+### 8.9 Long-running samples, the backlog tail, and metric selection
+
+**Behavior.** DSR1 and agentic datasets contain a small subset of very-long-OSL
+samples (DSR1 long-CoT up to `max_new_tokens = 20000`; the agentic set has OSL
+p50 99 / p99 2355 / max 11457 — a ~115× spread). When the dataset is issued
+repeatedly — `K` passes under concurrency, or an offline burst — each long
+sample takes far longer than one pass, so copies of the **same** long samples
+`[L_0 … L_n]` from many passes accumulate. Under temperature-0 (deterministic)
+decoding the re-issued copies produce the same long output, so the drain tail is
+dominated by many repeats of the same handful of long samples backlogged behind
+everything else. This is the offline drain tail (293038: a ~60-min tail of these
+backlogged long completions vs an ~80-min plateau) and the concurrency drain.
+
+**Verified skew** (232386, DSR1 poisson, 140k samples): e2e latency
+p50 26.5 s / p99 181 s (**6.8× skew**), but TTFT p50 0.22 s / p99 0.50 s
+(**2.3×, tight**). The long generation inflates e2e latency and OSL yet leaves
+TTFT — and, being per-token, TPOT — essentially untouched: they are
+per-request / per-token and **decoupled from OSL**.
+
+**How the window handles it.** The window is defined on **issue membership**
+(§8.2): a sample counts iff it was _issued_ in the window, and we aggregate its
+**full lifetime** — including completions that land far later in the drain. We do
+**not** re-define the window by completion time and do not wait for all issued
+samples to finish. Consequence: **e2e latency and OSL for the window are skewed**
+by the backlogged long samples (a long sample issued mid-window may complete at
+end-of-run, so its e2e includes the whole backlog wait) — those two are therefore
+not trustworthy steady numbers under long-sample skew. **TTFT and TPOT are not
+skewed** — per-request / per-token and stable across the OSL range (verified
+above) — so they remain valid steady metrics regardless of the backlog.
+
+**Metric-selection proposal (LLMs).** Report the steady state with
+**token-based, OSL-robust metrics — TTFT, TPOT, and TPS (output tokens/s) — and
+drop QPS (requests/s)** as a reported metric. With OSL varying ~100×, a "request"
+is not a unit of work (QPS conflates a 10-token request with a 10000-token one),
+so requests/s is a poor throughput measure; **tokens/s (TPS)** is the meaningful
+one. e2e latency and OSL become _context_ (they describe the workload's tail, not
+the system's steady behaviour), not headline steady metrics. Workloads whose unit
+of work is uniform and token-free (e.g. **text-to-video**) keep a
+request/sample-rate throughput, since there is no token stream to measure.
+
+We do **not** drop the long samples themselves — they still contribute their
+tokens to TPS and their (matching) TTFT/TPOT; we drop the _reliance_ on the
+OSL-skewed metrics, not the samples (dropping samples would bias TPS and the OSL
+mix). The verified TTFT/TPOT stability is exactly what licenses trusting the
+steady number without e2e latency / OSL / QPS.
+
 ## 9. Open questions
 
 - Does `drifting_up` reproduce on DSR1 (different workload) and on a clean
