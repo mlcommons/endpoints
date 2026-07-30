@@ -26,16 +26,23 @@ malformed-file behavior, since this is the load-bearing path for the
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import inference_endpoint.commands.benchmark.pipeline as pipeline_mod
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
     SessionState,
 )
 from inference_endpoint.commands.benchmark.pipeline import (
+    MetricsPipeline,
+    _build_report_from_snapshot,
     _load_final_snapshot_from_disk,
 )
+from inference_endpoint.config.schema import LoadPatternType
 from inference_endpoint.metrics.report import Report
 
 
@@ -159,3 +166,127 @@ class TestReportFromLoadedSnapshot:
         the precondition the fallback chain depends on."""
         result = _load_final_snapshot_from_disk(tmp_path / "nope.json")
         assert result is None
+
+
+def _fake_config(*, poisson: bool = False, use_legacy: bool = False) -> SimpleNamespace:
+    """Minimal stand-in exposing only what ``_build_report_from_snapshot`` reads."""
+    return SimpleNamespace(
+        settings=SimpleNamespace(
+            load_pattern=SimpleNamespace(
+                type=(
+                    LoadPatternType.POISSON
+                    if poisson
+                    else LoadPatternType.MAX_THROUGHPUT
+                ),
+                use_legacy_loadgen_qps_metrics=use_legacy,
+            ),
+            runtime=SimpleNamespace(scheduler_random_seed=1, dataloader_random_seed=2),
+            model_dump=lambda **kw: {"load_pattern": {}, "warmup": {}},
+        )
+    )
+
+
+@pytest.mark.unit
+class TestBuildReportFromSnapshot:
+    """``_build_report_from_snapshot`` warning branches + swallow-to-None.
+
+    ``Report.from_snapshot`` is stubbed so the branches under test (which key off
+    the returned Report) are exercised without a fully valid snapshot payload.
+    """
+
+    def test_incomplete_report_logs_warning(self, monkeypatch, caplog):
+        fake_report = SimpleNamespace(
+            complete=False, state="complete", legacy_loadgen_window_duration_ns=None
+        )
+        monkeypatch.setattr(
+            pipeline_mod,
+            "Report",
+            SimpleNamespace(from_snapshot=lambda *a, **k: fake_report),
+        )
+        with caplog.at_level("WARNING"):
+            out = _build_report_from_snapshot(
+                _snapshot_dict(n_pending_tasks=3), _fake_config()
+            )
+        assert out is fake_report
+        assert any("incomplete" in r.message.lower() for r in caplog.records)
+
+    def test_legacy_loadgen_qps_warning(self, monkeypatch, caplog):
+        fake_report = SimpleNamespace(
+            complete=True,
+            state="complete",
+            legacy_loadgen_window_duration_ns=5_000_000_000,
+        )
+        monkeypatch.setattr(
+            pipeline_mod,
+            "Report",
+            SimpleNamespace(from_snapshot=lambda *a, **k: fake_report),
+        )
+        with caplog.at_level("WARNING"):
+            out = _build_report_from_snapshot(
+                _snapshot_dict(), _fake_config(poisson=True, use_legacy=True)
+            )
+        assert out is fake_report
+        assert any("legacy" in r.message.lower() for r in caplog.records)
+
+    def test_malformed_snapshot_swallowed_to_none(self, monkeypatch, caplog):
+        def _boom(*a, **k):
+            raise ValueError("bad snapshot")
+
+        monkeypatch.setattr(
+            pipeline_mod, "Report", SimpleNamespace(from_snapshot=_boom)
+        )
+        with caplog.at_level("WARNING"):
+            out = _build_report_from_snapshot(_snapshot_dict(), _fake_config())
+        assert out is None
+        assert any(
+            "Failed to build report from snapshot" in r.message for r in caplog.records
+        )
+
+
+def _make_pipe(tmp_path: Path) -> MetricsPipeline:
+    return MetricsPipeline(
+        MagicMock(),
+        tokenizer_name=None,
+        enable_streaming=False,
+        event_log_dir=tmp_path / "events",
+        metrics_output_dir=tmp_path / "metrics",
+        loop=asyncio.get_event_loop(),
+    )
+
+
+@pytest.mark.unit
+class TestDrainFallback:
+    """``drain_and_build_report`` snapshot-sourcing fallback — the SIGKILL/OOM
+    recovery path where ``final_snapshot.json`` never made it to disk."""
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_subscriber_when_no_disk_snapshot(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        pipe = _make_pipe(tmp_path)  # metrics dir has no final_snapshot.json
+        pipe.publisher = MagicMock(buffered_count=0, pending_count=0)
+        pipe._launcher = MagicMock()
+        pipe.subscriber = MagicMock(latest=object())
+        monkeypatch.setattr(pipeline_mod, "snapshot_to_dict", lambda s: {"k": "v"})
+        monkeypatch.setattr(
+            pipeline_mod, "_build_report_from_snapshot", lambda d, c: "REPORT"
+        )
+        with caplog.at_level("WARNING"):
+            report = await pipe.drain_and_build_report()
+        assert report == "REPORT"
+        assert any(
+            "No final_snapshot.json on disk" in r.message for r in caplog.records
+        )
+        # Drained cleanly ⇒ publisher nulled (the signal __aexit__ reads).
+        assert pipe.publisher is None
+
+    @pytest.mark.asyncio
+    async def test_no_snapshot_available_returns_none(self, tmp_path, caplog):
+        pipe = _make_pipe(tmp_path)
+        pipe.publisher = MagicMock(buffered_count=0, pending_count=0)
+        pipe._launcher = MagicMock()
+        pipe.subscriber = MagicMock(latest=None)  # no disk, no live snapshot
+        with caplog.at_level("ERROR"):
+            report = await pipe.drain_and_build_report()
+        assert report is None
+        assert any("No metrics snapshot available" in r.message for r in caplog.records)

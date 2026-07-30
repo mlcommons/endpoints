@@ -49,6 +49,7 @@ from inference_endpoint.commands.benchmark.execute import (
     setup_benchmark,
 )
 from inference_endpoint.commands.benchmark.profiling import (
+    ProfileController,
     _derive_profile_urls,
     _post_profile,
     _render_profile_status,
@@ -2796,6 +2797,78 @@ class TestProfilingHelpers:
         assert "Trigger span" in text
         # Mirrors what finalize_benchmark dumps to profiling.json
         assert json.loads(json.dumps(payload))["engine"] == "vllm"
+
+    @pytest.mark.unit
+    def test_controller_start_then_stop_maps_indices(self):
+        """start() posts each /start_profile; stop() posts /stop_profile only for
+        the starts that returned 200, mapped by the same index, tagging stop_reason."""
+
+        def _fake_post(url):
+            # b's /start_profile fails (500); everything else succeeds.
+            status = 500 if url == "http://b/start_profile" else 200
+            return {
+                "url": url,
+                "status": status,
+                "error": None,
+                "sent_at_ns": 1,
+                "sent_at_iso": "x",
+            }
+
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+            side_effect=_fake_post,
+        ):
+            ctrl = ProfileController(
+                ProfilerEngine.VLLM, ["http://a/v1", "http://b/v1"], None
+            )
+            ctrl.start()
+            ctrl.stop(completed_normally=True)
+
+        payload = ctrl.payload()
+        assert payload["engine"] == "vllm"
+        assert [s["url"] for s in payload["starts"]] == [
+            "http://a/start_profile",
+            "http://b/start_profile",
+        ]
+        # Only a's start returned 200 → only a's stop fires; b (500) is skipped.
+        assert [s["url"] for s in payload["stops"]] == ["http://a/stop_profile"]
+        assert payload["stops"][0]["stop_reason"] == "phase_end"
+
+    @pytest.mark.unit
+    def test_controller_stop_reason_abort_when_not_completed(self):
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+            side_effect=lambda url: {
+                "url": url,
+                "status": 200,
+                "error": None,
+                "sent_at_ns": 1,
+                "sent_at_iso": "x",
+            },
+        ):
+            ctrl = ProfileController(ProfilerEngine.VLLM, ["http://a/v1"], None)
+            ctrl.start()
+            ctrl.stop(completed_normally=False)
+        assert ctrl.payload()["stops"][0]["stop_reason"] == "abort"
+
+    @pytest.mark.unit
+    def test_controller_disabled_is_noop(self):
+        """engine=None → no URLs derived, start/stop do nothing, payload is None."""
+        ctrl = ProfileController(None, ["http://a/v1"], None)
+        ctrl.start()
+        ctrl.stop(completed_normally=True)
+        assert ctrl.payload() is None
+
+    @pytest.mark.unit
+    def test_controller_stop_without_start_posts_nothing(self):
+        """stop() before any start() records nothing (empty _starts, early return)."""
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+        ) as mock_post:
+            ctrl = ProfileController(ProfilerEngine.VLLM, ["http://a/v1"], None)
+            ctrl.stop(completed_normally=True)
+        mock_post.assert_not_called()
+        assert ctrl.payload()["stops"] == []
 
 
 class _OverrideTestBase:

@@ -940,7 +940,10 @@ async def _run_benchmark_async(
                     logger.warning("Progress bar close error: %s", e)
     except BaseException:
         if tmpfs_dir.exists():
-            _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
+            try:
+                _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
+            except Exception as e:  # noqa: BLE001 — salvage best-effort; keep original exc
+                logger.warning("Failed to salvage tmpfs: %s", e)
             shutil.rmtree(tmpfs_dir, ignore_errors=True)
         raise
 
@@ -1075,13 +1078,6 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     collector = bench.collector
     report = bench.report
 
-    # Sibling profiling.json — kept separate so Report stays a pure
-    # snapshot-derived struct.
-    if bench.profiling is not None:
-        (ctx.report_dir / "profiling.json").write_text(
-            json.dumps(bench.profiling, indent=2)
-        )
-
     # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
     # sample_idx_map.json + events.jsonl from here).
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
@@ -1106,6 +1102,17 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             _write_report_artifacts(ctx, report, bench.profiling)
 
     _summarize_and_log_metrics(ctx, report, result, collector)
+
+    # Sibling profiling.json — kept separate so Report stays a pure snapshot-
+    # derived struct. Written after the report artifacts (and best-effort) so an
+    # OSError here can't discard the already-written perf report.
+    if bench.profiling is not None:
+        try:
+            (ctx.report_dir / "profiling.json").write_text(
+                json.dumps(bench.profiling, indent=2)
+            )
+        except OSError as e:
+            logger.warning("Failed to write profiling.json: %s", e)
 
     # Emit the accuracy results as a focused artifact under accuracy/. Written
     # after the report artifacts so a write failure here can't discard them.
@@ -1145,7 +1152,10 @@ def run_benchmark(
     finally:
         if bench:
             if bench.tmpfs_dir.exists():
-                _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
+                try:
+                    _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
+                except Exception as e:  # noqa: BLE001 — salvage best-effort
+                    logger.warning("Failed to salvage tmpfs: %s", e)
                 shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
             logger.info(f"Partial results saved to {ctx.report_dir}")
 
