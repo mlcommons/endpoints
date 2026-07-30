@@ -1065,6 +1065,7 @@ async def _run_benchmark_async(
                 loop=loop,
                 on_sample_complete=_on_sample_complete,
                 session_id=session_id,
+                session_id_headers=ctx.config.endpoint_config.session_id_headers,
             )
 
             phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)

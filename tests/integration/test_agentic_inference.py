@@ -111,6 +111,7 @@ async def _run_session(
     strategy: AgenticInferenceStrategy,
     responses_out: dict,
     event_records_out: list[EventRecord] | None = None,
+    session_id_headers: tuple[str, ...] = ("X-Session-ID",),
 ) -> int:
     """Wire up HTTPEndpointClient + BenchmarkSession and run one phase.
 
@@ -145,6 +146,7 @@ async def _run_session(
             event_publisher=publisher,
             loop=loop,
             on_sample_complete=on_complete,
+            session_id_headers=session_id_headers,
         )
         rt = RuntimeSettings(
             metrics.Throughput(1000),
@@ -815,6 +817,50 @@ async def test_tools_field_forwarded_to_endpoint(echo_server):
             assert "tools" in payload
             assert len(payload["tools"]) == 1
             assert payload["tools"][0]["function"]["name"] == "search"
+    finally:
+        server.stop()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_session_id_headers_reach_endpoint_on_every_turn():
+    """Every turn of a conversation carries the conversation id in each
+    configured routing header, so a session-aware router can pin the whole
+    conversation to the replica holding its KV prefix."""
+    received_headers: list[dict] = []
+
+    class CapturingEchoServer(EchoServer):
+        async def _handle_echo_chat_completions_request(self, request):
+            received_headers.append(dict(request.headers))
+            return await super()._handle_echo_chat_completions_request(request)
+
+    server = CapturingEchoServer(port=0)
+    server.start()
+    try:
+        rows = [
+            {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Hello"},
+            {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Hi"},
+            {"conversation_id": "c1", "turn": 3, "role": "user", "content": "Bye"},
+        ]
+        ds = _make_dataset(rows)
+        strategy = _make_strategy(ds)
+        responses: dict = {}
+
+        count = await _run_session(
+            server.url,
+            ds,
+            strategy,
+            responses,
+            session_id_headers=("X-Session-ID", "X-Dynamo-Session-ID"),
+        )
+
+        assert count == 2
+        assert len(received_headers) == 2
+        for headers in received_headers:
+            # aiohttp header lookup is case-insensitive; dict() is not.
+            lowered = {k.lower(): v for k, v in headers.items()}
+            assert lowered["x-session-id"] == "c1"
+            assert lowered["x-dynamo-session-id"] == "c1"
     finally:
         server.stop()
 

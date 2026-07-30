@@ -2,6 +2,33 @@
 
 This example runs agentic inference conversations through an OpenAI-compatible endpoint. The client preserves conversation order, sends one in-flight turn per active conversation, and adds `X-Session-ID: <conversation_id>` on every request so a router can keep a conversation on the same backend.
 
+## Conversation-Aware Routing
+
+Session affinity is what makes a multi-turn benchmark measure the serving stack rather than the router: every turn of a conversation must land on the replica that already holds the conversation's KV prefix, otherwise each turn re-prefills the whole trajectory and TTFT is dominated by cache misses.
+
+Routers disagree on which header they key off, so `endpoint_config.session_id_headers` selects the names the client stamps with the conversation id:
+
+| Router | Header | Server-side requirement |
+| --- | --- | --- |
+| Generic / default | `X-Session-ID` | — |
+| Dynamo frontend | `X-Dynamo-Session-ID` | run the frontend with `--router-session-affinity-ttl-secs` |
+| SGLang Model Gateway | `X-SMG-Routing-Key` | manual routing policy |
+
+```yaml
+endpoint_config:
+  endpoints: ["http://localhost:8000"]
+  session_id_headers: ["X-Session-ID", "X-Dynamo-Session-ID"]
+```
+
+or on the CLI:
+
+```bash
+inference-endpoint benchmark online -c config.yaml \
+  --session-id-headers X-Session-ID X-Dynamo-Session-ID
+```
+
+Every listed header carries the same conversation id, so sending several at once is safe against a router that ignores the names it does not recognize. Set `session_id_headers: []` to send none. Requests without a conversation id (single-turn load patterns) never carry a session header.
+
 ## Dataset
 
 Use flat JSONL with one row per message. Rows for each `conversation_id` must be contiguous and ordered by increasing `turn`.

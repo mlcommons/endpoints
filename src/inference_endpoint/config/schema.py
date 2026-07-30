@@ -54,6 +54,16 @@ from .utils import parse_dataset_string, resolve_env_vars
 
 logger = logging.getLogger(__name__)
 
+# Header carrying the conversation id when no explicit set is configured. Routers
+# that key session affinity off a different name are selected via
+# EndpointConfig.session_id_headers.
+DEFAULT_SESSION_ID_HEADER = "X-Session-ID"
+
+# RFC 9110 field-name token characters.
+_HEADER_NAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-.^_`|~"
+)
+
 
 class SystemDefaults(BaseModel):
     DEFAULT_TIMEOUT: ClassVar[float] = 300.0
@@ -1023,6 +1033,27 @@ class EndpointConfig(BaseModel):
             alias="--api-type", help="API type: openai, sglang, or videogen"
         ),
     ] = APIType.OPENAI
+    session_id_headers: Annotated[
+        list[str],
+        cyclopts.Parameter(
+            alias="--session-id-headers",
+            help="Headers that carry the conversation id for session-affinity routing",
+            negative="",
+        ),
+    ] = Field(
+        default_factory=lambda: [DEFAULT_SESSION_ID_HEADER],
+        description=(
+            "Header names that carry the conversation id on every request of a "
+            "conversation, so a session-aware router can pin all turns to the "
+            "replica holding the conversation's KV prefix. Each router dialect "
+            "reads a different name: 'X-Session-ID' (generic), "
+            "'X-Dynamo-Session-ID' (Dynamo frontend running "
+            "--router-session-affinity-ttl-secs), 'X-SMG-Routing-Key' (SGLang "
+            "Model Gateway manual routing policy). List several to send all of "
+            "them. Only applies to load patterns that carry a conversation id "
+            "(agentic_inference); single-turn requests send no session header."
+        ),
+    )
 
     @field_validator("endpoints", mode="after")
     @classmethod
@@ -1033,6 +1064,33 @@ class EndpointConfig(BaseModel):
                     f"Endpoint URL must include scheme (http:// or https://), got: {url!r}"
                 )
         return v
+
+    @field_validator("session_id_headers", mode="after")
+    @classmethod
+    def _validate_session_id_headers(cls, v: list[str]) -> list[str]:
+        """Reject malformed names and drop case-insensitive duplicates.
+
+        Duplicates matter: the header block is serialized verbatim onto the wire,
+        so 'X-Session-ID' twice would emit the field twice.
+        """
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for raw in v:
+            name = raw.strip()
+            if not name:
+                raise ValueError("session_id_headers entries must not be empty")
+            invalid = set(name) - _HEADER_NAME_CHARS
+            if invalid:
+                raise ValueError(
+                    f"Invalid HTTP header name {name!r}: illegal character(s) "
+                    f"{''.join(sorted(invalid))!r}"
+                )
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(name)
+        return deduped
 
 
 class BenchmarkConfig(WithUpdatesMixin, BaseModel):

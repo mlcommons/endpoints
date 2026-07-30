@@ -29,6 +29,7 @@ from inference_endpoint.config.schema import (
     BenchmarkConfig,
     Dataset,
     DatasetType,
+    EndpointConfig,
     EvalMethod,
     LoadPattern,
     LoadPatternType,
@@ -1122,3 +1123,41 @@ class TestRulesetSeedOverride:
         )
         with pytest.raises(ValidationError):
             self._submission(name)
+
+
+class TestEndpointConfigSessionIdHeaders:
+    """Header set that carries the conversation id for session-affinity routing."""
+
+    def _config(self, **kwargs):
+        return EndpointConfig(endpoints=["http://localhost:8000"], **kwargs)
+
+    @pytest.mark.unit
+    def test_defaults_to_generic_session_header(self):
+        assert self._config().session_id_headers == ["X-Session-ID"]
+
+    @pytest.mark.unit
+    def test_accepts_router_specific_headers(self):
+        config = self._config(
+            session_id_headers=["X-Session-ID", "X-Dynamo-Session-ID"]
+        )
+        assert config.session_id_headers == ["X-Session-ID", "X-Dynamo-Session-ID"]
+
+    @pytest.mark.unit
+    def test_case_insensitive_duplicates_collapse_to_first_spelling(self):
+        """A repeated name would otherwise be serialized onto the wire twice."""
+        config = self._config(
+            session_id_headers=["X-Dynamo-Session-ID", "x-dynamo-session-id"]
+        )
+        assert config.session_id_headers == ["X-Dynamo-Session-ID"]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "name", ["X-Dynamo Session-ID", "X-Bad:Header", "X-Bad\r\nInjected", ""]
+    )
+    def test_malformed_header_names_rejected(self, name):
+        with pytest.raises(ValidationError):
+            self._config(session_id_headers=[name])
+
+    @pytest.mark.unit
+    def test_empty_list_disables_session_headers(self):
+        assert self._config(session_id_headers=[]).session_id_headers == []

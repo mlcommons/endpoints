@@ -108,6 +108,8 @@ endpoint_config:
   - http://localhost:8000
   api_key: null  # API key
   api_type: openai  # API type: openai, sglang, or videogen | options: openai, openai_completions, sglang, videogen
+  session_id_headers:  # Header names that carry the conversation id on every request of a conversation, so a session-aware router can pin all turns to the replica holding the conversation's KV prefix. Each router dialect reads a different name: 'X-Session-ID' (generic), 'X-Dynamo-Session-ID' (Dynamo frontend running --router-session-affinity-ttl-secs), 'X-SMG-Routing-Key' (SGLang Model Gateway manual routing policy). List several to send all of them. Only applies to load patterns that carry a conversation id (agentic_inference); single-turn requests send no session header.
+  - X-Session-ID
 report_dir: null  # Report output directory
 timeout: null  # Global timeout in seconds
 verbose: false  # Enable verbose logging

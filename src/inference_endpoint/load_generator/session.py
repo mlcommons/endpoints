@@ -25,7 +25,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
@@ -33,7 +33,7 @@ from typing import Any, Protocol
 import msgspec
 
 from ..config.runtime_settings import RuntimeSettings
-from ..config.schema import LoadPatternType
+from ..config.schema import DEFAULT_SESSION_ID_HEADER, LoadPatternType
 from ..core.record import (
     ErrorEventType,
     EventRecord,
@@ -46,8 +46,6 @@ from .sample_order import create_sample_order
 from .strategy import LoadStrategy, create_load_strategy
 
 logger = logging.getLogger(__name__)
-
-_SESSION_ID_HEADER = "X-Session-ID"
 
 
 def _extract_prompt_text(messages: list[Any]) -> str | None:
@@ -174,6 +172,11 @@ class PhaseIssuer:
     Created fresh for each phase. Holds the phase-scoped uuid_to_index map,
     inflight counter, and issued count. Strategies call issue(sample_index)
     to load data, build a Query, publish ISSUED, and send to the endpoint.
+
+    ``session_id_headers`` names the headers that carry the conversation id on
+    every turn of a conversation, so a session-aware router (Dynamo, SGLang
+    Model Gateway, or a generic X-Session-ID router) can pin all turns of a
+    conversation to the replica already holding its KV prefix.
     """
 
     __slots__ = (
@@ -182,6 +185,7 @@ class PhaseIssuer:
         "_on_inflight_drained",
         "_performance_tracking_stopped",
         "_publisher",
+        "_session_id_headers",
         "_stop_check",
         "uuid_to_index",
         "uuid_to_conv_info",
@@ -197,10 +201,12 @@ class PhaseIssuer:
         publisher: EventPublisher,
         stop_check: Callable[[], bool],
         on_inflight_drained: Callable[[], None] | None = None,
+        session_id_headers: Sequence[str] = (DEFAULT_SESSION_ID_HEADER,),
     ):
         self._dataset = dataset
         self._issuer = issuer
         self._publisher = publisher
+        self._session_id_headers = tuple(session_id_headers)
         self._stop_check = stop_check
         self._on_inflight_drained = on_inflight_drained or (lambda: None)
         self.uuid_to_index: dict[str, int] = {}
@@ -255,7 +261,11 @@ class PhaseIssuer:
         data = self._dataset.load_sample(sample_index)
         if data_override is not None:
             data = {**data, **data_override}
-        headers = {_SESSION_ID_HEADER: conversation_id} if conversation_id else {}
+        headers = (
+            dict.fromkeys(self._session_id_headers, conversation_id)
+            if conversation_id
+            else {}
+        )
         query = Query(id=query_id, data=data, headers=headers)
         self.uuid_to_index[query_id] = sample_index
         self.uuid_to_conv_info[query_id] = (conversation_id, turn)
@@ -339,12 +349,14 @@ class BenchmarkSession:
         loop: asyncio.AbstractEventLoop,
         on_sample_complete: Callable[[QueryResult], None] | None = None,
         session_id: str | None = None,
+        session_id_headers: Sequence[str] = (DEFAULT_SESSION_ID_HEADER,),
     ):
         self._issuer = issuer
         self._publisher = event_publisher
         self._loop = loop
         self._on_sample_complete = on_sample_complete
         self.session_id = session_id or uuid.uuid4().hex
+        self._session_id_headers = tuple(session_id_headers)
 
         # Mutable state
         self._stop_requested = False
@@ -455,6 +467,7 @@ class BenchmarkSession:
             publisher=self._publisher,
             stop_check=self._make_stop_check(phase.runtime_settings, phase_start),
             on_inflight_drained=self._drain_event.set,
+            session_id_headers=self._session_id_headers,
         )
 
         self._current_phase_issuer = phase_issuer

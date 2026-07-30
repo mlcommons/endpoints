@@ -202,6 +202,45 @@ class TestPhaseIssuer:
         assert issued[0].conversation_id == "conv-1"
         assert issued[0].turn == 3
 
+    def test_issue_emits_every_configured_session_id_header(self):
+        """Each configured header carries the conversation id verbatim."""
+        dataset = FakeDataset(5)
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(
+            dataset,
+            issuer,
+            publisher,
+            lambda: False,
+            session_id_headers=("X-Session-ID", "X-Dynamo-Session-ID"),
+        )
+
+        phase_issuer.issue(2, conversation_id="conv-1", turn=3)
+
+        assert issuer.issued_queries[0].headers == {
+            "X-Session-ID": "conv-1",
+            "X-Dynamo-Session-ID": "conv-1",
+        }
+
+    def test_issue_omits_session_id_headers_without_conversation_id(self):
+        """Single-turn requests carry no session header even when configured."""
+        dataset = FakeDataset(5)
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(
+            dataset,
+            issuer,
+            publisher,
+            lambda: False,
+            session_id_headers=("X-Dynamo-Session-ID",),
+        )
+
+        phase_issuer.issue(2)
+
+        assert issuer.issued_queries[0].headers == {}
+
     def test_register_skipped_populates_state_without_issuing_http(self):
         dataset = FakeDataset(5)
         issuer = FakeIssuer()
