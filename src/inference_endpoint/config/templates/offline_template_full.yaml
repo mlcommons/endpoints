@@ -56,6 +56,7 @@ settings:
     n_samples_to_issue: null  # Sample count override
     scheduler_random_seed: 42  # Scheduler RNG seed
     dataloader_random_seed: 42  # Dataloader RNG seed
+    enable_live_metrics: true  # Enable live metrics publishing (periodic snapshots)
   load_pattern:
     type: max_throughput  # Load pattern type | offline only: max_throughput
     target_qps: null  # Target QPS

@@ -222,6 +222,46 @@ class TestMetricsPublisher:
             publisher.close()
 
     @pytest.mark.asyncio
+    async def test_disabled_interval_skips_tick_task_and_publish_final_works(
+        self, tmp_path: Path, zmq_ctx_scope: ManagedZMQContext
+    ):
+        """``publish_interval_s <= 0`` must not create a tick task, and
+        ``publish_final`` must still write the JSON snapshot correctly."""
+        loop = asyncio.get_event_loop()
+        target = tmp_path / "final_snapshot.json"
+        publisher = MetricsPublisher(
+            MetricsSnapshotCodec(),
+            zmq_ctx_scope,
+            "test_pub_disabled_interval",
+            loop,
+            final_snapshot_path=target,
+        )
+        try:
+            registry = MetricsRegistry()
+            registry.register_counter("c")
+            registry.increment("c", 2)
+
+            publisher.start(
+                registry,
+                publish_interval_s=0,
+                get_runtime_state=lambda: (SessionState.LIVE, 0),
+            )
+
+            # No tick task should have been created.
+            assert publisher._tick_task is None
+
+            await publisher.publish_final(registry, n_pending_tasks=0)
+
+            assert (
+                target.exists()
+            ), "final snapshot must be written even when live ticks are disabled"
+            decoded = json.loads(target.read_bytes())
+            assert decoded["state"] == SessionState.COMPLETE.value
+            assert decoded["n_pending_tasks"] == 0
+        finally:
+            publisher.close()
+
+    @pytest.mark.asyncio
     async def test_close_cancels_tick_task(
         self, tmp_path: Path, zmq_ctx_scope: ManagedZMQContext
     ):
