@@ -33,7 +33,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import inference_endpoint.commands.benchmark.pipeline as pipeline_mod
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
     SessionState,
@@ -45,6 +44,10 @@ from inference_endpoint.commands.benchmark.pipeline import (
 )
 from inference_endpoint.config.schema import LoadPatternType
 from inference_endpoint.metrics.report import Report
+
+# Dotted path for monkeypatch string targets — keeps a single import style (the
+# module is imported once via ``from ... import`` and patched by path here).
+_PIPE = "inference_endpoint.commands.benchmark.pipeline"
 
 
 def _snapshot_dict(
@@ -200,8 +203,7 @@ class TestBuildReportFromSnapshot:
             complete=False, state="complete", legacy_loadgen_window_duration_ns=None
         )
         monkeypatch.setattr(
-            pipeline_mod,
-            "Report",
+            f"{_PIPE}.Report",
             SimpleNamespace(from_snapshot=lambda *a, **k: fake_report),
         )
         with caplog.at_level("WARNING"):
@@ -218,8 +220,7 @@ class TestBuildReportFromSnapshot:
             legacy_loadgen_window_duration_ns=5_000_000_000,
         )
         monkeypatch.setattr(
-            pipeline_mod,
-            "Report",
+            f"{_PIPE}.Report",
             SimpleNamespace(from_snapshot=lambda *a, **k: fake_report),
         )
         with caplog.at_level("WARNING"):
@@ -233,9 +234,7 @@ class TestBuildReportFromSnapshot:
         def _boom(*a, **k):
             raise ValueError("bad snapshot")
 
-        monkeypatch.setattr(
-            pipeline_mod, "Report", SimpleNamespace(from_snapshot=_boom)
-        )
+        monkeypatch.setattr(f"{_PIPE}.Report", SimpleNamespace(from_snapshot=_boom))
         with caplog.at_level("WARNING"):
             out = _build_report_from_snapshot(_snapshot_dict(), _fake_config())
         assert out is None
@@ -268,9 +267,9 @@ class TestDrainFallback:
         pipe.publisher = MagicMock(buffered_count=0, pending_count=0)
         pipe._launcher = MagicMock()
         pipe.subscriber = MagicMock(latest=object())
-        monkeypatch.setattr(pipeline_mod, "snapshot_to_dict", lambda s: {"k": "v"})
+        monkeypatch.setattr(f"{_PIPE}.snapshot_to_dict", lambda s: {"k": "v"})
         monkeypatch.setattr(
-            pipeline_mod, "_build_report_from_snapshot", lambda d, c: "REPORT"
+            f"{_PIPE}._build_report_from_snapshot", lambda d, c: "REPORT"
         )
         with caplog.at_level("WARNING"):
             report = await pipe.drain_and_build_report()

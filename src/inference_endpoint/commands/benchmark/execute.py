@@ -926,13 +926,22 @@ async def _run_benchmark_async(
                     # failure paths (BenchmarkSession.run publishes ENDED in its own
                     # finally, so a failed run still has a terminal snapshot worth
                     # draining). Nulls pipe.publisher so __aexit__ releases the ZMQ
-                    # scope without killing the services. Best-effort: a drain error
-                    # (publisher.close / wait_for_exit) must not replace the run's
-                    # in-flight exception on the session-failure path.
+                    # scope without killing the services.
                     try:
                         report = await pipe.drain_and_build_report()
-                    except Exception as e:  # noqa: BLE001 — drain best-effort; keep run error
-                        logger.warning("Drain/report build error: %s", e)
+                    except Exception as e:  # noqa: BLE001
+                        # On a clean run a drain / report-build failure must be loud:
+                        # silently returning report=None would exit 0 with no perf
+                        # artifacts. On the session-failure path the run is already
+                        # raising, so swallow it there rather than let a teardown
+                        # error replace the in-flight exception.
+                        if session_completed_normally:
+                            raise
+                        logger.warning(
+                            "Drain/report build error suppressed (run already "
+                            "failing): %s",
+                            e,
+                        )
             finally:
                 # Runs on every path, including a setup error before session.run
                 # (which never reaches the session finally above). pbar.close() is

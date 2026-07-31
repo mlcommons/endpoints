@@ -1438,6 +1438,75 @@ class TestAggregatorArgs:
         # outer finally must have shut it down (idempotent, called once here).
         mock_client.shutdown_async.assert_awaited_once()
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_clean_run_drain_failure_propagates(self, tmp_path):
+        """A clean session (session.run succeeds) with a failing drain must NOT
+        silently exit with report=None — the drain error propagates so the run
+        fails loudly instead of producing a success with no perf artifacts."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+        mock_client = MagicMock()
+        mock_client.shutdown_async = AsyncMock()
+        mock_session = MagicMock()
+        mock_session.run = AsyncMock(return_value=MagicMock())  # clean success
+
+        loop = asyncio.get_event_loop()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(return_value=(MagicMock(), mock_client)),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_agentic_strategy",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.BenchmarkSession",
+                return_value=mock_session,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_phases",
+                return_value=[],
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline."
+                "MetricsPipeline.drain_and_build_report",
+                new=AsyncMock(side_effect=RuntimeError("drain boom")),
+            ),
+            # The perf run reaches the SIGINT handler on the clean path; patch it
+            # out so the test doesn't touch real process signal state.
+            patch.object(loop, "add_signal_handler"),
+            patch.object(loop, "remove_signal_handler"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            with pytest.raises(RuntimeError, match="drain boom"):
+                await _run_benchmark_async(ctx, loop)
+
 
 class TestAccuracyOnlyDatasetLoading:
     """`--accuracy-only` must skip the performance dataset even when the config
