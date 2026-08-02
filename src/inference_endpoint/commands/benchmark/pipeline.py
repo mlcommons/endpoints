@@ -230,7 +230,7 @@ class MetricsPipeline:
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         tb: TracebackType | None,
-    ) -> None:
+    ) -> bool | None:
         """Release the pipeline. Kill the services iff the run never drained.
 
         ``drain_and_build_report`` nulls ``self.publisher`` on success; a still-set
@@ -240,14 +240,14 @@ class MetricsPipeline:
         and the ZMQ scope — running every step even under ``BaseException``.
         """
         if self._stack is None:
-            return
+            return None
         stack, self._stack = self._stack, None
         if self.publisher is not None and self._launcher is not None:
-            try:
-                self._launcher.kill_all()
-            except Exception as e:  # noqa: BLE001 — teardown best-effort
-                logger.warning("Service kill_all error: %s", e)
-        stack.close()
+            # Register this last so it runs first. ExitStack still executes the
+            # publisher/subscriber/ZMQ callbacks if kill_all raises BaseException
+            # (for example, a second Ctrl-C during teardown).
+            stack.callback(self._kill_services)
+        return stack.__exit__(exc_type, exc, tb)
 
     async def start(self) -> None:
         """Bring up ZMQ + publisher + subscriber + service subprocesses.
@@ -302,13 +302,12 @@ class MetricsPipeline:
                 ],
                 timeout=self._config.settings.service_ready_timeout_s,
             )
-        except BaseException:
+        except BaseException as e:
             if self._launcher is not None:  # launch may have spawned children
-                try:
-                    self._launcher.kill_all()
-                except Exception as e:  # noqa: BLE001 — teardown best-effort
-                    logger.warning("Service kill_all error: %s", e)
-            stack.close()
+                # Run service termination first, while keeping the remaining
+                # publisher/subscriber/ZMQ callbacks BaseException-safe.
+                stack.callback(self._kill_services)
+            stack.__exit__(type(e), e, e.__traceback__)
             raise
         self._stack = stack
 
@@ -356,6 +355,15 @@ class MetricsPipeline:
         # released by the ExitStack in __aexit__.
         self.publisher = None
         return report
+
+    def _kill_services(self) -> None:
+        """Best-effort service termination owned by the pipeline ExitStack."""
+        if self._launcher is None:
+            return
+        try:
+            self._launcher.kill_all()
+        except Exception as e:  # noqa: BLE001 — teardown best-effort
+            logger.warning("Service kill_all error: %s", e)
 
     def _close_publisher(self) -> None:
         """Best-effort publisher close (ExitStack callback)."""

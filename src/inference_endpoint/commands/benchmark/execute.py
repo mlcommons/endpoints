@@ -929,6 +929,10 @@ async def _run_benchmark_async(
                     # scope without killing the services.
                     try:
                         report = await pipe.drain_and_build_report()
+                        if report is None:
+                            raise ExecutionError(
+                                "Benchmark completed without a usable metrics report"
+                            )
                     except Exception as e:  # noqa: BLE001
                         # On a clean run a drain / report-build failure must be loud:
                         # silently returning report=None would exit 0 with no perf

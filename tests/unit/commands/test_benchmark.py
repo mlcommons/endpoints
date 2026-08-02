@@ -88,7 +88,11 @@ from inference_endpoint.evaluation.scoring import (
     Scorer,
     SWEBenchScorer,
 )
-from inference_endpoint.exceptions import InputValidationError, SetupError
+from inference_endpoint.exceptions import (
+    ExecutionError,
+    InputValidationError,
+    SetupError,
+)
 from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import (
     PhaseResult,
@@ -1440,10 +1444,27 @@ class TestAggregatorArgs:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_clean_run_drain_failure_propagates(self, tmp_path):
-        """A clean session (session.run succeeds) with a failing drain must NOT
-        silently exit with report=None — the drain error propagates so the run
-        fails loudly instead of producing a success with no perf artifacts."""
+    @pytest.mark.parametrize(
+        ("drain_kwargs", "expected_error", "expected_match"),
+        [
+            pytest.param(
+                {"side_effect": RuntimeError("drain boom")},
+                RuntimeError,
+                "drain boom",
+                id="drain-raises",
+            ),
+            pytest.param(
+                {"return_value": None},
+                ExecutionError,
+                "without a usable metrics report",
+                id="drain-returns-no-report",
+            ),
+        ],
+    )
+    async def test_clean_run_drain_failure_propagates(
+        self, tmp_path, drain_kwargs, expected_error, expected_match
+    ):
+        """A clean session must fail if draining raises or yields no report."""
         config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
         ctx = self._make_ctx(config, tmp_path)
 
@@ -1491,7 +1512,7 @@ class TestAggregatorArgs:
             patch(
                 "inference_endpoint.commands.benchmark.pipeline."
                 "MetricsPipeline.drain_and_build_report",
-                new=AsyncMock(side_effect=RuntimeError("drain boom")),
+                new=AsyncMock(**drain_kwargs),
             ),
             # The perf run reaches the SIGINT handler on the clean path; patch it
             # out so the test doesn't touch real process signal state.
@@ -1504,7 +1525,7 @@ class TestAggregatorArgs:
             MockSub.return_value.start = MagicMock()
             MockLauncher.return_value.launch = _launch_ok
 
-            with pytest.raises(RuntimeError, match="drain boom"):
+            with pytest.raises(expected_error, match=expected_match):
                 await _run_benchmark_async(ctx, loop)
 
 

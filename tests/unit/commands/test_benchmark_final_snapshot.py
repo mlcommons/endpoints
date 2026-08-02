@@ -31,7 +31,7 @@ import contextlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
@@ -318,3 +318,47 @@ class TestAexitKillPolicy:
         pipe.subscriber = None
         await pipe.__aexit__(None, None, None)
         pipe._launcher.kill_all.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_kill_interrupt_still_closes_remaining_resources(self, tmp_path):
+        pipe = _make_pipe(tmp_path)
+        pipe._stack = contextlib.ExitStack()
+        remaining_cleanup = MagicMock()
+        pipe._stack.callback(remaining_cleanup)
+        pipe._launcher = MagicMock()
+        pipe._launcher.kill_all.side_effect = KeyboardInterrupt
+        pipe.publisher = MagicMock()
+        pipe.subscriber = None
+
+        with pytest.raises(KeyboardInterrupt):
+            await pipe.__aexit__(None, None, None)
+
+        remaining_cleanup.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_start_failure_kill_interrupt_still_closes_resources(tmp_path):
+    pipe = _make_pipe(tmp_path)
+    mock_zmq = MagicMock(socket_dir=str(tmp_path / "sockets"))
+
+    with (
+        patch(f"{_PIPE}.ManagedZMQContext") as mock_context,
+        patch(f"{_PIPE}.EventPublisherService") as mock_publisher,
+        patch(f"{_PIPE}.MetricsSnapshotSubscriber") as mock_subscriber,
+        patch(f"{_PIPE}.ServiceLauncher") as mock_launcher,
+    ):
+        mock_context.scoped.return_value.__enter__.return_value = mock_zmq
+        mock_context.scoped.return_value.__exit__.return_value = False
+        mock_publisher.return_value.socket_name = "test_pub"
+        mock_launcher.return_value.launch = AsyncMock(
+            side_effect=RuntimeError("launch failed")
+        )
+        mock_launcher.return_value.kill_all.side_effect = KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            await pipe.start()
+
+    mock_publisher.return_value.close.assert_called_once()
+    mock_subscriber.return_value.close.assert_called_once()
+    mock_context.scoped.return_value.__exit__.assert_called_once()
