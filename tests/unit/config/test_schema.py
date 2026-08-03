@@ -76,6 +76,12 @@ class TestModelParams:
         assert params.temperature is None
         assert params.max_new_tokens == 1024
         assert params.tokenizer_name is None
+        assert params.enable_token_metrics is True
+
+    @pytest.mark.unit
+    def test_token_metrics_can_be_disabled(self):
+        params = ModelParams(name="test", enable_token_metrics=False)
+        assert params.enable_token_metrics is False
 
     @pytest.mark.unit
     def test_with_osl_distribution(self):

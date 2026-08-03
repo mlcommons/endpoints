@@ -336,6 +336,10 @@ class ModelParams(BaseModel):
             help="HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).",
         ),
     ] = None
+    enable_token_metrics: bool = Field(
+        True,
+        description="Whether to collect client-side token metrics (ISL/OSL/TPOT).",
+    )
 
     @model_validator(mode="after")
     def _validate_generation_lengths(self) -> Self:

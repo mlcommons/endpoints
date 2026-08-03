@@ -2502,6 +2502,35 @@ class TestSetupBenchmarkTokenizer:
 
         assert ctx.tokenizer_name is None
 
+    @pytest.mark.unit
+    def test_disabled_token_metrics_skip_tokenizer_resolution(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS
+            | {"model_params": {"name": "test-model", "enable_token_metrics": False}},
+            report_dir=str(tmp_path),
+        )
+        mock_check = MagicMock()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                mock_check,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(_simple_dataset, [], []),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
+                return_value=_rt_settings,
+            ),
+        ):
+            ctx = setup_benchmark(config, TestMode.PERF)
+
+        mock_check.assert_not_called()
+        assert ctx.tokenizer_name is None
+
 
 class TestSetupBenchmark:
     """Tests for setup-time config normalization and sample accounting."""

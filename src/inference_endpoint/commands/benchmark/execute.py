@@ -488,7 +488,10 @@ def setup_benchmark(
     model_name = config.model_params.name
     tokenizer_override = config.model_params.tokenizer_name
     tokenizer_name: str | None
-    if tokenizer_override:
+    if not config.model_params.enable_token_metrics:
+        logger.info("Client-side token metrics disabled by configuration")
+        tokenizer_name = None
+    elif tokenizer_override:
         if not _check_tokenizer_exists(tokenizer_override):
             raise SetupError(
                 f"Tokenizer override '{tokenizer_override}' could not be verified. "

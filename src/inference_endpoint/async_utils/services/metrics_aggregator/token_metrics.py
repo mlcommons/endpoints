@@ -21,14 +21,16 @@ rayon pool is memory-bound and saturates ~8 cores). The aggregator buffers
 per-sample text. The sharded pool is the drain-phase accelerator and is
 auto-sized (one shard per core block); live mid-run flushes run on a small
 in-process thread pool (``--tokenizer-workers``, default 2) owned by the
-queue's live loop. A tokenizer without a fast (Rust) backend is a startup
-error, never a silent slow path. Platforms without CPU affinity (e.g. macOS)
-shard unpinned at full speed; only cache/NUMA locality is lost.
+queue's live loop. A tokenizer without a supported optimized backend (a Hugging
+Face Fast ``tokenizers`` backend or a Rust ``tiktoken.Encoding`` core) is a
+startup error, never a silent slow path. Platforms without CPU affinity (e.g.
+macOS) shard unpinned at full speed; only cache/NUMA locality is lost.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import multiprocessing
@@ -38,14 +40,15 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from itertools import chain
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
+from transformers import AutoTokenizer
+from transformers.utils import logging as transformers_logging
+
 from inference_endpoint.endpoint_client.cpu_affinity import (
     cgroup_clamped_cpus,
 )
-from transformers import AutoTokenizer
-from transformers.utils import logging as transformers_logging
 
 # A single rayon pool peaks at ~8 cores for BPE (memory-bound; more threads
 # oversubscribe and, on multi-socket Grace, cross the NUMA boundary). Sharding
@@ -122,14 +125,63 @@ def load_reference_tokenizer(tokenizer_name: str) -> Any:
     return AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
 
 
-def load_reference_backend(tokenizer_name: str) -> Any | None:
-    """Raw tokenizers backend (fast Rust path) for length counting.
+class _TikTokenBackend:
+    """Length-counting adapter for a Transformers wrapper around tiktoken.
 
-    Counting through the backend avoids the transformers "sequence longer than
-    model_max_length" warning the Python wrapper emits, so no ``model_max_length``
-    override is needed. ``None`` if the tokenizer has no fast backend.
+    Hugging Face labels custom tokenizers such as Kimi K3's
+    ``TikTokenTokenizer`` as "slow" because they inherit
+    ``PreTrainedTokenizer`` and do not expose ``backend_tokenizer``. Their BPE
+    core is nevertheless the Rust implementation in ``tiktoken.Encoding``.
+
+    Keep the model-provided wrapper in the loop instead of calling
+    ``Encoding.encode_batch`` directly. Kimi K3's ``encode`` method preserves
+    its special-token policy and splits very long or pathological strings to
+    avoid tiktoken's input-size and long-whitespace-run failure modes. The
+    outer Endpoints process sharding supplies parallelism across texts.
     """
-    return getattr(load_reference_tokenizer(tokenizer_name), "backend_tokenizer", None)
+
+    def __init__(self, tokenizer: Any) -> None:
+        self._tokenizer = tokenizer
+        # Kimi K3 exposes this explicit switch so raw user/model text cannot
+        # reinterpret a literal ``<|...|>`` substring as an XTML control token.
+        # Other tiktoken-backed wrappers may not expose it.
+        try:
+            encode_parameters = inspect.signature(tokenizer.encode).parameters
+        except (TypeError, ValueError):
+            encode_parameters = {}
+        self._supports_allow_special = "allow_special_tokens" in encode_parameters
+
+    def count_texts(self, texts: list[str]) -> list[int]:
+        if self._supports_allow_special:
+            return [
+                len(self._tokenizer.encode(text, allow_special_tokens=False))
+                for text in texts
+            ]
+        return [len(self._tokenizer.encode(text)) for text in texts]
+
+
+def _backend_from_tokenizer(tokenizer: Any) -> Any | None:
+    """Return a supported optimized length-counting backend."""
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is not None:
+        return backend
+
+    model = getattr(tokenizer, "model", None)
+    model_module = type(model).__module__.partition(".")[0]
+    if model_module == "tiktoken" and callable(getattr(tokenizer, "encode", None)):
+        return _TikTokenBackend(tokenizer)
+    return None
+
+
+def load_reference_backend(tokenizer_name: str) -> Any | None:
+    """Optimized backend for reference-tokenizer length counting.
+
+    Usually this is the raw Hugging Face ``tokenizers`` backend. A custom
+    Transformers tokenizer backed by ``tiktoken.Encoding`` receives an adapter
+    that preserves its model-specific encode behavior. ``None`` means there is
+    no supported accelerated backend.
+    """
+    return _backend_from_tokenizer(load_reference_tokenizer(tokenizer_name))
 
 
 def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
@@ -160,13 +212,32 @@ def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
     global _WORKER_BACKEND
     _WORKER_BACKEND = load_reference_backend(tokenizer_name)
     if _WORKER_BACKEND is not None:
-        _WORKER_BACKEND.encode("warmup", add_special_tokens=False)
+        encode_lengths(_WORKER_BACKEND, ["warmup"])
 
 
 def encode_lengths(backend: Any, texts: list[str]) -> list[int]:
-    """Per-text token counts via the raw tokenizers backend, one rayon call."""
+    """Per-text counts through an optimized HF Fast or tiktoken backend."""
+    count_texts = getattr(backend, "count_texts", None)
+    if count_texts is not None:
+        return count_texts(texts)
     encode_batch = getattr(backend, "encode_batch_fast", None) or backend.encode_batch
     return [len(e.ids) for e in encode_batch(texts, add_special_tokens=False)]
+
+
+def _chat_template_token_count(tokenizer: Any, messages: list[dict[str, Any]]) -> int:
+    """Count a rendered conversation through the tokenizer's native path.
+
+    In particular, Kimi K3 assigns ``allow_special`` per XTML segment. Rendering
+    to one string and subsequently calling ``tokenize`` loses those boundaries
+    and can reinterpret literal special-token text from users or tools as
+    structure. ``tokenize=True`` preserves the model tokenizer's exact policy.
+    """
+    encoded = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=False
+    )
+    if isinstance(encoded, dict):
+        encoded = encoded["input_ids"]
+    return len(encoded)
 
 
 def _worker_encode_lengths(texts: list[str]) -> list[int]:
@@ -248,6 +319,7 @@ class BatchTokenizer:
             max_workers=max(1, live_workers), thread_name_prefix="tok-thread"
         )
         self._load_tokenizer()  # also computes the chat-template baseline
+        self._backend = _backend_from_tokenizer(self._tokenizer)
         # Process shards for the batched text path. Empty only when
         # in-process mode was explicitly requested (n_workers=0 or
         # cores_per_worker<=0; ctor overrides used primarily by tests —
@@ -263,22 +335,11 @@ class BatchTokenizer:
         # Baseline = tokens from a [user, empty-assistant] pair minus the [user]
         # prefix alone, so the assistant frame is subtracted from message counts.
         try:
-            prefix = cast(
-                str,
-                tok.apply_chat_template(
-                    [_PREFIX_USER_MSG], tokenize=False, add_generation_prompt=False
-                ),
+            self._prefix_len = _chat_template_token_count(tok, [_PREFIX_USER_MSG])
+            with_assistant = _chat_template_token_count(
+                tok, [_PREFIX_USER_MSG, {"role": "assistant", "content": ""}]
             )
-            self._prefix_len = len(tok.tokenize(prefix))
-            with_assistant = cast(
-                str,
-                tok.apply_chat_template(
-                    [_PREFIX_USER_MSG, {"role": "assistant", "content": ""}],
-                    tokenize=False,
-                    add_generation_prompt=False,
-                ),
-            )
-            self._baseline = len(tok.tokenize(with_assistant)) - self._prefix_len
+            self._baseline = with_assistant - self._prefix_len
         except Exception:
             self._prefix_len = 0
             self._baseline = 0
@@ -296,18 +357,19 @@ class BatchTokenizer:
         process's affinity mask (or the online CPU count when the platform
         has no affinity API — shards then run unpinned), always at least one;
         an explicit count is clamped to that capacity. An environment that
-        cannot shard — no fast Rust backend, a warmup that fails or exceeds
-        its budget — raises instead of silently degrading to a slow path
-        that cannot keep up with completions.
+        cannot shard — no optimized backend, a warmup that fails or exceeds
+        its budget — raises instead of silently degrading to a slow path that
+        cannot keep up with completions.
         """
         if cores_per_worker <= 0 or n_workers == 0:
             logger.info("BatchTokenizer: in-process tokenization (explicit)")
             return
-        if getattr(self._tokenizer, "backend_tokenizer", None) is None:
+        if self._backend is None:
             raise RuntimeError(
-                f"tokenizer {self._tokenizer_name!r} has no fast (Rust) "
-                "backend; token metrics require one to keep up with "
-                "completions. Use a fast tokenizer, or disable token metrics."
+                f"tokenizer {self._tokenizer_name!r} has no supported optimized "
+                "backend (Hugging Face Fast or tiktoken); token metrics require "
+                "one to keep up with completions. Use a supported tokenizer, "
+                "add a backend adapter, or disable token metrics."
             )
         # The full allowed CPU universe (cgroup-clamped) drives the shard block
         # math. cgroup_clamped_cpus owns the probe-and-restore of this process's
@@ -364,11 +426,9 @@ class BatchTokenizer:
     # -- batched text path --------------------------------------------------
 
     def _encode_lengths_inproc(self, texts: list[str]) -> list[int]:
-        tok = self._tokenizer
-        backend = getattr(tok, "backend_tokenizer", None)
-        if backend is not None:
-            return encode_lengths(backend, texts)
-        return [len(tok.tokenize(t)) for t in texts]  # type: ignore[union-attr]
+        if self._backend is not None:
+            return encode_lengths(self._backend, texts)
+        return [len(self._tokenizer.tokenize(t)) for t in texts]  # type: ignore[union-attr]
 
     async def count_texts_async(
         self,
@@ -424,10 +484,9 @@ class BatchTokenizer:
         if tool_calls:
             msg["tool_calls"] = _normalize_tool_calls_for_template(tool_calls)
         try:
-            rendered = tok.apply_chat_template(  # type: ignore[union-attr]
-                [_PREFIX_USER_MSG, msg], tokenize=False, add_generation_prompt=False
+            full = _chat_template_token_count(  # type: ignore[arg-type]
+                tok, [_PREFIX_USER_MSG, msg]
             )
-            full = len(tok.tokenize(rendered))  # type: ignore[union-attr]
             return max(0, full - self._prefix_len - self._baseline)
         except Exception as exc:
             key = f"{self._tokenizer_name}:{type(exc).__name__}"
