@@ -138,9 +138,14 @@ class TestBatchTokenizer:
 class _FakeTokenizerWithTemplate(_FakeTokenizer):
     """Tokenizer that supports apply_chat_template for tool-call testing."""
 
+    def __init__(self, load_delay: float = 0.0):
+        super().__init__(load_delay)
+        self.chat_template_tokenize_values: list[bool] = []
+
     def apply_chat_template(
         self, messages, tokenize=False, add_generation_prompt=False
     ):
+        self.chat_template_tokenize_values.append(tokenize)
         # Simulate 2 wrapper tokens for the template frame.
         parts = ["WRAPPER", "WRAPPER"]
         for msg in messages:
@@ -161,6 +166,13 @@ class _FakeTokenizerWithTemplate(_FakeTokenizer):
 
 @pytest.mark.unit
 class TestBatchTokenizerMessageTokenization:
+    def test_chat_template_uses_native_tokenize_path(self):
+        """Preserve model-specific segment encoding instead of re-tokenizing text."""
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                assert tok._tokenizer.chat_template_tokenize_values
+                assert all(tok._tokenizer.chat_template_tokenize_values)
+
     @pytest.mark.asyncio
     async def test_token_count_message_subtracts_baseline(self):
         """token_count_message_async returns full_tokens - baseline."""
@@ -236,6 +248,26 @@ class _SlowBackend:
         return [_Encoding(len(t.split())) for t in texts]
 
 
+class _FakeTikTokenEncoding:
+    """Looks like tiktoken.Encoding without importing the optional native module."""
+
+    __module__ = "tiktoken.core"
+
+
+class _FakeTikTokenTokenizer(_FakeTokenizerWithTemplate):
+    """Transformers-style slow wrapper whose actual BPE core is tiktoken."""
+
+    model = _FakeTikTokenEncoding()
+
+    def __init__(self, load_delay: float = 0.0):
+        super().__init__(load_delay)
+        self.encoded: list[str] = []
+
+    def encode(self, text: str) -> list[int]:
+        self.encoded.append(text)
+        return list(range(len(text.split())))
+
+
 @pytest.mark.unit
 class TestEncodeHelpers:
     def test_encode_lengths_prefers_fast(self):
@@ -262,6 +294,42 @@ class TestEncodeHelpers:
         assert token_metrics_module.load_reference_backend("m") == "BACKEND"
         assert captured["name"] == "m"
         assert captured["kwargs"].get("trust_remote_code") is True
+
+    def test_load_reference_backend_accepts_tiktoken_core(self, monkeypatch):
+        class _FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name, **kwargs):
+                assert name == "kimi-k3"
+                assert kwargs == {"trust_remote_code": True}
+                return _FakeTikTokenTokenizer()
+
+        monkeypatch.setattr(token_metrics_module, "AutoTokenizer", _FakeAutoTokenizer)
+        backend = token_metrics_module.load_reference_backend("kimi-k3")
+        assert backend is not None
+        assert encode_lengths(backend, ["one two", "three"]) == [2, 1]
+
+    def test_tiktoken_adapter_calls_model_wrapper_encode(self):
+        tokenizer = _FakeTikTokenTokenizer()
+        backend = token_metrics_module._backend_from_tokenizer(tokenizer)
+        assert backend is not None
+        assert encode_lengths(backend, ["a b", "c"]) == [2, 1]
+        assert tokenizer.encoded == ["a b", "c"]
+
+    def test_tiktoken_adapter_disallows_specials_when_wrapper_supports_it(self):
+        class _KimiLikeTokenizer(_FakeTikTokenTokenizer):
+            def __init__(self):
+                super().__init__()
+                self.allow_special_values: list[bool] = []
+
+            def encode(self, text: str, allow_special_tokens: bool = True) -> list[int]:
+                self.allow_special_values.append(allow_special_tokens)
+                return list(range(len(text.split())))
+
+        tokenizer = _KimiLikeTokenizer()
+        backend = token_metrics_module._backend_from_tokenizer(tokenizer)
+        assert backend is not None
+        assert encode_lengths(backend, ["<|literal|> text"]) == [2]
+        assert tokenizer.allow_special_values == [False]
 
     def test_worker_encode_lengths_raises_without_backend(self, monkeypatch):
         monkeypatch.setattr(token_metrics_module, "_WORKER_BACKEND", None)
@@ -342,6 +410,17 @@ class TestSetupShardsDecisions:
         with patch(_MOCK_TARGET, _FakeTokenizer):  # no backend_tokenizer
             with pytest.raises(RuntimeError, match="optimized"):
                 BatchTokenizer("fake", live_workers=2)
+
+    def test_tiktoken_backend_can_start_shards(self, monkeypatch):
+        monkeypatch.setattr(
+            token_metrics_module, "ProcessPoolExecutor", _SpawnlessExecutor
+        )
+        monkeypatch.setattr(
+            token_metrics_module, "cgroup_clamped_cpus", lambda: list(range(16))
+        )
+        with patch(_MOCK_TARGET, _FakeTikTokenTokenizer):
+            with BatchTokenizer("kimi-k3", live_workers=2) as tok:
+                assert len(tok._procs) == 2
 
     def test_affinity_unavailable_shards_unpinned(self, monkeypatch):
         """No affinity API (e.g. macOS): shard from the CPU count, unpinned."""
@@ -468,7 +547,12 @@ class TestRayonCaps:
         def _no_affinity(pid, mask):
             raise AttributeError("no sched_setaffinity")
 
-        monkeypatch.setattr(token_metrics_module.os, "sched_setaffinity", _no_affinity)
+        monkeypatch.setattr(
+            token_metrics_module.os,
+            "sched_setaffinity",
+            _no_affinity,
+            raising=False,
+        )
         with patch(_MOCK_TARGET, _FakeTokenizer):
             token_metrics_module._init_worker("fake", [0, 1, 2, 3, 4, 5, 6, 7])
         assert token_metrics_module.os.environ["RAYON_NUM_THREADS"] == "8"
