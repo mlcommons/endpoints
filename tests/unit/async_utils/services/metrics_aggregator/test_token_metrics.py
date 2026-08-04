@@ -335,12 +335,12 @@ class TestSetupShardsDecisions:
             blocks = [set(ex.initargs[1]) for ex in tok._procs]
             assert blocks == [set(range(0, 8)), set(range(8, 16))]
 
-    def test_no_fast_backend_is_a_startup_error(self, monkeypatch):
+    def test_no_optimized_backend_is_a_startup_error(self, monkeypatch):
         monkeypatch.setattr(
             token_metrics_module, "ProcessPoolExecutor", _SpawnlessExecutor
         )
         with patch(_MOCK_TARGET, _FakeTokenizer):  # no backend_tokenizer
-            with pytest.raises(RuntimeError, match="fast"):
+            with pytest.raises(RuntimeError, match="optimized"):
                 BatchTokenizer("fake", live_workers=2)
 
     def test_affinity_unavailable_shards_unpinned(self, monkeypatch):

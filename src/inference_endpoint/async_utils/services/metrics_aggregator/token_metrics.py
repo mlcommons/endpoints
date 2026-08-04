@@ -145,10 +145,11 @@ class _TikTokenBackend:
         # reinterpret a literal ``<|...|>`` substring as an XTML control token.
         # Other tiktoken-backed wrappers may not expose it.
         try:
-            encode_parameters = inspect.signature(tokenizer.encode).parameters
+            self._supports_allow_special = (
+                "allow_special_tokens" in inspect.signature(tokenizer.encode).parameters
+            )
         except (TypeError, ValueError):
-            encode_parameters = {}
-        self._supports_allow_special = "allow_special_tokens" in encode_parameters
+            self._supports_allow_special = False
 
     def count_texts(self, texts: list[str]) -> list[int]:
         if self._supports_allow_special:
