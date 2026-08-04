@@ -43,12 +43,11 @@ from itertools import chain
 from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
-from transformers import AutoTokenizer
-from transformers.utils import logging as transformers_logging
-
 from inference_endpoint.endpoint_client.cpu_affinity import (
     cgroup_clamped_cpus,
 )
+from transformers import AutoTokenizer
+from transformers.utils import logging as transformers_logging
 
 # A single rayon pool peaks at ~8 cores for BPE (memory-bound; more threads
 # oversubscribe and, on multi-socket Grace, cross the NUMA boundary). Sharding
