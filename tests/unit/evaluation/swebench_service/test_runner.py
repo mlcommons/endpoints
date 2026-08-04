@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import stat
 import subprocess
 import sys
 import threading
+import types
+from pathlib import Path
 
 import msgspec.json
 import pytest
@@ -11,17 +14,35 @@ import yaml
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
     runner as runner_mod,
 )
+from inference_endpoint.evaluation.swebench_service.swebench_service.pyxis_environment import (
+    PyxisEnvironment,
+    build_srun_command,
+    resolve_image,
+    safe_srun_env,
+)
 from inference_endpoint.evaluation.swebench_service.swebench_service.runner import (
     CancellationToken,
+    PyxisSweBenchRunner,
     RunCancelled,
     RunnerError,
     SweBenchRunner,
+    _evaluate_pyxis_instance,
+    _write_pyxis_run_report,
+    create_runner,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service.schemas import (
     RunRequest,
 )
 
 pytestmark = pytest.mark.unit
+
+
+def test_pyxis_implementation_adds_only_environment_module():
+    package_dir = Path(runner_mod.__file__).parent
+
+    assert {path.name for path in package_dir.glob("pyxis_*") if path.is_file()} == {
+        "pyxis_environment.py"
+    }
 
 
 def _request(endpoints: list[str]) -> RunRequest:
@@ -189,6 +210,26 @@ def test_patch_config_normalizes_api_base(tmp_path, endpoint, expected_api_base)
     assert "model_class" not in cfg["model"]
     assert "api_key" not in cfg["model"]["model_kwargs"]
     assert cfg["environment"]["run_args"] == [
+        "--rm",
+        "--label",
+        "com.mlcommons.endpoints.swebench-run=run-123",
+    ]
+
+
+def test_patch_config_uses_requested_docker_runtime(monkeypatch, tmp_path):
+    monkeypatch.setenv("SWEBENCH_DOCKER_RUNTIME", "runc")
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+
+    patched = runner._patch_config(
+        tmp_path,
+        _request(["http://localhost:30000"]),
+        run_id="run-123",
+    )
+
+    cfg = yaml.safe_load(patched.read_text())
+    assert cfg["environment"]["run_args"] == [
+        "--runtime",
+        "runc",
         "--rm",
         "--label",
         "com.mlcommons.endpoints.swebench-run=run-123",
@@ -558,4 +599,482 @@ def test_cleanup_exactly_matches_harness_container_names(monkeypatch, tmp_path):
             "{{.ID}}\t{{.Names}}",
         ],
         ["docker", "rm", "-f", "agent-container", "eval-container"],
+    ]
+
+
+def _pyxis_request(instance_ids: list[str] | None = None) -> RunRequest:
+    instance_ids = instance_ids or ["repo__repo-1"]
+    return RunRequest(
+        model_name="test-model",
+        endpoint_urls=["http://endpoint:30000"],
+        generation_params={"temperature": 0.2},
+        subset="lite",
+        split="test",
+        num_instances=len(instance_ids),
+        workers=2,
+        max_eval_workers=2,
+        evaluated_instance_ids=instance_ids,
+    )
+
+
+_PYXIS_IMAGE_REGISTRY = "gitlab-master.nvidia.com:5005/hvagadia/swebench-arm64-images"
+
+
+def test_create_runner_defaults_to_docker(tmp_path):
+    runner = create_runner(
+        "docker",
+        project_root=tmp_path,
+        subprocess_timeout_s=30,
+        image_registry=None,
+    )
+
+    assert type(runner) is SweBenchRunner
+
+
+def test_create_runner_requires_image_registry_for_pyxis(tmp_path):
+    with pytest.raises(ValueError, match="image registry"):
+        create_runner(
+            "pyxis",
+            project_root=tmp_path,
+            subprocess_timeout_s=30,
+            image_registry=None,
+        )
+
+
+def test_create_runner_selects_pyxis(tmp_path):
+    runner = create_runner(
+        "pyxis",
+        project_root=tmp_path,
+        subprocess_timeout_s=30,
+        image_registry=_PYXIS_IMAGE_REGISTRY,
+    )
+
+    assert isinstance(runner, PyxisSweBenchRunner)
+
+
+def test_pyxis_patch_config_selects_pyxis_environment(tmp_path):
+    runner = PyxisSweBenchRunner(
+        project_root=tmp_path,
+        subprocess_timeout_s=30,
+        image_registry=_PYXIS_IMAGE_REGISTRY,
+    )
+
+    patched = runner._patch_config(tmp_path, _pyxis_request(), run_id="run-1")
+
+    environment = yaml.safe_load(patched.read_text())["environment"]
+    assert environment["environment_class"] == (
+        "swebench_service.pyxis_environment.PyxisEnvironment"
+    )
+    assert environment["cwd"] == "/testbed"
+    assert environment["run_id"] == "run-1"
+    assert "run_args" not in environment
+    assert "pull_timeout" not in environment
+    assert "container_timeout" not in environment
+
+
+def test_pyxis_resolves_registry_image_from_instance_id():
+    assert resolve_image(_PYXIS_IMAGE_REGISTRY, "repo__repo-1") == (
+        "gitlab-master.nvidia.com:5005#hvagadia/swebench-arm64-images/"
+        "sweb.eval.arm64.repo__repo-1:v4.1.0-arm64"
+    )
+    with pytest.raises(RunnerError, match="invalid SWE-bench instance ID"):
+        resolve_image(_PYXIS_IMAGE_REGISTRY, "../repo__repo-1")
+
+
+def test_pyxis_builds_one_node_srun_command(monkeypatch, tmp_path):
+    image = resolve_image(_PYXIS_IMAGE_REGISTRY, "repo__repo-1")
+    source = tmp_path / "input.json"
+    source.touch()
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    command = build_srun_command(
+        image=image,
+        name="minisweagent-run-1",
+        mounts=[(source, "/swebench/input.json")],
+        workdir="/testbed",
+        argv=["python", "worker.py"],
+    )
+
+    assert command == [
+        "srun",
+        "--overlap",
+        "--jobid=1738605",
+        "-N1",
+        "-n1",
+        "--nodelist=gb-nvl-053-compute04",
+        f"--container-image={image}",
+        "--container-name=minisweagent-run-1",
+        "--container-writable",
+        "--container-remap-root",
+        "--no-container-mount-home",
+        f"--container-mounts={source.resolve()}:/swebench/input.json",
+        "--container-workdir=/testbed",
+        "python",
+        "worker.py",
+    ]
+
+
+def test_pyxis_srun_requires_allocation(monkeypatch, tmp_path):
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+
+    with pytest.raises(RunnerError, match="SLURM_JOB_ID"):
+        build_srun_command(
+            image=resolve_image(_PYXIS_IMAGE_REGISTRY, "repo__repo-1"),
+            name=None,
+            mounts=[],
+            workdir="/testbed",
+            argv=["true"],
+        )
+
+
+def test_pyxis_srun_environment_does_not_forward_credentials(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "model-secret")
+    monkeypatch.setenv("SWEBENCH_SERVICE_AUTH_TOKEN", "service-secret")
+    monkeypatch.setenv("HF_TOKEN", "dataset-secret")
+
+    environment = safe_srun_env()
+
+    assert "OPENAI_API_KEY" not in environment
+    assert "SWEBENCH_SERVICE_AUTH_TOKEN" not in environment
+    assert "HF_TOKEN" not in environment
+
+
+def test_pyxis_environment_reuses_named_writable_container(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    monkeypatch.setenv("OPENAI_API_KEY", "model-secret")
+    image = tmp_path / "task.sqsh"
+    image.touch()
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    environment = PyxisEnvironment(
+        image=image,
+        run_id="run-1",
+        cwd="/testbed",
+        env={"PAGER": "cat"},
+        timeout=30,
+        interpreter=["bash", "-c"],
+    )
+
+    first = environment.execute({"command": "touch state"})
+    second = environment.execute({"command": "test -f state"})
+    environment.cleanup()
+
+    container_name = next(
+        argument.split("=", 1)[1]
+        for argument in calls[0][0]
+        if argument.startswith("--container-name=")
+    )
+    assert f"--container-image={image.resolve()}" in calls[0][0]
+    for command, kwargs in calls[1:3]:
+        assert f"--container-name={container_name}" in command
+        assert not any(arg.startswith("--container-image=") for arg in command)
+        assert "--no-container-mount-home" in command
+        assert kwargs["env"].get("OPENAI_API_KEY") is None
+    assert calls[1][0][-5:] == ["env", "PAGER=cat", "bash", "-c", "touch state"]
+    assert calls[-1][0][-4:] == [
+        "enroot",
+        "remove",
+        "-f",
+        f"pyxis_{container_name}",
+    ]
+    assert first["returncode"] == second["returncode"] == 0
+
+
+def test_pyxis_environment_mounts_persistent_tmp_on_every_step(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    image = tmp_path / "task.sqsh"
+    image.touch()
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    environment = PyxisEnvironment(image=image, run_id="run-1")
+    environment.execute({"command": "touch /tmp/state"})
+    environment.execute({"command": "test -f /tmp/state"})
+
+    tmp_mounts = [
+        next(arg for arg in command if arg.startswith("--container-mounts="))
+        for command in calls[:3]
+    ]
+    assert tmp_mounts[0] == tmp_mounts[1] == tmp_mounts[2]
+    source, destination = (
+        tmp_mounts[0].removeprefix("--container-mounts=").split(":", 1)
+    )
+    assert destination == "/tmp"
+    persistent_tmp = Path(source)
+    assert persistent_tmp.is_dir()
+    assert stat.S_IMODE(persistent_tmp.stat().st_mode) == 0o1777
+
+    environment.cleanup()
+
+    assert not persistent_tmp.exists()
+
+
+def test_pyxis_cleanup_is_best_effort_outside_allocation(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, stdout=""),
+    )
+    image = tmp_path / "task.sqsh"
+    image.touch()
+    environment = PyxisEnvironment(image=image, run_id="run-1")
+    persistent_tmp = environment._tmp_dir
+    monkeypatch.delenv("SLURM_JOB_ID")
+
+    environment.cleanup()
+
+    assert not persistent_tmp.exists()
+
+
+def test_pyxis_start_failure_removes_persistent_tmp(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    image = tmp_path / "task.sqsh"
+    image.touch()
+    persistent_tmp: Path | None = None
+
+    def fake_run(command, **kwargs):
+        nonlocal persistent_tmp
+        if any(arg.startswith("--container-image=") for arg in command):
+            mount = next(
+                arg for arg in command if arg.startswith("--container-mounts=")
+            )
+            source = mount.removeprefix("--container-mounts=").split(":", 1)[0]
+            persistent_tmp = Path(source)
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RunnerError, match="failed to start Pyxis container"):
+        PyxisEnvironment(image=image, run_id="run-1")
+
+    assert persistent_tmp is not None
+    assert not persistent_tmp.exists()
+
+
+def test_pyxis_cleanup_removes_only_exact_run_prefix(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        output = ""
+        if command[-3:] == ["enroot", "list", "-f"]:
+            output = (
+                "NAME PID COMM STATE STARTED TIME MNTNS USERNS COMMAND\n"
+                "pyxis_mswe_run-1_abcd1234                         \n"
+                "pyxis_mswe_run-10_ffff0000                        \n"
+                "unrelated                                         \n"
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    runner = PyxisSweBenchRunner(
+        project_root=tmp_path,
+        subprocess_timeout_s=30,
+        image_registry=_PYXIS_IMAGE_REGISTRY,
+    )
+
+    runner._cleanup_containers("run-1")
+
+    assert [command[-4:] for command in calls[1:]] == [
+        ["enroot", "remove", "-f", "pyxis_mswe_run-1_abcd1234"]
+    ]
+
+
+def test_pyxis_agent_command_uses_host_model_and_image_registry(monkeypatch, tmp_path):
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(command, log_path, **kwargs):
+        calls.append((command, kwargs))
+
+    monkeypatch.setattr(runner_mod, "_run_subprocess", fake_run)
+    request = _pyxis_request(["repo__repo-1", "repo__repo-2"])
+    request.endpoint_api_key = "model-secret"
+    runner = PyxisSweBenchRunner(
+        project_root=tmp_path,
+        subprocess_timeout_s=30,
+        image_registry=_PYXIS_IMAGE_REGISTRY,
+    )
+
+    runner._run_agent(
+        request,
+        tmp_path / "config.yaml",
+        tmp_path,
+        tmp_path,
+        {"model-secret"},
+    )
+
+    command, kwargs = calls[0]
+    assert command[1:4] == ["-m", "swebench_service.runner", "pyxis-agent"]
+    assert command[command.index("--image-registry") + 1] == _PYXIS_IMAGE_REGISTRY
+    assert command[command.index("--filter") + 1] == (
+        "^(?:repo__repo\\-1|repo__repo\\-2)$"
+    )
+    assert kwargs["env"]["OPENAI_API_KEY"] == "model-secret"
+
+
+def test_pyxis_agent_saves_each_live_trajectory_to_its_instance_path(tmp_path):
+    class FakeProgressTrackingAgent:
+        def __init__(self, *args, instance_id="", **kwargs):
+            self.instance_id = instance_id
+            self.kwargs = kwargs
+
+    swebench = types.SimpleNamespace(ProgressTrackingAgent=FakeProgressTrackingAgent)
+    assert hasattr(runner_mod, "_enable_live_trajectory_saves")
+
+    runner_mod._enable_live_trajectory_saves(swebench, tmp_path)
+    first = swebench.ProgressTrackingAgent(instance_id="repo__repo-1")
+    second = swebench.ProgressTrackingAgent(instance_id="repo__repo-2")
+
+    assert first.kwargs["output_path"] == (
+        tmp_path / "repo__repo-1" / "repo__repo-1.live.json"
+    )
+    assert second.kwargs["output_path"] == (
+        tmp_path / "repo__repo-2" / "repo__repo-2.live.json"
+    )
+
+
+def test_pyxis_eval_command_does_not_forward_model_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-secret")
+    calls: list[tuple[list[str], dict]] = []
+    output_dir = tmp_path / "output"
+    run_dir = tmp_path / "run"
+    output_dir.mkdir()
+    run_dir.mkdir()
+    preds_path = output_dir / "preds.json"
+    preds_path.write_text("{}")
+
+    def fake_run(command, log_path, *, cwd, env, **kwargs):
+        calls.append((command, {"cwd": cwd, "env": env}))
+        run_id = command[command.index("--run-id") + 1]
+        (cwd / f"test-model.{run_id}.json").write_text("{}")
+
+    monkeypatch.setattr(runner_mod, "_run_subprocess", fake_run)
+    runner = PyxisSweBenchRunner(
+        project_root=tmp_path,
+        subprocess_timeout_s=30,
+        image_registry=_PYXIS_IMAGE_REGISTRY,
+    )
+
+    result = runner._run_eval(
+        _pyxis_request(), preds_path, output_dir, run_dir, {"ambient-secret"}
+    )
+
+    command, kwargs = calls[0]
+    assert command[1:4] == ["-m", "swebench_service.runner", "pyxis-eval"]
+    assert command[command.index("--max-workers") + 1] == "2"
+    assert command[command.index("--image-registry") + 1] == _PYXIS_IMAGE_REGISTRY
+    assert command[command.index("--instance-ids") + 1 :] == ["repo__repo-1"]
+    assert "OPENAI_API_KEY" not in kwargs["env"]
+    assert result.exists()
+
+
+def test_pyxis_eval_does_not_mount_report_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    image = tmp_path / "task.sqsh"
+    image.touch()
+    report = (
+        tmp_path
+        / "logs"
+        / "run_evaluation"
+        / "run-1"
+        / "test-model"
+        / "repo__repo-1"
+        / "report.json"
+    )
+    report.parent.mkdir(parents=True)
+    report.write_text('{"repo__repo-1":{"resolved":true}}')
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="failed")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    test_spec = types.SimpleNamespace(instance_id="repo__repo-1", eval_script="true")
+
+    _evaluate_pyxis_instance(
+        test_spec=test_spec,
+        prediction={
+            "model_name_or_path": "test-model",
+            "model_patch": "diff --git a/a b/a",
+        },
+        image=image,
+        output_dir=tmp_path,
+        run_id="run-1",
+        timeout_s=30,
+    )
+
+    mounts = next(arg for arg in calls[0] if arg.startswith("--container-mounts="))
+    assert "report.json" not in mounts
+    assert f"{report.parent.resolve()}:/" not in mounts
+    assert not report.exists()
+
+
+def test_pyxis_result_uses_upstream_report(monkeypatch, tmp_path):
+    output_dir = tmp_path / "output"
+    run_id = "endpoints_test"
+    predictions = {
+        "repo__repo-1": {
+            "model_name_or_path": "test-model",
+            "instance_id": "repo__repo-1",
+            "model_patch": "diff --git a/a b/a",
+        },
+        "repo__repo-2": {
+            "model_name_or_path": "test-model",
+            "instance_id": "repo__repo-2",
+            "model_patch": "",
+        },
+    }
+    output_dir.mkdir()
+    calls = []
+
+    def fake_make_run_report(predictions, dataset, run_id, client):
+        calls.append((predictions, dataset, run_id, client))
+        result = tmp_path / "output" / "test-model.endpoints_test.json"
+        result.write_text("{}")
+        return result.name
+
+    swebench = types.ModuleType("swebench")
+    harness = types.ModuleType("swebench.harness")
+    reporting = types.ModuleType("swebench.harness.reporting")
+    reporting.make_run_report = fake_make_run_report
+    monkeypatch.setitem(sys.modules, "swebench", swebench)
+    monkeypatch.setitem(sys.modules, "swebench.harness", harness)
+    monkeypatch.setitem(sys.modules, "swebench.harness.reporting", reporting)
+
+    result_path = _write_pyxis_run_report(
+        output_dir=output_dir,
+        run_id=run_id,
+        instance_ids=["repo__repo-1", "repo__repo-2", "repo__repo-3"],
+        predictions=predictions,
+    )
+
+    assert result_path == output_dir / "test-model.endpoints_test.json"
+    assert calls == [
+        (
+            predictions,
+            [
+                {"instance_id": "repo__repo-1"},
+                {"instance_id": "repo__repo-2"},
+                {"instance_id": "repo__repo-3"},
+            ],
+            run_id,
+            None,
+        )
     ]

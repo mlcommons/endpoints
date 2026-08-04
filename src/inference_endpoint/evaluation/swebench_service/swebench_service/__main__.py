@@ -21,6 +21,7 @@ from pathlib import Path
 from aiohttp import web
 
 from .config import ServiceConfig
+from .runner import create_runner
 from .server import create_app
 
 
@@ -31,6 +32,8 @@ def main() -> None:
     parser.add_argument("--artifact-root", default="swebench_service_artifacts")
     parser.add_argument("--max-concurrent-runs", type=int, default=1)
     parser.add_argument("--subprocess-timeout-s", type=int, default=24 * 60 * 60)
+    parser.add_argument("--runtime", choices=("docker", "pyxis"), default="docker")
+    parser.add_argument("--image-registry")
     auth_group = parser.add_mutually_exclusive_group()
     auth_group.add_argument("--auth-token")
     auth_group.add_argument("--allow-unauthenticated", action="store_true")
@@ -47,7 +50,13 @@ def main() -> None:
         allow_unauthenticated=args.allow_unauthenticated,
         max_stored_runs=args.max_stored_runs,
     )
-    web.run_app(create_app(config), host=config.host, port=config.port)
+    runner = create_runner(
+        args.runtime,
+        project_root=Path(__file__).resolve().parents[1],
+        subprocess_timeout_s=config.subprocess_timeout_s,
+        image_registry=args.image_registry,
+    )
+    web.run_app(create_app(config, runner=runner), host=config.host, port=config.port)
 
 
 if __name__ == "__main__":

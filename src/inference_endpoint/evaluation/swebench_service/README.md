@@ -1,9 +1,9 @@
 # SWE-bench Service
 
-Runs mini-swe-agent and the SWE-bench harness on a host with Docker. The
+Runs mini-swe-agent and the SWE-bench harness on a host with Docker or Pyxis. The
 benchmark client only needs this service URL, but the service is trusted
 infrastructure: it receives one endpoint URL and optional endpoint credentials, runs
-Docker-backed evaluations, and serves run artifacts.
+container-backed evaluations, and serves run artifacts.
 
 The isolated service subproject commits its own `uv.lock` so deployments use a
 reproducible dependency set.
@@ -17,7 +17,13 @@ uv run --project src/inference_endpoint/evaluation/swebench_service \
 The endpoint URL in the benchmark config must be reachable from the service
 host. Service mode supports exactly one endpoint URL and follows the
 LiveCodeBench-style external-service convention for heavyweight evaluation work.
-Docker is required only on the service host.
+Docker is required only on the service host when using the default runtime. To use
+ARM64 task images from a registry on a retained one-node Slurm allocation, add
+`--runtime pyxis --image-registry REGISTRY`, for example
+`registry.example.com/group/project`. Images must use the name
+`sweb.eval.arm64.<instance_id>:v4.1.0-arm64`.
+Pyxis pulls and caches each image through Enroot; configure registry credentials
+in `~/.config/enroot/.credentials` when the registry requires authentication.
 The benchmark client submits a run to this service only in `ACC` or `BOTH`
 mode; the default `PERF` mode skips external evaluation.
 
