@@ -1334,7 +1334,7 @@ class TestAggregatorArgs:
 
         # __aexit__ kills the services (drain never ran) → launcher.kill_all();
         # called exactly once, and never for a clean run.
-        MockLauncher.return_value.kill_all.assert_called_once()
+        MockLauncher.return_value.terminate_all.assert_called_once()
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1382,7 +1382,7 @@ class TestAggregatorArgs:
                 await _run_benchmark_async(ctx, loop)
 
         # The setup-error path never drains, so __aexit__ kills the services once.
-        MockLauncher.return_value.kill_all.assert_called_once()
+        MockLauncher.return_value.terminate_all.assert_called_once()
 
     @pytest.mark.unit
     @pytest.mark.asyncio

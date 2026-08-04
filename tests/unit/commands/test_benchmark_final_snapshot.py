@@ -307,7 +307,7 @@ class TestAexitKillPolicy:
         pipe.publisher = None  # drain_and_build_report nulled it on a clean drain
         pipe.subscriber = None
         await pipe.__aexit__(None, None, None)
-        pipe._launcher.kill_all.assert_not_called()
+        pipe._launcher.terminate_all.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_never_drained_kills_once(self, tmp_path):
@@ -317,7 +317,7 @@ class TestAexitKillPolicy:
         pipe.publisher = MagicMock()  # still set ⇒ setup/session error before drain
         pipe.subscriber = None
         await pipe.__aexit__(None, None, None)
-        pipe._launcher.kill_all.assert_called_once()
+        pipe._launcher.terminate_all.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_kill_interrupt_still_closes_remaining_resources(self, tmp_path):
@@ -326,7 +326,7 @@ class TestAexitKillPolicy:
         remaining_cleanup = MagicMock()
         pipe._stack.callback(remaining_cleanup)
         pipe._launcher = MagicMock()
-        pipe._launcher.kill_all.side_effect = KeyboardInterrupt
+        pipe._launcher.terminate_all.side_effect = KeyboardInterrupt
         pipe.publisher = MagicMock()
         pipe.subscriber = None
 
@@ -354,7 +354,7 @@ async def test_start_failure_kill_interrupt_still_closes_resources(tmp_path):
         mock_launcher.return_value.launch = AsyncMock(
             side_effect=RuntimeError("launch failed")
         )
-        mock_launcher.return_value.kill_all.side_effect = KeyboardInterrupt
+        mock_launcher.return_value.terminate_all.side_effect = KeyboardInterrupt
 
         with pytest.raises(KeyboardInterrupt):
             await pipe.start()

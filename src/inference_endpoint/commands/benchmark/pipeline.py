@@ -244,7 +244,7 @@ class MetricsPipeline:
         stack, self._stack = self._stack, None
         if self.publisher is not None and self._launcher is not None:
             # Register this last so it runs first. ExitStack still executes the
-            # publisher/subscriber/ZMQ callbacks if kill_all raises BaseException
+            # publisher/subscriber/ZMQ callbacks if terminate_all raises BaseException
             # (for example, a second Ctrl-C during teardown).
             stack.callback(self._kill_services)
         return stack.__exit__(exc_type, exc, tb)
@@ -327,7 +327,13 @@ class MetricsPipeline:
             self.publisher.buffered_count,
             self.publisher.pending_count,
         )
-        self.publisher.close()
+        # Null the publisher before closing it so __aexit__ sees "drain initiated"
+        # regardless of whether the subsequent await completes or is cancelled
+        # (e.g. second Ctrl-C). If we close first and then CancelledError fires
+        # before the null assignment, __aexit__ would call terminate_all() on an
+        # aggregator that is already draining and writing final_snapshot.json.
+        publisher, self.publisher = self.publisher, None
+        publisher.close()
         logger.info("Waiting for services to finish processing...")
         await asyncio.to_thread(self._launcher.wait_for_exit, None)
 
@@ -350,20 +356,21 @@ class MetricsPipeline:
             if snap_dict is not None
             else None
         )
-        # Null the publisher so __aexit__ sees "drained cleanly" and releases the
-        # scope without killing the services. The subscriber and ZMQ scope are
-        # released by the ExitStack in __aexit__.
-        self.publisher = None
         return report
 
     def _kill_services(self) -> None:
-        """Best-effort service termination owned by the pipeline ExitStack."""
+        """Best-effort service termination owned by the pipeline ExitStack.
+
+        Sends SIGTERM first so the metrics aggregator can flush an INTERRUPTED
+        final_snapshot.json via its signal handler. Escalates to SIGKILL after
+        a short timeout for any process that does not exit cleanly.
+        """
         if self._launcher is None:
             return
         try:
-            self._launcher.kill_all()
+            self._launcher.terminate_all()
         except Exception as e:  # noqa: BLE001 — teardown best-effort
-            logger.warning("Service kill_all error: %s", e)
+            logger.warning("Service terminate_all error: %s", e)
 
     def _close_publisher(self) -> None:
         """Best-effort publisher close (ExitStack callback)."""

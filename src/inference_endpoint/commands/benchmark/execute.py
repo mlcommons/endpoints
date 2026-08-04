@@ -968,9 +968,11 @@ async def _run_benchmark_async(
         if tmpfs_dir.exists():
             try:
                 _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
+                shutil.rmtree(tmpfs_dir, ignore_errors=True)
             except Exception as e:  # noqa: BLE001 — salvage best-effort; keep original exc
-                logger.warning("Failed to salvage tmpfs: %s", e)
-            shutil.rmtree(tmpfs_dir, ignore_errors=True)
+                logger.warning(
+                    "Failed to salvage tmpfs: %s — tmpfs retained at %s", e, tmpfs_dir
+                )
         raise
 
     return BenchmarkResult(
@@ -1180,9 +1182,13 @@ def run_benchmark(
             if bench.tmpfs_dir.exists():
                 try:
                     _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
+                    shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
                 except Exception as e:  # noqa: BLE001 — salvage best-effort
-                    logger.warning("Failed to salvage tmpfs: %s", e)
-                shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
+                    logger.warning(
+                        "Failed to salvage tmpfs: %s — tmpfs retained at %s",
+                        e,
+                        bench.tmpfs_dir,
+                    )
             logger.info(f"Partial results saved to {ctx.report_dir}")
 
     return ctx.report_dir
