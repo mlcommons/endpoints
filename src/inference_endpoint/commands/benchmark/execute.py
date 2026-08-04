@@ -178,7 +178,6 @@ class BenchmarkContext:
     dataloader: Dataset | None
     rt_settings: RuntimeSettings | None
     total_samples: int
-    accuracy_datasets: list[Dataset] = field(default_factory=list)
     eval_configs: list[AccuracyConfiguration] = field(default_factory=list)
     affinity_plan: AffinityPlan | None = None
 
@@ -294,8 +293,8 @@ def _load_datasets(
     config: BenchmarkConfig,
     report_dir: Path,
     test_mode: TestMode,
-) -> tuple[Dataset | None, list[Dataset], list[AccuracyConfiguration]]:
-    """Load performance and accuracy datasets. Returns (perf_loader, acc_datasets, eval_configs)."""
+) -> tuple[Dataset | None, list[AccuracyConfiguration]]:
+    """Load performance and accuracy datasets. Returns (perf_loader, eval_configs)."""
     accuracy_only = test_mode == TestMode.ACC
     accuracy_cfgs = [ds for ds in config.datasets if ds.type == DatasetType.ACCURACY]
     performance_cfgs = [
@@ -310,7 +309,6 @@ def _load_datasets(
     elif not performance_cfgs:
         raise InputValidationError("At least one performance dataset required")
 
-    accuracy_datasets: list[Dataset] = []
     eval_configs: list[AccuracyConfiguration] = []
 
     # Pack the evaluation parameters for each accuracy dataset
@@ -348,7 +346,6 @@ def _load_datasets(
         ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
         scorer_cls.preflight(extras)
-        accuracy_datasets.append(ds)
         # TODO add tests and defaults
         eval_configs.append(
             AccuracyConfiguration(
@@ -431,7 +428,7 @@ def _load_datasets(
                     )
                 )
 
-    return dataloader, accuracy_datasets, eval_configs
+    return dataloader, eval_configs
 
 
 def setup_benchmark(
@@ -506,9 +503,7 @@ def setup_benchmark(
     )
 
     # Datasets
-    dataloader, accuracy_datasets, eval_configs = _load_datasets(
-        config, report_dir, test_mode
-    )
+    dataloader, eval_configs = _load_datasets(config, report_dir, test_mode)
 
     rt_settings: RuntimeSettings | None = None
     total_samples = 0
@@ -557,7 +552,6 @@ def setup_benchmark(
         dataloader=dataloader,
         rt_settings=rt_settings,
         total_samples=total_samples,
-        accuracy_datasets=accuracy_datasets,
         eval_configs=eval_configs,
         affinity_plan=affinity_plan,
     )
@@ -1083,7 +1077,11 @@ def _summarize_and_log_metrics(
 
     logger.info(f"Completed in {perf_elapsed:.1f}s")
     if ctx.accuracy_only:
-        acc_total = sum(ds.num_samples() * ds.repeats for ds in ctx.accuracy_datasets)
+        acc_total = sum(
+            ds.dataset.num_samples() * ds.num_repeats
+            for ds in ctx.eval_configs
+            if ds.dataset_type == DatasetType.ACCURACY
+        )
         logger.info(f"Accuracy-only: {acc_total} samples evaluated")
     else:
         logger.info(
