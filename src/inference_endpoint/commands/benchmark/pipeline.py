@@ -29,10 +29,11 @@ The one value-producing step stays an explicit method:
   wait for services → source the final snapshot → build the Report). Runs on both a
   clean finish and a session-run failure, since ``BenchmarkSession.run`` publishes
   ``ENDED`` in its own ``finally`` and the aggregator writes a terminal snapshot. It
-  nulls ``self.publisher`` on success — the signal ``__aexit__`` reads to choose
-  release-only vs. kill: a still-set publisher means the drain never ran (setup /
-  connect / session error before it), so the services are killed rather than left to
-  linger on the aggregator's unlimited drain-timeout.
+  nulls ``self.publisher`` at drain initiation (before ``publisher.close()``) —
+  the signal ``__aexit__`` reads to choose release-only vs. kill: a still-set
+  publisher means the drain was never initiated (setup / connect / session error
+  before it), so the services are killed rather than left to linger on the
+  aggregator's unlimited drain-timeout.
 """
 
 from __future__ import annotations
@@ -233,8 +234,9 @@ class MetricsPipeline:
     ) -> bool | None:
         """Release the pipeline. Kill the services iff the run never drained.
 
-        ``drain_and_build_report`` nulls ``self.publisher`` on success; a still-set
-        publisher means we never drained (setup / connect / session error before it),
+        ``drain_and_build_report`` nulls ``self.publisher`` at drain initiation; a
+        still-set publisher means the drain was never initiated (setup / connect /
+        session error before it),
         so the service subprocesses are killed rather than left on the aggregator's
         unlimited drain-timeout. The ``ExitStack`` then releases publisher, subscriber
         and the ZMQ scope — running every step even under ``BaseException``.

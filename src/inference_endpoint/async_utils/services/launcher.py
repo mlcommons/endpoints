@@ -168,8 +168,11 @@ class ServiceLauncher:
                 try:
                     proc.kill()
                     proc.wait(timeout=5)
-                except OSError as e:  # noqa: BLE001 — proc already exited between kill and wait
-                    logger.debug("kill pid=%d: %s", proc.pid, e)
+                except (OSError, subprocess.TimeoutExpired) as e:  # noqa: BLE001
+                    # OSError: proc already exited between kill and wait.
+                    # TimeoutExpired: proc is stuck in kernel D-state; log and
+                    # continue so remaining processes in _procs are still handled.
+                    logger.warning("Could not kill pid=%d: %s", proc.pid, e)
 
     def kill_all(self) -> None:
         """Kill all managed subprocesses."""

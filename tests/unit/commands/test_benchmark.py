@@ -1292,7 +1292,7 @@ class TestAggregatorArgs:
         ENDED, and with drain-timeout defaulting to unlimited the services would
         otherwise linger. Here launch succeeds and _create_issuer then raises, so
         the run never drains — MetricsPipeline.__aexit__ sees the publisher still
-        set and kills the services (kill_all).
+        set and kills the services (terminate_all).
         """
         config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
         ctx = self._make_ctx(config, tmp_path)
@@ -1332,7 +1332,7 @@ class TestAggregatorArgs:
             with pytest.raises(RuntimeError, match="setup boom"):
                 await _run_benchmark_async(ctx, loop)
 
-        # __aexit__ kills the services (drain never ran) → launcher.kill_all();
+        # __aexit__ kills the services (drain never ran) → launcher.terminate_all();
         # called exactly once, and never for a clean run.
         MockLauncher.return_value.terminate_all.assert_called_once()
 
@@ -1340,7 +1340,7 @@ class TestAggregatorArgs:
     @pytest.mark.asyncio
     async def test_setup_error_after_launch_aborts_exactly_once(self, tmp_path):
         """A SetupError after launch never drains, so MetricsPipeline.__aexit__
-        kills the services exactly once — kill_all() runs a single time (there is
+        kills the services exactly once — terminate_all() runs a single time (there is
         one teardown path now, not an explicit abort plus a finally abort).
         """
         config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
