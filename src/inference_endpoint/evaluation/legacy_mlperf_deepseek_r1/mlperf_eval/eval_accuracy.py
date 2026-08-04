@@ -757,15 +757,12 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def print_evaluation_results(df_evaluated: pd.DataFrame,
-                             logger: Optional[logging.Logger] = None) -> Dict[str, Any]:
+                             logger: Optional[logging.Logger] = None) -> None:
     """Print evaluation results in a unified format.
 
     Args:
         df_evaluated: DataFrame with evaluated results
         logger: Optional logger instance (uses module logger if not provided)
-
-    Returns:
-        Dictionary with evaluation statistics
     """
     if logger is None:
         logger = logging.getLogger(__name__)

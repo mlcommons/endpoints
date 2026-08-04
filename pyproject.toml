@@ -279,6 +279,5 @@ exclude = [
 module = [
     "inference_endpoint.openai.openai_types_gen",
     "inference_endpoint.metrics.reporter",
-    "inference_endpoint.evaluation.legacy_mlperf_deepseek_r1.mlperf_eval.*",
 ]
 ignore_errors = true
