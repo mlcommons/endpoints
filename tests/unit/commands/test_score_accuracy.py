@@ -24,12 +24,12 @@ from types import SimpleNamespace
 
 import msgspec.json
 import pytest
-from inference_endpoint.commands.benchmark.execute import (
+from inference_endpoint.commands.benchmark.accuracy import (
     AccuracyConfiguration,
     _accuracy_uuid_bound,
     _phase_osl_stats,
     _phase_response_counts,
-    _score_accuracy,
+    score_accuracy,
 )
 from inference_endpoint.config import schema as config_schema
 from inference_endpoint.config.schema import (
@@ -39,11 +39,11 @@ from inference_endpoint.config.schema import (
     ScorerMethod,
 )
 
-# Module object for the tests that monkeypatch execute's own module-level symbols
-# (load_reference_backend) so _score_accuracy resolves the patched one. Taken from
-# sys.modules to avoid importing execute under both the ``from ... import`` and
-# ``import ...`` styles.
-execute_mod = sys.modules[_score_accuracy.__module__]
+# The module that defines score_accuracy (commands.benchmark.accuracy), resolved
+# via __module__ so the tests monkeypatch its module-level load_reference_backend
+# and score_accuracy picks up the patched one — without importing the module under
+# both the ``from ... import`` and ``import ...`` styles.
+scoring_mod = sys.modules[score_accuracy.__module__]
 
 
 class _FakeDataset:
@@ -240,7 +240,7 @@ class TestScoreAccuracy:
             endpoint_config=endpoint_config,
         )
 
-        _score_accuracy(_ctx([cfg], test_mode=test_mode), _RESULT)
+        score_accuracy(_ctx([cfg], test_mode=test_mode), _RESULT)
 
         assert _FakeSWEBenchScorer.received_kwargs == {
             "extractor": None,
@@ -256,7 +256,7 @@ class TestScoreAccuracy:
             _cfg("gpqa::gptoss", 198, 0.9, tmp_path, repeats=5),
             _cfg("cnn_dailymail::llama3_8b", 100, 0.5, tmp_path),
         ]
-        scores = _score_accuracy(_ctx(cfgs), _RESULT)
+        scores = score_accuracy(_ctx(cfgs), _RESULT)
         assert isinstance(scores, list)
         by = _by_name(scores)
         assert set(by) == {
@@ -277,7 +277,7 @@ class TestScoreAccuracy:
             _cfg("plain", 10, 0.7, tmp_path),
             _cfg("with_bd", 10, 0.83, tmp_path, scorer=_FakeBreakdownScorer),
         ]
-        by = _by_name(_score_accuracy(_ctx(cfgs), _RESULT))
+        by = _by_name(score_accuracy(_ctx(cfgs), _RESULT))
         assert "breakdown" not in by["plain"]
         assert by["with_bd"]["breakdown"]["overall_accuracy"] == 80.0
 
@@ -298,20 +298,20 @@ class TestScoreAccuracy:
                 ),
             ],
         )
-        by = _by_name(_score_accuracy(_ctx([cfg]), result))
+        by = _by_name(score_accuracy(_ctx([cfg]), result))
         assert by["performance"]["unit_samples"] == 3
         assert by["performance"]["num_repeats"] == 1
         assert by["performance"]["total_samples"] == 128
         assert by["performance"]["duration_s"] == 3.0
 
     def test_empty_when_no_datasets(self, tmp_path):
-        assert _score_accuracy(_ctx([]), _RESULT) == []
+        assert score_accuracy(_ctx([]), _RESULT) == []
 
     def test_perf_mode_skips_only_external_scoring(self, tmp_path):
         ordinary_cfg = _cfg("aime25::gptoss", 30, 0.8, tmp_path)
         external_cfg = _cfg("swe_bench", 1, 1.0, tmp_path, scorer=_FakeSWEBenchScorer)
         _FakeSWEBenchScorer.received_kwargs = {}
-        scores = _score_accuracy(
+        scores = score_accuracy(
             _ctx(
                 [ordinary_cfg, external_cfg],
                 test_mode=config_schema.TestMode.PERF,
@@ -327,17 +327,17 @@ class TestScoreAccuracy:
         # tokenizer_name None (the default) => no output_sequence_lengths attached,
         # and the OSL path is never entered (fake scorers have no get_raw_outputs).
         cfg = _cfg("aime25::gptoss", 30, 0.8, tmp_path)
-        entry = _by_name(_score_accuracy(_ctx([cfg]), _RESULT))["aime25::gptoss"]
+        entry = _by_name(score_accuracy(_ctx([cfg]), _RESULT))["aime25::gptoss"]
         assert "output_sequence_lengths" not in entry
 
     def test_osl_attached_with_tokenizer(self, tmp_path, monkeypatch):
         """With a tokenizer, each accuracy entry gets an output_sequence_lengths
         block (same shape as the perf report) from the phase's completions."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+        entry = _by_name(score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
             "aime25::gptoss"
         ]
         # Outputs "a b" (2) and "a b c d" (4); "other" is not in sample_index_map.
@@ -353,10 +353,10 @@ class TestScoreAccuracy:
 
     def test_osl_skipped_for_performance_entry(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("performance", 2, 0.6, tmp_path, scorer=_FakeOSLScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+        entry = _by_name(score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
             "performance"
         ]
         assert "output_sequence_lengths" not in entry
@@ -364,7 +364,7 @@ class TestScoreAccuracy:
     def test_osl_dropped_when_get_raw_outputs_raises(self, tmp_path, monkeypatch):
         """A read/tokenize failure only drops OSL — scoring still succeeds."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
 
         class _RaisingScorer(_FakeOSLScorer):
@@ -372,7 +372,7 @@ class TestScoreAccuracy:
                 raise RuntimeError("events.jsonl unreadable")
 
         cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_RaisingScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+        entry = _by_name(score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
             "ds"
         ]
         assert "output_sequence_lengths" not in entry
@@ -383,7 +383,7 @@ class TestScoreAccuracy:
         """response_counts must be published even with no tokenizer configured —
         failure visibility cannot depend on OSL being enabled."""
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg]), _RESULT))["aime25::gptoss"]
+        entry = _by_name(score_accuracy(_ctx([cfg]), _RESULT))["aime25::gptoss"]
         assert entry["response_counts"] == {
             "issued": 2,
             "scored": 2,
@@ -396,10 +396,10 @@ class TestScoreAccuracy:
         """Masking regression: every response empty => OSL returns None, but
         response_counts must still publish scored=0 rather than omitting all."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_EmptyOSLScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+        entry = _by_name(score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
             "aime25::gptoss"
         ]
         assert "output_sequence_lengths" not in entry  # all empty -> OSL None
@@ -414,10 +414,10 @@ class TestScoreAccuracy:
         """scored/empty/missing partition the issued samples; OSL tokenizes only
         the one scored (non-empty) response."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_MixedOSLScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+        entry = _by_name(score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
             "ds"
         ]
         assert entry["response_counts"] == {
@@ -430,17 +430,17 @@ class TestScoreAccuracy:
 
     def test_response_counts_skipped_for_performance_entry(self, tmp_path):
         cfg = _cfg("performance", 2, 0.6, tmp_path, scorer=_FakeOSLScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg]), _RESULT))["performance"]
+        entry = _by_name(score_accuracy(_ctx([cfg]), _RESULT))["performance"]
         assert "response_counts" not in entry
 
     def test_all_missing_still_publishes_response_counts(self, tmp_path, monkeypatch):
         """An accuracy phase with no COMPLETE rows (empty, columned frame) must
         still publish response_counts (all missing) rather than dropping them."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_AllMissingScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+        entry = _by_name(score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
             "ds"
         ]
         assert entry["response_counts"] == {
@@ -454,9 +454,9 @@ class TestScoreAccuracy:
     def test_no_fast_backend_disables_osl_keeps_counts(self, tmp_path, monkeypatch):
         """A tokenizer with no fast backend (load_reference_backend -> None) skips
         OSL but still publishes response_counts."""
-        monkeypatch.setattr(execute_mod, "load_reference_backend", lambda name: None)
+        monkeypatch.setattr(scoring_mod, "load_reference_backend", lambda name: None)
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+        entry = _by_name(score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
             "aime25::gptoss"
         ]
         assert "output_sequence_lengths" not in entry
@@ -470,9 +470,9 @@ class TestScoreAccuracy:
         def _boom(name):
             raise OSError("no tokenizer")
 
-        monkeypatch.setattr(execute_mod, "load_reference_backend", _boom)
+        monkeypatch.setattr(scoring_mod, "load_reference_backend", _boom)
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+        entry = _by_name(score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
             "aime25::gptoss"
         ]
         assert "output_sequence_lengths" not in entry
@@ -480,10 +480,10 @@ class TestScoreAccuracy:
         assert entry["score"] == pytest.approx(0.8)
 
     def test_uuid_bound_passed_to_get_raw_outputs(self, tmp_path, monkeypatch):
-        """End-to-end: _score_accuracy computes the accuracy uuid bound from
+        """End-to-end: score_accuracy computes the accuracy uuid bound from
         sample_idx_map.json and passes it into get_raw_outputs."""
         monkeypatch.setattr(
-            execute_mod, "load_reference_backend", lambda name: _WordBackend()
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
         (tmp_path / "sample_idx_map.json").write_bytes(
             msgspec.json.encode({"aime25::gptoss": {"u1": 0, "u2": 1}})
@@ -496,9 +496,7 @@ class TestScoreAccuracy:
                 return super().get_raw_outputs(wanted_uuids)
 
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_CaptureScorer)
-        _score_accuracy(
-            _ctx([cfg], tokenizer_name="fake", report_dir=tmp_path), _RESULT
-        )
+        score_accuracy(_ctx([cfg], tokenizer_name="fake", report_dir=tmp_path), _RESULT)
         assert captured["wanted"] == {"u1", "u2"}
 
     def test_empty_uuid_bound_stays_bounded(self, tmp_path):
@@ -513,7 +511,7 @@ class TestScoreAccuracy:
                 return super().get_raw_outputs(wanted_uuids)
 
         cfg = _cfg("swe_bench", 1, 0.8, tmp_path, scorer=_CaptureScorer)
-        _score_accuracy(_ctx([cfg], report_dir=tmp_path), _RESULT)
+        score_accuracy(_ctx([cfg], report_dir=tmp_path), _RESULT)
 
         assert captured["wanted"] == set()
 
@@ -659,7 +657,7 @@ class TestPhaseDuration:
                 ),
             ],
         )
-        entry = _by_name(_score_accuracy(_ctx([cfg]), result))["aime25::gptoss"]
+        entry = _by_name(score_accuracy(_ctx([cfg]), result))["aime25::gptoss"]
         assert entry["duration_s"] == 5.5
 
     def test_numpy_score_coerced_to_serializable(self, tmp_path):
@@ -677,7 +675,7 @@ class TestPhaseDuration:
                 return np.float64(0.5), 1
 
         cfg = _cfg("np::ds", 10, 0.0, tmp_path, scorer=_NumpyScorer)
-        entry = _by_name(_score_accuracy(_ctx([cfg]), _RESULT))["np::ds"]
+        entry = _by_name(score_accuracy(_ctx([cfg]), _RESULT))["np::ds"]
         # np.floating is a float subclass, so isinstance(..., float) is not
         # enough — assert it is specifically NOT a numpy scalar.
         assert not isinstance(entry["score"], np.floating)

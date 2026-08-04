@@ -24,7 +24,7 @@ import random
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error as urllib_error
 
 import inference_endpoint.commands.benchmark.execute as execute_mod
@@ -42,15 +42,18 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkResult,
     ResponseCollector,
     _build_phases,
-    _derive_profile_urls,
     _load_datasets,
     _PerfPhaseTimeout,
-    _post_profile,
-    _render_profile_status,
     _run_benchmark_async,
-    _write_profiling_section,
     finalize_benchmark,
     setup_benchmark,
+)
+from inference_endpoint.commands.benchmark.profiling import (
+    ProfileController,
+    _derive_profile_urls,
+    _post_profile,
+    _render_profile_status,
+    write_profiling_section,
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -87,6 +90,7 @@ from inference_endpoint.evaluation.scoring import (
 )
 from inference_endpoint.exceptions import (
     DatasetValidationError,
+    ExecutionError,
     InputValidationError,
     SetupError,
 )
@@ -1258,16 +1262,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -1308,16 +1312,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -1362,16 +1366,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -1389,6 +1393,253 @@ class TestAggregatorArgs:
         tmpfs_base = shm if shm.exists() else Path(tempfile.gettempdir())
         tmpfs_dir = tmpfs_base / "benchmark_cli_benchmark_deadbeef"
         assert not tmpfs_dir.exists()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_setup_failure_after_launch_kills_services(self, tmp_path):
+        """A setup failure *after* the services launch but *before* session.run
+        must kill the aggregator/event-logger subprocesses, not orphan them.
+
+        The graceful drain (which waits for the services to self-exit on ENDED)
+        is only reached once session.run runs; a failure before it never sends
+        ENDED, and with drain-timeout defaulting to unlimited the services would
+        otherwise linger. Here launch succeeds and _create_issuer then raises, so
+        the run never drains — MetricsPipeline.__aexit__ sees the publisher still
+        set and kills the services (terminate_all).
+        """
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None  # services are now "running"
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(side_effect=RuntimeError("setup boom")),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="setup boom"):
+                await _run_benchmark_async(ctx, loop)
+
+        # __aexit__ kills the services (drain never ran) → launcher.terminate_all();
+        # called exactly once, and never for a clean run.
+        MockLauncher.return_value.terminate_all.assert_called_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_setup_error_after_launch_aborts_exactly_once(self, tmp_path):
+        """A SetupError after launch never drains, so MetricsPipeline.__aexit__
+        kills the services exactly once — terminate_all() runs a single time (there is
+        one teardown path now, not an explicit abort plus a finally abort).
+        """
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(side_effect=SetupError("connect boom")),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(SetupError, match="connect boom"):
+                await _run_benchmark_async(ctx, loop)
+
+        # The setup-error path never drains, so __aexit__ kills the services once.
+        MockLauncher.return_value.terminate_all.assert_called_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_http_client_shut_down_on_setup_error_after_create_issuer(
+        self, tmp_path
+    ):
+        """A setup error AFTER _create_issuer (client already created) but before
+        session.run must still shut the HTTP client down — otherwise its worker
+        subprocesses leak (the session finally that used to own the shutdown is
+        never reached on this path)."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        mock_client = MagicMock()
+        mock_client.shutdown_async = AsyncMock()
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(return_value=(MagicMock(), mock_client)),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_agentic_strategy",
+                side_effect=RuntimeError("setup boom after client create"),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="setup boom"):
+                await _run_benchmark_async(ctx, loop)
+
+        # Client was created; the run failed before the session finally, so the
+        # outer finally must have shut it down (idempotent, called once here).
+        mock_client.shutdown_async.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("drain_kwargs", "expected_error", "expected_match"),
+        [
+            pytest.param(
+                {"side_effect": RuntimeError("drain boom")},
+                RuntimeError,
+                "drain boom",
+                id="drain-raises",
+            ),
+            pytest.param(
+                {"return_value": None},
+                ExecutionError,
+                "without a usable metrics report",
+                id="drain-returns-no-report",
+            ),
+        ],
+    )
+    async def test_clean_run_drain_failure_propagates(
+        self, tmp_path, drain_kwargs, expected_error, expected_match
+    ):
+        """A clean session must fail if draining raises or yields no report."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+        mock_client = MagicMock()
+        mock_client.shutdown_async = AsyncMock()
+        mock_session = MagicMock()
+        mock_session.run = AsyncMock(return_value=MagicMock())  # clean success
+
+        loop = asyncio.get_event_loop()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(return_value=(MagicMock(), mock_client)),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_agentic_strategy",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.BenchmarkSession",
+                return_value=mock_session,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_phases",
+                return_value=[],
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline."
+                "MetricsPipeline.drain_and_build_report",
+                new=AsyncMock(**drain_kwargs),
+            ),
+            # The perf run reaches the SIGINT handler on the clean path; patch it
+            # out so the test doesn't touch real process signal state.
+            patch.object(loop, "add_signal_handler"),
+            patch.object(loop, "remove_signal_handler"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            with pytest.raises(expected_error, match=expected_match):
+                await _run_benchmark_async(ctx, loop)
 
 
 class TestAccuracyOnlyDatasetLoading:
@@ -2736,7 +2987,7 @@ class TestProfilingHelpers:
         resp = MagicMock()
         resp.__enter__.return_value.status = 200
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             return_value=resp,
         ):
             rec = _post_profile("http://h/start_profile")
@@ -2749,7 +3000,7 @@ class TestProfilingHelpers:
     def test_post_profile_http_error(self):
         err = urllib_error.HTTPError("http://h", 404, "Not Found", {}, None)
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             side_effect=err,
         ):
             rec = _post_profile("http://h/start_profile")
@@ -2759,7 +3010,7 @@ class TestProfilingHelpers:
     @pytest.mark.unit
     def test_post_profile_connection_failure_never_raises(self):
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             side_effect=OSError("refused"),
         ):
             rec = _post_profile("http://h/start_profile")
@@ -2800,7 +3051,7 @@ class TestProfilingHelpers:
             ],
         }
         buf = io.StringIO()
-        _write_profiling_section(buf, payload)
+        write_profiling_section(buf, payload)
         text = buf.getvalue()
         assert "Profiling" in text
         assert "http://h/start_profile" in text
@@ -2808,6 +3059,78 @@ class TestProfilingHelpers:
         assert "Trigger span" in text
         # Mirrors what finalize_benchmark dumps to profiling.json
         assert json.loads(json.dumps(payload))["engine"] == "vllm"
+
+    @pytest.mark.unit
+    def test_controller_start_then_stop_maps_indices(self):
+        """start() posts each /start_profile; stop() posts /stop_profile only for
+        the starts that returned 200, mapped by the same index, tagging stop_reason."""
+
+        def _fake_post(url):
+            # b's /start_profile fails (500); everything else succeeds.
+            status = 500 if url == "http://b/start_profile" else 200
+            return {
+                "url": url,
+                "status": status,
+                "error": None,
+                "sent_at_ns": 1,
+                "sent_at_iso": "x",
+            }
+
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+            side_effect=_fake_post,
+        ):
+            ctrl = ProfileController(
+                ProfilerEngine.VLLM, ["http://a/v1", "http://b/v1"], None
+            )
+            ctrl.start()
+            ctrl.stop(completed_normally=True)
+
+        payload = ctrl.payload()
+        assert payload["engine"] == "vllm"
+        assert [s["url"] for s in payload["starts"]] == [
+            "http://a/start_profile",
+            "http://b/start_profile",
+        ]
+        # Only a's start returned 200 → only a's stop fires; b (500) is skipped.
+        assert [s["url"] for s in payload["stops"]] == ["http://a/stop_profile"]
+        assert payload["stops"][0]["stop_reason"] == "phase_end"
+
+    @pytest.mark.unit
+    def test_controller_stop_reason_abort_when_not_completed(self):
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+            side_effect=lambda url: {
+                "url": url,
+                "status": 200,
+                "error": None,
+                "sent_at_ns": 1,
+                "sent_at_iso": "x",
+            },
+        ):
+            ctrl = ProfileController(ProfilerEngine.VLLM, ["http://a/v1"], None)
+            ctrl.start()
+            ctrl.stop(completed_normally=False)
+        assert ctrl.payload()["stops"][0]["stop_reason"] == "abort"
+
+    @pytest.mark.unit
+    def test_controller_disabled_is_noop(self):
+        """engine=None → no URLs derived, start/stop do nothing, payload is None."""
+        ctrl = ProfileController(None, ["http://a/v1"], None)
+        ctrl.start()
+        ctrl.stop(completed_normally=True)
+        assert ctrl.payload() is None
+
+    @pytest.mark.unit
+    def test_controller_stop_without_start_posts_nothing(self):
+        """stop() before any start() records nothing (empty _starts, early return)."""
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+        ) as mock_post:
+            ctrl = ProfileController(ProfilerEngine.VLLM, ["http://a/v1"], None)
+            ctrl.stop(completed_normally=True)
+        mock_post.assert_not_called()
+        assert ctrl.payload()["stops"] == []
 
 
 class _OverrideTestBase:
