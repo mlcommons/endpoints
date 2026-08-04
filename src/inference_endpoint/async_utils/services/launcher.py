@@ -157,8 +157,8 @@ class ServiceLauncher:
             if proc.poll() is None:
                 try:
                     proc.terminate()
-                except OSError:
-                    pass
+                except OSError as e:  # noqa: BLE001 — proc already exited between poll and terminate
+                    logger.debug("terminate pid=%d: %s", proc.pid, e)
         deadline = time.monotonic() + timeout
         for proc in self._procs:
             remaining = max(0.0, deadline - time.monotonic())
@@ -168,8 +168,8 @@ class ServiceLauncher:
                 try:
                     proc.kill()
                     proc.wait(timeout=5)
-                except OSError:
-                    pass
+                except OSError as e:  # noqa: BLE001 — proc already exited between kill and wait
+                    logger.debug("kill pid=%d: %s", proc.pid, e)
 
     def kill_all(self) -> None:
         """Kill all managed subprocesses."""
