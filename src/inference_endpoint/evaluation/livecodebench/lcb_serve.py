@@ -54,7 +54,14 @@ logger = logging.getLogger(__name__)
 
 # Grading assumes fork semantics; under Python 3.14's forkserver default the
 # grading children die at startup and the service reports 0/N forever.
+# This module only runs inside the Linux lcb-service container, so "fork"
+# is always available.
 _MP_CTX = mp.get_context("fork")
+
+# Error codes that mean the judge is broken, as opposed to the submitted code
+# failing its tests: -5 TestRunnerError, -6 GradingChildDied. Timeouts (-1)
+# are the submitted code's fault and do not count.
+_LCB_INFRA_ERROR_CODES = {-5, -6}
 
 
 def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
@@ -137,17 +144,29 @@ def run_code_subprocess(
     p.start()
     p.join(timeout=global_timeout)
 
-    if p.is_alive():
+    timed_out = p.is_alive()
+    if timed_out:
         p.kill()
 
     if len(resp_buffer) == 0:
-        # Assume timeout
-        res = [-1] * len(suite["inputs"])
-        metadata = {
-            "error": "Test suite timeout",
-            "error_code": -1,
-            "error_message": f"Subprocess did not complete in time ({global_timeout}s)",
-        }
+        if timed_out:
+            # Still running at the deadline: the submitted code took too long.
+            res = [-1] * len(suite["inputs"])
+            metadata = {
+                "error": "Test suite timeout",
+                "error_code": -1,
+                "error_message": f"Subprocess did not complete in time ({global_timeout}s)",
+            }
+        else:
+            # Exited before the deadline without reporting a result: the
+            # grading child died (e.g. bad start method, OOM kill), not the
+            # submitted code.
+            res = [-1] * len(suite["inputs"])
+            metadata = {
+                "error": "Grading subprocess died before reporting a result",
+                "error_code": -6,
+                "error_message": f"GradingChildDied (exitcode={p.exitcode})",
+            }
         return res, metadata
     else:
         res, metadata = resp_buffer[0]
@@ -274,7 +293,7 @@ class _LCBWorker:
         for qid, test_codes in zip(question_ids, codes, strict=False):
             results[qid] = [False] * len(test_codes)
         futures = {}
-        execution_errors = 0
+        infra_errors = 0
 
         with ProcessPoolExecutor(
             max_workers=self.n_lcb_workers, mp_context=_MP_CTX
@@ -297,7 +316,8 @@ class _LCBWorker:
                 qid, code_idx = futures[future]
                 res, metadata = future.result()
                 if "error" in metadata:
-                    execution_errors += 1
+                    if metadata.get("error_code") in _LCB_INFRA_ERROR_CODES:
+                        infra_errors += 1
                     logger.error(f"Test execution error for question {qid}: {metadata}")
 
                 # LCB uses any result > 0 as a 'pass' since:
@@ -323,12 +343,14 @@ class _LCBWorker:
                             exc_info=True,
                         )
 
-        # All subprocesses erroring means the judge itself is broken, not that
-        # every code sample failed its tests.
-        if futures and execution_errors == len(futures):
+        # Every subprocess hitting an infra error means the judge itself is
+        # broken, not that every code sample failed its tests. Timeouts are
+        # excluded: a batch where every submission loops forever is a valid
+        # 0 score, not a broken judge.
+        if futures and infra_errors == len(futures):
             raise RuntimeError(
-                f"All {len(futures)} grading subprocesses reported execution "
-                "errors - the LCB judging infrastructure is broken; refusing "
+                f"All {len(futures)} grading subprocesses reported "
+                "infrastructure errors - the LCB judge is broken; refusing "
                 "to report a 0 score. See the logged error metadata above."
             )
 
@@ -363,6 +385,7 @@ class LCBServe:
         if n_workers is None:
             n_workers = mp.cpu_count() // 2
         logger.info("Using %d workers for LCB eval", n_workers)
+        logger.info("Multiprocessing start method: %s", _MP_CTX.get_start_method())
         self.n_workers = n_workers
 
         self.path_to_dataset = (
