@@ -39,6 +39,9 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Infrastructure failures (broken judge) must not be scored as wrong answers.
+_LCB_INFRA_ERRORS = (ImportError, FileNotFoundError, RuntimeError)
+
 
 # =============================================================================
 # MLPerf Log Accuracy Processing
@@ -565,10 +568,6 @@ def evaluate_livecodebench(code: Optional[str], question_id: str) -> bool:
         os.chdir(original_cwd)
         shutil.rmtree(temp_dir, ignore_errors=True)
         os.environ.pop('TQDM_DISABLE', None)
-
-
-# Infrastructure failures (broken judge) must not be scored as wrong answers.
-_LCB_INFRA_ERRORS = (ImportError, FileNotFoundError, RuntimeError)
 
 
 def evaluate_livecodebench_worker(args: Tuple[str, str]) -> Tuple[str, bool]:
