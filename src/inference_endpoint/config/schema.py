@@ -81,7 +81,9 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 # (launched once from top-level model_params), so a per-dataset override would
 # desync ISL/OSL/TTFT/TPOT accounting without changing what is measured. Rejected
 # as generation_config_override keys — they are per-run/identity, not per-dataset.
-_METRICS_DECOUPLED_OVERRIDE_KEYS = frozenset({"name", "streaming", "tokenizer_name"})
+_METRICS_DECOUPLED_OVERRIDE_KEYS = frozenset(
+    {"name", "streaming", "tokenizer_name", "enable_token_metrics"}
+)
 
 
 def _non_default_completion_controls(mp: ModelParams) -> list[str]:
@@ -481,9 +483,9 @@ class Dataset(BaseModel):
     # per-dataset max OSL or top_p, as seen in DS-V4), and dataset-scoping also
     # enables per-dataset dynamic OSL distributions. Only generation knobs are
     # overridable — per-run/identity fields (`_METRICS_DECOUPLED_OVERRIDE_KEYS`:
-    # name / streaming / tokenizer_name) drive the single global tokenizer and
-    # MetricsAggregator, so overriding them per-dataset would desync ISL/OSL/
-    # TTFT/TPOT accounting; they are rejected at validation.
+    # name / streaming / tokenizer_name / enable_token_metrics) drive the single
+    # global tokenizer and MetricsAggregator, so overriding them per-dataset
+    # would desync ISL/OSL/TTFT/TPOT accounting; they are rejected at validation.
     #
     # TODO(post-mortem): split ModelParams into a per-run ModelIdentity and a
     # GenerationConfig, so the override surface is exactly the generation fields
@@ -502,8 +504,8 @@ class Dataset(BaseModel):
             "output budgets in the same fleet, e.g. "
             "generation_config_override: {max_new_tokens: 32768, "
             "temperature: 0.0}. NOTE: per-run/identity keys (`name`, "
-            "`streaming`, `tokenizer_name`) are rejected here — set them on "
-            "top-level model_params."
+            "`streaming`, `tokenizer_name`, `enable_token_metrics`) are "
+            "rejected here — set them on top-level model_params."
         ),
     )
 

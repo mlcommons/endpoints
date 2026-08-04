@@ -68,7 +68,7 @@ sglang serve \
   --mem-fraction-static 0.95
 ```
 
-`--model-path` is the checkpoint loaded by the server. It can be a local path visible to the server container or a Hugging Face model ID, depending on your SGLang environment. `--served-model-name` is the OpenAI model name exposed to clients; set `model_params.name` in the YAML to the same value.
+`--model-path` is the checkpoint loaded by the server. It can be a local path visible to the server container or a Hugging Face model ID, depending on your SGLang environment. `--served-model-name` is the OpenAI model name exposed to clients; set `model_params.name` in the YAML to the same value. If that served name is not also a loadable tokenizer on the benchmark host, set `model_params.tokenizer_name` to the tokenizer's Hugging Face repo or benchmark-host path so client-side ISL/OSL/TPOT metrics are collected.
 
 ## Client YAML
 

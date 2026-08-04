@@ -3,7 +3,11 @@ version: "1.0"
 type: "online"
 
 model_params:
-  name: "/model"
+  name: "kimi-k2.6"
+  # The served name above need not be a loadable tokenizer. Point this at the
+  # Kimi tokenizer's HF repo or a local path visible on the benchmark host so
+  # client-side ISL/OSL/TPOT metrics are collected.
+  tokenizer_name: "/path/to/Kimi-K2.6"
   temperature: 1.0
   top_p: 0.95
   max_new_tokens: 8192

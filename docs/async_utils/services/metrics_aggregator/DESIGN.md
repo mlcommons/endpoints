@@ -51,16 +51,21 @@ counted in `pending`. `flush_remaining` never raises.
 ### Sharded batch encoding (`BatchTokenizer`)
 
 The drain fans the whole buffer out across worker **processes**, one pinned
-per `CORES_PER_WORKER` (8) core block. Each worker runs the raw `tokenizers`
-backend's `encode_batch_fast` (Rust, rayon); a single BPE rayon pool
-saturates ~8 cores, so disjoint pinned blocks are how the whole machine is
-used. Workers are spawn-context, warmed in parallel at construction (bounded
-— a hung load is a startup error), and ignore SIGINT.
+per `CORES_PER_WORKER` (8) core block. Hugging Face Fast tokenizers run the raw
+`tokenizers` backend's `encode_batch_fast` (Rust, rayon). Custom Transformers
+wrappers backed by `tiktoken.Encoding`, including Kimi K3, run their native
+`encode` method through a length-counting adapter. Keeping the wrapper in the
+path preserves its special-token and long-input handling; process sharding
+provides parallelism when the wrapper has no batch API. A single BPE rayon pool
+saturates ~8 cores, so disjoint pinned blocks are how the whole machine is used.
+Workers are spawn-context, warmed in parallel at construction (bounded — a hung
+load is a startup error), and ignore SIGINT.
 
 The shard pool has no knob: it auto-sizes to one shard per 8-core block of
-the allowed CPU universe. There is no fallback — no fast Rust backend, or a
-failed/over-budget warmup, is a startup error, because an in-process slow
-path cannot keep up and would surface much later as an incomplete drain.
+the allowed CPU universe. There is no fallback — no supported optimized
+backend (Hugging Face Fast or `tiktoken`), or a failed/over-budget warmup, is a
+startup error, because an in-process slow path cannot keep up and would surface
+much later as an incomplete drain.
 Platforms without an affinity API (macOS) shard unpinned; each worker caps
 its rayon pool to the block size instead.
 
@@ -71,7 +76,9 @@ SIGTERM-kills the aggregator child — which the aggregator's SIGTERM handler
 turns into a best-effort `INTERRUPTED` final snapshot.
 
 Chat-template items (tool calls) run on the in-process thread lane —
-`apply_chat_template` is Python/Jinja; sharding buys nothing.
+`apply_chat_template` is Python/Jinja; sharding buys nothing. They use the
+tokenizer's native `tokenize=True` path so model-specific segment policies,
+including Kimi K3's XTML special-token boundaries, are preserved.
 
 ### CPU affinity: tokenize is post-run
 

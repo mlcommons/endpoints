@@ -3184,7 +3184,9 @@ class _OverrideTestBase:
             self._build_config(perf_path, acc_path, acc_override={"temperature": "hot"})
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("key", ["name", "streaming", "tokenizer_name"])
+    @pytest.mark.parametrize(
+        "key", ["name", "streaming", "tokenizer_name", "enable_token_metrics"]
+    )
     def test_metrics_decoupled_override_rejected_at_construction(self, tmp_path, key):
         """Per-run/identity keys are rejected end-to-end at BenchmarkConfig
         construction (not just on the Dataset submodel), so a per-dataset value

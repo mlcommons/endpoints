@@ -451,9 +451,11 @@ class TestScoreAccuracy:
         }
         assert "output_sequence_lengths" not in entry  # nothing to tokenize
 
-    def test_no_fast_backend_disables_osl_keeps_counts(self, tmp_path, monkeypatch):
-        """A tokenizer with no fast backend (load_reference_backend -> None) skips
-        OSL but still publishes response_counts."""
+    def test_no_optimized_backend_disables_osl_keeps_counts(
+        self, tmp_path, monkeypatch
+    ):
+        """A tokenizer with no supported optimized backend skips OSL but still
+        publishes response_counts."""
         monkeypatch.setattr(scoring_mod, "load_reference_backend", lambda name: None)
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
         entry = _by_name(score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[

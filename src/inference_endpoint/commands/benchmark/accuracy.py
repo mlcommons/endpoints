@@ -189,7 +189,7 @@ def _load_osl_backend(has_accuracy: bool, tokenizer_name: str | None) -> Any | N
     """Load the reference tokenizer backend for accuracy OSL, or None to disable.
 
     Loaded only when a real accuracy dataset exists; a load failure or a tokenizer
-    with no fast (Rust) backend disables OSL rather than failing scoring.
+    with no supported optimized backend disables OSL rather than failing scoring.
     """
     if not (has_accuracy and tokenizer_name is not None):
         return None
@@ -202,15 +202,16 @@ def _load_osl_backend(has_accuracy: bool, tokenizer_name: str | None) -> Any | N
             e,
         )
         return None
-    # A tokenizer with no fast (Rust) backend disables OSL rather than falling
-    # back to a slow Python-tokenizer count: the perf side
-    # (token_metrics._setup_shards) requires a fast backend too and raises without
-    # one, so OSL stays fast-only and consistent on both sides. Warn so the skip is
-    # visible instead of silently dropping the block.
+    # A tokenizer with no supported optimized backend disables OSL rather than
+    # falling back to a slow Python-tokenizer count: the perf side
+    # (token_metrics._setup_shards) has the same requirement and raises without
+    # one, so OSL stays consistent on both sides. Warn so the skip is visible
+    # instead of silently dropping the block.
     if osl_backend is None:
         logger.warning(
-            "Accuracy OSL disabled: tokenizer %r has no fast (Rust) backend "
-            "(token counting requires one, as on the perf side)",
+            "Accuracy OSL disabled: tokenizer %r has no supported optimized "
+            "backend (Hugging Face Fast or tiktoken; token counting requires "
+            "one, as on the perf side)",
             tokenizer_name,
         )
     return osl_backend

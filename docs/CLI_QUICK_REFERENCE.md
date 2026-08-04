@@ -96,6 +96,8 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--model-params.max-new-tokens --max-output-tokens` - Max output tokens (default: 1024)
 - `--model-params.osl-distribution.min --min-output-tokens` - Min output tokens (default: 1)
 - `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default: auto)
+- `--model-params.tokenizer-name --tokenizer` - HF repo ID or local tokenizer path used for client-side ISL/OSL/TPOT; overrides the served model name
+- `--model-params.enable-token-metrics / --model-params.no-enable-token-metrics` - Enable or disable client-side ISL/OSL/TPOT (default: enabled). Disabling skips tokenizer discovery and loading; non-token metrics are still collected.
 - `--runtime.min-duration-ms --duration` - Min duration: ms default, or with suffix (600s, 10m) (default: 600000)
 - `--runtime.n-samples-to-issue --num-samples` - Explicit sample count override
 - `--client.num-workers --workers` - HTTP workers (-1=auto, default: -1)
@@ -117,6 +119,30 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--load-pattern.target-concurrency --concurrency` - Concurrent requests (required for concurrency)
 
 **All other schema fields** are accessible via dotted paths (e.g., `--model-params.temperature`, `--model-params.top-k`, `--runtime.scheduler-random-seed`). Run `--help` to see the full list.
+
+### Tokenizer selection and Kimi K3
+
+By default, the benchmark uses `model_params.name` to find the tokenizer. Set
+`tokenizer_name` when the endpoint exposes a served alias or when the tokenizer
+is stored at a different path on the benchmark host:
+
+```yaml
+model_params:
+  name: "kimi-k3" # Name sent to the endpoint.
+  tokenizer_name: "moonshotai/Kimi-K3" # HF repo or benchmark-host path.
+```
+
+Kimi K3's custom Transformers tokenizer is supported even though Transformers
+labels it as a slow tokenizer: its BPE core uses the optimized Rust `tiktoken`
+backend. This framework capability does not by itself add Kimi K3 to an MLPerf
+ruleset's list of official submission models.
+
+If token metrics are not needed, avoid tokenizer discovery and loading with:
+
+```yaml
+model_params:
+  enable_token_metrics: false
+```
 
 ## Environment Variables
 
