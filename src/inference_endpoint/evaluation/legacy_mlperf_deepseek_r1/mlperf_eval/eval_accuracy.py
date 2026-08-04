@@ -660,8 +660,9 @@ def process_livecodebench_parallel(
     if not work_items:
         return 0, 0
 
-    # Pre-flight: a broken judge (missing dependency/dataset) must raise here
-    # with a real traceback, not be scored as 0.0 by every worker.
+    # Pre-flight: fail fast on a broken judge, and warm the lru_cache so
+    # fork-started workers inherit the loaded benchmark instead of each
+    # loading their own copy. The return value is intentionally discarded.
     load_lcb_benchmark()
 
     # Process in parallel
