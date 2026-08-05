@@ -99,6 +99,16 @@ def execute_code_single_suppressed_errors(
 
         if not isinstance(metadata, dict):
             raise ValueError(f"Expected metadata to be a dict, got {type(metadata)}")
+    except SystemExit as e:
+        # sys.exit() in submitted code is a BaseException, not caught below.
+        # It's the submission's fault, not the judge's, so give it its own
+        # error code and keep it out of _LCB_INFRA_ERROR_CODES.
+        res = [-2]
+        metadata = {
+            "error": f"Submission called sys.exit({e.code!r})",
+            "error_code": -7,
+            "error_message": "SubmissionExit",
+        }
     except Exception:
         # Magic number (see https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/evaluation/compute_code_generation_metrics.py#L65)
         res = [-2]  # LCB internal error code for test runner failed test cases
