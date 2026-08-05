@@ -47,6 +47,44 @@ exit 0
 """
 
 
+def _run_agent(args: argparse.Namespace) -> None:
+    from minisweagent.environments import get_environment
+    from minisweagent.run.benchmarks import swebench
+
+    def get_pyxis_environment(config: dict, instance: dict):
+        environment_config = copy.deepcopy(config.get("environment", {}))
+        environment_config["image"] = resolve_image(
+            args.image_registry, instance["instance_id"]
+        )
+        return get_environment(environment_config)
+
+    base_agent = swebench.ProgressTrackingAgent
+
+    class LiveTrajectoryAgent(base_agent):  # type: ignore[misc, valid-type]
+        def __init__(self, *agent_args: Any, instance_id: str = "", **kwargs: Any):
+            kwargs["output_path"] = (
+                args.output / instance_id / f"{instance_id}.live.json"
+            )
+            super().__init__(*agent_args, instance_id=instance_id, **kwargs)
+
+    swebench.get_sb_environment = get_pyxis_environment
+    swebench.ProgressTrackingAgent = LiveTrajectoryAgent
+    swebench.main(
+        subset=args.subset,
+        split=args.split,
+        slice_spec="",
+        filter_spec=args.filter,
+        shuffle=False,
+        output=str(args.output),
+        workers=args.workers,
+        model=args.model,
+        model_class=None,
+        redo_existing=False,
+        config_spec=[str(args.config)],
+        environment_class="swebench_service.pyxis_environment.PyxisEnvironment",
+    )
+
+
 def _evaluate_instance(
     *,
     test_spec: Any,
@@ -71,7 +109,6 @@ def _evaluate_instance(
 
     command = build_srun_command(
         image=image,
-        name=None,
         mounts=[
             (patch_path, "/tmp/swebench_patch.diff"),
             (eval_path, "/tmp/swebench_eval.sh"),
@@ -112,70 +149,7 @@ def _evaluate_instance(
     atomic_write_bytes(report_path, (json.dumps(report, indent=4) + "\n").encode())
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser()
-    commands = parser.add_subparsers(dest="command", required=True)
-
-    agent_parser = commands.add_parser("agent")
-    agent_parser.add_argument("--model", required=True)
-    agent_parser.add_argument("--config", type=Path, required=True)
-    agent_parser.add_argument("--subset", required=True)
-    agent_parser.add_argument("--split", required=True)
-    agent_parser.add_argument("--filter", required=True)
-    agent_parser.add_argument("--workers", type=int, required=True)
-    agent_parser.add_argument("--output", type=Path, required=True)
-    agent_parser.add_argument("--image-registry", required=True)
-
-    eval_parser = commands.add_parser("eval")
-    eval_parser.add_argument("--dataset-name", required=True)
-    eval_parser.add_argument("--split", required=True)
-    eval_parser.add_argument("--predictions-path", type=Path, required=True)
-    eval_parser.add_argument("--max-workers", type=int, required=True)
-    eval_parser.add_argument("--run-id", required=True)
-    eval_parser.add_argument("--image-registry", required=True)
-    eval_parser.add_argument("--output-dir", type=Path, required=True)
-    eval_parser.add_argument("--timeout", type=int, default=1800)
-    eval_parser.add_argument("--instance-ids", nargs="+", required=True)
-    args = parser.parse_args(argv)
-
-    if args.command == "agent":
-        from minisweagent.environments import get_environment
-        from minisweagent.run.benchmarks import swebench
-
-        def get_pyxis_environment(config: dict, instance: dict):
-            environment_config = copy.deepcopy(config.get("environment", {}))
-            environment_config["image"] = resolve_image(
-                args.image_registry, instance["instance_id"]
-            )
-            return get_environment(environment_config)
-
-        base_agent = swebench.ProgressTrackingAgent
-
-        class LiveTrajectoryAgent(base_agent):  # type: ignore[misc, valid-type]
-            def __init__(self, *agent_args: Any, instance_id: str = "", **kwargs: Any):
-                kwargs["output_path"] = (
-                    args.output / instance_id / f"{instance_id}.live.json"
-                )
-                super().__init__(*agent_args, instance_id=instance_id, **kwargs)
-
-        swebench.get_sb_environment = get_pyxis_environment
-        swebench.ProgressTrackingAgent = LiveTrajectoryAgent
-        swebench.main(
-            subset=args.subset,
-            split=args.split,
-            slice_spec="",
-            filter_spec=args.filter,
-            shuffle=False,
-            output=str(args.output),
-            workers=args.workers,
-            model=args.model,
-            model_class=None,
-            redo_existing=False,
-            config_spec=[str(args.config)],
-            environment_class=("swebench_service.pyxis_environment.PyxisEnvironment"),
-        )
-        return
-
+def _run_eval(args: argparse.Namespace) -> None:
     from swebench.harness.reporting import make_run_report
     from swebench.harness.test_spec.test_spec import make_test_spec
     from swebench.harness.utils import (
@@ -233,6 +207,38 @@ def main(argv: list[str] | None = None) -> None:
             args.run_id,
             client=None,
         )
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    agent_parser = commands.add_parser("agent")
+    agent_parser.add_argument("--model", required=True)
+    agent_parser.add_argument("--config", type=Path, required=True)
+    agent_parser.add_argument("--subset", required=True)
+    agent_parser.add_argument("--split", required=True)
+    agent_parser.add_argument("--filter", required=True)
+    agent_parser.add_argument("--workers", type=int, required=True)
+    agent_parser.add_argument("--output", type=Path, required=True)
+    agent_parser.add_argument("--image-registry", required=True)
+
+    eval_parser = commands.add_parser("eval")
+    eval_parser.add_argument("--dataset-name", required=True)
+    eval_parser.add_argument("--split", required=True)
+    eval_parser.add_argument("--predictions-path", type=Path, required=True)
+    eval_parser.add_argument("--max-workers", type=int, required=True)
+    eval_parser.add_argument("--run-id", required=True)
+    eval_parser.add_argument("--image-registry", required=True)
+    eval_parser.add_argument("--output-dir", type=Path, required=True)
+    eval_parser.add_argument("--timeout", type=int, default=1800)
+    eval_parser.add_argument("--instance-ids", nargs="+", required=True)
+    args = parser.parse_args(argv)
+
+    if args.command == "agent":
+        _run_agent(args)
+    else:
+        _run_eval(args)
 
 
 if __name__ == "__main__":
