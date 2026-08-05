@@ -126,7 +126,7 @@ environment:
     TQDM_DISABLE: "1"
   environment_class: docker
   pull_timeout: 3600
-  container_timeout: 10h
+  container_timeout: 6h
 
 model:
   cost_tracking: "ignore_errors"
@@ -180,8 +180,8 @@ model:
   model_kwargs:
     custom_llm_provider: "openai"
     drop_params: true
-    parallel_tool_calls: true
     api_base: ""
+    timeout: 3600
     # Sampling parameters (temperature, top_p, top_k, etc.) are injected at
     # runtime from the benchmark config's model_params block — absent here so
     # the model's own defaults apply when not specified in model_params.
