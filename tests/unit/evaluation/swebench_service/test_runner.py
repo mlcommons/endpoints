@@ -12,6 +12,9 @@ import msgspec.json
 import pytest
 import yaml
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
+    pyxis_worker as worker_mod,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service import (
     runner as runner_mod,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service.pyxis_environment import (
@@ -26,8 +29,6 @@ from inference_endpoint.evaluation.swebench_service.swebench_service.runner impo
     RunCancelled,
     RunnerError,
     SweBenchRunner,
-    _evaluate_pyxis_instance,
-    _write_pyxis_run_report,
     create_runner,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service.schemas import (
@@ -37,11 +38,12 @@ from inference_endpoint.evaluation.swebench_service.swebench_service.schemas imp
 pytestmark = pytest.mark.unit
 
 
-def test_pyxis_implementation_adds_only_environment_module():
+def test_pyxis_implementation_is_confined_to_environment_and_worker_modules():
     package_dir = Path(runner_mod.__file__).parent
 
     assert {path.name for path in package_dir.glob("pyxis_*") if path.is_file()} == {
-        "pyxis_environment.py"
+        "pyxis_environment.py",
+        "pyxis_worker.py",
     }
 
 
@@ -939,7 +941,7 @@ def test_pyxis_agent_command_uses_host_model_and_image_registry(monkeypatch, tmp
     )
 
     command, kwargs = calls[0]
-    assert command[1:4] == ["-m", "swebench_service.runner", "pyxis-agent"]
+    assert command[1:4] == ["-m", "swebench_service.pyxis_worker", "agent"]
     assert command[command.index("--image-registry") + 1] == _PYXIS_IMAGE_REGISTRY
     assert command[command.index("--filter") + 1] == (
         "^(?:repo__repo\\-1|repo__repo\\-2)$"
@@ -947,16 +949,50 @@ def test_pyxis_agent_command_uses_host_model_and_image_registry(monkeypatch, tmp
     assert kwargs["env"]["OPENAI_API_KEY"] == "model-secret"
 
 
-def test_pyxis_agent_saves_each_live_trajectory_to_its_instance_path(tmp_path):
+def test_pyxis_agent_saves_each_live_trajectory_to_its_instance_path(
+    monkeypatch, tmp_path
+):
     class FakeProgressTrackingAgent:
         def __init__(self, *args, instance_id="", **kwargs):
             self.instance_id = instance_id
             self.kwargs = kwargs
 
-    swebench = types.SimpleNamespace(ProgressTrackingAgent=FakeProgressTrackingAgent)
-    assert hasattr(runner_mod, "_enable_live_trajectory_saves")
+    swebench = types.SimpleNamespace(
+        ProgressTrackingAgent=FakeProgressTrackingAgent,
+        main=lambda **kwargs: None,
+    )
+    minisweagent = types.ModuleType("minisweagent")
+    environments = types.ModuleType("minisweagent.environments")
+    environments.get_environment = lambda config: config
+    run = types.ModuleType("minisweagent.run")
+    benchmarks = types.ModuleType("minisweagent.run.benchmarks")
+    benchmarks.swebench = swebench
+    monkeypatch.setitem(sys.modules, "minisweagent", minisweagent)
+    monkeypatch.setitem(sys.modules, "minisweagent.environments", environments)
+    monkeypatch.setitem(sys.modules, "minisweagent.run", run)
+    monkeypatch.setitem(sys.modules, "minisweagent.run.benchmarks", benchmarks)
 
-    runner_mod._enable_live_trajectory_saves(swebench, tmp_path)
+    worker_mod.main(
+        [
+            "agent",
+            "--model",
+            "test-model",
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--subset",
+            "verified",
+            "--split",
+            "test",
+            "--filter",
+            "repo__repo-1",
+            "--workers",
+            "1",
+            "--output",
+            str(tmp_path),
+            "--image-registry",
+            _PYXIS_IMAGE_REGISTRY,
+        ]
+    )
     first = swebench.ProgressTrackingAgent(instance_id="repo__repo-1")
     second = swebench.ProgressTrackingAgent(instance_id="repo__repo-2")
 
@@ -995,7 +1031,7 @@ def test_pyxis_eval_command_does_not_forward_model_key(monkeypatch, tmp_path):
     )
 
     command, kwargs = calls[0]
-    assert command[1:4] == ["-m", "swebench_service.runner", "pyxis-eval"]
+    assert command[1:4] == ["-m", "swebench_service.pyxis_worker", "eval"]
     assert command[command.index("--max-workers") + 1] == "2"
     assert command[command.index("--image-registry") + 1] == _PYXIS_IMAGE_REGISTRY
     assert command[command.index("--instance-ids") + 1 :] == ["repo__repo-1"]
@@ -1027,7 +1063,7 @@ def test_pyxis_eval_does_not_mount_report_directory(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", fake_run)
     test_spec = types.SimpleNamespace(instance_id="repo__repo-1", eval_script="true")
 
-    _evaluate_pyxis_instance(
+    worker_mod._evaluate_instance(
         test_spec=test_spec,
         prediction={
             "model_name_or_path": "test-model",
@@ -1045,7 +1081,7 @@ def test_pyxis_eval_does_not_mount_report_directory(monkeypatch, tmp_path):
     assert not report.exists()
 
 
-def test_pyxis_result_uses_upstream_report(monkeypatch, tmp_path):
+def test_pyxis_worker_uses_upstream_report(monkeypatch, tmp_path):
     output_dir = tmp_path / "output"
     run_id = "endpoints_test"
     predictions = {
@@ -1073,18 +1109,46 @@ def test_pyxis_result_uses_upstream_report(monkeypatch, tmp_path):
     harness = types.ModuleType("swebench.harness")
     reporting = types.ModuleType("swebench.harness.reporting")
     reporting.make_run_report = fake_make_run_report
+    test_spec = types.ModuleType("swebench.harness.test_spec")
+    test_spec_module = types.ModuleType("swebench.harness.test_spec.test_spec")
+    test_spec_module.make_test_spec = lambda row, arch: row
+    utils = types.ModuleType("swebench.harness.utils")
+    utils.get_predictions_from_file = lambda path, dataset, split: predictions.values()
+    utils.load_swebench_dataset = lambda dataset, split, instance_ids: []
     monkeypatch.setitem(sys.modules, "swebench", swebench)
     monkeypatch.setitem(sys.modules, "swebench.harness", harness)
     monkeypatch.setitem(sys.modules, "swebench.harness.reporting", reporting)
+    monkeypatch.setitem(sys.modules, "swebench.harness.test_spec", test_spec)
+    monkeypatch.setitem(
+        sys.modules, "swebench.harness.test_spec.test_spec", test_spec_module
+    )
+    monkeypatch.setitem(sys.modules, "swebench.harness.utils", utils)
 
-    result_path = _write_pyxis_run_report(
-        output_dir=output_dir,
-        run_id=run_id,
-        instance_ids=["repo__repo-1", "repo__repo-2", "repo__repo-3"],
-        predictions=predictions,
+    worker_mod.main(
+        [
+            "eval",
+            "--dataset-name",
+            "princeton-nlp/SWE-bench_Verified",
+            "--split",
+            "test",
+            "--predictions-path",
+            str(output_dir / "preds.json"),
+            "--max-workers",
+            "1",
+            "--run-id",
+            run_id,
+            "--image-registry",
+            _PYXIS_IMAGE_REGISTRY,
+            "--output-dir",
+            str(output_dir),
+            "--instance-ids",
+            "repo__repo-1",
+            "repo__repo-2",
+            "repo__repo-3",
+        ]
     )
 
-    assert result_path == output_dir / "test-model.endpoints_test.json"
+    assert (output_dir / "test-model.endpoints_test.json").exists()
     assert calls == [
         (
             predictions,
