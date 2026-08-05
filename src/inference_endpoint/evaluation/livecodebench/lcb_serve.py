@@ -52,10 +52,15 @@ from .generate import generate_dataset
 
 logger = logging.getLogger(__name__)
 
-# Grading assumes fork semantics; under Python 3.14's forkserver default the
-# grading children die at startup and the service reports 0/N forever.
-# This module only runs inside the Linux lcb-service container, so "fork"
-# is always available.
+# The pool is created from a worker thread of the event loop's default
+# executor (the server calls evaluate via run_in_executor), so it must not
+# fork the multithreaded parent; spawn (fork+exec) is safe from threads.
+# forkserver would also work in theory but hangs at pool shutdown in this
+# container.
+_MP_POOL_CTX = mp.get_context("spawn")
+
+# Grading assumes fork semantics; forking here is safe because the
+# spawn-started pool worker is freshly exec'd and single-threaded.
 _MP_CTX = mp.get_context("fork")
 
 # Error codes that mean the judge is broken, as opposed to the submitted code
@@ -306,7 +311,7 @@ class _LCBWorker:
         infra_errors = 0
 
         with ProcessPoolExecutor(
-            max_workers=self.n_lcb_workers, mp_context=_MP_CTX
+            max_workers=self.n_lcb_workers, mp_context=_MP_POOL_CTX
         ) as executor:
             for qid, test_codes in zip(question_ids, codes, strict=False):
                 test_suite_json = self.test_loader[qid]
@@ -395,7 +400,11 @@ class LCBServe:
         if n_workers is None:
             n_workers = mp.cpu_count() // 2
         logger.info("Using %d workers for LCB eval", n_workers)
-        logger.info("Multiprocessing start method: %s", _MP_CTX.get_start_method())
+        logger.info(
+            "Multiprocessing start methods: pool=%s, grading child=%s",
+            _MP_POOL_CTX.get_start_method(),
+            _MP_CTX.get_start_method(),
+        )
         self.n_workers = n_workers
 
         self.path_to_dataset = (
