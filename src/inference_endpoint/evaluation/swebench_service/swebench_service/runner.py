@@ -792,14 +792,14 @@ class PyxisSweBenchRunner(SweBenchRunner):
         eval_run_id: str | None = None,
         instance_ids: list[str] | None = None,
     ) -> None:
-        from .pyxis_environment import build_host_srun_command, safe_srun_env
+        from .pyxis_environment import build_srun_command, safe_srun_env
 
         del eval_run_id, instance_ids
         safe_run_id = re.sub(r"[^A-Za-z0-9_.-]", "-", run_id)[:24]
         prefix = f"pyxis_mswe_{safe_run_id}_"
         try:
             listed = subprocess.run(
-                build_host_srun_command(["enroot", "list", "-f"]),
+                build_srun_command(argv=["enroot", "list", "-f"]),
                 check=True,
                 capture_output=True,
                 text=True,
@@ -811,7 +811,7 @@ class PyxisSweBenchRunner(SweBenchRunner):
                 name = fields[0] if fields else ""
                 if name.startswith(prefix):
                     subprocess.run(
-                        build_host_srun_command(["enroot", "remove", "-f", name]),
+                        build_srun_command(argv=["enroot", "remove", "-f", name]),
                         check=True,
                         capture_output=True,
                         text=True,

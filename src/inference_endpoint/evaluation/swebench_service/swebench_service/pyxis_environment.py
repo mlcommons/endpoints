@@ -34,52 +34,43 @@ def safe_srun_env() -> dict[str, str]:
     return {name: os.environ[name] for name in _SAFE_SRUN_ENV if name in os.environ}
 
 
-def _slurm_prefix() -> list[str]:
+def build_srun_command(
+    *,
+    argv: list[str],
+    image: str | Path | None = None,
+    name: str | None = None,
+    mounts: list[tuple[Path, str]] | None = None,
+    workdir: str | None = None,
+) -> list[str]:
     job_id = os.environ.get("SLURM_JOB_ID", "").strip()
     if not job_id:
         raise RunnerError("Pyxis runtime requires SLURM_JOB_ID")
     command = ["srun", "--overlap", f"--jobid={job_id}", "-N1", "-n1"]
     if node := os.environ.get("SLURMD_NODENAME", "").strip():
         command.append(f"--nodelist={node}")
-    return command
-
-
-def build_host_srun_command(argv: list[str]) -> list[str]:
-    return [*_slurm_prefix(), *argv]
-
-
-def build_srun_command(
-    *,
-    image: str | Path | None,
-    name: str | None,
-    mounts: list[tuple[Path, str]],
-    workdir: str,
-    argv: list[str],
-) -> list[str]:
-    if image is None and name is None:
-        raise RunnerError("Pyxis command requires an image or container name")
-    command = _slurm_prefix()
     if image is not None:
         image_ref = str(image.resolve()) if isinstance(image, Path) else image
         command.append(f"--container-image={image_ref}")
     if name is not None:
         command.append(f"--container-name={name}")
-    command.extend(
-        [
-            "--container-writable",
-            "--container-remap-root",
-            "--no-container-mount-home",
-        ]
-    )
-    if mounts:
-        specs = []
-        for source, destination in mounts:
-            source_text = str(source.resolve())
-            if "," in source_text or "," in destination:
-                raise RunnerError("Pyxis mount paths cannot contain commas")
-            specs.append(f"{source_text}:{destination}")
-        command.append("--container-mounts=" + ",".join(specs))
-    command.append(f"--container-workdir={workdir}")
+    if image is not None or name is not None:
+        command.extend(
+            [
+                "--container-writable",
+                "--container-remap-root",
+                "--no-container-mount-home",
+            ]
+        )
+        if mounts:
+            specs = []
+            for source, destination in mounts:
+                source_text = str(source.resolve())
+                if "," in source_text or "," in destination:
+                    raise RunnerError("Pyxis mount paths cannot contain commas")
+                specs.append(f"{source_text}:{destination}")
+            command.append("--container-mounts=" + ",".join(specs))
+        if workdir is not None:
+            command.append(f"--container-workdir={workdir}")
     command.extend(argv)
     return command
 
@@ -115,9 +106,6 @@ class PyxisEnvironment:
         self._tmp_dir.chmod(0o1777)
         self._lock = threading.Lock()
         self._cleaned = False
-        self._start()
-
-    def _start(self) -> None:
         command = build_srun_command(
             image=self.config.image,
             name=self.name,
@@ -154,6 +142,7 @@ class PyxisEnvironment:
             workdir=cwd or self.config.cwd,
             argv=argv,
         )
+        output: dict[str, Any]
         try:
             result = subprocess.run(
                 srun_command,
@@ -183,11 +172,6 @@ class PyxisEnvironment:
                     "exception": str(exc),
                 },
             }
-        self._check_finished(output)
-        return output
-
-    @staticmethod
-    def _check_finished(output: dict[str, Any]) -> None:
         lines = output.get("output", "").lstrip().splitlines(keepends=True)
         if (
             lines
@@ -204,6 +188,7 @@ class PyxisEnvironment:
                     "extra": {"exit_status": "Submitted", "submission": submission},
                 }
             )
+        return output
 
     def get_template_vars(self, **kwargs: Any) -> dict[str, Any]:
         return {
@@ -233,13 +218,9 @@ class PyxisEnvironment:
             if os.environ.get("SLURM_JOB_ID", "").strip():
                 try:
                     subprocess.run(
-                        [
-                            *_slurm_prefix(),
-                            "enroot",
-                            "remove",
-                            "-f",
-                            f"pyxis_{self.name}",
-                        ],
+                        build_srun_command(
+                            argv=["enroot", "remove", "-f", f"pyxis_{self.name}"]
+                        ),
                         check=False,
                         capture_output=True,
                         text=True,

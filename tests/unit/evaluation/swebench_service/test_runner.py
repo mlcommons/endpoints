@@ -728,6 +728,25 @@ def test_pyxis_srun_requires_allocation(monkeypatch, tmp_path):
         )
 
 
+def test_pyxis_builds_host_srun_command(monkeypatch):
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    command = build_srun_command(argv=["enroot", "list", "-f"])
+
+    assert command == [
+        "srun",
+        "--overlap",
+        "--jobid=1738605",
+        "-N1",
+        "-n1",
+        "--nodelist=gb-nvl-053-compute04",
+        "enroot",
+        "list",
+        "-f",
+    ]
+
+
 def test_pyxis_srun_environment_does_not_forward_credentials(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "model-secret")
     monkeypatch.setenv("SWEBENCH_SERVICE_AUTH_TOKEN", "service-secret")
