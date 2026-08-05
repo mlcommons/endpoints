@@ -35,6 +35,7 @@ running in.
 """
 
 import argparse
+import ctypes
 import json
 import logging
 import multiprocessing as mp
@@ -43,7 +44,9 @@ from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
+from multiprocessing.sharedctypes import Synchronized
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 from tqdm import tqdm
@@ -64,8 +67,10 @@ _MP_POOL_CTX = mp.get_context("spawn")
 _MP_CTX = mp.get_context("fork")
 
 # Error codes that mean the judge is broken, as opposed to the submitted code
-# failing its tests: -5 TestRunnerError, -6 GradingChildDied. Timeouts (-1)
-# are the submitted code's fault and do not count.
+# failing its tests: -5 TestRunnerError, -6 GradingChildDied (child died
+# before grading started, e.g. a bad start method). Submission-attributed
+# codes stay out: timeouts (-1), sys.exit() (-7 SubmissionExit), and
+# submissions that kill their own interpreter (-8 SubmissionKilledChild).
 _LCB_INFRA_ERROR_CODES = {-5, -6}
 
 
@@ -94,9 +99,18 @@ def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
 
 
 def execute_code_single_suppressed_errors(
-    *args, resp_buffer: list | None = None, **kwargs
+    *args,
+    resp_buffer: list | None = None,
+    started_flag: Synchronized | None = None,
+    **kwargs,
 ):
     """Wrapper around execute code so that all errors are resurfaced as failed tests"""
+    if started_flag is not None:
+        # From here on the wrapper is running and grading (i.e. the
+        # submission) is about to execute; if the interpreter dies now it is
+        # the submission's doing. Deaths before this point are judge startup
+        # failures.
+        started_flag.value = True
     try:
         res, metadata = execute_code_single(*args, **kwargs)
         if not isinstance(res, list):
@@ -145,6 +159,8 @@ def run_code_subprocess(
 
     manager = _MP_CTX.Manager()
     resp_buffer = manager.list()
+    # typeshed types ctx.Value() as SynchronizedBase, which lacks .value
+    started_flag = cast(Synchronized, _MP_CTX.Value(ctypes.c_bool, False))
     p = _MP_CTX.Process(
         target=execute_code_single_suppressed_errors,
         args=(
@@ -154,6 +170,7 @@ def run_code_subprocess(
         kwargs={
             "resp_buffer": resp_buffer,
             "timeout_sec": timeout_sec,
+            "started_flag": started_flag,
         },
     )
     p.start()
@@ -172,13 +189,22 @@ def run_code_subprocess(
                 "error_code": -1,
                 "error_message": f"Subprocess did not complete in time ({global_timeout}s)",
             }
-        else:
-            # Exited before the deadline without reporting a result: the
-            # grading child died (e.g. bad start method, OOM kill), not the
-            # submitted code.
+        elif started_flag.value:
+            # The interpreter died while grading was running (os._exit(),
+            # segfault, OOM, ...). Grading executes the untrusted submission,
+            # so this is the submission's fault, not the judge's.
             res = [-1] * len(suite["inputs"])
             metadata = {
-                "error": "Grading subprocess died before reporting a result",
+                "error": "Grading child killed while executing the submission",
+                "error_code": -8,
+                "error_message": f"SubmissionKilledChild (exitcode={p.exitcode})",
+            }
+        else:
+            # Died before grading started (e.g. bad start method): the judge
+            # is broken.
+            res = [-1] * len(suite["inputs"])
+            metadata = {
+                "error": "Grading subprocess died before grading started",
                 "error_code": -6,
                 "error_message": f"GradingChildDied (exitcode={p.exitcode})",
             }
