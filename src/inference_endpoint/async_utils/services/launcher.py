@@ -145,6 +145,35 @@ class ServiceLauncher:
             # re-raise the exception.
             raise
 
+    def terminate_all(self, timeout: float = 5.0) -> None:
+        """Terminate all managed subprocesses: SIGTERM then escalate to SIGKILL.
+
+        Sends SIGTERM first so subprocesses can flush final state (e.g. the
+        metrics aggregator writes ``INTERRUPTED`` ``final_snapshot.json`` in its
+        SIGTERM handler). After ``timeout`` seconds any process that has not
+        exited is killed unconditionally with SIGKILL.
+        """
+        for proc in self._procs:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except OSError as e:  # noqa: BLE001 — proc already exited between poll and terminate
+                    logger.debug("terminate pid=%d: %s", proc.pid, e)
+        deadline = time.monotonic() + timeout
+        for proc in self._procs:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired) as e:  # noqa: BLE001
+                    # OSError: proc already exited between kill and wait.
+                    # TimeoutExpired: proc is stuck in kernel D-state; log and
+                    # continue so remaining processes in _procs are still handled.
+                    logger.warning("Could not kill pid=%d: %s", proc.pid, e)
+
     def kill_all(self) -> None:
         """Kill all managed subprocesses."""
         for proc in self._procs:

@@ -26,17 +26,28 @@ malformed-file behavior, since this is the load-bearing path for the
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
     SessionState,
 )
-from inference_endpoint.commands.benchmark.execute import (
+from inference_endpoint.commands.benchmark.pipeline import (
+    MetricsPipeline,
+    _build_report_from_snapshot,
     _load_final_snapshot_from_disk,
 )
+from inference_endpoint.config.schema import LoadPatternType
 from inference_endpoint.metrics.report import Report
+
+# Dotted path for monkeypatch string targets — keeps a single import style (the
+# module is imported once via ``from ... import`` and patched by path here).
+_PIPE = "inference_endpoint.commands.benchmark.pipeline"
 
 
 def _snapshot_dict(
@@ -159,3 +170,195 @@ class TestReportFromLoadedSnapshot:
         the precondition the fallback chain depends on."""
         result = _load_final_snapshot_from_disk(tmp_path / "nope.json")
         assert result is None
+
+
+def _fake_config(*, poisson: bool = False, use_legacy: bool = False) -> SimpleNamespace:
+    """Minimal stand-in exposing only what ``_build_report_from_snapshot`` reads."""
+    return SimpleNamespace(
+        settings=SimpleNamespace(
+            load_pattern=SimpleNamespace(
+                type=(
+                    LoadPatternType.POISSON
+                    if poisson
+                    else LoadPatternType.MAX_THROUGHPUT
+                ),
+                use_legacy_loadgen_qps_metrics=use_legacy,
+            ),
+            runtime=SimpleNamespace(scheduler_random_seed=1, dataloader_random_seed=2),
+            model_dump=lambda **kw: {"load_pattern": {}, "warmup": {}},
+        )
+    )
+
+
+@pytest.mark.unit
+class TestBuildReportFromSnapshot:
+    """``_build_report_from_snapshot`` warning branches + swallow-to-None.
+
+    ``Report.from_snapshot`` is stubbed so the branches under test (which key off
+    the returned Report) are exercised without a fully valid snapshot payload.
+    """
+
+    def test_incomplete_report_logs_warning(self, monkeypatch, caplog):
+        fake_report = SimpleNamespace(
+            complete=False, state="complete", legacy_loadgen_window_duration_ns=None
+        )
+        monkeypatch.setattr(
+            f"{_PIPE}.Report",
+            SimpleNamespace(from_snapshot=lambda *a, **k: fake_report),
+        )
+        with caplog.at_level("WARNING"):
+            out = _build_report_from_snapshot(
+                _snapshot_dict(n_pending_tasks=3), _fake_config()
+            )
+        assert out is fake_report
+        assert any("incomplete" in r.message.lower() for r in caplog.records)
+
+    def test_legacy_loadgen_qps_warning(self, monkeypatch, caplog):
+        fake_report = SimpleNamespace(
+            complete=True,
+            state="complete",
+            legacy_loadgen_window_duration_ns=5_000_000_000,
+        )
+        monkeypatch.setattr(
+            f"{_PIPE}.Report",
+            SimpleNamespace(from_snapshot=lambda *a, **k: fake_report),
+        )
+        with caplog.at_level("WARNING"):
+            out = _build_report_from_snapshot(
+                _snapshot_dict(), _fake_config(poisson=True, use_legacy=True)
+            )
+        assert out is fake_report
+        assert any("legacy" in r.message.lower() for r in caplog.records)
+
+    def test_malformed_snapshot_swallowed_to_none(self, monkeypatch, caplog):
+        def _boom(*a, **k):
+            raise ValueError("bad snapshot")
+
+        monkeypatch.setattr(f"{_PIPE}.Report", SimpleNamespace(from_snapshot=_boom))
+        with caplog.at_level("WARNING"):
+            out = _build_report_from_snapshot(_snapshot_dict(), _fake_config())
+        assert out is None
+        assert any(
+            "Failed to build report from snapshot" in r.message for r in caplog.records
+        )
+
+
+def _make_pipe(tmp_path: Path) -> MetricsPipeline:
+    return MetricsPipeline(
+        MagicMock(),
+        tokenizer_name=None,
+        enable_streaming=False,
+        event_log_dir=tmp_path / "events",
+        metrics_output_dir=tmp_path / "metrics",
+        loop=asyncio.get_event_loop(),
+    )
+
+
+@pytest.mark.unit
+class TestDrainFallback:
+    """``drain_and_build_report`` snapshot-sourcing fallback — the SIGKILL/OOM
+    recovery path where ``final_snapshot.json`` never made it to disk."""
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_subscriber_when_no_disk_snapshot(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        pipe = _make_pipe(tmp_path)  # metrics dir has no final_snapshot.json
+        pipe.publisher = MagicMock(buffered_count=0, pending_count=0)
+        pipe._launcher = MagicMock()
+        pipe.subscriber = MagicMock(latest=object())
+        monkeypatch.setattr(f"{_PIPE}.snapshot_to_dict", lambda s: {"k": "v"})
+        monkeypatch.setattr(
+            f"{_PIPE}._build_report_from_snapshot", lambda d, c: "REPORT"
+        )
+        with caplog.at_level("WARNING"):
+            report = await pipe.drain_and_build_report()
+        assert report == "REPORT"
+        assert any(
+            "No final_snapshot.json on disk" in r.message for r in caplog.records
+        )
+        # Drained cleanly ⇒ publisher nulled (the signal __aexit__ reads).
+        assert pipe.publisher is None
+
+    @pytest.mark.asyncio
+    async def test_no_snapshot_available_returns_none(self, tmp_path, caplog):
+        pipe = _make_pipe(tmp_path)
+        pipe.publisher = MagicMock(buffered_count=0, pending_count=0)
+        pipe._launcher = MagicMock()
+        pipe.subscriber = MagicMock(latest=None)  # no disk, no live snapshot
+        with caplog.at_level("ERROR"):
+            report = await pipe.drain_and_build_report()
+        assert report is None
+        assert any("No metrics snapshot available" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+class TestAexitKillPolicy:
+    """``__aexit__`` kills the service subprocesses iff the run never drained. A
+    clean drain nulls ``pipe.publisher``; killing then would tear down a still-
+    writing aggregator. The negative arm (clean drain ⇒ no kill) is the core
+    invariant of the async-context-manager rewrite and must be pinned."""
+
+    @pytest.mark.asyncio
+    async def test_clean_drain_does_not_kill(self, tmp_path):
+        pipe = _make_pipe(tmp_path)
+        pipe._stack = contextlib.ExitStack()
+        pipe._launcher = MagicMock()
+        pipe.publisher = None  # drain_and_build_report nulled it on a clean drain
+        pipe.subscriber = None
+        await pipe.__aexit__(None, None, None)
+        pipe._launcher.terminate_all.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_never_drained_kills_once(self, tmp_path):
+        pipe = _make_pipe(tmp_path)
+        pipe._stack = contextlib.ExitStack()
+        pipe._launcher = MagicMock()
+        pipe.publisher = MagicMock()  # still set ⇒ setup/session error before drain
+        pipe.subscriber = None
+        await pipe.__aexit__(None, None, None)
+        pipe._launcher.terminate_all.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_kill_interrupt_still_closes_remaining_resources(self, tmp_path):
+        pipe = _make_pipe(tmp_path)
+        pipe._stack = contextlib.ExitStack()
+        remaining_cleanup = MagicMock()
+        pipe._stack.callback(remaining_cleanup)
+        pipe._launcher = MagicMock()
+        pipe._launcher.terminate_all.side_effect = KeyboardInterrupt
+        pipe.publisher = MagicMock()
+        pipe.subscriber = None
+
+        with pytest.raises(KeyboardInterrupt):
+            await pipe.__aexit__(None, None, None)
+
+        remaining_cleanup.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_start_failure_kill_interrupt_still_closes_resources(tmp_path):
+    pipe = _make_pipe(tmp_path)
+    mock_zmq = MagicMock(socket_dir=str(tmp_path / "sockets"))
+
+    with (
+        patch(f"{_PIPE}.ManagedZMQContext") as mock_context,
+        patch(f"{_PIPE}.EventPublisherService") as mock_publisher,
+        patch(f"{_PIPE}.MetricsSnapshotSubscriber") as mock_subscriber,
+        patch(f"{_PIPE}.ServiceLauncher") as mock_launcher,
+    ):
+        mock_context.scoped.return_value.__enter__.return_value = mock_zmq
+        mock_context.scoped.return_value.__exit__.return_value = False
+        mock_publisher.return_value.socket_name = "test_pub"
+        mock_launcher.return_value.launch = AsyncMock(
+            side_effect=RuntimeError("launch failed")
+        )
+        mock_launcher.return_value.terminate_all.side_effect = KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            await pipe.start()
+
+    mock_publisher.return_value.close.assert_called_once()
+    mock_subscriber.return_value.close.assert_called_once()
+    mock_context.scoped.return_value.__exit__.assert_called_once()

@@ -104,9 +104,13 @@ class OpenAITextCompletionsAdapter(HttpRequestAdapter):
         resp = cls._response_decoder.decode(response_bytes)
         if not resp.choices:
             raise ValueError("Response must contain at least one choice")
+        choice = resp.choices[0]
         return QueryResult(
             id=query_id,
-            response_output=TextModelOutput(output=resp.choices[0].text),
+            response_output=TextModelOutput(output=choice.text),
+            metadata=(
+                {"finish_reason": choice.finish_reason} if choice.finish_reason else {}
+            ),
         )
 
     @classmethod

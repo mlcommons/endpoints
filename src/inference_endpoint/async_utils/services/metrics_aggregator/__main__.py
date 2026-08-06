@@ -26,6 +26,7 @@ from pathlib import Path
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
+from inference_endpoint.metrics.early_stopping import EarlyStoppingSpec
 from inference_endpoint.utils.logging import setup_logging
 
 from .aggregator import MetricCounterKey, MetricsAggregatorService
@@ -93,7 +94,7 @@ def _make_sigterm_handler(
 
     def _on_sigterm() -> None:
         logger.warning(
-            "metrics aggregator received SIGTERM; " "writing INTERRUPTED final snapshot"
+            "metrics aggregator received SIGTERM; writing INTERRUPTED final snapshot"
         )
         task = loop.create_task(_signal_finalize())
         pending_tasks.add(task)
@@ -197,6 +198,12 @@ async def main() -> None:
         default=0,
         help="Identity to send in the readiness signal",
     )
+    parser.add_argument(
+        "--early-stopping",
+        action="store_true",
+        default=False,
+        help="Compute MLPerf early-stopping percentile estimates for TTFT/TPOT/latency.",
+    )
     args = parser.parse_args()
     setup_logging(level="INFO")
 
@@ -240,7 +247,8 @@ async def main() -> None:
         tokenizer_cm as tokenizer,
         ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx,
     ):
-        registry = MetricsRegistry()
+        es_spec = EarlyStoppingSpec() if args.early_stopping else None
+        registry = MetricsRegistry(early_stopping=es_spec)
         publisher = MetricsPublisher(
             MetricsSnapshotCodec(),
             zmq_ctx,

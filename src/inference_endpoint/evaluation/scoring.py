@@ -72,6 +72,8 @@ class Scorer(ABC):
     PREDEFINED: ClassVar[dict[str, type["Scorer"]]] = {}
     SCORER_ID: ClassVar[str]
     REQUIRES_EXTRACTOR: ClassVar[bool] = True
+    SKIP_ENDPOINT_PHASE: ClassVar[bool] = False
+    """Whether scoring is performed externally instead of on endpoint outputs."""
 
     def __init_subclass__(
         cls,
@@ -110,6 +112,21 @@ class Scorer(ABC):
     def available_scorers(cls) -> list[str]:
         """Return the list of registered scorer names."""
         return list(Scorer.PREDEFINED.keys())
+
+    @classmethod
+    def dataset_loader_kwargs(cls, extras: dict[str, Any]) -> dict[str, Any]:
+        """Return scorer-specific keyword arguments for dataset construction."""
+        return {}
+
+    @classmethod
+    def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
+        """Return an externally evaluated sample count, if the scorer has one."""
+        return None
+
+    @classmethod
+    def preflight(cls, extras: dict[str, Any]) -> None:
+        """Validate scorer dependencies before benchmark execution begins."""
+        return None
 
     def __init__(
         self,
@@ -1549,7 +1566,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
             # strict=True surfaces missing/unmounted sources here, not as an
             # opaque decord read failure inside VBench 30 minutes later.
             resolved_src = src.resolve(strict=True)
-            dst = staged_dir / f"{safe_prompt}-{idx}{src.suffix or '.mp4'}"
+            dst = staged_dir / f"{safe_prompt}-{idx}.mp4"
             dst.symlink_to(resolved_src)
 
     def _run_vbench_subprocess(
@@ -2124,3 +2141,7 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
         result.
         """
         return self._breakdown
+
+
+# Late import registers the extracted scorer without introducing a cycle.
+from .swe_bench_scorer import SWEBenchScorer as SWEBenchScorer  # noqa: E402
