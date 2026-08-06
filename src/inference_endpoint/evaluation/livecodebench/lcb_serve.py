@@ -157,31 +157,35 @@ def run_code_subprocess(
         suite["inputs"]
     ) + flat_timeout_extension
 
-    manager = _MP_CTX.Manager()
-    resp_buffer = manager.list()
-    # typeshed types ctx.Value() as SynchronizedBase, which lacks .value
-    started_flag = cast(Synchronized, _MP_CTX.Value(ctypes.c_bool, False))
-    p = _MP_CTX.Process(
-        target=execute_code_single_suppressed_errors,
-        args=(
-            test_suite_json,
-            code,
-        ),
-        kwargs={
-            "resp_buffer": resp_buffer,
-            "timeout_sec": timeout_sec,
-            "started_flag": started_flag,
-        },
-    )
-    p.start()
-    p.join(timeout=global_timeout)
+    with _MP_CTX.Manager() as manager:
+        resp_buffer = manager.list()
+        # typeshed types ctx.Value() as SynchronizedBase, which lacks .value
+        started_flag = cast(Synchronized, _MP_CTX.Value(ctypes.c_bool, False))
+        p = _MP_CTX.Process(
+            target=execute_code_single_suppressed_errors,
+            args=(
+                test_suite_json,
+                code,
+            ),
+            kwargs={
+                "resp_buffer": resp_buffer,
+                "timeout_sec": timeout_sec,
+                "started_flag": started_flag,
+            },
+        )
+        p.start()
+        p.join(timeout=global_timeout)
 
-    timed_out = p.is_alive()
-    if timed_out:
-        p.kill()
+        timed_out = p.is_alive()
+        if timed_out:
+            p.kill()
+            p.join()
 
-    if len(resp_buffer) > 0:
-        return resp_buffer[0]
+        if len(resp_buffer) > 0:
+            return resp_buffer[0]
+
+        started = bool(started_flag.value)
+        exitcode = p.exitcode
 
     # No result was reported: every test case counts as failed, only the
     # attribution differs.
@@ -193,14 +197,14 @@ def run_code_subprocess(
             "error_code": -1,
             "error_message": f"Subprocess did not complete in time ({global_timeout}s)",
         }
-    elif started_flag.value:
+    elif started:
         # The interpreter died while grading was running (os._exit(),
         # segfault, OOM, ...). Grading executes the untrusted submission, so
         # this is the submission's fault, not the judge's.
         metadata = {
             "error": "Grading child killed while executing the submission",
             "error_code": -8,
-            "error_message": f"SubmissionKilledChild (exitcode={p.exitcode})",
+            "error_message": f"SubmissionKilledChild (exitcode={exitcode})",
         }
     else:
         # Died before grading started (e.g. bad start method): the judge is
@@ -208,7 +212,7 @@ def run_code_subprocess(
         metadata = {
             "error": "Grading subprocess died before grading started",
             "error_code": -6,
-            "error_message": f"GradingChildDied (exitcode={p.exitcode})",
+            "error_message": f"GradingChildDied (exitcode={exitcode})",
         }
     return res, metadata
 
