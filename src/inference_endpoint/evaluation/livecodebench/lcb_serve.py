@@ -74,7 +74,9 @@ _MP_CTX = mp.get_context("fork")
 _LCB_INFRA_ERROR_CODES = {-5, -6}
 
 
-def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
+def execute_code_single(
+    test_suite_json: str, code: str, timeout_sec: int = 60
+) -> tuple[list, dict]:
     # Run code with lcb_runner. Note that the lcb_runner has a very rudimentary sandbox
     # which is extremely easy to bypass, and as such it is recommended to run this both
     # in an unprivileged container and in a separate process.
@@ -99,11 +101,13 @@ def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
 
 
 def execute_code_single_suppressed_errors(
-    *args,
+    test_suite_json: str,
+    code: str,
+    timeout_sec: int = 60,
+    *,
     resp_buffer: list | None = None,
     started_flag: Synchronized | None = None,
-    **kwargs,
-):
+) -> tuple[list, dict]:
     """Wrapper around execute code so that all errors are resurfaced as failed tests"""
     if started_flag is not None:
         # From here on the wrapper is running and grading (i.e. the
@@ -112,7 +116,9 @@ def execute_code_single_suppressed_errors(
         # failures.
         started_flag.value = True
     try:
-        res, metadata = execute_code_single(*args, **kwargs)
+        res, metadata = execute_code_single(
+            test_suite_json, code, timeout_sec=timeout_sec
+        )
         if not isinstance(res, list):
             raise ValueError(f"Expected boolean result, got {type(res)}")
 
@@ -146,7 +152,7 @@ def run_code_subprocess(
     test_suite_json: str,
     code: str,
     timeout_sec: int = 60,
-):
+) -> tuple[list, dict]:
     # Compute global timeout -
     # https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/evaluation/compute_code_generation_metrics.py#L43
 
