@@ -28,6 +28,17 @@ _SAFE_SRUN_ENV = (
     "TMPDIR",
     "XDG_RUNTIME_DIR",
 )
+_STEP_STATUS = "/tmp/.mlperf_srun_status"
+_STEP_SCRIPT = r"""set +e
+status_path=$1
+timeout_s=$2
+shift 2
+printf 'started\n' > "$status_path"
+timeout "$timeout_s" "$@"
+returncode=$?
+printf 'finished:%s\n' "$returncode" > "$status_path"
+exit "$returncode"
+"""
 
 
 def safe_srun_env() -> dict[str, str]:
@@ -45,9 +56,17 @@ def build_srun_command(
     job_id = os.environ.get("SLURM_JOB_ID", "").strip()
     if not job_id:
         raise RunnerError("Pyxis runtime requires SLURM_JOB_ID")
-    command = ["srun", "--overlap", f"--jobid={job_id}", "-N1", "-n1"]
-    if node := os.environ.get("SLURMD_NODENAME", "").strip():
-        command.append(f"--nodelist={node}")
+    node = os.environ.get("SLURMD_NODENAME", "").strip()
+    if not node:
+        raise RunnerError("Pyxis runtime requires SLURMD_NODENAME")
+    command = [
+        "srun",
+        "--overlap",
+        f"--jobid={job_id}",
+        "-N1",
+        "-n1",
+        f"--nodelist={node}",
+    ]
     if image is not None:
         image_ref = str(image.resolve()) if isinstance(image, Path) else image
         command.append(f"--container-image={image_ref}")
@@ -75,6 +94,59 @@ def build_srun_command(
     return command
 
 
+def run_srun_step(
+    *,
+    argv: list[str],
+    status_path: Path,
+    timeout_s: int,
+    failure_path: Path | None = None,
+    image: str | Path | None = None,
+    name: str | None = None,
+    mounts: list[tuple[Path, str]] | None = None,
+    workdir: str | None = None,
+    stderr: int = subprocess.STDOUT,
+) -> subprocess.CompletedProcess[str]:
+    status_path.write_text("pending\n")
+    status_path.chmod(0o666)
+    command = build_srun_command(
+        image=image,
+        name=name,
+        mounts=mounts,
+        workdir=workdir,
+        argv=[
+            "bash",
+            "-c",
+            _STEP_SCRIPT,
+            "pyxis-step",
+            _STEP_STATUS,
+            str(timeout_s),
+            *argv,
+        ],
+    )
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            timeout=timeout_s + 30,
+            env=safe_srun_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        if failure_path is not None:
+            failure_path.touch()
+        raise RunnerError(
+            "Pyxis infrastructure failure before the command completed"
+        ) from exc
+    if status_path.read_text().strip() != f"finished:{result.returncode}":
+        if failure_path is not None:
+            failure_path.touch()
+        raise RunnerError("Pyxis infrastructure failure before the command completed")
+    return result
+
+
 def resolve_image(image_registry: str, instance_id: str) -> str:
     if Path(instance_id).name != instance_id or instance_id in {".", ".."}:
         raise RunnerError(f"invalid SWE-bench instance ID: {instance_id}")
@@ -84,7 +156,7 @@ def resolve_image(image_registry: str, instance_id: str) -> str:
         if not separator:
             raise RunnerError("Pyxis image registry must include a repository")
         image_registry = f"{host}#{repository}"
-    return f"{image_registry}/sweb.eval.arm64.{instance_id}:v4.1.0-arm64"
+    return f"{image_registry}/sweb.eval.arm64.{instance_id.lower()}:v4.1.0-arm64"
 
 
 class PyxisEnvironmentConfig(BaseModel):
@@ -94,6 +166,7 @@ class PyxisEnvironmentConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     timeout: int = 30
     interpreter: list[str] = Field(default_factory=lambda: ["bash", "-c"])
+    infrastructure_failure_path: Path | None = None
 
 
 class PyxisEnvironment:
@@ -106,23 +179,18 @@ class PyxisEnvironment:
         self._tmp_dir.chmod(0o1777)
         self._lock = threading.Lock()
         self._cleaned = False
-        command = build_srun_command(
-            image=self.config.image,
-            name=self.name,
-            mounts=[(self._tmp_dir, "/tmp")],
-            workdir=self.config.cwd,
-            argv=["true"],
-        )
         try:
-            subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=self.config.timeout,
-                env=safe_srun_env(),
+            run_srun_step(
+                image=self.config.image,
+                name=self.name,
+                mounts=[(self._tmp_dir, "/tmp")],
+                workdir=self.config.cwd,
+                argv=["true"],
+                status_path=self._tmp_dir / Path(_STEP_STATUS).name,
+                timeout_s=self.config.timeout,
+                failure_path=self.config.infrastructure_failure_path,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except RunnerError as exc:
             self.cleanup()
             raise RunnerError(
                 f"failed to start Pyxis container for {self.config.image}"
@@ -135,42 +203,31 @@ class PyxisEnvironment:
         argv = ["env"]
         argv.extend(f"{key}={value}" for key, value in self.config.env.items())
         argv.extend([*self.config.interpreter, command])
-        srun_command = build_srun_command(
-            image=None,
+        result = run_srun_step(
+            argv=argv,
+            status_path=self._tmp_dir / Path(_STEP_STATUS).name,
+            timeout_s=timeout or self.config.timeout,
+            failure_path=self.config.infrastructure_failure_path,
             name=self.name,
             mounts=[(self._tmp_dir, "/tmp")],
             workdir=cwd or self.config.cwd,
-            argv=argv,
         )
         output: dict[str, Any]
-        try:
-            result = subprocess.run(
-                srun_command,
-                text=True,
-                timeout=timeout or self.config.timeout,
-                encoding="utf-8",
-                errors="replace",
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=safe_srun_env(),
-            )
+        if result.returncode == 124:
+            output = {
+                "output": result.stdout,
+                "returncode": -1,
+                "exception_info": "The command timed out",
+                "extra": {
+                    "exception_type": "TimeoutExpired",
+                    "exception": f"command timed out after {timeout or self.config.timeout}s",
+                },
+            }
+        else:
             output = {
                 "output": result.stdout,
                 "returncode": result.returncode,
                 "exception_info": "",
-            }
-        except Exception as exc:
-            raw_output = getattr(exc, "output", None)
-            if isinstance(raw_output, bytes):
-                raw_output = raw_output.decode("utf-8", errors="replace")
-            output = {
-                "output": raw_output or "",
-                "returncode": -1,
-                "exception_info": f"An error occurred while executing the command: {exc}",
-                "extra": {
-                    "exception_type": type(exc).__name__,
-                    "exception": str(exc),
-                },
             }
         lines = output.get("output", "").lstrip().splitlines(keepends=True)
         if (
@@ -178,6 +235,7 @@ class PyxisEnvironment:
             and lines[0].strip() == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
             and output["returncode"] == 0
         ):
+            # mini-swe-agent is installed only in the SWE-bench service subproject.
             from minisweagent.exceptions import Submitted
 
             submission = "".join(lines[1:])
@@ -240,4 +298,7 @@ class PyxisEnvironment:
         try:
             self.cleanup()
         except Exception:
-            pass
+            logging.getLogger(__name__).warning(
+                "Could not clean up Pyxis environment",
+                exc_info=True,
+            )

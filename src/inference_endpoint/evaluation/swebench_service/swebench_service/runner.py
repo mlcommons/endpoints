@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urlparse, urlunparse
 
 import msgspec.json
@@ -85,6 +85,31 @@ _LOG_TAIL_MAX_BYTES = 64 * 1024
 _LOG_TAIL_MAX_LINES = 50
 _RUN_LABEL = "com.mlcommons.endpoints.swebench-run"
 _PROCESS_TERMINATE_TIMEOUT_S = 10
+_SWEBENCH_DATASETS = {
+    "verified": "princeton-nlp/SWE-bench_Verified",
+    "lite": "princeton-nlp/SWE-bench_Lite",
+}
+
+
+def _prepare_eval(request: RunRequest, run_dir: Path) -> tuple[str, str]:
+    run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
+    (run_dir / "swe_bench_eval_run_id.txt").write_text(run_id)
+    dataset_name = _SWEBENCH_DATASETS.get(request.subset)
+    if dataset_name is None:
+        raise RunnerError(f"unknown SWE-bench subset: {request.subset}")
+    return run_id, dataset_name
+
+
+def _resolve_eval_result(output_dir: Path, model_name: str, run_id: str) -> Path:
+    result_path = output_dir / f"{model_name.replace('/', '__')}.{run_id}.json"
+    if result_path.exists():
+        return result_path
+    candidates = sorted(output_dir.rglob(f"*{run_id}*.json"))
+    if not candidates:
+        raise RunnerError(f"SWE-bench result file not found for run_id={run_id}")
+    if len(candidates) > 1:
+        raise RunnerError(f"multiple SWE-bench result files found for run_id={run_id}")
+    return candidates[0]
 
 
 def _normalize_endpoint_base(endpoint: str) -> str:
@@ -377,17 +402,11 @@ class SweBenchRunner:
     def _configure_environment(
         self, environment_cfg: dict[str, Any], run_id: str
     ) -> None:
-        run_args: list[str] = []
-        if docker_runtime := os.environ.get("SWEBENCH_DOCKER_RUNTIME", "").strip():
-            run_args.extend(["--runtime", docker_runtime])
-        run_args.extend(
-            [
-                "--rm",
-                "--label",
-                f"{_RUN_LABEL}={run_id}",
-            ]
-        )
-        environment_cfg["run_args"] = run_args
+        environment_cfg["run_args"] = [
+            "--rm",
+            "--label",
+            f"{_RUN_LABEL}={run_id}",
+        ]
 
     def _run_agent(
         self,
@@ -579,14 +598,7 @@ class SweBenchRunner:
         secret_values: set[str],
         cancel_token: CancellationToken | None = None,
     ) -> Path:
-        run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
-        (run_dir / "swe_bench_eval_run_id.txt").write_text(run_id)
-        dataset_name = {
-            "verified": "princeton-nlp/SWE-bench_Verified",
-            "lite": "princeton-nlp/SWE-bench_Lite",
-        }.get(request.subset)
-        if dataset_name is None:
-            raise RunnerError(f"unknown SWE-bench subset: {request.subset}")
+        run_id, dataset_name = _prepare_eval(request, run_dir)
         cmd = [
             sys.executable,
             "-m",
@@ -615,18 +627,7 @@ class SweBenchRunner:
             secret_values=secret_values,
             cancel_token=cancel_token,
         )
-        safe_model = request.model_name.replace("/", "__")
-        result_path = output_dir / f"{safe_model}.{run_id}.json"
-        if result_path.exists():
-            return result_path
-        candidates = sorted(output_dir.rglob(f"*{run_id}*.json"))
-        if not candidates:
-            raise RunnerError(f"SWE-bench result file not found for run_id={run_id}")
-        if len(candidates) > 1:
-            raise RunnerError(
-                f"multiple SWE-bench result files found for run_id={run_id}"
-            )
-        return candidates[0]
+        return _resolve_eval_result(output_dir, request.model_name, run_id)
 
 
 class PyxisSweBenchRunner(SweBenchRunner):
@@ -703,14 +704,7 @@ class PyxisSweBenchRunner(SweBenchRunner):
         secret_values: set[str],
         cancel_token: CancellationToken | None = None,
     ) -> Path:
-        run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
-        (run_dir / "swe_bench_eval_run_id.txt").write_text(run_id)
-        dataset_name = {
-            "verified": "princeton-nlp/SWE-bench_Verified",
-            "lite": "princeton-nlp/SWE-bench_Lite",
-        }.get(request.subset)
-        if dataset_name is None:
-            raise RunnerError(f"unknown SWE-bench subset: {request.subset}")
+        run_id, dataset_name = _prepare_eval(request, run_dir)
         command = [
             sys.executable,
             "-m",
@@ -744,12 +738,7 @@ class PyxisSweBenchRunner(SweBenchRunner):
             secret_values=secret_values,
             cancel_token=cancel_token,
         )
-        result_path = (
-            output_dir / f"{request.model_name.replace('/', '__')}.{run_id}.json"
-        )
-        if not result_path.exists():
-            raise RunnerError(f"SWE-bench result file not found for run_id={run_id}")
-        return result_path
+        return _resolve_eval_result(output_dir, request.model_name, run_id)
 
     def _cleanup_containers(
         self,
@@ -758,6 +747,7 @@ class PyxisSweBenchRunner(SweBenchRunner):
         eval_run_id: str | None = None,
         instance_ids: list[str] | None = None,
     ) -> None:
+        # Local import avoids the runner <-> Pyxis environment import cycle.
         from .pyxis_environment import build_srun_command, safe_srun_env
 
         del eval_run_id, instance_ids
@@ -791,7 +781,7 @@ class PyxisSweBenchRunner(SweBenchRunner):
 
 
 def create_runner(
-    runtime: str,
+    runtime: Literal["docker", "pyxis"],
     *,
     project_root: Path,
     subprocess_timeout_s: int,

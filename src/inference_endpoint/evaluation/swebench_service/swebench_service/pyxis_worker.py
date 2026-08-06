@@ -14,9 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import atomic_write_bytes
-from .pyxis_environment import build_srun_command, resolve_image, safe_srun_env
+from .pyxis_environment import resolve_image, run_srun_step
+from .runner import RunnerError
 
 _PRINT_LOCK = threading.Lock()
+_INFRASTRUCTURE_FAILURE = ".pyxis_infrastructure_failure"
 _EVAL_SCRIPT = r"""set -eu
 
 patch_path=$1
@@ -48,41 +50,46 @@ exit 0
 
 
 def _run_agent(args: argparse.Namespace) -> None:
+    # Generation-only dependencies are loaded only in the agent worker mode.
     from minisweagent.environments import get_environment
     from minisweagent.run.benchmarks import swebench
+
+    failure_path = args.output / _INFRASTRUCTURE_FAILURE
+    failure_path.unlink(missing_ok=True)
 
     def get_pyxis_environment(config: dict, instance: dict):
         environment_config = copy.deepcopy(config.get("environment", {}))
         environment_config["image"] = resolve_image(
             args.image_registry, instance["instance_id"]
         )
+        environment_config["infrastructure_failure_path"] = str(failure_path)
         return get_environment(environment_config)
 
-    base_agent = swebench.ProgressTrackingAgent
-
-    class LiveTrajectoryAgent(base_agent):  # type: ignore[misc, valid-type]
-        def __init__(self, *agent_args: Any, instance_id: str = "", **kwargs: Any):
-            kwargs["output_path"] = (
-                args.output / instance_id / f"{instance_id}.live.json"
-            )
-            super().__init__(*agent_args, instance_id=instance_id, **kwargs)
-
-    swebench.get_sb_environment = get_pyxis_environment
-    swebench.ProgressTrackingAgent = LiveTrajectoryAgent
-    swebench.main(
-        subset=args.subset,
-        split=args.split,
-        slice_spec="",
-        filter_spec=args.filter,
-        shuffle=False,
-        output=str(args.output),
-        workers=args.workers,
-        model=args.model,
-        model_class=None,
-        redo_existing=False,
-        config_spec=[str(args.config)],
-        environment_class="swebench_service.pyxis_environment.PyxisEnvironment",
-    )
+    if not hasattr(swebench, "get_sb_environment"):
+        raise RuntimeError(
+            "installed mini-swe-agent does not expose get_sb_environment"
+        )
+    original_get_sb_environment = swebench.get_sb_environment
+    try:
+        swebench.get_sb_environment = get_pyxis_environment
+        swebench.main(
+            subset=args.subset,
+            split=args.split,
+            slice_spec="",
+            filter_spec=args.filter,
+            shuffle=False,
+            output=str(args.output),
+            workers=args.workers,
+            model=args.model,
+            model_class=None,
+            redo_existing=False,
+            config_spec=[str(args.config)],
+            environment_class="swebench_service.pyxis_environment.PyxisEnvironment",
+        )
+        if failure_path.exists():
+            raise RunnerError("Pyxis infrastructure failure during agent execution")
+    finally:
+        swebench.get_sb_environment = original_get_sb_environment
 
 
 def _evaluate_instance(
@@ -107,14 +114,20 @@ def _evaluate_instance(
     output_path.write_text("")
     report_path.unlink(missing_ok=True)
 
-    command = build_srun_command(
+    mounts = [
+        (patch_path, "/tmp/swebench_patch.diff"),
+        (eval_path, "/tmp/swebench_eval.sh"),
+        (output_path, "/tmp/swebench_test_output.txt"),
+    ]
+    status_path = log_dir / ".mlperf_srun_status"
+    mounts.append((status_path, "/tmp/.mlperf_srun_status"))
+    result = run_srun_step(
         image=image,
-        mounts=[
-            (patch_path, "/tmp/swebench_patch.diff"),
-            (eval_path, "/tmp/swebench_eval.sh"),
-            (output_path, "/tmp/swebench_test_output.txt"),
-        ],
+        mounts=mounts,
         workdir="/testbed",
+        status_path=status_path,
+        timeout_s=timeout_s + 30,
+        stderr=subprocess.PIPE,
         argv=[
             "bash",
             "-c",
@@ -126,18 +139,17 @@ def _evaluate_instance(
             str(timeout_s),
         ],
     )
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=timeout_s + 60,
-        env=safe_srun_env(),
-    )
     with _PRINT_LOCK:
         print(f"[{instance_id}]\n{result.stdout}{result.stderr}", flush=True)
-    if result.returncode != 0:
+    if result.returncode in {1, 124}:
         return
+    if result.returncode != 0:
+        raise RunnerError(
+            f"unexpected Pyxis evaluation exit code for {instance_id}: "
+            f"{result.returncode}"
+        )
 
+    # Grading is an evaluation-only dependency and is not needed in agent mode.
     from swebench.harness.grading import get_eval_report
 
     report = get_eval_report(
@@ -150,6 +162,7 @@ def _evaluate_instance(
 
 
 def _run_eval(args: argparse.Namespace) -> None:
+    # Evaluation-only SWE-bench harness dependencies are not needed in agent mode.
     from swebench.harness.reporting import make_run_report
     from swebench.harness.test_spec.test_spec import make_test_spec
     from swebench.harness.utils import (
@@ -189,15 +202,25 @@ def _run_eval(args: argparse.Namespace) -> None:
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=args.max_workers
     ) as executor:
-        futures = [
-            executor.submit(_evaluate_instance, **payload) for payload in payloads
-        ]
+        futures = {
+            executor.submit(_evaluate_instance, **payload): payload[
+                "test_spec"
+            ].instance_id
+            for payload in payloads
+        }
+        failures = []
         for future in concurrent.futures.as_completed(futures):
             try:
                 future.result()
             except Exception as exc:
                 with _PRINT_LOCK:
                     print(f"Pyxis evaluation failed: {exc}", flush=True)
+                failures.append(futures[future])
+        if failures:
+            raise RunnerError(
+                "Pyxis infrastructure failure evaluating: "
+                + ", ".join(sorted(failures))
+            )
 
     output_dir = args.output_dir.resolve()
     with contextlib.chdir(output_dir):

@@ -126,7 +126,7 @@ environment:
     TQDM_DISABLE: "1"
   environment_class: docker
   pull_timeout: 3600
-  container_timeout: 6h
+  container_timeout: 10h
 
 model:
   cost_tracking: "ignore_errors"

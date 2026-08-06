@@ -24,6 +24,8 @@ ARM64 task images from a registry on a retained one-node Slurm allocation, add
 `sweb.eval.arm64.<instance_id>:v4.1.0-arm64`.
 Pyxis pulls and caches each image through Enroot; configure registry credentials
 in `~/.config/enroot/.credentials` when the registry requires authentication.
+Launch the service on the compute node inside its active one-node Slurm allocation;
+the Pyxis runtime requires both `SLURM_JOB_ID` and `SLURMD_NODENAME`.
 The benchmark client submits a run to this service only in `ACC` or `BOTH`
 mode; the default `PERF` mode skips external evaluation.
 
