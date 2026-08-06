@@ -180,38 +180,37 @@ def run_code_subprocess(
     if timed_out:
         p.kill()
 
-    if len(resp_buffer) == 0:
-        if timed_out:
-            # Still running at the deadline: the submitted code took too long.
-            res = [-1] * len(suite["inputs"])
-            metadata = {
-                "error": "Test suite timeout",
-                "error_code": -1,
-                "error_message": f"Subprocess did not complete in time ({global_timeout}s)",
-            }
-        elif started_flag.value:
-            # The interpreter died while grading was running (os._exit(),
-            # segfault, OOM, ...). Grading executes the untrusted submission,
-            # so this is the submission's fault, not the judge's.
-            res = [-1] * len(suite["inputs"])
-            metadata = {
-                "error": "Grading child killed while executing the submission",
-                "error_code": -8,
-                "error_message": f"SubmissionKilledChild (exitcode={p.exitcode})",
-            }
-        else:
-            # Died before grading started (e.g. bad start method): the judge
-            # is broken.
-            res = [-1] * len(suite["inputs"])
-            metadata = {
-                "error": "Grading subprocess died before grading started",
-                "error_code": -6,
-                "error_message": f"GradingChildDied (exitcode={p.exitcode})",
-            }
-        return res, metadata
+    if len(resp_buffer) > 0:
+        return resp_buffer[0]
+
+    # No result was reported: every test case counts as failed, only the
+    # attribution differs.
+    res = [-1] * len(suite["inputs"])
+    if timed_out:
+        # Still running at the deadline: the submitted code took too long.
+        metadata = {
+            "error": "Test suite timeout",
+            "error_code": -1,
+            "error_message": f"Subprocess did not complete in time ({global_timeout}s)",
+        }
+    elif started_flag.value:
+        # The interpreter died while grading was running (os._exit(),
+        # segfault, OOM, ...). Grading executes the untrusted submission, so
+        # this is the submission's fault, not the judge's.
+        metadata = {
+            "error": "Grading child killed while executing the submission",
+            "error_code": -8,
+            "error_message": f"SubmissionKilledChild (exitcode={p.exitcode})",
+        }
     else:
-        res, metadata = resp_buffer[0]
-        return res, metadata
+        # Died before grading started (e.g. bad start method): the judge is
+        # broken.
+        metadata = {
+            "error": "Grading subprocess died before grading started",
+            "error_code": -6,
+            "error_message": f"GradingChildDied (exitcode={p.exitcode})",
+        }
+    return res, metadata
 
 
 class LCBTestLoader:
