@@ -14,18 +14,62 @@ uv run --project src/inference_endpoint/evaluation/swebench_service \
   --auth-token "$SWEBENCH_SERVICE_AUTH_TOKEN"
 ```
 
-The endpoint URL in the benchmark config must be reachable from the service
-host. Service mode supports exactly one endpoint URL and follows the
-LiveCodeBench-style external-service convention for heavyweight evaluation work.
-Docker is required only on the service host when using the default runtime. To use
-ARM64 task images from a registry on a retained one-node Slurm allocation, add
-`--runtime pyxis --image-registry REGISTRY`, for example
-`registry.example.com/group/project`. Images must use the name
-`sweb.eval.arm64.<instance_id>:v4.1.0-arm64`.
-Pyxis pulls and caches each image through Enroot; configure registry credentials
-in `~/.config/enroot/.credentials` when the registry requires authentication.
-Launch the service on the compute node inside its active one-node Slurm allocation;
-the Pyxis runtime requires both `SLURM_JOB_ID` and `SLURMD_NODENAME`.
+The endpoint URL in the benchmark config must be reachable from the service host.
+Service mode supports exactly one endpoint URL and follows the LiveCodeBench-style
+external-service convention for heavyweight evaluation work.
+
+## Runtime workflow
+
+### Common workflow
+
+The benchmark client sends the selected SWE-bench instances, model configuration,
+and endpoint URL to the service. The service first runs mini-swe-agent to generate
+one patch per instance and writes the patches to `preds.json`. It then evaluates
+those predictions with the SWE-bench harness and returns the aggregate result and
+retained run artifacts. The selected runtime changes where and how the task
+containers execute; it does not change the benchmark client configuration or the
+model endpoint request path.
+
+### Docker runtime
+
+Docker is the default runtime and is required only on the service host. During
+generation, the service runs `mini-extra swebench` unchanged. mini-swe-agent selects
+the official per-instance x86_64 SWE-bench image, starts a writable Docker container
+for the trajectory, and executes every model tool call in that container so its
+filesystem changes persist across turns.
+
+After generation, the service passes `preds.json` to
+`swebench.harness.run_evaluation`. The standard SWE-bench evaluator starts a fresh
+Docker container for each prediction, applies the generated patch, runs the task's
+evaluation script, captures its output, and grades it. The service collects the
+result file produced by the harness and removes containers belonging to the run.
+
+### Pyxis runtime
+
+Select Pyxis with `--runtime pyxis --image-registry REGISTRY`, for example
+`registry.example.com/group/project`. The current path uses ARM64 images named
+`sweb.eval.arm64.<instance_id>:v4.1.0-arm64`. Pyxis pulls and caches them through
+Enroot; configure registry credentials in `~/.config/enroot/.credentials` when the
+registry requires authentication. Launch the service on the compute node inside an
+active one-node Slurm allocation. The runtime requires `SLURM_JOB_ID` and
+`SLURMD_NODENAME` and assumes the node is exclusive to the user.
+
+During generation, the service still uses mini-swe-agent for the agent loop and
+model requests, but replaces its Docker environment with `PyxisEnvironment`. Every
+trajectory receives a named, writable Pyxis container. Each tool call becomes an
+overlapping `srun` step in that container, preserving filesystem changes across
+turns. Tool commands run in private PID namespaces so one trajectory cannot signal
+processes belonging to another trajectory.
+
+After generation, the Pyxis worker evaluates each prediction in a fresh `srun`
+container step because the Docker-based SWE-bench evaluator cannot run on the
+compute node. It mounts the patch, SWE-bench evaluation script, and output file into
+the task image. It preserves SWE-bench 4.1.0's patch-application order, test timeout,
+captured output, and `get_eval_report` grading. A patch failure or test timeout is an
+unresolved task; an `srun`, Enroot, or container-start failure is an infrastructure
+error that fails the run. The service then aggregates the per-instance reports and
+removes its named Pyxis containers.
+
 The benchmark client submits a run to this service only in `ACC` or `BOTH`
 mode; the default `PERF` mode skips external evaluation.
 

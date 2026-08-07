@@ -14,9 +14,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from .runner import RunnerError
+
+logger = logging.getLogger(__name__)
 
 _SAFE_SRUN_ENV = (
     "PATH",
@@ -34,7 +36,7 @@ status_path=$1
 timeout_s=$2
 shift 2
 printf 'started\n' > "$status_path"
-timeout "$timeout_s" "$@"
+unshare --pid --fork --mount-proc timeout "$timeout_s" "$@"
 returncode=$?
 printf 'finished:%s\n' "$returncode" > "$status_path"
 exit "$returncode"
@@ -164,7 +166,11 @@ class PyxisEnvironmentConfig(BaseModel):
     run_id: str
     cwd: str = "/testbed"
     env: dict[str, str] = Field(default_factory=dict)
-    timeout: int = 30
+    timeout_s: int = Field(
+        default=30,
+        validation_alias=AliasChoices("timeout_s", "timeout"),
+        serialization_alias="timeout",
+    )
     interpreter: list[str] = Field(default_factory=lambda: ["bash", "-c"])
     infrastructure_failure_path: Path | None = None
 
@@ -180,6 +186,7 @@ class PyxisEnvironment:
         self._lock = threading.Lock()
         self._cleaned = False
         try:
+            # A no-op initializes and validates the named persistent container.
             run_srun_step(
                 image=self.config.image,
                 name=self.name,
@@ -187,7 +194,7 @@ class PyxisEnvironment:
                 workdir=self.config.cwd,
                 argv=["true"],
                 status_path=self._tmp_dir / Path(_STEP_STATUS).name,
-                timeout_s=self.config.timeout,
+                timeout_s=self.config.timeout_s,
                 failure_path=self.config.infrastructure_failure_path,
             )
         except RunnerError as exc:
@@ -200,13 +207,14 @@ class PyxisEnvironment:
         self, action: dict[str, Any], cwd: str = "", *, timeout: int | None = None
     ) -> dict[str, Any]:
         command = action.get("command", "")
+        logger.debug("Executing Pyxis command: %s", command)
         argv = ["env"]
         argv.extend(f"{key}={value}" for key, value in self.config.env.items())
         argv.extend([*self.config.interpreter, command])
         result = run_srun_step(
             argv=argv,
             status_path=self._tmp_dir / Path(_STEP_STATUS).name,
-            timeout_s=timeout or self.config.timeout,
+            timeout_s=timeout or self.config.timeout_s,
             failure_path=self.config.infrastructure_failure_path,
             name=self.name,
             mounts=[(self._tmp_dir, "/tmp")],
@@ -220,7 +228,9 @@ class PyxisEnvironment:
                 "exception_info": "The command timed out",
                 "extra": {
                     "exception_type": "TimeoutExpired",
-                    "exception": f"command timed out after {timeout or self.config.timeout}s",
+                    "exception": (
+                        f"command timed out after {timeout or self.config.timeout_s}s"
+                    ),
                 },
             }
         else:
@@ -250,7 +260,7 @@ class PyxisEnvironment:
 
     def get_template_vars(self, **kwargs: Any) -> dict[str, Any]:
         return {
-            **self.config.model_dump(),
+            **self.config.model_dump(by_alias=True),
             **platform.uname()._asdict(),
             **kwargs,
         }
@@ -259,7 +269,7 @@ class PyxisEnvironment:
         return {
             "info": {
                 "config": {
-                    "environment": self.config.model_dump(mode="json"),
+                    "environment": self.config.model_dump(mode="json", by_alias=True),
                     "environment_type": (
                         f"{self.__class__.__module__}.{self.__class__.__name__}"
                     ),
@@ -286,7 +296,7 @@ class PyxisEnvironment:
                         env=safe_srun_env(),
                     )
                 except (OSError, RunnerError, subprocess.SubprocessError):
-                    logging.getLogger(__name__).warning(
+                    logger.warning(
                         "Could not remove Pyxis container %s",
                         self.name,
                         exc_info=True,
@@ -298,7 +308,7 @@ class PyxisEnvironment:
         try:
             self.cleanup()
         except Exception:
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "Could not clean up Pyxis environment",
                 exc_info=True,
             )

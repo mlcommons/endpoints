@@ -19,6 +19,10 @@ from .runner import RunnerError
 
 _PRINT_LOCK = threading.Lock()
 _INFRASTRUCTURE_FAILURE = ".pyxis_infrastructure_failure"
+# This mirrors the per-instance portion of SWE-bench 4.1.0's Docker evaluator:
+# apply the patch with the same three fallbacks, run eval.sh with its timeout, and
+# preserve the test output for get_eval_report(). Pyxis mounts these files and
+# executes them with srun instead of copying them through the Docker API.
 _EVAL_SCRIPT = r"""set -eu
 
 patch_path=$1

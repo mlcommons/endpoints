@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import stat
 import subprocess
 import sys
@@ -12,7 +13,6 @@ from typing import Literal, get_type_hints
 import msgspec.json
 import pytest
 import yaml
-
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
     pyxis_worker as worker_mod,
 )
@@ -835,7 +835,9 @@ def test_pyxis_srun_environment_does_not_forward_credentials(monkeypatch):
     assert "HF_TOKEN" not in environment
 
 
-def test_pyxis_environment_reuses_named_writable_container(monkeypatch, tmp_path):
+def test_pyxis_environment_reuses_named_writable_container(
+    monkeypatch, tmp_path, caplog
+):
     monkeypatch.setenv("SLURM_JOB_ID", "1738605")
     monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
     monkeypatch.setenv("OPENAI_API_KEY", "model-secret")
@@ -857,8 +859,14 @@ def test_pyxis_environment_reuses_named_writable_container(monkeypatch, tmp_path
         timeout=30,
         interpreter=["bash", "-c"],
     )
+    assert environment.config.timeout_s == 30
+    assert environment.serialize()["info"]["config"]["environment"]["timeout"] == 30
 
-    first = environment.execute({"command": "touch state"})
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="inference_endpoint.evaluation.swebench_service.swebench_service.pyxis_environment",
+    ):
+        first = environment.execute({"command": "touch state"})
     second = environment.execute({"command": "test -f state"})
     environment.cleanup()
 
@@ -874,6 +882,9 @@ def test_pyxis_environment_reuses_named_writable_container(monkeypatch, tmp_path
         assert "--no-container-mount-home" in command
         assert kwargs["env"].get("OPENAI_API_KEY") is None
     assert calls[1][0][-5:] == ["env", "PAGER=cat", "bash", "-c", "touch state"]
+    assert any(
+        "unshare --pid --fork --mount-proc" in argument for argument in calls[1][0]
+    )
     assert calls[-1][0][-4:] == [
         "enroot",
         "remove",
@@ -881,6 +892,7 @@ def test_pyxis_environment_reuses_named_writable_container(monkeypatch, tmp_path
         f"pyxis_{container_name}",
     ]
     assert first["returncode"] == second["returncode"] == 0
+    assert "Executing Pyxis command: touch state" in caplog.text
 
 
 def test_pyxis_environment_mounts_persistent_tmp_on_every_step(monkeypatch, tmp_path):
@@ -985,7 +997,7 @@ def test_pyxis_environment_raises_when_srun_never_starts_command(monkeypatch, tm
     environment.config = types.SimpleNamespace(
         cwd="/testbed",
         env={},
-        timeout=30,
+        timeout_s=30,
         interpreter=["bash", "-c"],
         infrastructure_failure_path=failure_path,
     )
