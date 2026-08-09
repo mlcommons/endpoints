@@ -19,6 +19,16 @@ from .classify import (
     classify_eval_log,
     classify_unit,
 )
+from .gates import (
+    CheckpointIdentityGate,
+    EndpointFingerprintGate,
+    Gate,
+    GateFailure,
+    GateReport,
+    GateScaleError,
+    ToolCallGate,
+    run_gates,
+)
 from .guards import HealthTerm, HealthVerdict, MemoryGuard, combine_terms, kill_by_pid
 from .infra_retry import (
     InfraRetryLedger,
@@ -46,13 +56,19 @@ from .reaper import LocalProcessLiveness, OwnerLiveness, SlurmStepLiveness, reap
 from .units import Unit, UnitPlan, plan_units
 
 __all__ = [
-    "GENUINE_KINDS",
-    "INFRA_KINDS",
+    "CheckpointIdentityGate",
     "ClaimError",
     "CompletenessReport",
+    "EndpointFingerprintGate",
     "ErrorKind",
+    "GENUINE_KINDS",
+    "Gate",
+    "GateFailure",
+    "GateReport",
+    "GateScaleError",
     "HealthTerm",
     "HealthVerdict",
+    "INFRA_KINDS",
     "InfraRetryLedger",
     "LocalProcessLiveness",
     "MemoryGuard",
@@ -63,6 +79,7 @@ __all__ = [
     "RetryRecord",
     "RunQuality",
     "SlurmStepLiveness",
+    "ToolCallGate",
     "Unit",
     "UnitClassification",
     "UnitOutcome",
@@ -79,5 +96,6 @@ __all__ = [
     "plan_units",
     "reap",
     "retry_on_provable_non_execution",
+    "run_gates",
     "verify_inventory",
 ]
