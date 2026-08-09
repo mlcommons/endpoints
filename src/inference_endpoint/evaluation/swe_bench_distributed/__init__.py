@@ -11,6 +11,7 @@ emit an accuracy number unless every planned instance id is accounted for
 exactly once.
 """
 
+from .guards import HealthTerm, HealthVerdict, MemoryGuard, combine_terms, kill_by_pid
 from .merge import MergeRefusal, MergeResult, merge_run, verify_inventory
 from .queue import (
     ClaimError,
@@ -18,18 +19,28 @@ from .queue import (
     UnitResult,
     WorkQueue,
 )
+from .reaper import LocalProcessLiveness, OwnerLiveness, SlurmStepLiveness, reap
 from .units import Unit, UnitPlan, plan_units
 
 __all__ = [
     "ClaimError",
+    "HealthTerm",
+    "HealthVerdict",
+    "LocalProcessLiveness",
+    "MemoryGuard",
     "MergeRefusal",
     "MergeResult",
+    "OwnerLiveness",
+    "SlurmStepLiveness",
     "Unit",
     "UnitOutcome",
     "UnitPlan",
     "UnitResult",
     "WorkQueue",
+    "combine_terms",
+    "kill_by_pid",
     "merge_run",
     "plan_units",
+    "reap",
     "verify_inventory",
 ]
