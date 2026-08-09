@@ -11,6 +11,14 @@ emit an accuracy number unless every planned instance id is accounted for
 exactly once.
 """
 
+from .classify import (
+    GENUINE_KINDS,
+    INFRA_KINDS,
+    ErrorKind,
+    UnitClassification,
+    classify_eval_log,
+    classify_unit,
+)
 from .guards import HealthTerm, HealthVerdict, MemoryGuard, combine_terms, kill_by_pid
 from .merge import MergeRefusal, MergeResult, merge_run, verify_inventory
 from .queue import (
@@ -23,7 +31,10 @@ from .reaper import LocalProcessLiveness, OwnerLiveness, SlurmStepLiveness, reap
 from .units import Unit, UnitPlan, plan_units
 
 __all__ = [
+    "GENUINE_KINDS",
+    "INFRA_KINDS",
     "ClaimError",
+    "ErrorKind",
     "HealthTerm",
     "HealthVerdict",
     "LocalProcessLiveness",
@@ -33,10 +44,13 @@ __all__ = [
     "OwnerLiveness",
     "SlurmStepLiveness",
     "Unit",
+    "UnitClassification",
     "UnitOutcome",
     "UnitPlan",
     "UnitResult",
     "WorkQueue",
+    "classify_eval_log",
+    "classify_unit",
     "combine_terms",
     "kill_by_pid",
     "merge_run",
