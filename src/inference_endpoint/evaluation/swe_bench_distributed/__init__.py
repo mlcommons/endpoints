@@ -19,6 +19,16 @@ from .classify import (
     classify_eval_log,
     classify_unit,
 )
+from .gates import (
+    CheckpointIdentityGate,
+    EndpointFingerprintGate,
+    Gate,
+    GateFailure,
+    GateReport,
+    GateScaleError,
+    ToolCallGate,
+    run_gates,
+)
 from .guards import HealthTerm, HealthVerdict, MemoryGuard, combine_terms, kill_by_pid
 from .merge import MergeRefusal, MergeResult, merge_run, verify_inventory
 from .queue import (
@@ -33,8 +43,14 @@ from .units import Unit, UnitPlan, plan_units
 __all__ = [
     "GENUINE_KINDS",
     "INFRA_KINDS",
+    "CheckpointIdentityGate",
     "ClaimError",
+    "EndpointFingerprintGate",
     "ErrorKind",
+    "Gate",
+    "GateFailure",
+    "GateReport",
+    "GateScaleError",
     "HealthTerm",
     "HealthVerdict",
     "LocalProcessLiveness",
@@ -43,6 +59,7 @@ __all__ = [
     "MergeResult",
     "OwnerLiveness",
     "SlurmStepLiveness",
+    "ToolCallGate",
     "Unit",
     "UnitClassification",
     "UnitOutcome",
@@ -56,5 +73,6 @@ __all__ = [
     "merge_run",
     "plan_units",
     "reap",
+    "run_gates",
     "verify_inventory",
 ]
