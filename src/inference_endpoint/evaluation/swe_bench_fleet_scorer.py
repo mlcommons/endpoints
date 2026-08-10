@@ -326,11 +326,17 @@ class SWEBenchFleetScorer(Scorer, scorer_id="swe_bench_fleet"):
         ]
 
     def _submit_unit(self, service_url: str, unit: Unit) -> str:
+        # The service accepts exactly one endpoint URL per run, so a unit is
+        # bound to exactly one endpoint. Sending every unit to endpoint 0 would
+        # funnel the whole fleet through a single engine while the rest idle,
+        # which is both a throughput ceiling and a measurement hazard: one
+        # engine's behaviour would decide the entire run's accuracy. Binding by
+        # shard index spreads units deterministically -- the same unit always
+        # gets the same endpoint, so a retry is comparable to its first attempt.
+        endpoint = self._endpoint_urls[unit.shard % len(self._endpoint_urls)]
         payload = {
             "model_name": self._model_name,
-            # The service accepts exactly one endpoint URL per run; the fleet's
-            # parallelism comes from running many units, not many endpoints.
-            "endpoint_urls": self._endpoint_urls[:1],
+            "endpoint_urls": [endpoint],
             "endpoint_api_key": self._endpoint_api_key,
             "generation_params": self._generation_params,
             "subset": self.options["subset"],
