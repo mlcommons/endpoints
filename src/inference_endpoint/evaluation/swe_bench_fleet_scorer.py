@@ -255,7 +255,15 @@ class SWEBenchFleetScorer(Scorer, scorer_id="swe_bench_fleet"):
         self._model_name = model_name
         self._endpoint_urls = endpoint_urls
         self._endpoint_api_key = endpoint_config.get("api_key")
-        self._generation_params = SWEBenchScorer._generation_params(model_params)
+        # load_benchmark_config() yaml.safe_load()s config.yaml, so model_params
+        # is a plain mapping here, while _generation_params() expects the
+        # pydantic ModelParams. Re-validate rather than re-implement the field
+        # selection, so the fleet path and the single-service path agree.
+        from ..config.schema import ModelParams
+
+        self._generation_params = SWEBenchScorer._generation_params(
+            ModelParams.model_validate(model_params)
+        )
         self._unit_root = unit_root
 
         def fingerprint() -> str | None:
