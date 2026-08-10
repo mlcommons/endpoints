@@ -29,6 +29,24 @@ _SAFE_SRUN_ENV = (
     "LC_ALL",
     "TMPDIR",
     "XDG_RUNTIME_DIR",
+    # Proxy policy must reach enroot, which performs the registry pull inside
+    # the step. Clusters that pin a container-cache proxy system-wide 403 any
+    # registry outside its allow-list, and without no_proxy every per-instance
+    # image import fails with "CONNECT tunnel failed, response 403".
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    # srun locates its own configuration through SLURM_CONF. Dropping it makes
+    # the child fall back to /etc/slurm/slurm.conf, which on a configless or
+    # multi-cluster site is either absent ("Could not establish a configuration
+    # source") or a different file whose plugins are not installed
+    # ("failed to initialize cli_filter plugin"). Every step then fails before
+    # the container is ever created. The remaining SLURM_* variables stay out:
+    # inheriting SLURM_JOB_ID / SLURM_STEP_ID is what breaks a nested srun.
+    "SLURM_CONF",
 )
 _STEP_STATUS = "/tmp/.mlperf_srun_status"
 _STEP_SCRIPT = r"""set +e
