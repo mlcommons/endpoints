@@ -3721,3 +3721,85 @@ class TestRunBenchmarkAuditDispatch:
 
         benchmark_spy.assert_not_called()
         assert audit_calls == [tmp_path / "audit"]
+
+
+class TestAccuracyOnlyIdleIssuer:
+    """An accuracy-only run whose datasets are all scored externally.
+
+    `setup_benchmark` pins num_workers=1 and max_connections=1 for every
+    TestMode.ACC run so the compliance gate's single_stream assertion holds, and
+    `HTTPClientConfig` separately requires num_workers to divide the endpoint
+    count. One worker cannot divide four endpoints, so listing several endpoints
+    took the whole run down during setup -- for a client that issues nothing.
+    """
+
+    def _ctx(self, tmp_path, endpoints: list[str], *, total_samples: int = 0):
+        config = OfflineConfig(
+            endpoint_config={"endpoints": endpoints},
+            model_params={"name": "test-model"},
+            datasets=[{"path": "test.jsonl"}],
+            settings=OfflineSettings(client=HTTPClientConfig(num_workers=1)),
+        )
+        ctx = _make_benchmark_context(config, tmp_path, test_mode=TestMode.ACC)
+        return dataclasses.replace(ctx, total_samples=total_samples)
+
+    async def _capture_endpoints(self, ctx) -> list[str]:
+        captured: list[str] = []
+
+        async def _create(http_config, loop):
+            captured.extend(http_config.endpoint_urls)
+            return MagicMock()
+
+        with (
+            patch.object(execute_mod.HTTPEndpointClient, "create", new=_create),
+            patch.object(execute_mod, "HttpClientSampleIssuer", MagicMock()),
+        ):
+            await execute_mod._create_issuer(ctx, asyncio.get_event_loop())
+        return captured
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_many_endpoints_do_not_reject_an_idle_accuracy_run(self, tmp_path):
+        ctx = self._ctx(
+            tmp_path,
+            [f"http://engine-{i}:8000" for i in range(4)],
+            total_samples=0,
+        )
+
+        captured = await self._capture_endpoints(ctx)
+
+        assert len(captured) == 1
+        assert captured[0].startswith("http://engine-0:8000")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_a_single_endpoint_run_is_unchanged(self, tmp_path):
+        ctx = self._ctx(tmp_path, ["http://engine-0:8000"], total_samples=0)
+
+        captured = await self._capture_endpoints(ctx)
+
+        assert len(captured) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_an_issuing_accuracy_run_still_gets_every_endpoint(self, tmp_path):
+        """The narrowing is scoped to a client that issues nothing.
+
+        A run that will issue samples keeps the full endpoint list, so the
+        divisibility invariant still means what it says where it matters.
+        """
+        endpoints = [f"http://engine-{i}:8000" for i in range(2)]
+        config = OfflineConfig(
+            endpoint_config={"endpoints": endpoints},
+            model_params={"name": "test-model"},
+            datasets=[{"path": "test.jsonl"}],
+            settings=OfflineSettings(client=HTTPClientConfig(num_workers=2)),
+        )
+        ctx = dataclasses.replace(
+            _make_benchmark_context(config, tmp_path, test_mode=TestMode.ACC),
+            total_samples=8,
+        )
+
+        captured = await self._capture_endpoints(ctx)
+
+        assert len(captured) == 2

@@ -705,6 +705,25 @@ async def _create_issuer(
     """Create the HTTP endpoint client + sample issuer, or raise SetupError."""
     config = ctx.config
     endpoints = config.endpoint_config.endpoints
+    if ctx.accuracy_only and ctx.total_samples == 0:
+        # This client will not issue a single sample: every accuracy dataset is
+        # scored externally (Scorer.SKIP_ENDPOINT_PHASE), which is what makes
+        # total_samples zero. It is built only so the session has an issuer.
+        #
+        # It still has to satisfy HTTPClientConfig, which requires num_workers
+        # to divide the endpoint count -- and accuracy-only runs are forced to
+        # num_workers=1 for deterministic ordering, so any run listing more than
+        # one endpoint is rejected before it starts. Hand the idle client a
+        # single endpoint so the invariant holds; it drives none of them.
+        #
+        # Scorers that fan out across endpoints themselves (swe_bench_fleet)
+        # read the real endpoint list from the run's config.yaml, not from this
+        # client, so narrowing it here does not narrow the run.
+        #
+        # The proper fix is to not build an issuer at all when nothing will be
+        # issued; that needs a null issuer, because BenchmarkSession requires a
+        # non-None one. This is the narrow version of that change.
+        endpoints = endpoints[:1]
     logger.info(f"Connecting: {endpoints}")
     try:
         api_type: APIType = config.endpoint_config.api_type
