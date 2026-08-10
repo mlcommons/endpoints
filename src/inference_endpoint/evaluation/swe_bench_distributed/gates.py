@@ -369,6 +369,30 @@ def build_scale_prompt(repetitions: int = 120) -> str:
     )
 
 
+#: Response fields that change on every request and carry no checkpoint
+#: identity. vLLM's ``/v1/models`` stamps ``created`` with the request time and
+#: mints a fresh ``permission[].id`` per call, so hashing the raw payload makes
+#: the fingerprint differ between any two reads of a perfectly healthy engine.
+#: The dispatcher compares the claim-time and publish-time fingerprints and
+#: treats a difference as ``endpoint_changed`` -- an infrastructure fault -- so
+#: an unstable fingerprint retries and then abandons every unit, and the merge
+#: gate can never produce a number.
+_VOLATILE_IDENTITY_KEYS = frozenset({"created", "created_at", "permission"})
+
+
+def _strip_volatile(value: Any) -> Any:
+    """Drop per-request fields so a fingerprint reflects identity, not time."""
+    if isinstance(value, dict):
+        return {
+            key: _strip_volatile(item)
+            for key, item in value.items()
+            if key not in _VOLATILE_IDENTITY_KEYS
+        }
+    if isinstance(value, list):
+        return [_strip_volatile(item) for item in value]
+    return value
+
+
 class EndpointFingerprintGate:
     """Record a per-endpoint fingerprint for later comparison.
 
@@ -401,7 +425,9 @@ class EndpointFingerprintGate:
                 )
             except (urllib_error.URLError, OSError, ValueError, TimeoutError):
                 continue
-            parts.append(json.dumps(payload, sort_keys=True, default=str))
+            parts.append(
+                json.dumps(_strip_volatile(payload), sort_keys=True, default=str)
+            )
         if not parts:
             return None
         import hashlib
