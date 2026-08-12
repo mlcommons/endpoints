@@ -48,10 +48,12 @@ from multiprocessing.sharedctypes import Synchronized
 from pathlib import Path
 from typing import cast
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
 from .generate import generate_dataset
+from .run_lcb_tests import run_test
 
 logger = logging.getLogger(__name__)
 
@@ -75,17 +77,20 @@ _LCB_INFRA_ERROR_CODES = {-5, -6}
 
 
 def execute_code_single(
-    test_suite_json: str, code: str, timeout_sec: int = 60
+    test_suite_json: str,
+    code: str,
+    timeout_sec: int = 60,
+    *,
+    started_flag: Synchronized | None = None,
 ) -> tuple[list, dict]:
     # Run code with lcb_runner. Note that the lcb_runner has a very rudimentary sandbox
     # which is extremely easy to bypass, and as such it is recommended to run this both
     # in an unprivileged container and in a separate process.
-    import numpy as np
-
-    from .run_lcb_tests import run_test
-
     res, metadata = run_test(
-        {"input_output": test_suite_json}, test=code, timeout=timeout_sec
+        {"input_output": test_suite_json},
+        test=code,
+        timeout=timeout_sec,
+        started_flag=started_flag,
     )
 
     # LCB results are expected to be plain booleans or error codes.
@@ -109,15 +114,12 @@ def execute_code_single_suppressed_errors(
     started_flag: Synchronized | None = None,
 ) -> tuple[list, dict]:
     """Wrapper around execute code so that all errors are resurfaced as failed tests"""
-    if started_flag is not None:
-        # From here on the wrapper is running and grading (i.e. the
-        # submission) is about to execute; if the interpreter dies now it is
-        # the submission's doing. Deaths before this point are judge startup
-        # failures.
-        started_flag.value = True
     try:
+        # started_flag is flipped inside run_test, once judge-side setup
+        # (reliability_guard, suite parse) is done and the submission's own
+        # code is next; see run_lcb_tests.run_test.
         res, metadata = execute_code_single(
-            test_suite_json, code, timeout_sec=timeout_sec
+            test_suite_json, code, timeout_sec=timeout_sec, started_flag=started_flag
         )
         if not isinstance(res, list):
             raise ValueError(f"Expected boolean result, got {type(res)}")
