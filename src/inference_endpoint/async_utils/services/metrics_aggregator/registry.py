@@ -423,13 +423,12 @@ class MetricsRegistry:
 
     # -- registration -----------------------------------------------------
 
-    def register_counter(self, name: str, dtype: type = int) -> CounterSampler:
+    def register_counter(self, name: str, dtype: type = int) -> None:
         if name in self._seen_names:
             raise ValueError(f"Metric name already registered: {name}")
         sampler = CounterSampler(name, dtype=dtype)
         self._counters[name] = sampler
         self._seen_names.add(name)
-        return sampler
 
     def register_series(
         self,
@@ -442,7 +441,7 @@ class MetricsRegistry:
         percentiles: tuple[float, ...] = DEFAULT_PERCENTILES,
         dtype: type = int,
         tail_latency: bool = False,
-    ) -> SeriesSampler:
+    ) -> None:
         """Register a new series.
 
         ``percentiles`` MUST include ``50.0`` (or ``50``) — median is a
@@ -474,7 +473,6 @@ class MetricsRegistry:
         )
         self._series[name] = sampler
         self._seen_names.add(name)
-        return sampler
 
     # -- hot path ---------------------------------------------------------
     # Direct dict lookup, no isinstance dispatch — these are called once per
