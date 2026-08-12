@@ -528,7 +528,11 @@ def run_test(sample, test=None, timeout=6, started_flag: Synchronized | None = N
                 )
                 return results, metadata
             except Exception as e:
+                # Reached only if the submission's code fails to compile or
+                # doesn't define the expected function -- grade_call_based's
+                # own per-test-case loop already handles runtime errors.
                 return [-4], {
+                    "error": repr(e),
                     "error_code": -4,
                     "error_message": f"Error during testing: {e}",
                 }
@@ -548,7 +552,10 @@ def run_test(sample, test=None, timeout=6, started_flag: Synchronized | None = N
                 )
                 return results, metadata
             except Exception as e:
+                # Same as the call_based branch above: a compile/definition
+                # failure in the submission's own code, not a judge bug.
                 return [-4], {
+                    "error": repr(e),
                     "error_code": -4,
                     "error_message": f"Error during testing: {e}",
                 }

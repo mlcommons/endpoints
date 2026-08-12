@@ -30,6 +30,7 @@ by the forked grading child; the batch-level guard tests below need the
 real pool and monkeypatch _MP_POOL_CTX to fork for the same reason.
 """
 
+import multiprocessing as mp
 import os
 
 import pytest
@@ -113,6 +114,19 @@ def test_death_during_judge_setup_is_infra_error_not_submission():
     assert metadata["error_code"] in lcb_serve._LCB_INFRA_ERROR_CODES
 
 
+def test_compile_error_in_submission_is_not_infra_but_is_logged():
+    """A submission that doesn't even compile hits the outer except in
+    grade_call_based's caller, gets -4, and is the submission's fault, not
+    the judge's -- but must still carry an "error" key so it's visible."""
+    bad_syntax = "def solve(x\n    return x\n"  # missing closing paren
+    res, metadata = lcb_serve.run_code_subprocess(
+        CALL_BASED_SUITE, bad_syntax, timeout_sec=TIMEOUT_SEC
+    )
+    assert metadata["error_code"] == -4
+    assert "error" in metadata
+    assert metadata["error_code"] not in lcb_serve._LCB_INFRA_ERROR_CODES
+
+
 def test_timeout_is_not_infra_error():
     # grade_call_based enforces its own per-test-case timeout via
     # signal.alarm and returns a normal -3 result well within it, so
@@ -148,6 +162,52 @@ def test_all_os_exit_batch_scores_zero_without_raising():
     assert results == {"q1": [False], "q2": [False]}
 
 
+def test_submission_error_logs_at_warning_not_error(caplog):
+    """Routine submission-attributed outcomes (-8 here) must not log at
+    ERROR -- that level is reserved for judge-side infra failures, so ops
+    can alert on it without being flooded by ordinary bad submissions."""
+    worker = lcb_serve._LCBWorker(
+        _DictTestLoader(q1=CALL_BASED_SUITE),
+        n_lcb_workers=1,
+        worker_timeout_sec=TIMEOUT_SEC,
+    )
+    with caplog.at_level("WARNING", logger=lcb_serve.logger.name):
+        results = worker(["q1"], [[CALL_OS_EXIT]])
+
+    assert results == {"q1": [False]}
+    levels = [r.levelname for r in caplog.records]
+    assert "WARNING" in levels
+    assert "ERROR" not in levels
+
+
+def test_infra_error_logs_at_error_level(monkeypatch, caplog):
+    """A judge-side death (-6) must log at ERROR so it's distinguishable
+    from the routine submission-attributed WARNINGs above."""
+    monkeypatch.setattr(lcb_serve, "_MP_POOL_CTX", mp.get_context("fork"))
+
+    def _die_immediately(*args, **kwargs):
+        os._exit(1)
+
+    monkeypatch.setattr(
+        lcb_serve, "execute_code_single_suppressed_errors", _die_immediately
+    )
+
+    worker = lcb_serve._LCBWorker(
+        _DictTestLoader(q1=CALL_BASED_SUITE),
+        n_lcb_workers=1,
+        worker_timeout_sec=TIMEOUT_SEC,
+    )
+    with caplog.at_level("WARNING", logger=lcb_serve.logger.name):
+        # Single-sample batch is also all-infra, so the guard raises; the
+        # log call happens before that, inside the executor's with-block.
+        with pytest.raises(RuntimeError, match="infrastructure errors"):
+            worker(["q1"], [[PASSING_CALL_BASED]])
+
+    levels = [r.levelname for r in caplog.records]
+    assert "ERROR" in levels
+    assert "WARNING" not in levels
+
+
 def test_all_judge_startup_death_batch_raises(monkeypatch):
     """A batch where every grading child dies before run_test is reached
     means the judge itself is broken, not that every sample failed -- the
@@ -158,8 +218,6 @@ def test_all_judge_startup_death_batch_raises(monkeypatch):
     would not see it. The guard logic under test lives in
     _LCBWorker.__call__ and is identical regardless of pool context.
     """
-    import multiprocessing as mp
-
     monkeypatch.setattr(lcb_serve, "_MP_POOL_CTX", mp.get_context("fork"))
 
     def _die_immediately(*args, **kwargs):

@@ -71,8 +71,12 @@ _MP_CTX = mp.get_context("fork")
 # Error codes that mean the judge is broken, as opposed to the submitted code
 # failing its tests: -5 TestRunnerError, -6 GradingChildDied (child died
 # before grading started, e.g. a bad start method). Submission-attributed
-# codes stay out: timeouts (-1), sys.exit() (-7 SubmissionExit), and
-# submissions that kill their own interpreter (-8 SubmissionKilledChild).
+# codes stay out: timeouts (-1), sys.exit() (-7 SubmissionExit), submissions
+# that kill their own interpreter (-8 SubmissionKilledChild), and -4 (the
+# submission's code failed to compile or define the expected function --
+# see the outer except in run_lcb_tests.grade_call_based/grade_stdio callers
+# -- which is the submission's fault, not the judge's, even though it's
+# labeled "Error during testing").
 _LCB_INFRA_ERROR_CODES = {-5, -6}
 
 
@@ -370,7 +374,17 @@ class _LCBWorker:
                 if "error" in metadata:
                     if metadata.get("error_code") in _LCB_INFRA_ERROR_CODES:
                         infra_errors += 1
-                    logger.error(f"Test execution error for question {qid}: {metadata}")
+                        logger.error(
+                            f"Test execution error for question {qid}: {metadata}"
+                        )
+                    else:
+                        # Routine submission-attributed outcomes (timeout,
+                        # sys.exit, os._exit, bad code) -- expected at scale,
+                        # would otherwise flood ERROR and drown out the
+                        # infra signal above.
+                        logger.warning(
+                            f"Test execution error for question {qid}: {metadata}"
+                        )
 
                 # LCB uses any result > 0 as a 'pass' since:
                 # Negative numbers indicate error codes
