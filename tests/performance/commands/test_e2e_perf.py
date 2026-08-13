@@ -41,6 +41,8 @@ Run::
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from inference_endpoint.testing.max_throughput_server import MaxThroughputServer
 from inference_endpoint.testing.variable_throughput_server import VariableResponseServer
@@ -54,12 +56,26 @@ from .utils import run_cli
 
 @pytest.fixture(scope="module", params=[False, True], ids=["nonstream", "stream"])
 def max_tput_server(request):
-    """Stub server returning fixed pre-compiled responses (roofline target)."""
+    """Stub server returning fixed pre-compiled responses (roofline target).
+
+    ``stream_interval`` is the number of characters packed into each SSE
+    event (the stub's ``output_length`` is 160 chars, so 10 means 16 events
+    per response). It shapes what the streaming roofline measures: at 1 the
+    client's per-chunk SSE parsing dominates and the number reflects
+    chunk-parse cost rather than the request pipeline; at ``output_length``
+    a response is one big event and streaming accumulation is barely
+    exercised. 16 events approximates a realistic completion while keeping
+    the stub cheap.
+
+    Env overrides (also see ``run_cli`` for client-side knobs):
+        ROOFLINE_SERVER_WORKERS  — stub server worker processes (default 4)
+        ROOFLINE_STREAM_INTERVAL — chars per SSE event (default 10)
+    """
     with MaxThroughputServer(
         port=0,
-        num_workers=4,
+        num_workers=int(os.environ.get("ROOFLINE_SERVER_WORKERS", "4")),
         stream=request.param,
-        stream_interval=10,
+        stream_interval=int(os.environ.get("ROOFLINE_STREAM_INTERVAL", "10")),
         quiet=True,
     ) as srv:
         yield srv
