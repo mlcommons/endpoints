@@ -126,8 +126,9 @@ class Timeouts(WithUpdatesMixin, BaseModel):
         gt=0,
         description=(
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
-            "after ENDED (None = wait indefinitely). An incomplete drain is "
-            "surfaced via n_pending_tasks > 0, never silently dropped."
+            "after ENDED (None = wait indefinitely). An incomplete drain fails "
+            "the run: artifacts are written with complete: false, then "
+            "run_benchmark exits non-zero."
         ),
     )
     worker_initialization_timeout_s: float = Field(

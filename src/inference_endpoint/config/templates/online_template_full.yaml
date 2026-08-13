@@ -87,7 +87,7 @@ settings:
     warmup_drain_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)
     performance_drain_timeout_s: null  # Performance drain timeout in seconds (None = wait indefinitely)
     accuracy_drain_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely; accuracy is unbounded by default because every sample must complete)
-    metrics_drain_timeout_s: null  # Wall-clock budget (seconds) to finish tokenizing buffered samples after ENDED (None = wait indefinitely). An incomplete drain is surfaced via n_pending_tasks > 0, never silently dropped.
+    metrics_drain_timeout_s: null  # Wall-clock budget (seconds) to finish tokenizing buffered samples after ENDED (None = wait indefinitely). An incomplete drain fails the run: artifacts are written with complete: false, then run_benchmark exits non-zero.
     worker_initialization_timeout_s: 60.0  # Endpoint-client worker init timeout (seconds)
     worker_graceful_shutdown_wait_s: 0.5  # Endpoint-client post-run graceful shutdown wait (seconds)
     worker_force_kill_timeout_s: 0.5  # Endpoint-client force kill timeout after graceful wait (seconds)
