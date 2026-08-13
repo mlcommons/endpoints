@@ -39,7 +39,8 @@ model_params:
   name: "Qwen3.6-27B-Q4_K_M" # set to your served model name.
   # HF tokenizer for client-side token metrics (ISL / OSL / TPOT). Without it
   # the served GGUF name above is not a loadable tokenizer, so the metrics
-  # aggregator cannot count output tokens and the OSL / TPOT blocks in
+  # aggregator cannot count text-based input or output tokens, and the ISL /
+  # OSL / TPOT blocks in
   # result_summary.json are left empty. Point this at the model's canonical
   # HF tokenizer (or a local path).
   tokenizer_name: "Qwen/Qwen3.6-27B"

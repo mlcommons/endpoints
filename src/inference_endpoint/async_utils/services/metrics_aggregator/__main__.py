@@ -236,9 +236,9 @@ async def main() -> None:
                 args.tokenizer, live_workers=args.tokenizer_workers
             )
         except RuntimeError as exc:
-            # Fail-fast contract: a tokenizer environment that cannot shard
-            # must surface as a clear service-launch failure, not a silent
-            # slow path that cannot keep up with completions.
+            # Shard initialization failures must surface as a clear
+            # service-launch failure. Tokenizers without a plain-text backend
+            # do not create shards and remain usable for structured messages.
             raise SystemExit(f"FATAL: {exc}") from exc
     else:
         tokenizer_cm = nullcontext()

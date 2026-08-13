@@ -21,7 +21,6 @@ See docs/load_generator/DESIGN.md for the full design.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
@@ -48,31 +47,6 @@ from .strategy import LoadStrategy, create_load_strategy
 logger = logging.getLogger(__name__)
 
 _SESSION_ID_HEADER = "X-Session-ID"
-
-
-def _extract_prompt_text(messages: list[Any]) -> str | None:
-    """Join text content from an OpenAI messages list; handles list-form multimodal content."""
-    parts: list[str] = []
-    for m in messages:
-        if not isinstance(m, dict):
-            continue
-        c = m.get("content")
-        if isinstance(c, str) and c:
-            parts.append(c)
-        elif isinstance(c, list):
-            parts.extend(
-                p["text"]
-                for p in c
-                if isinstance(p, dict)
-                and p.get("type") == "text"
-                and isinstance(p.get("text"), str)
-            )
-        tc = m.get("tool_calls")
-        if tc:
-            parts.append(json.dumps(tc, separators=(",", ":")))
-    return "\n".join(parts) if parts else None
-
-
 # ---------------------------------------------------------------------------
 # Phase configuration
 # ---------------------------------------------------------------------------
@@ -181,6 +155,7 @@ class PhaseIssuer:
         "_issuer",
         "_on_inflight_drained",
         "_performance_tracking_stopped",
+        "_prompt_warning_reasons",
         "_publisher",
         "_stop_check",
         "uuid_to_index",
@@ -209,6 +184,14 @@ class PhaseIssuer:
         self.inflight: int = 0
         self.issued_count: int = 0
         self._performance_tracking_stopped = False
+        self._prompt_warning_reasons: set[str] = set()
+
+    def _warn_prompt_once(self, reason: str, message: str) -> None:
+        """Warn once per phase when ISL cannot be derived from a sample."""
+        if reason in self._prompt_warning_reasons:
+            return
+        self._prompt_warning_reasons.add(reason)
+        logger.warning(message)
 
     def mark_inflight_complete(self) -> None:
         self.inflight -= 1
@@ -262,21 +245,54 @@ class PhaseIssuer:
         ts = time.monotonic_ns()
         prompt_data: PromptData
         if isinstance(data, dict):
-            token_ids = data.get("input_tokens") or data.get("token_ids")
-            # Multimodal datasets store ``prompt`` as a list of OpenAI content
-            # parts (e.g. [{"type": "text", ...}, {"type": "image_url", ...}])
-            # which the HTTP adapter handles directly. `PromptData.text` is only
-            # meaningful for ISL reporting on text-only prompts.
-            # Therefore, setting `text=None` for non-string prompts
-            # means that ISL reporting will be unavailable for multimodal samples.
-            prompt_text = data.get("prompt")
-            if prompt_text is None and "messages" in data:
-                prompt_text = _extract_prompt_text(data["messages"])
-            prompt_data = PromptData(
-                text=prompt_text if isinstance(prompt_text, str) else None,
-                token_ids=tuple(token_ids) if token_ids is not None else None,
-            )
+            input_tokens = data.get("input_tokens")
+            token_ids = data.get("token_ids")
+            messages = data.get("messages")
+            prompt = data.get("prompt")
+            if input_tokens is not None and token_ids is not None:
+                raise ValueError("sample contains both input_tokens and token_ids")
+
+            if input_tokens is not None:
+                prompt_data = PromptData(token_ids=tuple(input_tokens))
+            elif token_ids is not None:
+                prompt_data = PromptData(token_ids=tuple(token_ids))
+            elif isinstance(messages, list | tuple) and messages:
+                tools = data.get("tools")
+                chat_template_kwargs = data.get("chat_template_kwargs")
+                prompt_data = PromptData(
+                    messages=tuple(messages),
+                    tools=tuple(tools) if isinstance(tools, list | tuple) else None,
+                    chat_template_kwargs=(
+                        dict(chat_template_kwargs)
+                        if isinstance(chat_template_kwargs, dict)
+                        else None
+                    ),
+                    chat_template=(
+                        data["chat_template"]
+                        if isinstance(data.get("chat_template"), str)
+                        else None
+                    ),
+                    tool_choice=(
+                        data["tool_choice"]
+                        if isinstance(data.get("tool_choice"), str | dict)
+                        else None
+                    ),
+                )
+            elif isinstance(prompt, str):
+                prompt_data = PromptData(text=prompt)
+            else:
+                if not isinstance(prompt, list):
+                    self._warn_prompt_once(
+                        "unsupported_mapping",
+                        "Samples without token IDs, non-empty messages, or a string "
+                        "prompt are issued normally, but ISL is unavailable",
+                    )
+                prompt_data = PromptData()
         else:
+            self._warn_prompt_once(
+                "non_mapping",
+                "Non-mapping samples are issued normally, but ISL is unavailable",
+            )
             prompt_data = PromptData()
         self._publisher.publish(
             EventRecord(
