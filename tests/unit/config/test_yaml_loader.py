@@ -45,13 +45,12 @@ datasets:
     path: "test.jsonl"
 
 settings:
-  runtime:
-    min_duration_ms: 60000
+  timeouts:
+    worker_initialization_timeout_s: 120
   load_pattern:
     type: "max_throughput"
   client:
     num_workers: 4
-    worker_initialization_timeout: 120
     transport:
       type: zmq
       recv_buffer_size: 16777216
@@ -68,7 +67,7 @@ endpoint_config:
         assert config.name == "test-config"
         assert config.type == BenchmarkTestType.OFFLINE
         assert len(config.datasets) == 1
-        assert config.settings.client.worker_initialization_timeout == 120.0
+        assert config.settings.timeouts.worker_initialization_timeout_s == 120.0
         assert config.settings.client.transport.recv_buffer_size == 16777216
         assert config.settings.client.transport.send_buffer_size == 8388608
 
@@ -209,7 +208,7 @@ class TestDefaultConfigs:
         config = BenchmarkConfig.create_default_config(BenchmarkTestType.OFFLINE)
         assert isinstance(config, BenchmarkConfig)
         assert config.settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
-        assert config.settings.runtime.min_duration_ms == 600000
+        assert config.settings.timeouts.run_timeout_s is None
         assert config.settings.client.num_workers >= 1  # auto-resolved from -1
 
     def test_create_default_online_config(self):
@@ -217,7 +216,7 @@ class TestDefaultConfigs:
         assert isinstance(config, BenchmarkConfig)
         assert config.settings.load_pattern.type == LoadPatternType.POISSON
         assert config.settings.load_pattern.target_qps == 10.0
-        assert config.settings.runtime.min_duration_ms == 600000
+        assert config.settings.timeouts.run_timeout_s is None
 
     def test_create_default_eval_not_implemented(self):
         with pytest.raises(CLIError, match="EVAL"):
@@ -246,8 +245,8 @@ class TestSerialization:
         )
         assert loaded.settings.load_pattern.type == original.settings.load_pattern.type
         assert (
-            loaded.settings.client.worker_initialization_timeout
-            == original.settings.client.worker_initialization_timeout
+            loaded.settings.timeouts.worker_initialization_timeout_s
+            == original.settings.timeouts.worker_initialization_timeout_s
         )
         assert (
             loaded.settings.client.transport.recv_buffer_size

@@ -284,8 +284,6 @@ class TestE2E:
             tmp_path,
             "benchmark",
             "offline",
-            "--duration",
-            "0",
             "--streaming",
             "off",
         )
@@ -308,8 +306,8 @@ class TestE2E:
             "poisson",
             "--target-qps",
             "50",
-            "--duration",
-            "2000",
+            "--num-samples",
+            "100",
         )
         assert r["n_samples_issued"] > 0
 
@@ -326,7 +324,7 @@ class TestE2E:
             "concurrency",
             "--concurrency",
             "4",
-            "--duration",
-            "2000",
+            "--num-samples",
+            "40",
         )
         assert r["n_samples_issued"] > 0

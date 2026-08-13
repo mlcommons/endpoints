@@ -353,32 +353,19 @@ class TestBenchmarkConfig:
             )
 
     @pytest.mark.unit
-    def test_negative_min_duration_rejected(self):
-        with pytest.raises(ValueError, match="greater than or equal to 0"):
+    def test_max_duration_zero_rejected(self):
+        with pytest.raises(ValueError, match="greater than 0"):
             BenchmarkConfig(
                 type=TestType.OFFLINE,
                 model_params={"name": "M"},
                 endpoint_config={"endpoints": ["http://x"]},
                 datasets=[{"path": "D"}],
-                settings={"runtime": {"min_duration_ms": -1}},
-            )
-
-    @pytest.mark.unit
-    def test_max_lt_min_duration_rejected(self):
-        with pytest.raises(ValueError, match="max_duration_ms"):
-            BenchmarkConfig(
-                type=TestType.OFFLINE,
-                model_params={"name": "M"},
-                endpoint_config={"endpoints": ["http://x"]},
-                datasets=[{"path": "D"}],
-                settings={
-                    "runtime": {"min_duration_ms": 5000, "max_duration_ms": 1000}
-                },
+                settings={"runtime": {"max_duration_ms": 0}},
             )
 
     @pytest.mark.unit
     def test_max_duration_below_zero_rejected(self):
-        with pytest.raises(ValueError, match="greater than or equal to 0"):
+        with pytest.raises(ValueError, match="greater than 0"):
             BenchmarkConfig(
                 type=TestType.OFFLINE,
                 model_params={"name": "M"},
@@ -525,7 +512,7 @@ class TestBenchmarkConfigMethods:
         assert redacted["description"] == value["description"]
 
     @pytest.mark.unit
-    def test_max_duration_zero_converts_to_none_in_runtime_settings(self):
+    def test_max_duration_defaults_to_none_in_runtime_settings(self):
         from inference_endpoint.config.runtime_settings import RuntimeSettings
 
         config = BenchmarkConfig(
@@ -533,7 +520,6 @@ class TestBenchmarkConfigMethods:
             model_params={"name": "M"},
             endpoint_config={"endpoints": ["http://x"]},
             datasets=[{"path": "D"}],
-            settings={"runtime": {"max_duration_ms": 0}},
         )
         rt = RuntimeSettings.from_config(config, dataloader_num_samples=100)
         assert rt.max_duration_ms is None
@@ -900,7 +886,7 @@ class TestAgenticInferenceTotalSamples:
     """Tests for total_samples_to_issue() with agentic_inference load pattern."""
 
     @pytest.mark.unit
-    def test_agentic_inference_uses_dataset_size_ignoring_duration(self):
+    def test_agentic_inference_uses_dataset_size(self):
         config = BenchmarkConfig(
             type=TestType.ONLINE,
             model_params={"name": "M"},
@@ -908,7 +894,6 @@ class TestAgenticInferenceTotalSamples:
             datasets=[{"path": "D", "agentic_inference": {}}],
             settings={
                 "load_pattern": {"type": "agentic_inference", "target_concurrency": 4},
-                "runtime": {"min_duration_ms": 600000},
             },
         )
         rt = RuntimeSettings.from_config(config, dataloader_num_samples=4316)

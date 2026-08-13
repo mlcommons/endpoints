@@ -81,6 +81,6 @@ dataset["train"].to_json("cnn_dailymail_train.json")
 And then launch the example template.
 
 ```
-uv run inference-endpoint benchmark from-config -c examples/02_ServerBenchmarking/online_llama2_70b_cnn.yaml --timeout 600
+uv run inference-endpoint benchmark from-config -c examples/02_ServerBenchmarking/online_llama2_70b_cnn.yaml
 
 ```

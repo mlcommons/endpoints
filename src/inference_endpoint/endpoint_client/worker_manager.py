@@ -92,7 +92,7 @@ class WorkerManager:
 
         except TimeoutError as e:
             raise TimeoutError(
-                f"Workers failed to initialize within {self.http_config.worker_initialization_timeout}s"
+                f"Workers failed to initialize within {self.http_config.worker_initialization_timeout_s}s"
             ) from e
 
         finally:
@@ -130,7 +130,7 @@ class WorkerManager:
 
     async def _wait_for_workers_with_liveness_check(self) -> None:
         """Wait for workers, checking liveness at 10% intervals."""
-        timeout = self.http_config.worker_initialization_timeout
+        timeout = self.http_config.worker_initialization_timeout_s
         check_interval = timeout * 0.10 if timeout else 1.0
         start = time.monotonic()
 
@@ -165,7 +165,7 @@ class WorkerManager:
             if worker.is_alive():
                 worker.terminate()
 
-        await asyncio.sleep(self.http_config.worker_graceful_shutdown_wait)
+        await asyncio.sleep(self.http_config.worker_graceful_shutdown_wait_s)
 
         # Force kill remaining
         for worker in self.workers:
@@ -176,7 +176,7 @@ class WorkerManager:
         await asyncio.gather(
             *(
                 asyncio.to_thread(
-                    worker.join, timeout=self.http_config.worker_force_kill_timeout
+                    worker.join, timeout=self.http_config.worker_force_kill_timeout_s
                 )
                 for worker in self.workers
             )

@@ -48,6 +48,7 @@ from inference_endpoint.commands.benchmark.execute import (
     finalize_benchmark,
     setup_benchmark,
 )
+from inference_endpoint.commands.benchmark.pipeline import _build_aggregator_args
 from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
     _derive_profile_urls,
@@ -60,7 +61,6 @@ from inference_endpoint.config.schema import (
     AgenticInferenceConfig,
     BenchmarkConfig,
     DatasetType,
-    DrainConfig,
     LoadPattern,
     LoadPatternType,
     OfflineSettings,
@@ -82,8 +82,9 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.config.schema import (
     OnlineBenchmarkConfig as OnlineConfig,
 )
+from inference_endpoint.config.timeouts import Timeouts
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import APIType, QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.predefined.swe_bench import SWEBench
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -267,15 +268,13 @@ class TestCLIConfigModels:
         config = cls(**_OFFLINE_KWARGS, **extra_kwargs)
         assert config.type == expected_type
         assert config.model_params.streaming == expected_streaming
-        assert config.settings.runtime.min_duration_ms == 600000
+        assert config.settings.runtime.n_samples_to_issue is None
 
     @pytest.mark.unit
     def test_num_samples_override(self):
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
-            settings=OfflineSettings(
-                runtime=RuntimeConfig(min_duration_ms=0, n_samples_to_issue=100)
-            ),
+            settings=OfflineSettings(runtime=RuntimeConfig(n_samples_to_issue=100)),
         )
         assert config.settings.runtime.n_samples_to_issue == 100
 
@@ -331,30 +330,6 @@ class TestCLIConfigModels:
         assert acc_ds.accuracy_config is not None
         assert acc_ds.accuracy_config.extras is not None
         assert acc_ds.accuracy_config.extras.get("workers") == expected_workers
-
-
-class TestDurationSuffix:
-    """Test duration suffix parsing (600s, 10m, 600000ms, plain int)."""
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "value, expected_ms",
-        [
-            ("600s", 600000),
-            ("10m", 600000),
-            ("600000ms", 600000),
-            ("600000", 600000),
-            (600000, 600000),
-            ("0.5m", 30000),
-            ("1.5s", 1500),
-        ],
-    )
-    def test_duration_suffix(self, value, expected_ms):
-        config = OfflineConfig(
-            **_OFFLINE_KWARGS,
-            settings=OfflineSettings(runtime=RuntimeConfig(min_duration_ms=value)),
-        )
-        assert config.settings.runtime.min_duration_ms == expected_ms
 
 
 class TestDatasetParsing:
@@ -759,7 +734,7 @@ datasets:
         config_file.write_text(yaml_content)
         from_config(config=config_file, timeout=42.0, mode=TestMode.BOTH)
         called_config, called_mode = mock_run.call_args[0]
-        assert called_config.timeout == 42.0
+        assert called_config.settings.timeouts.run_timeout_s == 42.0
         assert called_mode == TestMode.BOTH
 
     @pytest.mark.unit
@@ -1266,69 +1241,6 @@ settings:
         assert warmup.n_requests is None
 
 
-class TestDrainConfig:
-    """Tests for DrainConfig schema model."""
-
-    @pytest.mark.unit
-    def test_defaults(self):
-        cfg = DrainConfig()
-        assert cfg.warmup_timeout_s == 240.0
-        assert cfg.performance_timeout_s == 240.0
-        assert cfg.accuracy_timeout_s is None
-        assert cfg.metrics_drain_timeout_s == 0.0
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "field",
-        ["warmup_timeout_s", "performance_timeout_s", "accuracy_timeout_s"],
-    )
-    @pytest.mark.parametrize("value", [0, -1.0])
-    def test_timeout_must_be_positive_or_none(self, field, value):
-        with pytest.raises(ValidationError):
-            DrainConfig(**{field: value})
-
-    @pytest.mark.unit
-    def test_metrics_drain_timeout_zero_is_valid(self):
-        cfg = DrainConfig(metrics_drain_timeout_s=0)
-        assert cfg.metrics_drain_timeout_s == 0.0
-
-    @pytest.mark.unit
-    def test_metrics_drain_timeout_negative_rejected(self):
-        with pytest.raises(ValidationError):
-            DrainConfig(metrics_drain_timeout_s=-1.0)
-
-    @pytest.mark.unit
-    def test_extra_fields_rejected(self):
-        with pytest.raises(ValidationError):
-            DrainConfig(unknown_field=1)
-
-    @pytest.mark.unit
-    def test_yaml_roundtrip(self, tmp_path):
-        yaml_content = """
-type: "offline"
-model_params:
-  name: "test-model"
-endpoint_config:
-  endpoints: ["http://test:8000"]
-datasets:
-  - path: "test.jsonl"
-settings:
-  drain:
-    warmup_timeout_s: 12.5
-    performance_timeout_s: 30.0
-    accuracy_timeout_s: null
-    metrics_drain_timeout_s: 300.0
-"""
-        config_file = tmp_path / "drain.yaml"
-        config_file.write_text(yaml_content)
-        config = BenchmarkConfig.from_yaml_file(config_file)
-        drain = config.settings.drain
-        assert drain.warmup_timeout_s == 12.5
-        assert drain.performance_timeout_s == 30.0
-        assert drain.accuracy_timeout_s is None
-        assert drain.metrics_drain_timeout_s == 300.0
-
-
 class TestAggregatorArgs:
     """Tests that metrics aggregator subprocess args are correctly forwarded."""
 
@@ -1362,7 +1274,7 @@ class TestAggregatorArgs:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "timeout_s, expected_flag",
-        [(120.0, "120.0"), (0.0, "0.0"), (60.0, "60.0")],
+        [(120.0, "120.0"), (None, "0"), (60.0, "60.0")],
     )
     async def test_drain_timeout_forwarded_to_aggregator_args(
         self, tmp_path, timeout_s, expected_flag
@@ -1370,7 +1282,7 @@ class TestAggregatorArgs:
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(
-                drain=DrainConfig(metrics_drain_timeout_s=timeout_s)
+                timeouts=Timeouts(metrics_drain_timeout_s=timeout_s)
             ),
         )
         ctx = self._make_ctx(config, tmp_path)
@@ -1416,11 +1328,28 @@ class TestAggregatorArgs:
         assert args[idx + 1] == expected_flag
 
     @pytest.mark.unit
+    def test_none_drain_timeout_builds_unlimited_argv(self):
+        """None (= unlimited) must cross the argv boundary as "0", never "None"."""
+        args = _build_aggregator_args(
+            socket_dir="/tmp/sockets",
+            pub_socket_name="pub",
+            metrics_socket_name="metrics",
+            metrics_output_dir=Path("/tmp/metrics"),
+            enable_streaming=False,
+            tokenizer_name=None,
+            drain_timeout_s=None,
+            tokenizer_workers=2,
+            early_stopping=False,
+        )
+        idx = args.index("--drain-timeout")
+        assert args[idx + 1] == "0"
+
+    @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_tokenizer_and_workers_forwarded_from_schema(self, tmp_path):
         """The benchmark forwards --tokenizer and --tokenizer-workers; the
         workers value comes from the schema default
-        (drain.metrics_tokenizer_workers), the single source of truth."""
+        (settings.metrics_tokenizer_workers), the single source of truth."""
         config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
         ctx = self._make_ctx(config, tmp_path)
         ctx.tokenizer_name = "gpt2"
@@ -1464,7 +1393,7 @@ class TestAggregatorArgs:
         idx = args.index("--tokenizer")
         assert args[idx + 1] == "gpt2"
         idx = args.index("--tokenizer-workers")
-        expected = str(config.settings.drain.metrics_tokenizer_workers)
+        expected = str(config.settings.metrics_tokenizer_workers)
         assert args[idx + 1] == expected
 
     @pytest.mark.unit
@@ -2118,10 +2047,10 @@ class TestBuildPhases:
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(
-                drain=DrainConfig(
-                    warmup_timeout_s=7.0,
-                    performance_timeout_s=15.0,
-                    accuracy_timeout_s=45.0,
+                timeouts=Timeouts(
+                    warmup_drain_timeout_s=7.0,
+                    performance_drain_timeout_s=15.0,
+                    accuracy_drain_timeout_s=45.0,
                 ),
                 warmup=WarmupConfig(enabled=True, drain=True),
             ),
@@ -2839,6 +2768,37 @@ class TestSetupBenchmark:
         assert ctx.config.settings.client.num_workers == 1
         assert ctx.config.settings.client.max_connections == 1
         assert ctx.config.settings.load_pattern.target_concurrency == 1
+
+    @pytest.mark.unit
+    def test_accuracy_only_setup_validates_with_non_default_api_type(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        """A non-default endpoint api_type (propagated into the client via
+        _propagate_client_api_type's with_updates) must survive the ACC-mode
+        client normalization re-validation without errors."""
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://x"], "api_type": "sglang"},
+            model_params={"name": "test-model"},
+            settings=OnlineSettings(
+                load_pattern=LoadPattern(
+                    type=LoadPatternType.CONCURRENCY, target_concurrency=10
+                ),
+                client=HTTPClientConfig(
+                    num_workers=4, warmup_connections=0, max_connections=8
+                ),
+            ),
+            report_dir=str(tmp_path),
+        )
+        ctx = self._setup(
+            config,
+            TestMode.ACC,
+            (_simple_dataset, [], []),
+            _rt_settings,
+        )
+
+        assert ctx.config.settings.client.num_workers == 1
+        assert ctx.config.endpoint_config.api_type == APIType.SGLANG
+        assert ctx.config.settings.client.api_type == APIType.SGLANG
 
     @pytest.mark.unit
     def test_perf_run_leaves_target_concurrency_untouched(

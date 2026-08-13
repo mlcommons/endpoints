@@ -100,7 +100,7 @@ def _build_aggregator_args(
     metrics_output_dir: Path,
     enable_streaming: bool,
     tokenizer_name: str | None,
-    drain_timeout_s: float,
+    drain_timeout_s: float | None,
     tokenizer_workers: int,
     early_stopping: bool,
 ) -> list[str]:
@@ -121,7 +121,11 @@ def _build_aggregator_args(
         args.append("--early-stopping")
     if tokenizer_name is not None:
         args.extend(["--tokenizer", tokenizer_name])
-    args.extend(["--drain-timeout", str(drain_timeout_s)])
+    # Aggregator argv contract keeps 0 = unlimited (hand-launch default);
+    # the schema uses None = unlimited, so convert at the argv boundary.
+    args.extend(
+        ["--drain-timeout", "0" if drain_timeout_s is None else str(drain_timeout_s)]
+    )
     args.extend(["--tokenizer-workers", str(tokenizer_workers)])
     return args
 
@@ -280,7 +284,7 @@ class MetricsPipeline:
             stack.callback(self._close_subscriber)
 
             self._launcher = ServiceLauncher(zmq_ctx)
-            drain = self._config.settings.drain
+            timeouts = self._config.settings.timeouts
             aggregator_args = _build_aggregator_args(
                 socket_dir=zmq_ctx.socket_dir,
                 pub_socket_name=pub_socket_name,
@@ -288,8 +292,8 @@ class MetricsPipeline:
                 metrics_output_dir=self._metrics_output_dir,
                 enable_streaming=self._enable_streaming,
                 tokenizer_name=self._tokenizer_name,
-                drain_timeout_s=drain.metrics_drain_timeout_s,
-                tokenizer_workers=drain.metrics_tokenizer_workers,
+                drain_timeout_s=timeouts.metrics_drain_timeout_s,
+                tokenizer_workers=self._config.settings.metrics_tokenizer_workers,
                 early_stopping=self._config.settings.early_stopping.enabled,
             )
             event_logger_args = _build_event_logger_args(
@@ -302,7 +306,7 @@ class MetricsPipeline:
                     ServiceConfig(module=_AGGREGATOR_MODULE, args=aggregator_args),
                     ServiceConfig(module=_EVENT_LOGGER_MODULE, args=event_logger_args),
                 ],
-                timeout=self._config.settings.service_ready_timeout_s,
+                timeout=timeouts.service_ready_timeout_s,
             )
         except BaseException as e:
             if self._launcher is not None:  # launch may have spawned children
@@ -359,6 +363,17 @@ class MetricsPipeline:
             else None
         )
         return report
+
+    def terminate_metrics_aggregator(self) -> None:
+        """SIGTERM the metrics aggregator; safe no-op before launch.
+
+        Run-watchdog abort path: targeted so the aggregator's SIGTERM handler
+        writes the INTERRUPTED final snapshot while the event logger stays
+        alive to flush its buffer on the session's ENDED event.
+        """
+        if self._launcher is None:
+            return
+        self._launcher.terminate(_AGGREGATOR_MODULE)
 
     def _kill_services(self) -> None:
         """Best-effort service termination owned by the pipeline ExitStack.

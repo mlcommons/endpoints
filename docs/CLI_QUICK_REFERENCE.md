@@ -96,8 +96,7 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--model-params.max-new-tokens --max-output-tokens` - Max output tokens (default: 1024)
 - `--model-params.osl-distribution.min --min-output-tokens` - Min output tokens (default: 1)
 - `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default: auto)
-- `--runtime.min-duration-ms --duration` - Min duration: ms default, or with suffix (600s, 10m) (default: 600000)
-- `--runtime.n-samples-to-issue --num-samples` - Explicit sample count override
+- `--runtime.n-samples-to-issue --num-samples` - Explicit sample count (omit to issue the dataset once — the default)
 - `--client.num-workers --workers` - HTTP workers (-1=auto, default: -1)
 - `--client.max-connections --max-connections` - Max TCP connections (-1=unlimited)
 - `--endpoint-config.api-key --api-key` - API authentication
@@ -106,7 +105,7 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
   Note: applies to CLI-driven `benchmark offline` / `benchmark online`; `benchmark from-config`
   does not expose a CLI override for `report_dir`. Set it in the YAML only if you need to control
   the output location; otherwise a default report directory is used.
-- `--timeout` - Global timeout in seconds
+- `--timeout` - Whole-run watchdog in seconds (off by default). If it fires, the run is aborted, the report is marked INTERRUPTED, and the process exits non-zero.
 - `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
 - `--no-early-stopping` - opt out of the MLPerf early-stopping percentile estimates in `result_summary.json` (default: on; see [early_stopping.md](early_stopping.md))
 
@@ -117,6 +116,35 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--load-pattern.target-concurrency --concurrency` - Concurrent requests (required for concurrency)
 
 **All other schema fields** are accessible via dotted paths (e.g., `--model-params.temperature`, `--model-params.top-k`, `--runtime.scheduler-random-seed`). Run `--help` to see the full list.
+
+## Time Knobs
+
+All give-up deadlines live under `settings.timeouts`; the only workload duration is
+`settings.runtime.max_duration_ms`. `null`/unset means "wait indefinitely" (or "off") everywhere.
+
+| YAML path                                           | CLI flag                            | Semantics                                                                                                               |
+| --------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `settings.runtime.max_duration_ms`                  | `--runtime.max-duration-ms`         | Caps the performance phase (ms, or suffix: `600s`, `10m`); reaching it ends the phase NORMALLY — the report stays valid |
+| `settings.timeouts.run_timeout_s`                   | `--timeout`                         | Whole-run watchdog; firing aborts the entire run — report marked INTERRUPTED, non-zero exit                             |
+| `settings.timeouts.service_ready_timeout_s`         | `--service-ready-timeout`           | Wait for the metrics-aggregator/event-logger services to become ready (default 30)                                      |
+| `settings.timeouts.warmup_drain_timeout_s`          | `--warmup-drain-timeout`            | Bound on in-flight warmup requests after the warmup phase ends (default 240)                                            |
+| `settings.timeouts.performance_drain_timeout_s`     | `--performance-drain-timeout`       | Bound on in-flight performance requests after the phase ends (default: wait indefinitely)                               |
+| `settings.timeouts.accuracy_drain_timeout_s`        | `--accuracy-drain-timeout`          | Bound on in-flight accuracy requests after the phase ends (default: wait indefinitely)                                  |
+| `settings.timeouts.metrics_drain_timeout_s`         | `--metrics-drain-timeout`           | Budget for the metrics aggregator to finish tokenizing buffered samples after the run ends (default: wait indefinitely) |
+| `settings.timeouts.worker_initialization_timeout_s` | `--worker-initialization-timeout-s` | Wait for endpoint-client worker processes to start (default 60)                                                         |
+| `settings.timeouts.worker_graceful_shutdown_wait_s` | `--worker-graceful-shutdown-wait-s` | Post-run wait for workers to exit gracefully (default 0.5)                                                              |
+| `settings.timeouts.worker_force_kill_timeout_s`     | `--worker-force-kill-timeout-s`     | Wait after SIGTERM before SIGKILL during worker teardown (default 0.5)                                                  |
+
+How the knobs compose:
+
+1. **`--num-samples` / dataset-once defines the work.** An explicit `runtime.n_samples_to_issue`
+   sets the sample count; omitting it issues the performance dataset once.
+2. **`runtime.max_duration_ms` caps the performance phase** and ends it normally — remaining
+   samples are not issued, the report is valid.
+3. **`timeouts.run_timeout_s` aborts the whole run** (every phase, drains included) — the report
+   is marked INTERRUPTED and the process exits non-zero.
+4. **Per-phase drain timeouts bound the post-phase wait** for requests still in flight after a
+   phase stops issuing.
 
 ## Environment Variables
 
@@ -224,14 +252,13 @@ inference-endpoint benchmark online \
   --report-dir production_report \
   -v
 
-# Or with duration (calculates samples from target_qps * duration)
+# Without --num-samples, the dataset is issued once (the default)
 inference-endpoint benchmark online \
   --endpoints https://api.production.com \
   --model Qwen/Qwen3-8B \
   --dataset prod_queries.jsonl \
   --load-pattern poisson \
   --target-qps 100 \
-  --duration 5m \
   --workers 16 \
   --report-dir production_report \
   -v
@@ -290,8 +317,7 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minutes
-    n_samples_to_issue: null # Optional: explicit sample count (null = auto-calculate)
+    n_samples_to_issue: null # Optional: explicit sample count (null = issue the dataset once)
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
   load_pattern:
@@ -331,8 +357,8 @@ Note: For submission configs, `model_params.name` is optional when `submission_r
 
 **Sample Count Control:**
 
-- Priority: `--num-samples` > calculated (target_qps × duration) > dataset size
-- Default duration: 600000ms (10 minutes)
+- `--num-samples` sets an explicit sample count; without it the dataset is issued once
+- Behavior change: bare configs (no `--num-samples`) now run the dataset once instead of deriving 10 minutes' worth of samples from the target QPS
 
 **Mode Requirements:**
 

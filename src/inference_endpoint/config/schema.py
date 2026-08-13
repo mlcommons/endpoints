@@ -15,18 +15,23 @@
 
 """Configuration schema — single source of truth for YAML and CLI.
 
-All Pydantic models here define both the YAML config structure and the CLI interface.
-cyclopts auto-generates CLI flags from fields. Use cyclopts.Parameter(alias=...)
-on Annotated fields to declare shorthand aliases alongside dotted paths.
+All Pydantic models define both the YAML config structure and the CLI
+interface. cyclopts auto-generates CLI flags from fields. Use
+cyclopts.Parameter(alias=...) on Annotated fields to declare shorthand
+aliases alongside dotted paths.
+
+Split criterion: one module per config domain (enums / audit / model_params /
+datasets / settings / timeouts); this module owns only the root aggregate
+(``BenchmarkConfig`` and its cross-field validation) plus the explicit
+re-export hub, so every existing ``config.schema`` import site keeps working.
 """
 
 from __future__ import annotations
 
 import logging
 from collections import Counter
-from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal, Self, Union
+from typing import Annotated, Any, Literal, Self, Union
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import cyclopts
@@ -36,21 +41,81 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
-    SerializerFunctionWrapHandler,
     Tag,
     TypeAdapter,
     field_validator,
-    model_serializer,
     model_validator,
 )
 
-from .. import metrics
 from ..core.types import APIType
-from ..endpoint_client.config import HTTPClientConfig
 from ..exceptions import CLIError
 from ..utils import WithUpdatesMixin
-from .ruleset_base import BenchmarkSuiteRuleset
+from .audit import AuditConfig, AuditTestId, OutputCachingTestConfig
+from .datasets import AccuracyConfig, AgenticInferenceConfig, Dataset
+from .enums import (
+    DatasetType,
+    EvalMethod,
+    LoadPatternType,
+    OSLDistributionType,
+    ProfilerEngine,
+    ScorerMethod,
+    StreamingMode,
+    TestMode,
+    TestType,
+)
+from .model_params import (
+    ModelParams,
+    OSLDistribution,
+    SubmissionReference,
+    _non_default_completion_controls,
+)
+from .settings import (
+    EarlyStoppingConfig,
+    LoadPattern,
+    OfflineSettings,
+    OnlineSettings,
+    ProfilingConfig,
+    RuntimeConfig,
+    Settings,
+    WarmupConfig,
+)
+from .timeouts import Timeouts
 from .utils import parse_dataset_string, resolve_env_vars
+
+__all__ = [
+    "APIType",
+    "AccuracyConfig",
+    "AgenticInferenceConfig",
+    "AuditConfig",
+    "AuditTestId",
+    "BenchmarkConfig",
+    "Dataset",
+    "DatasetType",
+    "EarlyStoppingConfig",
+    "EndpointConfig",
+    "EvalMethod",
+    "LoadPattern",
+    "LoadPatternType",
+    "ModelParams",
+    "OSLDistribution",
+    "OSLDistributionType",
+    "OfflineBenchmarkConfig",
+    "OfflineSettings",
+    "OnlineBenchmarkConfig",
+    "OnlineSettings",
+    "OutputCachingTestConfig",
+    "ProfilerEngine",
+    "ProfilingConfig",
+    "RuntimeConfig",
+    "ScorerMethod",
+    "Settings",
+    "StreamingMode",
+    "SubmissionReference",
+    "TestMode",
+    "TestType",
+    "Timeouts",
+    "WarmupConfig",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -1080,10 +1145,6 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         Path | None,
         cyclopts.Parameter(alias="--report-dir", help="Report output directory"),
     ] = None
-    timeout: Annotated[
-        float | None,
-        cyclopts.Parameter(alias="--timeout", help="Global timeout in seconds"),
-    ] = None
     # verbose is handled by cyclopts meta app (-v flag), not here
     verbose: Annotated[bool, cyclopts.Parameter(show=False)] = Field(
         False, description="Enable verbose logging"
@@ -1122,7 +1183,6 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         Validation:
         - Workers must be -1 (auto) or >= 1
-        - max_duration_ms >= min_duration_ms >= 0
         - No duplicate dataset (name, type) pairs
         - Load pattern must match test type
         """

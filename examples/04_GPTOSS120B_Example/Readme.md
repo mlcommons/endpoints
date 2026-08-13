@@ -49,8 +49,7 @@ docker run --runtime nvidia --gpus all \
 
 ```bash
 uv run inference-endpoint benchmark from-config \
-  -c examples/04_GPTOSS120B_Example/vllm_gptoss_120b_example.yaml \
-  --timeout 60
+  -c examples/04_GPTOSS120B_Example/vllm_gptoss_120b_example.yaml
 ```
 
 The config uses `api_type: openai_completions`, which routes to `/v1/completions` with pre-tokenized
@@ -171,8 +170,7 @@ LiveCodeBench accuracy at concurrency 512:
 
 ```bash
 uv run inference-endpoint benchmark from-config \
-  -c examples/04_GPTOSS120B_Example/sglang_gptoss_120b_example.yaml \
-  --timeout 60
+  -c examples/04_GPTOSS120B_Example/sglang_gptoss_120b_example.yaml
 ```
 
 For a performance-only run, use [`gptoss_120b_example.yaml`](gptoss_120b_example.yaml). It is
@@ -210,7 +208,6 @@ cd examples/04_GPTOSS120B_Example
 python run.py \
     --report-dir ./results \
     --num-repeats 1 \
-    --min-duration 10 \
     --max-duration 600
 ```
 
@@ -218,7 +215,6 @@ python run.py \
 | -------------------- | ------------------------ | ------------------------------------ |
 | `--report-dir`       | `sglang_accuracy_report` | Directory to save results            |
 | `--num-repeats`      | `1`                      | Repeats per dataset                  |
-| `--min-duration`     | `10`                     | Minimum benchmark duration (seconds) |
 | `--max-duration`     | `600`                    | Maximum benchmark duration (seconds) |
 | `--force-regenerate` | off                      | Force dataset regeneration           |
 
