@@ -80,20 +80,24 @@ def test_max_throughput_roofline(max_tput_server, tmp_path, record_result):
         tmp_path,
         max_tput_server,
     )
-    r = results["results"]
-    assert r["failed"] == 0, f"failed={r['failed']} (expected 0)"
+    r = results
+    failed = r["n_samples_failed"]
+    total = r["n_samples_completed"]
+    elapsed = r["duration_ns"] / 1e9
+    assert r["complete"], "run did not complete cleanly"
+    assert failed == 0, f"failed={failed} (expected 0)"
     record_result(
         "max_throughput (2M burst)",
         stream=max_tput_server.stream,
         qps=r["qps"],
-        total=r["total"],
-        elapsed=r["elapsed_time"],
-        failed=r["failed"],
+        total=total,
+        elapsed=elapsed,
+        failed=failed,
     )
     print(
         f"\n  max_throughput  stream={max_tput_server.stream}: "
-        f"QPS={r['qps']:>10,.0f}  total={r['total']:>9,}  "
-        f"elapsed={r['elapsed_time']:6.2f}s"
+        f"QPS={r['qps']:>10,.0f}  total={total:>9,}  "
+        f"elapsed={elapsed:6.2f}s"
     )
 
 
@@ -120,20 +124,24 @@ def test_concurrency_roofline(max_tput_server, concurrency, tmp_path, record_res
         tmp_path,
         max_tput_server,
     )
-    r = results["results"]
-    assert r["failed"] == 0, f"failed={r['failed']} (expected 0)"
+    r = results
+    failed = r["n_samples_failed"]
+    total = r["n_samples_completed"]
+    elapsed = r["duration_ns"] / 1e9
+    assert r["complete"], "run did not complete cleanly"
+    assert failed == 0, f"failed={failed} (expected 0)"
     record_result(
         f"concurrency c={concurrency:,}",
         stream=max_tput_server.stream,
         qps=r["qps"],
-        total=r["total"],
-        elapsed=r["elapsed_time"],
-        failed=r["failed"],
+        total=total,
+        elapsed=elapsed,
+        failed=failed,
     )
     print(
         f"\n  concurrency  c={concurrency:>5}  stream={max_tput_server.stream}: "
-        f"QPS={r['qps']:>10,.0f}  total={r['total']:>9,}  "
-        f"elapsed={r['elapsed_time']:6.2f}s"
+        f"QPS={r['qps']:>10,.0f}  total={total:>9,}  "
+        f"elapsed={elapsed:6.2f}s"
     )
 
 
@@ -173,8 +181,7 @@ def test_poisson_binary_search_max_qps(max_tput_server, tmp_path, record_result)
             tmp_path / f"qps_{target}",
             max_tput_server,
         )
-        r = results["results"]
-        achieved = r["qps"]
+        achieved = results["qps"]
         sustained = achieved >= target * PASS_RATIO
         history.append((target, achieved, sustained))
         if sustained:
@@ -261,18 +268,22 @@ def test_low_qps_no_network_errors(variable_server, tmp_path, record_result):
         tmp_path,
         variable_server,
     )
-    r = results["results"]
-    assert r["failed"] == 0, f"failed={r['failed']} of {r['total']}"
+    r = results
+    failed = r["n_samples_failed"]
+    total = r["n_samples_completed"]
+    elapsed = r["duration_ns"] / 1e9
+    assert r["complete"], "run did not complete cleanly"
+    assert failed == 0, f"failed={failed} of {total}"
     record_result(
         f"low_qps target={TARGET_QPS}",
         stream=variable_server.stream,
         qps=r["qps"],
-        total=r["total"],
-        elapsed=r["elapsed_time"],
-        failed=r["failed"],
+        total=total,
+        elapsed=elapsed,
+        failed=failed,
     )
     print(
         f"\n  low_qps  target={TARGET_QPS}  stream={variable_server.stream}: "
-        f"achieved={r['qps']:.2f} QPS  total={r['total']}  "
-        f"failed={r['failed']}  elapsed={r['elapsed_time']:.2f}s"
+        f"achieved={r['qps']:.2f} QPS  total={total}  "
+        f"failed={failed}  elapsed={elapsed:.2f}s"
     )

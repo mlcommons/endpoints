@@ -46,7 +46,8 @@ def run_cli(
     *,
     dataset: str = DATASET,
 ) -> dict:
-    """Invoke ``inference-endpoint`` in-process via cyclopts; return results.json.
+    """Invoke ``inference-endpoint`` in-process via cyclopts; return the parsed
+    ``performance/result_summary.json`` (the run's machine-readable report).
 
     Client ``--streaming`` is coupled to the server's response mode: the stub
     server always returns the same pre-compiled bytes (JSON or SSE),
@@ -83,4 +84,5 @@ def run_cli(
     except SystemExit as e:
         if e.code not in (None, 0):
             raise
-    return json.loads((report_dir / "results.json").read_text())
+    summary_path = report_dir / "performance" / "result_summary.json"
+    return json.loads(summary_path.read_text())
