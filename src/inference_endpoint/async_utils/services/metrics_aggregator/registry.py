@@ -256,7 +256,13 @@ class SeriesSampler(MetricSampler):
         self, sorted_values, spec: EarlyStoppingSpec
     ) -> dict[str, float | None]:
         if spec.percentiles is not None:  # explicit override: tests / offline analysis
-            targets = {str(v): float(v) for v in sorted(spec.percentiles, reverse=True)}
+            # Descending, deduped on the parsed value so 99 and 99.0 are one target
+            # (the rule the post-hoc script applies to its --percentiles fallback);
+            # the first spelling wins the key, so an int override still keys "99".
+            seen: dict[float, str] = {}
+            for p in sorted(spec.percentiles, reverse=True):
+                seen.setdefault(float(p), str(p))
+            targets = {key: value for value, key in seen.items()}
         else:
             targets = es_targets_from_grid(self._percentiles)
         results = {

@@ -154,6 +154,29 @@ def test_report_from_snapshot_preserves_empty_series_map():
     assert all(v is None for v in esp.values())
 
 
+def test_explicit_override_keys_and_dedupes():
+    # The override path has no grid to carry keys through, so its keying is its own
+    # contract: str() of the entry as given (an int override stays "99"), descending
+    # by value, and one entry per VALUE — 99 and 99.0 are the same target, so they
+    # must not become two keys computing the same estimate twice.
+    esp = _series(
+        _snap(_registry(EarlyStoppingSpec(percentiles=(99, 99.9, 99.0)), n=20000)),
+        "ttft_ns",
+    )["early_stopping_percentiles"]
+    assert list(esp) == ["99.9", "99"]
+    assert all(v is not None for v in esp.values())  # n is above both floors
+
+
+def test_override_rejects_fraction_style_percentiles():
+    # A pre-unification override (0.99 meaning p99) must not quietly certify the
+    # sub-1% percentile p0.99. es_percentile_estimate rejects it, and the rejection
+    # lands in the same best-effort catch as any other bad override: map omitted,
+    # exact stats intact.
+    d = _snap(_registry(EarlyStoppingSpec(percentiles=(0.99,)), n=100))
+    assert "early_stopping_percentiles" not in _series(d, "ttft_ns")
+    assert _series(d, "ttft_ns")["percentiles"]
+
+
 def test_es_failure_does_not_kill_the_final_snapshot():
     # ES runs inside publish_final's build_snapshot, where an exception would
     # cost the entire final report — a bad explicit override must degrade to

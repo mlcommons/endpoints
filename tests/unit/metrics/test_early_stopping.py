@@ -128,9 +128,12 @@ def test_invalid_domain_raises():
         lambda: find_min_passing(1, 0.0),
         lambda: find_min_passing(1, 0.99, c=1.0),
         lambda: find_min_passing(1, 0.99, d=0.99),  # tolerance must stay below p
-        # product surface (grid convention, 0-100)
+        # product surface (grid convention, 0-100). Sub-1 values are rejected, not
+        # computed: a fraction-style 0.99 would silently certify p0.99% instead of
+        # p99, and this chokepoint is what every override path funnels through.
         lambda: es_percentile_estimate([1.0, 2.0], 150.0),
         lambda: es_percentile_estimate([1.0, 2.0], 100.0),
+        lambda: es_percentile_estimate([1.0, 2.0], 0.99),
         lambda: es_percentile_estimate([1.0, 2.0], 0.0),
         lambda: es_percentile_estimate([1.0, 2.0], 99.0, confidence=0.0),
     ):

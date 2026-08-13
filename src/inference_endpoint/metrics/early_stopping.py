@@ -199,7 +199,7 @@ def _validate_domain(p: float, d: float, c: float) -> None:
 def find_min_passing(
     t: int, p: float, d: float = TOLERANCE, c: float = CONFIDENCE
 ) -> int:
-    """Minimum ``h`` such that ``_odds(h, t, p, d) <= 1 - c``.
+    """Minimum ``h`` such that ``_odds(h, t, p, d) < 1 - c``.
 
     LoadGen's ``MinPassingQueriesFinder`` (``loadgen/early_stopping.cc:62-114``): the
     smallest number of under-latency queries that, alongside ``t`` over-latency queries,
@@ -284,14 +284,21 @@ def es_percentile_estimate(
 ) -> EarlyStoppingResult:
     """Conservative early-stopping estimate over an ascending-sorted latency series.
 
-    ``percentile`` uses the grid convention (0-100, e.g. ``99.9``); a fraction-style
-    argument such as ``0.99`` is a sub-1% percentile here, **not** p99. The single
-    conversion to the kernel's fraction domain happens here, unrounded — the same ``/100``
+    ``percentile`` uses the grid convention (0-100, e.g. ``99.9``). Values below 1 are
+    rejected rather than computed: a fraction-style ``0.99`` would silently mean the
+    sub-1% percentile p0.99, never a tail-certification target, and this single
+    chokepoint is what keeps the registry's explicit-override path and the post-hoc
+    script's ``--percentiles`` agreeing on the domain. The single conversion to the
+    kernel's fraction domain happens here, unrounded — the same ``/100``
     ``np.percentile`` applies internally, so the ``empirical`` value can never
     diverge from the report grid's ``method="lower"`` entry.
     """
-    if not 0.0 < percentile < 100.0:
-        raise ValueError(f"percentile must be in (0, 100), got {percentile}")
+    if not 1.0 <= percentile < 100.0:
+        hint = f" — did you mean {percentile * 100}?" if 0.0 < percentile < 1.0 else ""
+        raise ValueError(
+            f"percentile uses the grid convention (0-100) and must be in [1, 100), "
+            f"got {percentile}{hint}"
+        )
     fraction = percentile / 100.0
     n = len(sorted_latencies)
     min_queries = find_min_passing(1, fraction, TOLERANCE, confidence) + 1
