@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Protocol
 
@@ -45,6 +44,8 @@ def run_cli(
     server: StubServer,
     *,
     dataset: str = DATASET,
+    workers: int | None = None,
+    init_timeout: float | None = None,
 ) -> dict:
     """Invoke ``inference-endpoint`` in-process via cyclopts; return the parsed
     ``performance/result_summary.json`` (the run's machine-readable report).
@@ -54,9 +55,10 @@ def run_cli(
     regardless of what the client sent in the request body. Mismatched modes
     produce ``DecodeError: JSON is malformed`` on every response.
 
-    Env overrides (useful in containers where cpu_affinity is restricted):
-        ROOFLINE_NUM_WORKERS  — override --workers (default: auto)
-        ROOFLINE_INIT_TIMEOUT — override --client.worker-initialization-timeout
+    ``workers`` / ``init_timeout`` override the client's ``--workers`` /
+    ``--client.worker-initialization-timeout`` (useful in containers where
+    cpu_affinity is restricted); tests wire them from the ``--roofline-*``
+    pytest options via the ``client_opts`` fixture.
     """
     from inference_endpoint.main import app
 
@@ -75,10 +77,10 @@ def run_cli(
         "--report-dir",
         str(report_dir),
     ]
-    if nw := os.environ.get("ROOFLINE_NUM_WORKERS"):
-        args += ["--workers", nw]
-    if to := os.environ.get("ROOFLINE_INIT_TIMEOUT"):
-        args += ["--client.worker-initialization-timeout", to]
+    if workers is not None:
+        args += ["--workers", str(workers)]
+    if init_timeout is not None:
+        args += ["--client.worker-initialization-timeout", str(init_timeout)]
     try:
         app(args)
     except SystemExit as e:

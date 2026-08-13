@@ -37,11 +37,14 @@ summary table by ``conftest.py`` after the session completes.
 Run::
 
     pytest -vs -m performance --no-cov tests/performance/commands/test_e2e_perf.py
+
+Knobs are pytest options (see the "roofline" group in ``pytest --help``)::
+
+    pytest -vs -m performance --no-cov tests/performance/commands/test_e2e_perf.py \
+        --roofline-server-workers=8 --roofline-stream-interval=20
 """
 
 from __future__ import annotations
-
-import os
 
 import pytest
 from inference_endpoint.testing.max_throughput_server import MaxThroughputServer
@@ -52,6 +55,15 @@ from .utils import run_cli
 # =============================================================================
 # Roofline tests — MaxThroughputServer, every load pattern, stream + non-stream
 # =============================================================================
+
+
+@pytest.fixture(scope="module")
+def client_opts(request):
+    """Client-side ``run_cli`` overrides from the ``--roofline-*`` options."""
+    return {
+        "workers": request.config.getoption("--roofline-client-workers"),
+        "init_timeout": request.config.getoption("--roofline-init-timeout"),
+    }
 
 
 @pytest.fixture(scope="module", params=[False, True], ids=["nonstream", "stream"])
@@ -67,15 +79,14 @@ def max_tput_server(request):
     exercised. 16 events approximates a realistic completion while keeping
     the stub cheap.
 
-    Env overrides (also see ``run_cli`` for client-side knobs):
-        ROOFLINE_SERVER_WORKERS  — stub server worker processes (default 4)
-        ROOFLINE_STREAM_INTERVAL — chars per SSE event (default 10)
+    Both knobs are pytest options: ``--roofline-server-workers`` (default 4)
+    and ``--roofline-stream-interval`` (default 10).
     """
     with MaxThroughputServer(
         port=0,
-        num_workers=int(os.environ.get("ROOFLINE_SERVER_WORKERS", "4")),
+        num_workers=request.config.getoption("--roofline-server-workers"),
         stream=request.param,
-        stream_interval=int(os.environ.get("ROOFLINE_STREAM_INTERVAL", "10")),
+        stream_interval=request.config.getoption("--roofline-stream-interval"),
         quiet=True,
     ) as srv:
         yield srv
@@ -83,7 +94,7 @@ def max_tput_server(request):
 
 @pytest.mark.performance
 @pytest.mark.xdist_group(name="serial_performance")
-def test_max_throughput_roofline(max_tput_server, tmp_path, record_result):
+def test_max_throughput_roofline(max_tput_server, tmp_path, record_result, client_opts):
     """Offline burst — issue 2,000,000 queries at t=0."""
     results = run_cli(
         [
@@ -95,6 +106,7 @@ def test_max_throughput_roofline(max_tput_server, tmp_path, record_result):
         ],
         tmp_path,
         max_tput_server,
+        **client_opts,
     )
     r = results
     failed = r["n_samples_failed"]
@@ -120,7 +132,9 @@ def test_max_throughput_roofline(max_tput_server, tmp_path, record_result):
 @pytest.mark.performance
 @pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize("concurrency", [1000, 4000, 16000])
-def test_concurrency_roofline(max_tput_server, concurrency, tmp_path, record_result):
+def test_concurrency_roofline(
+    max_tput_server, concurrency, tmp_path, record_result, client_opts
+):
     """Online concurrency — N in-flight requests for fixed duration."""
     results = run_cli(
         [
@@ -139,6 +153,7 @@ def test_concurrency_roofline(max_tput_server, concurrency, tmp_path, record_res
         ],
         tmp_path,
         max_tput_server,
+        **client_opts,
     )
     r = results
     failed = r["n_samples_failed"]
@@ -163,7 +178,9 @@ def test_concurrency_roofline(max_tput_server, concurrency, tmp_path, record_res
 
 @pytest.mark.performance
 @pytest.mark.xdist_group(name="serial_performance")
-def test_poisson_binary_search_max_qps(max_tput_server, tmp_path, record_result):
+def test_poisson_binary_search_max_qps(
+    max_tput_server, tmp_path, record_result, client_opts
+):
     """Binary search for the largest 10k-multiple target_qps the server sustains."""
     STEP = 10_000
     LO, HI = 10_000, 250_000  # search space (inclusive)
@@ -196,6 +213,7 @@ def test_poisson_binary_search_max_qps(max_tput_server, tmp_path, record_result)
             ],
             tmp_path / f"qps_{target}",
             max_tput_server,
+            **client_opts,
         )
         achieved = results["qps"]
         sustained = achieved >= target * PASS_RATIO
@@ -248,7 +266,9 @@ def variable_server(request):
 
 @pytest.mark.performance
 @pytest.mark.xdist_group(name="serial_performance")
-def test_low_qps_no_network_errors(variable_server, tmp_path, record_result):
+def test_low_qps_no_network_errors(
+    variable_server, tmp_path, record_result, client_opts
+):
     """Sustain 5 QPS Poisson for 20 s — must complete with zero failed requests.
 
     Low QPS spaces requests far enough apart that idle connections may
@@ -283,6 +303,9 @@ def test_low_qps_no_network_errors(variable_server, tmp_path, record_result):
         ],
         tmp_path,
         variable_server,
+        # --workers is pinned to 4 above (deliberate for the low-QPS stub);
+        # only the init-timeout knob applies here.
+        init_timeout=client_opts["init_timeout"],
     )
     r = results
     failed = r["n_samples_failed"]
