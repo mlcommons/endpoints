@@ -82,13 +82,17 @@ def test_estimate_reference_values_and_conservatism():
 
 
 def test_sufficiency_floor_boundary():
-    # Below the floor the estimate must be None (never a fabricated bound), the
-    # empirical value must still be reported, and n=0 must not crash. Just above
-    # the floor the budget is t=1: nothing is discarded and the estimate IS the
-    # maximum observed sample.
-    below = es_percentile_estimate([float(i) for i in range(600)], 99.0)  # < 662
+    # p99 needs 662 samples — `min_queries` = find_min_passing(1, p99) + 1 — before
+    # any bound is certifiable at c=0.99 (per-percentile floors: the cheat sheet in
+    # docs/early_stopping.md). Below that the estimate must be None (never a
+    # fabricated bound) while the empirical value is still reported, and n=0 must
+    # not crash. Exactly at the floor the budget is t=1: nothing is discarded and
+    # the estimate IS the maximum observed sample. Both sides of 662 are pinned, so
+    # the floor cannot drift without failing here.
+    below = es_percentile_estimate([float(i) for i in range(661)], 99.0)
     assert below.estimate is None and below.empirical is not None
-    arr = [float(i) for i in range(663)]
+    assert below.min_queries == 662
+    arr = [float(i) for i in range(662)]
     at_floor = es_percentile_estimate(arr, 99.0)
     assert at_floor.estimate == arr[-1] and at_floor.discarded == 0
     empty = es_percentile_estimate([], 99.0)

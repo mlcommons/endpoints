@@ -253,7 +253,7 @@ def test_main_cli_contract(tmp_path, capsys):
     with pytest.raises(SystemExit):
         mod.main([str(events), "--percentiles", "150"])  # grid convention: (0, 100)
     with pytest.raises(SystemExit):
-        # pre-#423 fraction style must hard-error, not silently mean p0.99%
+        # fraction style must hard-error, not silently mean p0.99%
         mod.main([str(events), "--percentiles", "0.99"])
     with pytest.raises(SystemExit):
         mod.main([str(events), "--confidence", "1.0"])

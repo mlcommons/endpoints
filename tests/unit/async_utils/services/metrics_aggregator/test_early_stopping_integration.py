@@ -141,9 +141,11 @@ def test_custom_grid_with_p100_and_int_keys_is_safe():
 
 
 def test_report_from_snapshot_preserves_empty_series_map():
-    # The HIGH round-3 finding: _series_to_metric_dict preserved the map but
-    # Report.from_snapshot._series_dict short-circuited count==0 first, so the
-    # summary still dropped it. Pin the REAL consumer path, not the helper.
+    # An enabled-but-empty series must still carry its all-null
+    # early_stopping_percentiles map into the summary. Pin the REAL consumer path
+    # (Report.from_snapshot): a count==0 short-circuit there drops the map even
+    # when _series_to_metric_dict preserves it, so exercising the helper alone
+    # would prove nothing.
     from inference_endpoint.metrics.report import Report
 
     report = Report.from_snapshot(_snap(_registry(EarlyStoppingSpec(), n=0)))

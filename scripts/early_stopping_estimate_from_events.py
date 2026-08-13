@@ -281,11 +281,11 @@ def main(argv=None):
             f"got {sorted(values)}"
         )
     if any(v < 1.0 for v in values):
-        # a fraction-style value (pre-#423 convention) silently means a sub-1%
-        # percentile here — never a legitimate tail-certification target
+        # a fraction-style value silently means a sub-1% percentile here — never a
+        # legitimate tail-certification target, so reject it with the intended value
         bad = sorted(v for v in values if v < 1.0)
         raise SystemExit(
-            f"FATAL: percentiles now use the grid convention (0-100); {bad} would "
+            f"FATAL: percentiles use the grid convention (0-100); {bad} would "
             f"mean sub-1% percentiles — did you mean {[v * 100 for v in bad]}?"
         )
     # canonical float-style keys, deduped on the parsed value ("99" == "99.0")
