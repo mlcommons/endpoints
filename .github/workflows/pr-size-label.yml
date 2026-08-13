@@ -1,0 +1,75 @@
+name: PR size label
+
+# Labels each PR with size/normal|large|very-large from its non-test churn,
+# per the Endpoints PR Review Policy. Advisory — it never fails the PR.
+#
+# SECURITY: this uses `pull_request_target` so GITHUB_TOKEN can write labels on
+# PRs opened from forks (a plain `pull_request` token is read-only for forks).
+# That means the workflow runs in the BASE repo's context with write access, so
+# it MUST NOT check out or execute any PR-provided code. It checks out the base
+# repo's copy of scripts/pr_size_check.py and only *fetches* the PR head commit
+# to count `git diff` lines. Do not add steps that run code from the PR.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-size-label-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  size-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base repo (trusted)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+
+      - name: Fetch PR head commit (data only, not executed)
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          case "$PR_NUMBER" in
+            ''|*[!0-9]*) echo "unexpected PR number: $PR_NUMBER" >&2; exit 1 ;;
+          esac
+          git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head"
+
+      - name: Compute size class
+        id: size
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 scripts/pr_size_check.py \
+            --base "$BASE_SHA" \
+            --head FETCH_HEAD \
+            --github-output
+
+      - name: Apply size label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          CLS: ${{ steps.size.outputs.size_class }}
+        run: |
+          if [ -z "$CLS" ]; then
+            echo "No size class computed (base unresolved / diff skipped); nothing to label."
+            exit 0
+          fi
+          # Ensure the size labels exist (idempotent; --force updates on re-run).
+          gh label create "size/normal"     -c 0E8A16 -d "PR Review Policy: <=500 non-test lines & <=20 files" --force || true
+          gh label create "size/large"      -c FBCA04 -d "PR Review Policy: 501-1500 lines or 21-50 files"     --force || true
+          gh label create "size/very-large" -c B60205 -d "PR Review Policy: >1500 lines or >50 files"          --force || true
+
+          gh pr edit "$PR" --add-label "size/$CLS"
+          for other in normal large very-large; do
+            if [ "$other" != "$CLS" ]; then
+              gh pr edit "$PR" --remove-label "size/$other" 2>/dev/null || true
+            fi
+          done

@@ -74,3 +74,14 @@ repos:
         language: system
         pass_filenames: false
         files: ^(pyproject\.toml|uv\.lock)$
+
+      - id: pr-size-check
+        name: PR size (non-test churn class)
+        # Advisory: always exits 0. Quiet on a normal commit (pre-commit hides a
+        # passing hook's output); the breakdown surfaces only under
+        # `pre-commit run pr-size-check --verbose`, which the `--verbose` arg
+        # populates with the threshold grid and per-class requirements.
+        entry: python scripts/pr_size_check.py --verbose
+        language: system
+        pass_filenames: false
+        always_run: true
