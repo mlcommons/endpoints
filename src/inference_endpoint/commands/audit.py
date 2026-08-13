@@ -129,6 +129,13 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
         report = bench.report
         if report is None:
             raise ExecutionError(f"Audit phase '{spec.label}' produced no report")
+        # A timed-out phase produced an INTERRUPTED report at best; certifying
+        # a compliance result from it is never valid.
+        if bench.run_timed_out:
+            raise ExecutionError(
+                f"Audit phase '{spec.label}' hit the run timeout "
+                "(settings.timeouts.run_timeout_s); report marked INTERRUPTED"
+            )
         # A SIGINT/SIGTERM during a (long) audit phase is turned into a graceful
         # stop, so the phase returns with an "interrupted" report. Propagate it
         # as KeyboardInterrupt so the CLI exits 130 (interrupted), not as a

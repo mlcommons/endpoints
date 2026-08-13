@@ -69,6 +69,7 @@ class ServiceLauncher:
     def __init__(self, zmq_context: ManagedZMQContext) -> None:
         self._zmq_ctx = zmq_context
         self._procs: list[subprocess.Popen] = []
+        self._modules: list[str] = []
 
     @property
     def procs(self) -> list[subprocess.Popen]:
@@ -118,6 +119,7 @@ class ServiceLauncher:
                 logger.info("Launching service: %s (id=%d)", svc.module, i)
                 proc = subprocess.Popen(cmd)
                 self._procs.append(proc)
+                self._modules.append(svc.module)
 
             await receiver.wait(timeout=timeout)
             logger.info("All %d services ready", len(services))
@@ -144,6 +146,18 @@ class ServiceLauncher:
             # If for some reason the reason for the exception is not a crashed subprocess,
             # re-raise the exception.
             raise
+
+    def terminate(self, module: str) -> None:
+        """SIGTERM managed subprocesses whose module exactly matches ``module``.
+
+        Targeted so the whole-run watchdog can abort the metrics aggregator
+        (whose SIGTERM handler writes an INTERRUPTED final snapshot) without
+        killing the event logger, which flushes its buffer on the session's
+        ENDED event and would lose buffered records on SIGTERM.
+        """
+        for launched_module, proc in zip(self._modules, self._procs, strict=True):
+            if launched_module == module and proc.poll() is None:
+                proc.terminate()
 
     def terminate_all(self, timeout: float = 5.0) -> None:
         """Terminate all managed subprocesses: SIGTERM then escalate to SIGKILL.

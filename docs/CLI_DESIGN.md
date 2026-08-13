@@ -131,7 +131,6 @@ Validation is layered, executing in order:
  1. cyclopts        → required args? unknown flags?
  2. Pydantic fields → type coercion, ge/le constraints
  3. Sub-model validators:
-    ├── RuntimeConfig._validate_durations    → max >= min duration
     ├── LoadPattern._validate_completeness   → poisson needs qps, concurrency needs target
     └── HTTPClientConfig._workers_not_zero   → num_workers != 0
  4. BenchmarkConfig._resolve_and_validate:
@@ -204,5 +203,5 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 `BenchmarkConfig` is frozen. Use `with_updates()` to produce new instances with re-validation:
 
 ```python
-config = config.with_updates(timeout=300, datasets=["new_data.jsonl"])
+config = config.with_updates(report_dir="results/run1", datasets=["new_data.jsonl"])
 ```

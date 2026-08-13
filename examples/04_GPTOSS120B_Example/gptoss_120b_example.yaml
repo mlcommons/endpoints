@@ -17,8 +17,8 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 300
-    max_duration_ms: 6000
+    max_duration_ms: 6000 # 6 s cap on the performance phase (short smoke run)
+    # Sample count: dataset issued once (the default) — replaces the old duration-derived count, which rounded up to one dataset pass.
     scheduler_random_seed: 42
     dataloader_random_seed: 42
 
