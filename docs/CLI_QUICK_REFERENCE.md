@@ -122,18 +122,18 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 All give-up deadlines live under `settings.timeouts`; the only workload duration is
 `settings.runtime.max_duration_ms`. `null`/unset means "wait indefinitely" (or "off") everywhere.
 
-| YAML path                                           | CLI flag                            | Semantics                                                                                                               |
-| --------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `settings.runtime.max_duration_ms`                  | `--runtime.max-duration-ms`         | Caps the performance phase (ms, or suffix: `600s`, `10m`); reaching it ends the phase NORMALLY — the report stays valid |
-| `settings.timeouts.run_timeout_s`                   | `--timeout`                         | Whole-run watchdog; firing aborts the entire run — report marked INTERRUPTED, non-zero exit                             |
-| `settings.timeouts.service_ready_timeout_s`         | `--service-ready-timeout`           | Wait for the metrics-aggregator/event-logger services to become ready (default 30)                                      |
-| `settings.timeouts.warmup_drain_timeout_s`          | `--warmup-drain-timeout`            | Bound on in-flight warmup requests after the warmup phase ends (default 240)                                            |
-| `settings.timeouts.performance_drain_timeout_s`     | `--performance-drain-timeout`       | Bound on in-flight performance requests after the phase ends (default: wait indefinitely)                               |
-| `settings.timeouts.accuracy_drain_timeout_s`        | `--accuracy-drain-timeout`          | Bound on in-flight accuracy requests after the phase ends (default: wait indefinitely)                                  |
-| `settings.timeouts.metrics_drain_timeout_s`         | `--metrics-drain-timeout`           | Budget for the metrics aggregator to finish tokenizing buffered samples after the run ends (default: wait indefinitely) |
-| `settings.timeouts.worker_initialization_timeout_s` | `--worker-initialization-timeout-s` | Wait for endpoint-client worker processes to start (default 60)                                                         |
-| `settings.timeouts.worker_graceful_shutdown_wait_s` | `--worker-graceful-shutdown-wait-s` | Post-run wait for workers to exit gracefully (default 0.5)                                                              |
-| `settings.timeouts.worker_force_kill_timeout_s`     | `--worker-force-kill-timeout-s`     | Wait after SIGTERM before SIGKILL during worker teardown (default 0.5)                                                  |
+| YAML path                                           | CLI flag                            | Semantics                                                                                                                                                                        |
+| --------------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `settings.runtime.max_duration_ms`                  | `--runtime.max-duration-ms`         | Caps the performance phase (ms, or suffix: `600s`, `10m`); reaching it ends the phase NORMALLY — the report stays valid                                                          |
+| `settings.timeouts.run_timeout_s`                   | `--timeout`                         | Whole-run watchdog; firing aborts the entire run — report marked INTERRUPTED, non-zero exit                                                                                      |
+| `settings.timeouts.service_ready_timeout_s`         | `--service-ready-timeout`           | Wait for the metrics-aggregator/event-logger services to become ready (default 30)                                                                                               |
+| `settings.timeouts.warmup_drain_timeout_s`          | `--warmup-drain-timeout`            | Bound on in-flight warmup requests after the warmup phase ends (default 240)                                                                                                     |
+| `settings.timeouts.performance_drain_timeout_s`     | `--performance-drain-timeout`       | Bound on in-flight performance requests after the phase ends (default: wait indefinitely)                                                                                        |
+| `settings.timeouts.accuracy_drain_timeout_s`        | `--accuracy-drain-timeout`          | Bound on in-flight accuracy requests after the phase ends (default: wait indefinitely)                                                                                           |
+| `settings.timeouts.metrics_drain_timeout_s`         | `--metrics-drain-timeout`           | Budget for the metrics aggregator to finish tokenizing buffered samples after the run ends (default: wait indefinitely); expiring fails the run with `complete: false` artifacts |
+| `settings.timeouts.worker_initialization_timeout_s` | `--worker-initialization-timeout-s` | Wait for endpoint-client worker processes to start (default 60)                                                                                                                  |
+| `settings.timeouts.worker_graceful_shutdown_wait_s` | `--worker-graceful-shutdown-wait-s` | Post-run wait for workers to exit gracefully (default 0.5)                                                                                                                       |
+| `settings.timeouts.worker_force_kill_timeout_s`     | `--worker-force-kill-timeout-s`     | Wait after SIGTERM before SIGKILL during worker teardown (default 0.5)                                                                                                           |
 
 How the knobs compose:
 

@@ -1312,6 +1312,23 @@ def run_benchmark(
                 f"Run timeout ({run_timeout_s}s) reached; run aborted and "
                 "report marked INTERRUPTED"
             )
+        if (
+            bench.report is not None
+            and bench.report.state == "complete"
+            and not bench.report.complete
+        ):
+            # The aggregator gave up on its tokenization backlog when
+            # metrics_drain_timeout_s expired (state "complete" with pending
+            # tasks). The artifacts above are already written with
+            # complete: false; fail loudly instead of exiting 0 on partial
+            # ISL/OSL/TPOT stats.
+            raise ExecutionError(
+                "Metrics drain timed out "
+                f"(metrics_drain_timeout_s="
+                f"{config.settings.timeouts.metrics_drain_timeout_s}): "
+                "tokenization did not finish before the deadline; report is "
+                "partial (complete: false in result_summary.json)"
+            )
     except KeyboardInterrupt:
         # Salvage results (finally), then propagate to main.py -> exit 130.
         logger.warning("Benchmark interrupted by user")
