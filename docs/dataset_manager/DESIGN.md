@@ -77,8 +77,9 @@ parser/remap config, and dataset name. Format is inferred from file extension wh
 - `.parquet` → `PARQUET`
 - explicit `format=huggingface` → `HF`
 
-Presets (e.g. `"gpqa::Qwen/Qwen3-8B"`) are encoded in `config.name` as a `"::"` split — the
-factory resolves them to a predefined dataset class with a model-specific transform stack.
+Presets (e.g. `"gpqa::gptoss"`) are encoded in `config.name` as a `"::"` split — `<dataset>::<preset>` —
+where the factory resolves the first segment to a predefined dataset class and the second to a named
+preset with its transform stack.
 
 ### `Transform` (abstract base)
 
@@ -116,8 +117,8 @@ configs. Each predefined dataset ships with default transforms for supported mod
 
 ## Preset System
 
-A preset string like `"gpqa::Qwen/Qwen3-8B"` resolves to a predefined dataset with a
-model-specific transform stack pre-applied. This is used by rulesets to ensure consistent
+A preset string like `"gpqa::gptoss"` (`<dataset>::<preset>`) resolves to a predefined dataset with a
+named preset's transform stack pre-applied. This is used by rulesets to ensure consistent
 prompt formatting across submissions.
 
 ## Design Decisions

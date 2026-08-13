@@ -376,6 +376,23 @@ run-to-run noise) while costing ~60% more wall-clock. Based on this finding,
 
 ---
 
+## Quantization calibration dataset
+
+Submitters who quantize the reference model themselves (e.g. NVFP4 / FP8
+post-training quantization) can calibrate with
+[`bfcl_calib.jsonl`](bfcl_calib.jsonl) — a 364-record, chat/tool-aware sample of
+BFCL v4 single-turn prompts (OpenAI-style `messages` + BFCL `tools` function
+schemas). It is used **only** to estimate quantizer scales (weight / activation /
+KV-cache); it is **not** scored and is **not** part of the accuracy gate.
+
+At quantization time each record is rendered through the model's own tokenizer
+chat template (with its `tools` block) so the calibration activations match
+serving-time inputs. The set is sampled from the BFCL v4 single-turn domain — the
+same domain as the ~995-sample accuracy gate — and ~30% of its prompts also
+appear in that gate.
+
+---
+
 ## Reproducible runs with `--seed`
 
 Fix the RNG used for sampling so the same seed + same model + a deterministic

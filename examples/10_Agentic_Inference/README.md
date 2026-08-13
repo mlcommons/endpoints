@@ -1,14 +1,10 @@
 # Multi-Turn Agentic Benchmark
 
-This example runs agentic inference conversations through an OpenAI-compatible
-endpoint. The client preserves conversation order, sends one in-flight turn per
-active conversation, and adds `X-Session-ID: <conversation_id>` on every request
-so a router can keep a conversation on the same backend.
+This example runs agentic inference conversations through an OpenAI-compatible endpoint. The client preserves conversation order, sends one in-flight turn per active conversation, and adds `X-Session-ID: <conversation_id>` on every request so a router can keep a conversation on the same backend.
 
 ## Dataset
 
-Use flat JSONL with one row per message. Rows for each `conversation_id` must be
-contiguous and ordered by increasing `turn`.
+Use flat JSONL with one row per message. Rows for each `conversation_id` must be contiguous and ordered by increasing `turn`.
 
 ```jsonl
 {"conversation_id":"c1","turn":1,"role":"user","system":"...","content":"...","tools":[...],"delay_seconds":0.4}
@@ -17,17 +13,32 @@ contiguous and ordered by increasing `turn`.
 {"conversation_id":"c1","turn":4,"role":"assistant","content":"..."}
 ```
 
-Required fields are `conversation_id`, `turn`, and `role`. User rows normally
-include `content`; agentic rows can also include `system`, `tools`,
-`tool_calls`, `tool_results`, `reasoning_content`, and `delay_seconds`.
+Required fields are `conversation_id`, `turn`, and `role`. User rows normally include `content`; agentic rows can also include `system`, `tools`, `tool_calls`, `tool_results`, `reasoning_content`, and `delay_seconds`.
 
-Place the dataset under `examples/10_Agentic_Inference/datasets/` or point the YAML at
-another accessible JSONL path.
+The official MLPerf dataset can be downloaded from MLCommons storage (link TBD). Submitters must use this dataset unchanged for official submissions.
+
+Place the dataset under `examples/10_Agentic_Inference/datasets/` or point the YAML at another accessible JSONL path.
+
+## Supported Models
+
+The Agentic Inference benchmark can support any model. The current iteration of the MLPerf Inference benchmark accepts official submissions for the following two models:
+
+| Model           | Architecture                   | Parameters            | Context        |
+| --------------- | ------------------------------ | --------------------- | -------------- |
+| Kimi K2.6       | MoE + MLA                      | 1T total / 32B active | 262,144 tokens |
+| Qwen3.6-35B-A3B | MoE + Gated DeltaNet/Attention | 35B total / 3B active | 262,144 tokens |
+
+Reference implementations and runnable examples for both models are provided below.
 
 ## Start A Server
 
-Start an SGLang OpenAI-compatible server. This is the standard recipe used for
-throughput replays; adjust `--model-path`, `--tp`, and `--port` for your node.
+To run the benchmark, expose one of the supported models through an OpenAI-compatible API endpoint. The serving framework is not prescribed: submitters may use vLLM, SGLang, TensorRT-LLM, or another serving framework as long as it provides an OpenAI-compatible endpoint.
+
+The following SGLang commands are reference examples. Adjust model paths, parallelism, ports, and memory settings for your hardware.
+
+### Kimi K2.6
+
+See the [SGLang Kimi-K2.6 recipe](https://docs.sglang.io/cookbook/autoregressive/Moonshotai/Kimi-K2.6) for model-specific deployment guidance.
 
 ```bash
 python3 -m sglang.launch_server \
@@ -41,117 +52,35 @@ python3 -m sglang.launch_server \
   --port 8000
 ```
 
-`--model-path` is the checkpoint loaded by the server. It can be a local path
-visible to the server container or a Hugging Face model id, depending on your
-SGLang environment. `--served-model-name` is the OpenAI model name exposed to
-clients; set `model_params.name` in the YAML to the same value.
+### Qwen3.6-35B-A3B
 
-To enable Kimi Eagle3 speculative decoding in SGLang, use the
-[`nvidia/Kimi-K2.6-Eagle3`](https://huggingface.co/nvidia/Kimi-K2.6-Eagle3)
-draft checkpoint. Add the following optional flags to the server command and set
-`--speculative-draft-model-path` to that Eagle3 checkpoint path as visible
-inside the server container:
+See the [SGLang Qwen3.6 recipe](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.6) for model-specific deployment guidance.
 
 ```bash
-  --speculative-algorithm EAGLE3 \
-  --speculative-draft-model-path /path/to/Kimi-K2.6-Eagle3 \
-  --speculative-num-steps 3 \
-  --speculative-eagle-topk 1 \
-  --speculative-num-draft-tokens 4
+sglang serve \
+  --model-path Qwen/Qwen3.6-35B-A3B \
+  --served-model-name Qwen/Qwen3.6-35B-A3B \
+  --port 30000 \
+  --host 0.0.0.0 \
+  --tool-call-parser qwen3_coder \
+  --reasoning-parser qwen3 \
+  --weight-loader-prefetch-checkpoints \
+  --mem-fraction-static 0.95
 ```
+
+`--model-path` is the checkpoint loaded by the server. It can be a local path visible to the server container or a Hugging Face model ID, depending on your SGLang environment. `--served-model-name` is the OpenAI model name exposed to clients; set `model_params.name` in the YAML to the same value.
 
 ## Client YAML
 
-The runnable config is
-`examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml`.
+Runnable example configs are provided for [Kimi K2.6](kimi_agentic_benchmark.yaml) and [Qwen3.6-35B-A3B](qwen_agentic_benchmark.yaml).
 
-### Fields
-
-- `name`: human-readable run name written to reports and logs. Change this when
-  creating a distinct benchmark config.
-- `version`: config version label for this example.
-- `type`: scheduler mode for the run.
-- `model_params.name`: model name sent in each OpenAI request. Set this to the
-  model name served by the endpoint.
-- `model_params.temperature`: sampling temperature sent to the server.
-- `model_params.top_p`: nucleus sampling value sent to the server.
-- `model_params.max_new_tokens`: per-turn generation cap.
-- `model_params.chat_template_kwargs.thinking`: Kimi chat-template option.
-- `model_params.chat_template_kwargs.preserve_thinking`: preserves
-  reasoning content in the rendered prompt.
-- First dataset `name`: label used in benchmark outputs. Change this to match
-  the dataset variant being run.
-- First dataset `type`: dataset role for this entry.
-- First dataset `path`: JSONL dataset path to run. Set this to a real local or
-  mounted dataset path, for example `/path/to/agentic_combined.jsonl`.
-- First dataset `accuracy_config.eval_method`: scorer used during finalization.
-  `agentic_inference_inline` scores the performance replay outputs without issuing a
-  separate accuracy phase.
-- First dataset `agentic_inference.enable_salt`: applies deterministic salt
-  markers when issuing conversation instances so repeats do not reuse KV cache
-  by accident.
-- First dataset `agentic_inference.inject_tool_delay`: honors positive
-  `delay_seconds` values from the dataset before issuing user/tool turns.
-- First dataset `agentic_inference.num_trajectories_to_issue`: total number of
-  trajectories to start. Change this to scale runtime.
-- First dataset `agentic_inference.stop_issuing_on_first_user_complete`: controls only
-  whether the client keeps issuing after the measurement window ends. Performance
-  tracking always stops when the first concurrency slot finishes a trajectory and
-  there is no next trajectory left to assign. If this field is `true`, the client
-  stops issuing future turns at that point and drains already in-flight turns. If
-  this field is `false`, the client keeps replaying already-started active
-  trajectories to completion for accuracy/log coverage, but those later-issued
-  turns are outside the performance measurement window.
-- `settings.runtime.min_duration_ms`: minimum run duration. Agentic inference replay
-  completion is controlled by trajectory budget and active conversation drain.
-- `settings.load_pattern.type`: enables conversation-aware issuing.
-- `settings.load_pattern.target_concurrency`: maximum active conversations. Each
-  active conversation has at most one in-flight request. Change this for the
-  target concurrency of the run.
-- `settings.client.warmup_connections`: disables pre-warmed HTTP sockets.
-- `settings.client.max_idle_time`: connection idle lifetime in seconds.
-- `endpoint_config.endpoints`: server URL list. Replace with the endpoint URLs
-  for the run.
-- `endpoint_config.api_type`: selects the endpoint protocol and route.
-- `report_dir`: output directory for events, snapshots, scores, and reports.
-  Change this per run so outputs are not overwritten.
-
-### Benchmark Invariants
-
-For official Kimi agentic benchmark runs, keep these values fixed:
-
-- `version: "1.0"`
-- `type: "online"`
-- `model_params.temperature: 1.0`
-- `model_params.top_p: 0.95`
-- `model_params.max_new_tokens: 8192`
-- `model_params.chat_template_kwargs.thinking: true`
-- `model_params.chat_template_kwargs.preserve_thinking: true`
-- First dataset `type: performance`
-- First dataset `accuracy_config.eval_method: agentic_inference_inline`
-- `settings.runtime.min_duration_ms: 0`
-- `settings.load_pattern.type: agentic_inference`
-- `settings.client.warmup_connections: 0`
-- `settings.client.max_idle_time: 0.5`
-- `endpoint_config.api_type: openai`
-
-The agentic inference dataset required defaults are:
-
-- First dataset `agentic_inference.enable_salt: true`
-- First dataset `agentic_inference.inject_tool_delay: true`
-- First dataset `agentic_inference.stop_issuing_on_first_user_complete: false`
-
-Set `agentic_inference.num_trajectories_to_issue` to an integer multiple of the
-dataset trajectory count so each repeat has the same representation. Use
-`agentic_inference.stop_issuing_on_first_user_complete: true` only for faster
-optimization/debug runs, not official benchmark runs.
+Some key client features specific to the Agentic Inference benchmark are described below.
 
 ### Salting Mechanism
 
-When `agentic_inference.enable_salt: true`, the strategy adds a short deterministic
-`[salt: ...]` marker before the system prompt for the trajectory repeat and
-another after the system prompt for the conversation. Each salt is four hex characters.
-This restricts kv-cache reuse to:
+`agentic_inference.enable_salt` must be set to `true` for official submissions.
+
+When `agentic_inference.enable_salt: true`, the strategy adds a short deterministic `[salt: ...]` marker before the system prompt for the trajectory repeat and another after the system prompt for the conversation. Each salt is four hex characters. This restricts kv-cache reuse to:
 
 1. Fully allowed within a trajectory.
 2. System prompt allowed within same iteration of the dataset.
@@ -159,38 +88,118 @@ This restricts kv-cache reuse to:
 
 ### Inline Accuracy
 
-When `accuracy_config.eval_method: agentic_inference_inline` is set on the performance
-dataset, the benchmark scores the generated `events.jsonl` during finalization
-and writes `scores.json` under `report_dir`. The scorer uses the loaded
-agentic inference dataset as ground truth, matches completed assistant responses back
-to their conversation/turn ids, and compares them with the expected assistant
-turns embedded in the dataset. It does not issue a separate accuracy phase.
+Submitters must enable inline accuracy for official submissions by setting `accuracy_config.eval_method: agentic_inference_inline` on the performance dataset. The benchmark then scores the generated `events.jsonl` during finalization and writes `scores.json` under `report_dir`. The scorer uses the loaded agentic inference dataset as ground truth, matches completed assistant responses back to their conversation/turn ids, and compares them with the expected assistant turns embedded in the dataset. It does not issue a separate accuracy phase.
 
 ### Tail Management
 
-Agentic inference benchmarks can have a long tail because different users receive
-trajectories with very different turn counts, delays, and generated lengths. In
-large runs this tail can last up to an hour after steady-state work has already
-ended, so the benchmark separates the performance window from the remaining
-accuracy/logging drain.
+Agentic inference benchmarks can have a long tail because different users receive trajectories with very different turn counts, delays, and generated lengths. In large runs this tail can last up to an hour after steady-state work has already ended, so the benchmark separates the performance window from the remaining accuracy/logging drain.
 
-The benchmark stops performance tracking when the first active user finishes its
-final assigned trajectory. It emits `STOP_PERFORMANCE_TRACKING` at that point to
-avoid measuring the tail. Turns issued before this event remain in the
-performance window even if they finish later; turns issued after it are excluded
-from performance metrics.
+The benchmark stops performance tracking when the first active user finishes its final assigned trajectory. It emits `STOP_PERFORMANCE_TRACKING` at that point to avoid measuring the tail. Turns issued before this event remain in the performance window even if they finish later; turns issued after it are excluded from performance metrics.
 
-For final submissions, keep
-`agentic_inference.stop_issuing_on_first_user_complete: false` so the client finishes
-already-started trajectories for accuracy. During optimization, set it to `true`
-to stop issuing future turns at the performance boundary and shorten the tail.
+For official submissions, submitters must set `agentic_inference.stop_issuing_on_first_user_complete` to `false` so the client finishes already-started trajectories for accuracy. During optimization, set it to `true` to stop issuing future turns at the performance boundary and shorten the tail.
+
+### SWE-bench Accuracy
+
+Submitters must enable SWE-bench accuracy for official submissions. Both `qwen_agentic_benchmark.yaml` and `kimi_agentic_benchmark.yaml` include the required SWE-bench accuracy dataset. The benchmark framework skips its built-in endpoint phase for the SWE-bench dataset. Instead, `SWEBenchScorer` submits the run to a native SWE-bench service. The service host owns Docker, `mini-swe-agent`, and the `swebench` evaluation harness, and it drives requests to the configured endpoint.
+
+Keep `accuracy_config.num_repeats: 1`: the scorer performs one external evaluation run per benchmark. Optional `accuracy_config.extras.subset` and `split` are used consistently for dataset loading, preflight, and scoring.
+
+`accuracy_config.extras.swebench_service_url` points the benchmark client to the service. Service mode follows the LiveCodeBench-style external-service convention for heavyweight evaluation work and supports exactly one endpoint URL in `endpoint_config.endpoints`; that URL must be reachable from the service host. Treat the service host as trusted infrastructure: it receives the endpoint URL and optional endpoint API key needed to run mini-swe-agent. Start the service with `--auth-token` and set `accuracy_config.extras.swebench_service_auth_token`. Only isolated local development should use the explicit `--allow-unauthenticated` override.
+
+`accuracy_config.extras.workers` sets the agent run's parallelism (`--workers`). If unset, it defaults to the load pattern's `target_concurrency` (for `concurrency`/`agentic_inference` patterns), else 10. `max_eval_workers` (default 10, `--max_workers`) sets the eval harness's parallelism.
+
+Qwen tool-call runs should set `accuracy_config.extras.swebench_template: qwen_tools`. The selected packaged template also activates the service's `QwenToolsModel` through mini-swe-agent's `model_class` hook.
+
+If SWE-bench evaluation is needed, start the service with the following command on a host that has Docker:
+
+```bash
+uv run --project src/inference_endpoint/evaluation/swebench_service \
+  python -m swebench_service --host 0.0.0.0 --port 18080 \
+  --auth-token "$SWEBENCH_SERVICE_AUTH_TOKEN"
+```
 
 ## Run The Client
 
-Update the first `datasets` entry (`name` and `path`), `model_params.name`, and
-`endpoint_config.endpoints` as needed, then run:
+Update the first `datasets` entry (`name` and `path`), `model_params.name`, and `endpoint_config.endpoints` as needed. Then select the matching model config and run it from the repo root:
 
 ```bash
-uv run inference-endpoint benchmark from-config \
-  --config examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml
+CONFIG=examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml
+# For Kimi, use examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml.
+
+# PERF (default): agentic performance and inline scoring; skips SWE-bench.
+uv run inference-endpoint benchmark from-config --config "$CONFIG"
+
+# BOTH: agentic performance followed by SWE-bench.
+uv run inference-endpoint benchmark from-config --config "$CONFIG" --mode both
+
+# ACC: SWE-bench only; skips the agentic performance dataset.
+uv run inference-endpoint benchmark from-config --config "$CONFIG" --mode acc
 ```
+
+The default `PERF` mode does not load, preflight, or submit external evaluation scorers. Use `--mode both` or `--mode acc` whenever SWE-bench should run.
+
+See `accuracy/RUNBOOK.md` for preconditions, sanity checks, and common failure modes.
+
+## Official Submission Rules
+
+The YAML configuration gives submitters flexibility to configure the benchmark for their systems, but official submissions must follow the requirements below. All MLPerf Endpoint Benchmark rules apply in full. Where a requirement below is more specific to the Agentic Inference benchmark, the more specific requirement takes precedence for this benchmark.
+
+### Sampling Parameters and Thinking Flags
+
+Submitters must not modify the sampling parameters or thinking flags. The model-specific values in the example YAML files are authoritative and are repeated below for completeness:
+
+For Kimi K2.6:
+
+- `temperature: 1.0`
+- `top_p: 0.95`
+- `max_new_tokens: 8192`
+- `chat_template_kwargs.thinking: true`
+- `chat_template_kwargs.preserve_thinking: true`
+
+For Qwen3.6-35B-A3B:
+
+- `temperature: 1.0`
+- `top_k: 20`
+- `top_p: 0.95`
+- `repetition_penalty: 1.0`
+- `presence_penalty: 1.5`
+- `max_new_tokens: 8192`
+- `chat_template_kwargs.preserve_thinking: true`
+
+Any sampling parameter or thinking flag not listed above for the selected model must be omitted. Submitters must not introduce additional sampling parameters or thinking flags.
+
+`preserve_thinking` ensures that reasoning tokens from previous turns are not stripped by the chat template before the input is sent to the inference engine. Because chat-template processing is a server-side property, the client can only request this behavior by sending the flag. Popular serving frameworks, including SGLang, vLLM, and TensorRT-LLM, honor this flag; however, each submitter is responsible for verifying that their server is compliant. The chat template must not omit reasoning tokens from any previous turn.
+
+### Dataset Size
+
+For official submissions, `agentic_inference.num_trajectories_to_issue` must be a positive integer multiple of the total dataset size. The official dataset contains 613 trajectories, so valid values are `613`, `1226`, `1839`, and so on.
+
+Submitters must also enable salting and inter-turn delays by setting:
+
+- `agentic_inference.enable_salt: true`
+- `agentic_inference.inject_tool_delay: true`
+
+For official submissions, `agentic_inference.stop_issuing_on_first_user_complete` must be set to `false` so the client finishes already-started trajectories for accuracy after the performance window ends. Setting it to `true` stops issuing future turns at the performance boundary and may be used only for faster optimization or debugging runs. Runs with this setting enabled are not valid official submissions.
+
+### Accuracy
+
+Official submissions must enable both inline accuracy and SWE-bench accuracy. Configure the performance dataset with `accuracy_config.eval_method: agentic_inference_inline`, and configure the SWE-bench accuracy dataset with `accuracy_config.eval_method: swe_bench_scorer`. For SWE-bench, `accuracy_config.extras.num_instances` must be set to `200`. When using the example `online` configs, run with `--mode both` so performance, inline accuracy, and SWE-bench accuracy are all executed.
+
+Qwen3.6-35B-A3B submissions must set `accuracy_config.extras.swebench_template: qwen_tools`. Kimi K2.6 submissions must omit `accuracy_config.extras.swebench_template`.
+
+Every submitted Pareto point must satisfy all of the following accuracy thresholds:
+
+| Metric             |        Kimi K2.6 |  Qwen3.6-35B-A3B |
+| ------------------ | ---------------: | ---------------: |
+| Inline accuracy    |      `>= 63.08%` |      `>= 55.86%` |
+| OSL per-turn mean  | `404-494` tokens | `355-434` tokens |
+| SWE-bench accuracy |       `>= 76.5%` |       `>= 67.5%` |
+
+### Speculative Decoding
+
+Speculative decoding may be used in accordance with the MLPerf Endpoint Benchmark rules. The list of allowed speculative-decoding heads for this benchmark will be maintained below. Only heads included in this list may be used for official submissions.
+
+Allowed speculative-decoding heads:
+
+- Qwen3.6-35B-A3B: native MTP head included with the model
+- Kimi K2.6: `nvidia/Kimi-K2.6-Eagle3`

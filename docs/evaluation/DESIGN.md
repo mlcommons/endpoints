@@ -35,11 +35,12 @@ accuracy summary written into benchmark results
 
 ## Files
 
-| File             | Purpose                                                           |
-| ---------------- | ----------------------------------------------------------------- |
-| `extractor.py`   | Extracts model answer from raw text (regex, boxed-answer parsing) |
-| `scoring.py`     | Compares extracted answer to ground truth label                   |
-| `livecodebench/` | LiveCodeBench-specific code execution pipeline                    |
+| File             | Purpose                                                                                                                                      |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extractor.py`   | Extracts model answer from raw text (regex, boxed-answer parsing)                                                                            |
+| `scoring.py`     | Compares extracted answer to ground truth label                                                                                              |
+| `bfcl_v4_*.py`   | BFCL v4 function-calling eval: `bfcl_v4_execution.py`, `bfcl_v4_scorer.py`, `bfcl_v4_metrics.py`, and the multi-turn `runner`/`scorer`/`cli` |
+| `livecodebench/` | LiveCodeBench-specific code execution pipeline                                                                                               |
 
 ## LiveCodeBench
 
@@ -60,13 +61,19 @@ Files:
 
 The scorer registry in `evaluation/scoring.py` currently includes:
 
-| Method                | Description                                                    |
-| --------------------- | -------------------------------------------------------------- |
-| `pass_at_1`           | Exact-match style scoring; also used by the LiveCodeBench path |
-| `string_match`        | Whitespace-trimmed string equality                             |
-| `rouge`               | ROUGE-based text generation scoring                            |
-| `code_bench_scorer`   | LiveCodeBench code-execution scoring                           |
-| `shopify_category_f1` | Shopify category F1 evaluation                                 |
+| Method                      | Description                                                    |
+| --------------------------- | -------------------------------------------------------------- |
+| `pass_at_1`                 | Exact-match style scoring; also used by the LiveCodeBench path |
+| `string_match`              | Whitespace-trimmed string equality                             |
+| `rouge`                     | ROUGE-based text generation scoring                            |
+| `code_bench_scorer`         | LiveCodeBench code-execution scoring                           |
+| `shopify_category_f1`       | Shopify category F1 evaluation                                 |
+| `agentic_inference_inline`  | Inline scoring for agentic multi-turn inference                |
+| `vbench`                    | VBench video-generation accuracy (WAN 2.2 T2V)                 |
+| `bfcl_v4`                   | BFCL v4 function-calling accuracy                              |
+| `legacy_mlperf_deepseek_r1` | MLPerf DeepSeek-R1 combined multi-subset accuracy              |
+
+The registry (`Scorer.PREDEFINED`) is auto-populated from `Scorer` subclasses via `__init_subclass__`.
 
 The scoring configuration used by benchmark execution is specified per accuracy dataset under
 `datasets[].accuracy_config`, including `accuracy_config.eval_method`,

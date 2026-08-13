@@ -229,9 +229,9 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
     # Per-dataset accuracy entries (one per scored dataset), attached after
     # scoring in finalize_benchmark. Accuracy is not in the metrics snapshot, so
-    # from_snapshot leaves this empty; perf-only runs keep it empty. Each entry
-    # carries score + sample counts and, for multi-subset scorers, a BFCL-shaped
-    # breakdown. Display-only.
+    # from_snapshot leaves this empty; runs without configured scoring keep it
+    # empty. Each entry carries score + sample counts and, for multi-subset
+    # scorers, a BFCL-shaped breakdown. Display-only.
     accuracy: list[dict[str, Any]] = msgspec.field(default_factory=list)
 
     @classmethod
