@@ -36,6 +36,8 @@ import os
 import pytest
 from inference_endpoint.evaluation.livecodebench import lcb_serve, run_lcb_tests
 
+pytestmark = pytest.mark.unit
+
 CALL_BASED_SUITE = '{"fn_name": "solve", "inputs": ["1"], "outputs": ["1"]}'
 PASSING_CALL_BASED = "def solve(x):\n    return x\n"
 CALL_SYSEXIT = "def solve(x):\n    import sys\n    sys.exit(3)\n"
