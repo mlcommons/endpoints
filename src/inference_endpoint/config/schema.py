@@ -416,6 +416,13 @@ class AgenticInferenceConfig(BaseModel):
             "in dataset."
         ),
     )
+    routing_headers: tuple[str, ...] = Field(
+        default=("X-Session-ID",),
+        description=(
+            "HTTP header names populated with the conversation ID on every "
+            "agentic request."
+        ),
+    )
     num_trajectories_to_issue: int | None = Field(
         default=None,
         gt=0,

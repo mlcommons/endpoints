@@ -57,6 +57,7 @@ from inference_endpoint.commands.benchmark.profiling import (
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
+    AgenticInferenceConfig,
     BenchmarkConfig,
     DatasetType,
     DrainConfig,
@@ -71,6 +72,9 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
     WarmupConfig,
+)
+from inference_endpoint.config.schema import (
+    Dataset as DatasetConfig,
 )
 from inference_endpoint.config.schema import (
     OfflineBenchmarkConfig as OfflineConfig,
@@ -1661,6 +1665,36 @@ class TestBuildPhases:
 
         assert len(phases) == 1
         assert phases[0].phase_type == PhaseType.PERFORMANCE
+
+    @pytest.mark.unit
+    def test_agentic_routing_headers_propagate_to_performance_phase(
+        self, base_rt_settings, simple_dataset
+    ):
+        routing_headers = ["X-Session-ID", "X-SMG-Routing-Key"]
+        config = OnlineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "datasets": [
+                    DatasetConfig(
+                        path="agentic.jsonl",
+                        agentic_inference=AgenticInferenceConfig(
+                            routing_headers=routing_headers
+                        ),
+                    )
+                ],
+                "settings": OnlineSettings(
+                    load_pattern=LoadPattern(
+                        type=LoadPatternType.AGENTIC_INFERENCE,
+                        target_concurrency=8,
+                    )
+                ),
+            }
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+
+        phases = _build_phases(ctx)
+
+        assert phases[0].routing_headers == tuple(routing_headers)
 
     @pytest.mark.unit
     def test_warmup_enabled_produces_two_phases(self, base_rt_settings, simple_dataset):

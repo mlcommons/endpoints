@@ -46,7 +46,6 @@ from .strategy import LoadStrategy, create_load_strategy
 
 logger = logging.getLogger(__name__)
 
-_SESSION_ID_HEADER = "X-Session-ID"
 # ---------------------------------------------------------------------------
 # Phase configuration
 # ---------------------------------------------------------------------------
@@ -71,6 +70,7 @@ class PhaseConfig:
     drain_after: bool = True
     drain_timeout: float | None = None
     strategy: LoadStrategy | None = field(default=None, compare=False)
+    routing_headers: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +157,7 @@ class PhaseIssuer:
         "_performance_tracking_stopped",
         "_prompt_warning_reasons",
         "_publisher",
+        "_routing_headers",
         "_stop_check",
         "uuid_to_index",
         "uuid_to_conv_info",
@@ -172,12 +173,14 @@ class PhaseIssuer:
         publisher: EventPublisher,
         stop_check: Callable[[], bool],
         on_inflight_drained: Callable[[], None] | None = None,
+        routing_headers: tuple[str, ...] = (),
     ):
         self._dataset = dataset
         self._issuer = issuer
         self._publisher = publisher
         self._stop_check = stop_check
         self._on_inflight_drained = on_inflight_drained or (lambda: None)
+        self._routing_headers = routing_headers
         self.uuid_to_index: dict[str, int] = {}
         self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.completed_uuids: set[str] = set()
@@ -238,7 +241,11 @@ class PhaseIssuer:
         data = self._dataset.load_sample(sample_index)
         if data_override is not None:
             data = {**data, **data_override}
-        headers = {_SESSION_ID_HEADER: conversation_id} if conversation_id else {}
+        headers = (
+            dict.fromkeys(self._routing_headers, conversation_id)
+            if conversation_id
+            else {}
+        )
         query = Query(id=query_id, data=data, headers=headers)
         self.uuid_to_index[query_id] = sample_index
         self.uuid_to_conv_info[query_id] = (conversation_id, turn)
@@ -471,6 +478,7 @@ class BenchmarkSession:
             publisher=self._publisher,
             stop_check=self._make_stop_check(phase.runtime_settings, phase_start),
             on_inflight_drained=self._drain_event.set,
+            routing_headers=phase.routing_headers,
         )
 
         self._current_phase_issuer = phase_issuer

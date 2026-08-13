@@ -572,6 +572,16 @@ def _build_phases(
     drain_cfg = ctx.config.settings.drain
 
     if ctx.dataloader is not None and ctx.rt_settings is not None:
+        perf_dataset = next(
+            dataset
+            for dataset in ctx.config.datasets
+            if dataset.type == DatasetType.PERFORMANCE
+        )
+        routing_headers = (
+            perf_dataset.agentic_inference.routing_headers
+            if perf_dataset.agentic_inference is not None
+            else ()
+        )
         warmup_cfg = ctx.config.settings.warmup
         if warmup_cfg.enabled:
             warmup_dataset: Dataset = (
@@ -611,6 +621,7 @@ def _build_phases(
                 PhaseType.PERFORMANCE,
                 strategy=perf_strategy,
                 drain_timeout=drain_cfg.performance_timeout_s,
+                routing_headers=routing_headers,
             )
         )
 
