@@ -710,6 +710,56 @@ class _PerfPhaseTimeout:
             self._handle = None
 
 
+class _RunWatchdog:
+    """Whole-run deadline timer for ``settings.timeouts.run_timeout_s``.
+
+    Armed before the metrics pipeline starts (so service-launch and
+    endpoint-connect stalls are bounded) and kept armed through the metrics
+    drain (so a stuck aggregator drain is bounded too). On fire: stop the
+    session first — it short-circuits its drain and publishes ENDED promptly,
+    so the event logger flushes and the aggregator records the buffered
+    tokenizer-drain samples — then SIGTERM the aggregator, whose handler
+    writes the INTERRUPTED final snapshot (``publish_final`` is first-wins,
+    so INTERRUPTED stays authoritative). ``run_benchmark`` raises
+    ``ExecutionError`` after finalization whenever ``fired`` is set, so a
+    timed-out run always fails loudly even if a still-draining aggregator
+    finalized COMPLETE first.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        deadline: float | None,
+        pipe: MetricsPipeline,
+    ) -> None:
+        self.fired = False
+        self._session: BenchmarkSession | None = None
+        self._pipe = pipe
+        self._handle = (
+            loop.call_later(max(0.0, deadline - time.monotonic()), self._fire)
+            if deadline is not None
+            else None
+        )
+
+    def bind_session(self, session: BenchmarkSession) -> None:
+        """Late-bind the session: it is created after the timer is armed."""
+        self._session = session
+
+    def _fire(self) -> None:
+        self.fired = True
+        logger.error(
+            "Run timeout reached; aborting run — report will be marked " "INTERRUPTED."
+        )
+        if self._session is not None:
+            self._session.stop()
+        self._pipe.terminate_metrics_aggregator()
+
+    def cancel(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
+
+
 async def _create_issuer(
     ctx: BenchmarkContext, loop: asyncio.AbstractEventLoop
 ) -> tuple[HttpClientSampleIssuer, HTTPEndpointClient]:
@@ -842,44 +892,7 @@ async def _run_benchmark_async(
     # idempotent, so the clean-path shutdown below is a harmless second call.
     http_client: HTTPEndpointClient | None = None
 
-    # Whole-run watchdog. Armed before the pipeline starts so setup stalls
-    # (service launch, endpoint connect) are bounded too, and kept armed
-    # through the metrics drain so run_timeout_s can SIGTERM a stuck
-    # aggregator drain. Cancelled in the outermost finally.
-    run_timed_out = False
-    # The session is created later inside the pipeline scope; bind it through
-    # a mutable holder so the callback never touches a possibly-unbound local
-    # (a NameError inside a loop callback is swallowed by the loop's exception
-    # handler, which would leave the watchdog inert).
-    session_ref: list[BenchmarkSession] = []
-    run_timeout_s = config.settings.timeouts.run_timeout_s
-
-    def _on_run_timeout() -> None:
-        nonlocal run_timed_out
-        run_timed_out = True
-        logger.error(
-            "Run timeout (%.1fs) reached; aborting run — report will be "
-            "marked INTERRUPTED.",
-            run_timeout_s,
-        )
-        # Stop the session first: it short-circuits _drain_inflight and
-        # run()'s finally publishes ENDED promptly, so the aggregator still
-        # records the buffered tokenizer-drain samples. Then SIGTERM the
-        # aggregator: its handler writes the INTERRUPTED final snapshot
-        # (publish_final is first-wins, so INTERRUPTED stays authoritative;
-        # even if a still-draining aggregator finalizes as COMPLETE first,
-        # run_benchmark raises on run_timed_out, so a timed-out run always
-        # fails loudly). Targeted (not all services): the event logger
-        # flushes on ENDED, which session.stop() still delivers.
-        if session_ref:
-            session_ref[0].stop()
-        pipe.terminate_metrics_aggregator()
-
-    run_watchdog = (
-        loop.call_later(max(0.0, deadline - time.monotonic()), _on_run_timeout)
-        if deadline is not None
-        else None
-    )
+    watchdog = _RunWatchdog(loop, deadline, pipe)
 
     try:
         tmpfs_dir.mkdir(parents=True, exist_ok=True)
@@ -917,7 +930,7 @@ async def _run_benchmark_async(
                     on_sample_complete=on_sample_complete,
                     session_id=session_id,
                 )
-                session_ref.append(session)
+                watchdog.bind_session(session)
                 phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
 
                 max_duration_ms = (
@@ -957,7 +970,7 @@ async def _run_benchmark_async(
 
                 loop.add_signal_handler(signal.SIGINT, session.stop)
                 try:
-                    if run_timed_out:
+                    if watchdog.fired:
                         # Deadline elapsed during setup — never start issuing
                         # load after it. Run the already-stopped session so
                         # STARTED/ENDED still flow: the event logger exits only
@@ -972,7 +985,7 @@ async def _run_benchmark_async(
                         )
                         session_completed_normally = True
                 except Exception as e:
-                    if run_timed_out:
+                    if watchdog.fired:
                         # The watchdog already aborted the run; a teardown race
                         # can surface here as a generic exception. Fall through
                         # with an empty session result so finalize still writes
@@ -998,7 +1011,7 @@ async def _run_benchmark_async(
                     # Unifies the clean phase-end path and the abort path — both
                     # reach this block. A watchdog abort counts as an abort even
                     # when session.run returned normally after session.stop().
-                    profiler.stop(session_completed_normally and not run_timed_out)
+                    profiler.stop(session_completed_normally and not watchdog.fired)
                     # Graceful drain runs on both the clean-finish and session-
                     # failure paths (BenchmarkSession.run publishes ENDED in its own
                     # finally, so a failed run still has a terminal snapshot worth
@@ -1052,8 +1065,7 @@ async def _run_benchmark_async(
                 )
         raise
     finally:
-        if run_watchdog is not None:
-            run_watchdog.cancel()
+        watchdog.cancel()
 
     return BenchmarkResult(
         session=result,
@@ -1061,7 +1073,7 @@ async def _run_benchmark_async(
         report=report,
         tmpfs_dir=tmpfs_dir,
         profiling=profiler.payload(),
-        run_timed_out=run_timed_out,
+        run_timed_out=watchdog.fired,
     )
 
 
