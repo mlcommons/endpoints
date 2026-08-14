@@ -72,10 +72,8 @@ settings:
     type: "concurrency"
     target_concurrency: 1024
 
-  timeouts:
-    worker_initialization_timeout_s: 300.0
-
   client:
+    worker_initialization_timeout: 300.0
     num_workers: 16
     log_level: "WARN"
     worker_gc_mode: "disabled"

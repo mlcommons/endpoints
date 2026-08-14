@@ -22,7 +22,6 @@ pre-consolidation config surface (``settings.drain``, top-level ``timeout``,
 import random
 
 import pytest
-import yaml
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
@@ -53,9 +52,6 @@ class TestTimeoutsDefaults:
         assert cfg.performance_drain_timeout_s is None
         assert cfg.accuracy_drain_timeout_s is None
         assert cfg.metrics_drain_timeout_s is None
-        assert cfg.worker_initialization_timeout_s == 60.0
-        assert cfg.worker_graceful_shutdown_wait_s == 0.5
-        assert cfg.worker_force_kill_timeout_s == 0.5
 
     @pytest.mark.unit
     def test_mounted_on_settings_by_default(self):
@@ -101,15 +97,7 @@ class TestTimeoutsValidation:
         assert getattr(Timeouts(**{field: None}), field) is None
 
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "field",
-        [
-            "service_ready_timeout_s",
-            "worker_initialization_timeout_s",
-            "worker_graceful_shutdown_wait_s",
-            "worker_force_kill_timeout_s",
-        ],
-    )
+    @pytest.mark.parametrize("field", ["service_ready_timeout_s"])
     def test_ge_zero_fields_accept_zero_reject_negative(self, field):
         assert getattr(Timeouts(**{field: 0}), field) == 0.0
         with pytest.raises(ValidationError):
@@ -153,54 +141,19 @@ class TestDeletedConfigSurface:
         with pytest.raises(ValidationError, match="timeout"):
             BenchmarkConfig(**_MINIMAL_KWARGS, timeout=42.0)
 
+
+class TestClientWorkerKnobs:
     @pytest.mark.unit
-    def test_client_worker_knob_rejected(self):
-        with pytest.raises(ValidationError, match="worker_initialization_timeout"):
-            BenchmarkConfig(
-                **_MINIMAL_KWARGS,
-                settings={"client": {"worker_initialization_timeout": 120.0}},
-            )
-
-    @pytest.mark.unit
-    def test_client_worker_knob_rejected_from_yaml(self, tmp_path):
-        yaml_content = """
-type: "offline"
-model_params:
-  name: "test-model"
-endpoint_config:
-  endpoints: ["http://test:8000"]
-datasets:
-  - path: "test.jsonl"
-settings:
-  client:
-    worker_initialization_timeout: 120
-"""
-        config_file = tmp_path / "stale.yaml"
-        config_file.write_text(yaml_content)
-        with pytest.raises(ValidationError, match="worker_initialization_timeout"):
-            BenchmarkConfig.from_yaml_file(config_file)
-
-
-class TestWorkerFieldsHiddenFromSerialization:
-    @pytest.mark.unit
-    def test_yaml_roundtrip_excludes_worker_carrier_fields(self, tmp_path):
-        """The runtime-carrier worker fields on the client never serialize, so
-        a persisted config reloads cleanly under extra=forbid."""
-        config = BenchmarkConfig(**_MINIMAL_KWARGS)
-        out = tmp_path / "roundtrip.yaml"
-        config.to_yaml_file(out)
-
-        dumped = yaml.safe_load(out.read_text())
-        client_block = dumped.get("settings", {}).get("client", {}) or {}
-        carrier_fields = {
-            "worker_initialization_timeout_s",
-            "worker_graceful_shutdown_wait_s",
-            "worker_force_kill_timeout_s",
-        }
-        assert not carrier_fields & client_block.keys()
-
-        loaded = BenchmarkConfig.from_yaml_file(out)
-        assert loaded.settings.timeouts == config.settings.timeouts
+    def test_worker_lifecycle_knobs_live_on_client(self):
+        """Worker lifecycle timeouts are endpoint-client internals and stay on
+        settings.client, not in the timeouts block."""
+        config = BenchmarkConfig(
+            **_MINIMAL_KWARGS,
+            settings={"client": {"worker_initialization_timeout": 120.0}},
+        )
+        assert config.settings.client.worker_initialization_timeout == 120.0
+        with pytest.raises(ValidationError):
+            Timeouts(worker_initialization_timeout_s=90.0)
 
 
 class TestTimeoutsYAMLRoundtrip:
@@ -221,7 +174,6 @@ settings:
     performance_drain_timeout_s: 30.0
     accuracy_drain_timeout_s: null
     metrics_drain_timeout_s: 300.0
-    worker_initialization_timeout_s: 90
 """
         config_file = tmp_path / "timeouts.yaml"
         config_file.write_text(yaml_content)
@@ -232,7 +184,6 @@ settings:
         assert timeouts.performance_drain_timeout_s == 30.0
         assert timeouts.accuracy_drain_timeout_s is None
         assert timeouts.metrics_drain_timeout_s == 300.0
-        assert timeouts.worker_initialization_timeout_s == 90.0
 
 
 class TestMaxDurationSuffix:

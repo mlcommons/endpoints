@@ -187,24 +187,15 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         False, description="Stream all chunks to main thread (caution: perf overhead)"
     )
 
-    # Worker lifecycle timeouts — runtime carriers. The authoritative user
-    # knobs live in settings.timeouts; setup copies them here (no CLI flag,
-    # never serialized). WithUpdatesMixin.with_updates reads exclude=True
-    # fields directly, so copies preserve the injected values.
-    worker_initialization_timeout_s: Annotated[
-        float, cyclopts.Parameter(parse=False)
-    ] = Field(60.0, exclude=True, description="Worker init timeout (seconds)")
-    worker_graceful_shutdown_wait_s: Annotated[
-        float, cyclopts.Parameter(parse=False)
-    ] = Field(
-        0.5, exclude=True, description="Post-run graceful shutdown wait (seconds)"
+    # Worker lifecycle timeouts
+    worker_initialization_timeout: float = Field(
+        60.0, description="Worker init timeout (seconds)"
     )
-    worker_force_kill_timeout_s: Annotated[float, cyclopts.Parameter(parse=False)] = (
-        Field(
-            0.5,
-            exclude=True,
-            description="Force kill timeout after graceful wait (seconds)",
-        )
+    worker_graceful_shutdown_wait: float = Field(
+        0.5, description="Post-run graceful shutdown wait (seconds)"
+    )
+    worker_force_kill_timeout: float = Field(
+        0.5, description="Force kill timeout after graceful wait (seconds)"
     )
 
     # Set to True to skip certificate verification (e.g. self-signed certs).

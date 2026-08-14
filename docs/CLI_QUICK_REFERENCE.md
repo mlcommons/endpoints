@@ -120,31 +120,63 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 ## Time Knobs
 
 All give-up deadlines live under `settings.timeouts`; the only workload duration is
-`settings.runtime.max_duration_ms`. `null`/unset means "wait indefinitely" (or "off") everywhere.
+`settings.runtime.max_duration_ms`; endpoint-client worker lifecycle timeouts are client
+internals under `settings.client`. `null`/unset means "wait indefinitely" (or "off") everywhere.
 
-| YAML path                                           | CLI flag                            | Semantics                                                                                                                                                                        |
-| --------------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `settings.runtime.max_duration_ms`                  | `--runtime.max-duration-ms`         | Caps the performance phase (ms, or suffix: `600s`, `10m`); reaching it ends the phase NORMALLY — the report stays valid                                                          |
-| `settings.timeouts.run_timeout_s`                   | `--timeout`                         | Whole-run watchdog; firing aborts the entire run — report marked INTERRUPTED, non-zero exit                                                                                      |
-| `settings.timeouts.service_ready_timeout_s`         | `--service-ready-timeout`           | Wait for the metrics-aggregator/event-logger services to become ready (default 30)                                                                                               |
-| `settings.timeouts.warmup_drain_timeout_s`          | `--warmup-drain-timeout`            | Bound on in-flight warmup requests after the warmup phase ends (default 240)                                                                                                     |
-| `settings.timeouts.performance_drain_timeout_s`     | `--performance-drain-timeout`       | Bound on in-flight performance requests after the phase ends (default: wait indefinitely)                                                                                        |
-| `settings.timeouts.accuracy_drain_timeout_s`        | `--accuracy-drain-timeout`          | Bound on in-flight accuracy requests after the phase ends (default: wait indefinitely)                                                                                           |
-| `settings.timeouts.metrics_drain_timeout_s`         | `--metrics-drain-timeout`           | Budget for the metrics aggregator to finish tokenizing buffered samples after the run ends (default: wait indefinitely); expiring fails the run with `complete: false` artifacts |
-| `settings.timeouts.worker_initialization_timeout_s` | `--worker-initialization-timeout-s` | Wait for endpoint-client worker processes to start (default 60)                                                                                                                  |
-| `settings.timeouts.worker_graceful_shutdown_wait_s` | `--worker-graceful-shutdown-wait-s` | Post-run wait for workers to exit gracefully (default 0.5)                                                                                                                       |
-| `settings.timeouts.worker_force_kill_timeout_s`     | `--worker-force-kill-timeout-s`     | Wait after SIGTERM before SIGKILL during worker teardown (default 0.5)                                                                                                           |
+Where every knob acts over the life of a run:
+
+```text
+run_benchmark ── run_timeout_s deadline captured here ─────────────────────────────┐
+│                                                                                  │
+├─ setup: dataset + tokenizer load          (counts against run_timeout_s)         │
+├─ launch metrics/event-logger services     ── service_ready_timeout_s             │
+├─ start endpoint-client workers            ── client.worker_initialization_timeout│
+│                                                                                  │
+├─ WARMUP       issue ──────────┤ drain ─┤  ── warmup_drain_timeout_s              │
+│                                                                                  │
+├─ PERFORMANCE  issue ──────────┤ drain ─┤                                         │
+│               │               │        └─ performance_drain_timeout_s            │
+│               └───────────────┴─ max_duration_ms caps ISSUING only; reaching it  │
+│                                  ends the phase NORMALLY (valid report) and      │
+│                                  SKIPS the drain — the two never run together    │
+│                                                                                  │
+├─ ACCURACY     issue ──────────┤ drain ─┤  ── accuracy_drain_timeout_s            │
+│                                                                                  │
+├─ metrics drain (tokenize buffered ISL/OSL)── metrics_drain_timeout_s             │
+│                                              (expiry FAILS the run:              │
+│                                              complete: false + non-zero exit)    │
+├─ worker shutdown                          ── client.worker_graceful_shutdown_wait│
+│                                              then client.worker_force_kill_timeout
+└─ finalize: score accuracy, write artifacts                                       │
+                                                                                   │
+ run_timeout_s (whole-run watchdog) ───────────────────────────────────────────────┘
+ firing at ANY point above aborts the run: report marked INTERRUPTED, non-zero exit
+```
+
+| YAML path                                       | CLI flag                                 | Semantics                                                                                                                                                                        |
+| ----------------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `settings.runtime.max_duration_ms`              | `--runtime.max-duration-ms`              | Caps performance-phase issuing (ms, or suffix: `600s`, `10m`); reaching it ends the phase NORMALLY — the report stays valid — and skips the performance drain                    |
+| `settings.timeouts.run_timeout_s`               | `--timeout`                              | Whole-run watchdog over everything above; firing aborts the entire run — report marked INTERRUPTED, non-zero exit                                                                |
+| `settings.timeouts.service_ready_timeout_s`     | `--service-ready-timeout`                | Wait for the metrics-aggregator/event-logger services to become ready (default 30)                                                                                               |
+| `settings.timeouts.warmup_drain_timeout_s`      | `--warmup-drain-timeout`                 | Bound on in-flight warmup requests after the warmup phase ends (default 240)                                                                                                     |
+| `settings.timeouts.performance_drain_timeout_s` | `--performance-drain-timeout`            | Bound on in-flight performance requests after the phase stops issuing (default: wait indefinitely)                                                                               |
+| `settings.timeouts.accuracy_drain_timeout_s`    | `--accuracy-drain-timeout`               | Bound on in-flight accuracy requests after the phase ends (default: wait indefinitely)                                                                                           |
+| `settings.timeouts.metrics_drain_timeout_s`     | `--metrics-drain-timeout`                | Budget for the metrics aggregator to finish tokenizing buffered samples after the run ends (default: wait indefinitely); expiring fails the run with `complete: false` artifacts |
+| `settings.client.worker_initialization_timeout` | `--client.worker-initialization-timeout` | Wait for endpoint-client worker processes to start (default 60)                                                                                                                  |
+| `settings.client.worker_graceful_shutdown_wait` | `--client.worker-graceful-shutdown-wait` | Post-run wait for workers to exit gracefully (default 0.5)                                                                                                                       |
+| `settings.client.worker_force_kill_timeout`     | `--client.worker-force-kill-timeout`     | Wait after the graceful window before force-killing workers (default 0.5)                                                                                                        |
 
 How the knobs compose:
 
 1. **`--num-samples` / dataset-once defines the work.** An explicit `runtime.n_samples_to_issue`
    sets the sample count; omitting it issues the performance dataset once.
-2. **`runtime.max_duration_ms` caps the performance phase** and ends it normally — remaining
-   samples are not issued, the report is valid.
-3. **`timeouts.run_timeout_s` aborts the whole run** (every phase, drains included) — the report
-   is marked INTERRUPTED and the process exits non-zero.
-4. **Per-phase drain timeouts bound the post-phase wait** for requests still in flight after a
-   phase stops issuing.
+2. **`runtime.max_duration_ms` caps performance-phase issuing** and ends the phase normally —
+   remaining samples are not issued, in-flight requests are abandoned (no drain), the report is
+   valid. It does not bound the drain: issuing and draining are consecutive, never concurrent.
+3. **Per-phase drain timeouts bound the post-phase wait** for requests still in flight after a
+   phase stops issuing on its own.
+4. **`timeouts.run_timeout_s` is the only total-wall-time bound** (setup, every phase, every
+   drain) — firing aborts the run, marks the report INTERRUPTED, and exits non-zero.
 
 ## Environment Variables
 

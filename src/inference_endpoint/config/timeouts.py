@@ -16,11 +16,12 @@
 """Global waits and deadlines (the ``settings.timeouts`` block).
 
 Split criterion: one module per config domain; every global time knob that
-bounds how long the harness waits — startup readiness, per-phase drains, the
-worker lifecycle, and the whole-run watchdog — lives here. Workload durations
+bounds how long the harness waits — startup readiness, per-phase drains, and
+the whole-run watchdog — lives here. Workload durations
 (``runtime.max_duration_ms``) are part of the benchmark definition, not waits,
-and stay in ``runtime``. Dataset-scoped time knobs (e.g. agentic
-``turn_timeout_s``) stay in their dataset config blocks.
+and stay in ``runtime``. Client worker-lifecycle timeouts stay on
+``settings.client`` (endpoint-client internals). Dataset-scoped time knobs
+(e.g. agentic ``turn_timeout_s``) stay in their dataset config blocks.
 """
 
 from __future__ import annotations
@@ -130,17 +131,4 @@ class Timeouts(WithUpdatesMixin, BaseModel):
             "the run: artifacts are written with complete: false, then "
             "run_benchmark exits non-zero."
         ),
-    )
-    worker_initialization_timeout_s: float = Field(
-        60.0, ge=0, description="Endpoint-client worker init timeout (seconds)"
-    )
-    worker_graceful_shutdown_wait_s: float = Field(
-        0.5,
-        ge=0,
-        description="Endpoint-client post-run graceful shutdown wait (seconds)",
-    )
-    worker_force_kill_timeout_s: float = Field(
-        0.5,
-        ge=0,
-        description="Endpoint-client force kill timeout after graceful wait (seconds)",
     )

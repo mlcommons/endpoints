@@ -375,8 +375,7 @@ def _resolve_template(template_path: Path, server_url: str) -> dict:
     # The other 5 templates benefit from warm module / IPC caches and don't
     # need the headroom. 120 s is a generous safety margin that does not
     # change the production default, only this integration test.
-    data["settings"].setdefault("timeouts", {})
-    data["settings"]["timeouts"]["worker_initialization_timeout_s"] = 120.0
+    data["settings"].setdefault("client", {})["worker_initialization_timeout"] = 120.0
 
     # Accuracy datasets can't run e2e against echo server (no scorer), so keep only performance datasets.
     data["datasets"] = [

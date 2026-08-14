@@ -738,7 +738,6 @@ async def _create_issuer(
         api_type: APIType = config.endpoint_config.api_type
         # client.api_type is propagated from endpoint_config.api_type by
         # BenchmarkConfig._propagate_client_api_type — no override needed here.
-        timeouts = config.settings.timeouts
         client_overrides: dict = {
             "endpoint_urls": [
                 urljoin(e.rstrip("/") + "/", api_type.default_route())
@@ -747,12 +746,6 @@ async def _create_issuer(
             "api_key": config.endpoint_config.api_key,
             "event_logs_dir": ctx.report_dir,
             "cpu_affinity": ctx.affinity_plan,
-            # Worker lifecycle deadlines live in settings.timeouts; the
-            # HTTPClientConfig fields are excluded runtime carriers populated
-            # only here.
-            "worker_initialization_timeout_s": timeouts.worker_initialization_timeout_s,
-            "worker_graceful_shutdown_wait_s": timeouts.worker_graceful_shutdown_wait_s,
-            "worker_force_kill_timeout_s": timeouts.worker_force_kill_timeout_s,
         }
         if ctx.accuracy_only:
             # Single-stream (num_workers=1, max_connections=1) is baked into

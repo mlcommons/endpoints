@@ -77,6 +77,9 @@ settings:
       linger: -1  # ZMQ linger on close (-1=block until sent)
       immediate: 1  # ZMQ IMMEDIATE (1=only enqueue on ready)
     stream_all_chunks: false  # Stream all chunks to main thread (caution: perf overhead)
+    worker_initialization_timeout: 60.0  # Worker init timeout (seconds)
+    worker_graceful_shutdown_wait: 0.5  # Post-run graceful shutdown wait (seconds)
+    worker_force_kill_timeout: 0.5  # Force kill timeout after graceful wait (seconds)
     insecure: false  # Skip TLS certificate verification
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
@@ -88,9 +91,6 @@ settings:
     performance_drain_timeout_s: null  # Performance drain timeout in seconds (None = wait indefinitely)
     accuracy_drain_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely; accuracy is unbounded by default because every sample must complete)
     metrics_drain_timeout_s: null  # Wall-clock budget (seconds) to finish tokenizing buffered samples after ENDED (None = wait indefinitely). An incomplete drain fails the run: artifacts are written with complete: false, then run_benchmark exits non-zero.
-    worker_initialization_timeout_s: 60.0  # Endpoint-client worker init timeout (seconds)
-    worker_graceful_shutdown_wait_s: 0.5  # Endpoint-client post-run graceful shutdown wait (seconds)
-    worker_force_kill_timeout_s: 0.5  # Endpoint-client force kill timeout after graceful wait (seconds)
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
