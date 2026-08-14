@@ -23,13 +23,13 @@ re-exports the public surface.
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Self
 
 import cyclopts
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .enums import DatasetType, EvalMethod, ScorerMethod
 from .model_params import ModelParams
 
 
@@ -55,6 +55,36 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 # desync ISL/OSL/TTFT/TPOT accounting without changing what is measured. Rejected
 # as generation_config_override keys — they are per-run/identity, not per-dataset.
 _METRICS_DECOUPLED_OVERRIDE_KEYS = frozenset({"name", "streaming", "tokenizer_name"})
+
+
+class DatasetType(str, Enum):
+    """Dataset purpose type."""
+
+    PERFORMANCE = "performance"
+    ACCURACY = "accuracy"
+
+
+class EvalMethod(str, Enum):
+    """Evaluation methods for accuracy testing."""
+
+    EXACT_MATCH = "exact_match"
+    CONTAINS = "contains"
+    JUDGE = "judge"
+
+
+class ScorerMethod(str, Enum):
+    """Registered scorer methods for accuracy evaluation."""
+
+    PASS_AT_1 = "pass_at_1"
+    STRING_MATCH = "string_match"
+    ROUGE = "rouge"
+    CODE_BENCH = "code_bench_scorer"
+    SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
+    AGENTIC_INFERENCE_INLINE = "agentic_inference_inline"
+    VBENCH = "vbench"
+    BFCL_V4 = "bfcl_v4"
+    LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
+    SWE_BENCH = "swe_bench_scorer"
 
 
 class AgenticInferenceConfig(BaseModel):

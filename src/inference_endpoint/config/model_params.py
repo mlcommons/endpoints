@@ -22,12 +22,12 @@ the public surface.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Annotated, Any, Self
 
 import cyclopts
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .enums import OSLDistributionType, StreamingMode
 from .ruleset_base import BenchmarkSuiteRuleset
 
 
@@ -44,6 +44,28 @@ def _non_default_completion_controls(mp: ModelParams) -> list[str]:
         "skip_special_tokens": not mp.skip_special_tokens,
     }
     return [name for name, non_default in checks.items() if non_default]
+
+
+class OSLDistributionType(str, Enum):
+    """Output Sequence Length distribution types."""
+
+    ORIGINAL = "original"  # Use original distribution from dataset (default)
+    FIXED = "fixed"  # Fixed length for all outputs
+    UNIFORM = "uniform"  # Uniform distribution between min and max
+    NORMAL = "normal"  # Normal/Gaussian distribution
+
+
+class StreamingMode(str, Enum):
+    """Streaming mode for response handling.
+
+    - AUTO: Automatically enable for online mode, disable for offline mode
+    - ON: Force streaming enabled (for TTFT metrics)
+    - OFF: Force streaming disabled
+    """
+
+    AUTO = "auto"
+    ON = "on"
+    OFF = "off"
 
 
 class OSLDistribution(BaseModel):

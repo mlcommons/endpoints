@@ -20,16 +20,19 @@ interface. cyclopts auto-generates CLI flags from fields. Use
 cyclopts.Parameter(alias=...) on Annotated fields to declare shorthand
 aliases alongside dotted paths.
 
-Split criterion: one module per config domain (enums / audit / model_params /
-datasets / settings / timeouts); this module owns only the root aggregate
-(``BenchmarkConfig`` and its cross-field validation) plus the explicit
-re-export hub, so every existing ``config.schema`` import site keeps working.
+Split criterion: one module per config domain (audit / model_params /
+datasets / settings / timeouts), with every name — model, enum, helper —
+living beside its owner; this module owns only the root aggregate
+(``BenchmarkConfig``, its cross-field validation, and the root-level
+``TestType``/``TestMode`` enums) plus the explicit re-export hub, so every
+existing ``config.schema`` import site keeps working.
 """
 
 from __future__ import annotations
 
 import logging
 from collections import Counter
+from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self, Union
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -51,29 +54,29 @@ from ..core.types import APIType
 from ..exceptions import CLIError
 from ..utils import WithUpdatesMixin
 from .audit import AuditConfig, AuditTestId, OutputCachingTestConfig
-from .datasets import AccuracyConfig, AgenticInferenceConfig, Dataset
-from .enums import (
+from .datasets import (
+    AccuracyConfig,
+    AgenticInferenceConfig,
+    Dataset,
     DatasetType,
     EvalMethod,
-    LoadPatternType,
-    OSLDistributionType,
-    ProfilerEngine,
     ScorerMethod,
-    StreamingMode,
-    TestMode,
-    TestType,
 )
 from .model_params import (
     ModelParams,
     OSLDistribution,
+    OSLDistributionType,
+    StreamingMode,
     SubmissionReference,
     _non_default_completion_controls,
 )
 from .settings import (
     EarlyStoppingConfig,
     LoadPattern,
+    LoadPatternType,
     OfflineSettings,
     OnlineSettings,
+    ProfilerEngine,
     ProfilingConfig,
     RuntimeConfig,
     Settings,
@@ -119,6 +122,34 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+
+class TestMode(str, Enum):
+    """Test mode controlling performance issuance and response collection.
+
+    - PERF: Run performance and ordinary configured scoring without in-process
+      collection; skip scorers that own an external evaluation run
+    - ACC: Skip performance and collect responses for configured scoring
+    - BOTH: Run performance and configured scoring with response collection
+    """
+
+    PERF = "perf"
+    ACC = "acc"
+    BOTH = "both"
+
+
+class TestType(str, Enum):
+    """Test type for both config classification and execution mode.
+
+    - OFFLINE: Max throughput benchmark (all queries at t=0)
+    - ONLINE: Sustained QPS benchmark (Poisson or concurrency-based)
+    - EVAL: Accuracy evaluation
+    - SUBMISSION: Official submission (may include both perf and accuracy)
+    """
+
+    OFFLINE = "offline"
+    ONLINE = "online"
+    EVAL = "eval"
+    SUBMISSION = "submission"
 
 
 
