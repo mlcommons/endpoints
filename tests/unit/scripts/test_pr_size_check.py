@@ -173,6 +173,127 @@ def test_main_writes_github_output(tmp_path, monkeypatch):
     assert "files=1" in written
 
 
+def test_main_measures_head_ref_not_working_tree(tmp_path, monkeypatch, capsys):
+    """The two-ref path: ``--head`` measures a ref, not the working tree.
+
+    Mirrors the labeling workflow, which checks out the base and passes
+    ``--head FETCH_HEAD``. The working tree is left on the base branch with no
+    changes, so a correct size can only come from the ``--head`` ref.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+
+    _git(tmp_path, "checkout", "-b", "feature")
+    (tmp_path / "a.py").write_text("x = 1\n" + "\n".join(f"c{i}" for i in range(600)))
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feature")
+
+    # Return the working tree to the base branch: it now holds no change.
+    _git(tmp_path, "checkout", "main")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_BASE_REF", raising=False)
+    monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+
+    rc = mod.main(["--base", "main", "--head", "feature"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # The +600 lines exist only on the feature ref; the working tree (main) is
+    # clean, so LARGE proves the size came from --head, not the working tree.
+    assert "PR size: LARGE" in out
+    assert "600 lines, 1 files" in out
+
+
+def test_main_excludes_top_level_lockfile(tmp_path, monkeypatch, capsys):
+    """A root-level ``*.lock`` (e.g. ``uv.lock``) is excluded from the size.
+
+    Guards the ``:(exclude)*.lock`` pathspec: git's default matching means a
+    root-level lockfile has no path separator, so a large lock bump must not
+    inflate the class.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "uv.lock").write_text("v = 0\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+
+    _git(tmp_path, "checkout", "-b", "feature")
+    (tmp_path / "a.py").write_text("x = 1\ny = 2\n")  # +1 counted line
+    (tmp_path / "uv.lock").write_text("\n".join(f"l{i}" for i in range(600)))
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feature")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PR_BASE_REF", "main")
+    monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # uv.lock's ~600-line churn is excluded; only a.py's +1 line counts.
+    assert "PR size: NORMAL" in out
+    assert "1 lines, 1 files" in out
+
+
+def test_main_auto_detects_base_when_env_unset(tmp_path, monkeypatch, capsys):
+    """With no ``PR_BASE_REF``/``--base``, resolution scans the candidate refs.
+
+    The default local pre-commit path: ``resolve_base_ref`` tries
+    ``origin/main`` -> ``main`` -> ``upstream/main``; here only ``main`` exists.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+
+    _git(tmp_path, "checkout", "-b", "feature")
+    (tmp_path / "a.py").write_text("x = 1\ny = 2\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feature")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_BASE_REF", raising=False)
+    monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "PR size: NORMAL" in out
+    assert "base: main @" in out  # resolved via candidate scan, not env/--base
+
+
+def test_main_uses_github_base_ref(tmp_path, monkeypatch, capsys):
+    """``GITHUB_BASE_REF`` is consulted when ``PR_BASE_REF``/``--base`` are unset."""
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+
+    _git(tmp_path, "checkout", "-b", "feature")
+    (tmp_path / "a.py").write_text("x = 1\ny = 2\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feature")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_BASE_REF", raising=False)
+    monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "base: main @" in out
+
+
 def test_main_skips_when_base_unresolvable(tmp_path, monkeypatch, capsys):
     _init_repo(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n")

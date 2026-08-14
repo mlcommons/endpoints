@@ -44,7 +44,7 @@ import subprocess
 # sources, and generated files are churn a reviewer does not read line by line.
 EXCLUDE_PATHSPECS = (
     ":(exclude)tests/**",
-    ":(exclude)**/*.lock",
+    ":(exclude)*.lock",
     ":(exclude)vendor/**",
     ":(exclude)src/inference_endpoint/openai/openai_types_gen.py",
     ":(exclude)src/inference_endpoint/openai/openapi.yaml",
@@ -136,7 +136,7 @@ def resolve_base_ref() -> str | None:
 def measure(base_ref: str, head_ref: str | None) -> tuple[int, int, str] | None:
     """Return (churn, files, merge_base_short), or None if the diff cannot run.
 
-    With ``head_ref`` unset this diffs the merge-base against the working tree
+    If ``head_ref`` is None, this diffs the merge-base against the working tree
     (the pre-commit case: the working tree holds the staged changes). With
     ``head_ref`` set it diffs merge-base..head_ref (the CI case, where the
     checkout is the base repo and the PR head is fetched separately).
