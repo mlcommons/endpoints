@@ -347,7 +347,9 @@ See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details
 - `hf_squad_dataset` — HuggingFace squad dataset
 - `max_throughput_runtime_settings`, `poisson_runtime_settings`, `concurrency_runtime_settings` — preset configs
 
-**Test data**: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples), `tests/assets/datasets/squad_pruned/`
+**Test data**: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples), `tests/assets/datasets/squad_pruned/`, `tests/assets/tokenizers/char` + `char_chat` (hermetic char-level tokenizers; `char_chat` adds a minimal chat template for the structured tokenization paths)
+
+**Performance suites** (`tests/performance/`, CI-skipped, run on demand): CLI roofline + low-QPS correctness against the built-in stub servers, and a metrics-tokenizer throughput matrix with regression floors. Cases record rows via the shared `record_result` fixture (`tests/performance/conftest.py`) into one end-of-session summary table; knobs are `--roofline-*` pytest options. See docs/CLIENT_PERFORMANCE_TUNING.md ("Performance Test Suite").
 
 ### Performance Guidelines
 
