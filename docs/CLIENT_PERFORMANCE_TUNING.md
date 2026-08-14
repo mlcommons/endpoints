@@ -178,3 +178,76 @@ uv run python -m inference_endpoint.testing.variable_throughput_server --stream 
 | `--stream-interval`     | 1       | Chars per SSE event                                                           |
 | `--max-concurrency`     | 0       | Max concurrent requests (0 = unlimited)                                       |
 | `--num-workers`         | 10      | Server worker processes                                                       |
+
+---
+
+## Performance Test Suite
+
+On-demand pytest suites (`@pytest.mark.performance`, CI-skipped) that drive the
+test servers above through the full CLI pipeline and benchmark the metrics
+tokenizer. Run them when investigating a client throughput regression or
+benchmarking a new machine.
+
+```bash
+# Everything (~10-15 min)
+uv run pytest -vs -m performance --no-cov tests/performance
+
+# Roofline + low-QPS correctness (~8-10 min)
+uv run pytest -vs -m performance --no-cov tests/performance/commands/test_e2e_perf.py
+
+# Tokenizer throughput matrix (~1 min)
+uv run pytest -vs -m performance --no-cov \
+    tests/performance/async_utils/services/metrics_aggregator/test_token_metrics_perf.py
+```
+
+### Families
+
+- **Roofline** (`tests/performance/commands/test_e2e_perf.py`): peak QPS against
+  `MaxThroughputServer` for every load pattern — `max_throughput` burst,
+  `concurrency` sweep (1k/4k/16k), and a binary search for the largest
+  10k-multiple Poisson `target_qps` sustained — parameterized on stream /
+  non-stream. Reports numbers; asserts only correctness (zero failures, clean
+  completion).
+- **Low-QPS correctness** (same file): 5 QPS Poisson against
+  `VariableResponseServer` for ~20 s; asserts zero failed requests. Guards
+  keep-alive / idle-pool / slow-response regressions that only surface when
+  connections sit idle past `TCP_KEEPIDLE`.
+- **Tokenizer throughput matrix**
+  (`tests/performance/async_utils/services/metrics_aggregator/test_token_metrics_perf.py`):
+  drives `TokenBatchQueue` end-to-end over every input kind × flush lane —
+  `text` (batched: live = thread pool ≤1024 items/flush, drain = fan-out across
+  every pinned shard process) and the chat-template kinds `msg` (structured
+  assistant output → OSL/TPOT) and `prompt` (full chat input → structured ISL),
+  which render one `apply_chat_template` per item on the thread pool and never
+  touch the shard pool (live ≈ drain, GIL-bound). Uses the checked-in
+  char-level tokenizers (`tests/assets/tokenizers/char`, `char_chat`) so runs
+  are hermetic.
+
+### Knobs
+
+Pytest options, grouped under `roofline` in `pytest --help`:
+
+| Option                       | Default | Purpose                                                                                                                        |
+| ---------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `--roofline-server-workers`  | 4       | Stub server worker processes                                                                                                   |
+| `--roofline-stream-interval` | 10      | Chars per SSE event in the stub response (`output_length` 160 → 16 events/response; 1 measures per-chunk parse cost)           |
+| `--roofline-client-workers`  | auto    | Override the benchmark client `--workers`                                                                                      |
+| `--roofline-init-timeout`    | auto    | Override `--client.worker-initialization-timeout`; very high core counts can need e.g. `300` because auto worker spawn is slow |
+
+### Summary table
+
+Every parameterized case records a row via the shared `record_result` fixture
+(`tests/performance/conftest.py`); one table with host / CPU / core info prints
+at end of session so cross-machine runs are easy to compare. `Chars` is the
+total text payload fed to the tokenizer (tokenizer rows only).
+
+### Regression floors
+
+Each tokenizer-matrix cell asserts a throughput floor
+(`_FLOOR_ITEMS_PER_S` in the test) set at 50% of the slowest hardware the lane
+was validated on. Drain cells also run under a time budget derived from the
+floor (`2 × n / floor`); exceeding it fails the test the same way a production
+drain timeout surfaces (`n_pending_tasks > 0`). When a healthy but slower
+machine fails a floor, lower the floor to 50% of the new measurement in the
+same change that records the run. The roofline and low-QPS families
+deliberately have no throughput floors.

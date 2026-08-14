@@ -49,6 +49,48 @@ sys.path.insert(0, src_path)
 pytest_plugins = ["src.inference_endpoint.profiling.pytest_profiling_plugin"]
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """CLI knobs for the E2E performance tests (tests/performance/commands).
+
+    Registered here (not in tests/performance/conftest.py) because options
+    must live in an initial conftest — ``testpaths = ["tests"]`` guarantees
+    this file is loaded for every invocation, so ``-m performance`` from the
+    repo root sees the flags too.
+    """
+    group = parser.getgroup("roofline", "E2E performance test knobs")
+    group.addoption(
+        "--roofline-server-workers",
+        type=int,
+        default=4,
+        help="MaxThroughputServer stub worker processes (default: 4)",
+    )
+    group.addoption(
+        "--roofline-stream-interval",
+        type=int,
+        default=10,
+        help=(
+            "Characters per SSE event in the streaming stub response; the "
+            "stub's output_length is 160 chars, so 10 means 16 events per "
+            "response (default: 10)"
+        ),
+    )
+    group.addoption(
+        "--roofline-client-workers",
+        type=int,
+        default=None,
+        help="Override the benchmark client --workers (default: auto)",
+    )
+    group.addoption(
+        "--roofline-init-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Override --client.worker-initialization-timeout seconds "
+            "(useful in containers where cpu_affinity is restricted)"
+        ),
+    )
+
+
 @pytest.fixture
 def sample_config() -> dict[str, Any]:
     """Sample configuration for testing."""

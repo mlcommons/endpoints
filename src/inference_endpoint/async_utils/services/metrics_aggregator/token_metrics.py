@@ -20,7 +20,7 @@ processes each pinned to a block of ``CORES_PER_WORKER`` cores (a single BPE
 backend pool is memory-bound and saturates ~8 cores). The aggregator buffers
 per-sample text. The sharded pool is the drain-phase accelerator and is
 auto-sized (one shard per core block); live mid-run flushes run on a small
-in-process thread pool (``--tokenizer-workers``, default 2) owned by the
+in-process thread pool (``--tokenizer-workers``, default 4) owned by the
 queue's live loop. Plain text counting uses a Hugging Face fast tokenizer's
 Rust backend. Structured chat counting uses the full tokenizer's
 ``apply_chat_template`` path and does not require that backend. Platforms
