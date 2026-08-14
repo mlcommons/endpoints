@@ -37,6 +37,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.registry import 
 from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
     TokenBatchQueue,
 )
+from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
+    MessageInput,
+)
 from inference_endpoint.core.record import (
     EventRecord,
     SampleEventType,
@@ -353,6 +356,45 @@ class TestOslTriggerToolCalls:
         await queue.drain_all()
 
         assert snapshot_series_count(registry, "osl") == 1
+
+    async def test_osl_with_reasoning_uses_structured_message_path(self):
+        from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+            OslTrigger,
+            SampleRow,
+        )
+        from inference_endpoint.core.types import TextModelOutput
+
+        class CapturingTokenizer:
+            def __init__(self):
+                self.messages = []
+
+            async def count_batch_async(self, inputs, _loop, live=False):
+                assert all(isinstance(item, MessageInput) for item in inputs)
+                self.messages.extend(
+                    (item.content, item.reasoning, item.tool_calls) for item in inputs
+                )
+                return [4] * len(inputs)
+
+        registry = MetricsRegistry()
+        registry.register_series("osl", hdr_low=1, hdr_high=100_000)
+        tokenizer = CapturingTokenizer()
+        queue = TokenBatchQueue(tokenizer, asyncio.get_running_loop())
+        trigger = OslTrigger(registry, queue)
+        output = TextModelOutput(output="answer", reasoning="private reasoning")
+
+        trigger.fire(
+            EventRecord(
+                event_type=SampleEventType.COMPLETE,
+                timestamp_ns=1000,
+                sample_uuid="s1",
+                data=output,
+            ),
+            SampleRow(sample_uuid="s1"),
+            {},
+        )
+        await queue.drain_all()
+
+        assert tokenizer.messages == [("answer", "private reasoning", None)]
 
 
 @pytest.mark.unit

@@ -103,10 +103,10 @@ def _phase_osl_stats(
     population in one call would hold every Encoding in memory at once.
     """
     # Skip empty/failed completions (a failed request still logs a COMPLETE
-    # event with output == ""). The perf-side OslTrigger does the same
-    # (metrics_table.OslTrigger._extract_text returns None for empty text), so
-    # accuracy OSL matches its population and a failure isn't counted as a
-    # 0-token sample that would drag min/avg down.
+    # event with output == ""). The performance-side OslTrigger follows the
+    # same rule: _extract_tokenization_input returns None for an empty text-only
+    # output, so a failure is not counted as a 0-token sample that would drag
+    # min/avg down.
     texts = [
         uuid_to_text[u] for u in sample_uuids if u in uuid_to_text and uuid_to_text[u]
     ]
