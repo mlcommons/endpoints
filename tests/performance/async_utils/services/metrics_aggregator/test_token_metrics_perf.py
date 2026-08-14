@@ -57,6 +57,7 @@ import random
 import time
 from pathlib import Path
 
+import msgspec
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
     BatchTokenizer,
@@ -181,6 +182,28 @@ class _Recorder:
         self.tokens += count
 
 
+def _payload_bytes(item: TokenizationInput) -> int:
+    """UTF-8 bytes of the text payload an item carries to the tokenizer.
+
+    For structured kinds this counts the enqueued content (messages, tool
+    JSON), not the template framing the render adds around it — it answers
+    "how much workload text did this lane chew through".
+    """
+    if isinstance(item, TextInput):
+        return len(item.text.encode())
+    if isinstance(item, MessageInput):
+        return (
+            len(item.content.encode())
+            + len((item.reasoning or "").encode())
+            + (len(msgspec.json.encode(item.tool_calls)) if item.tool_calls else 0)
+        )
+    if isinstance(item, PromptInput):
+        return sum(len(str(m.get("content", "")).encode()) for m in item.messages) + (
+            len(msgspec.json.encode(item.tools)) if item.tools else 0
+        )
+    return len(item.token_ids)  # TokenIdsInput: pre-tokenized, no text payload
+
+
 @pytest.mark.performance
 @pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize("lane", ["live", "drain"])
@@ -219,10 +242,19 @@ async def test_tokenizer_lane_throughput(kind, lane, record_result):
     assert rec.items == n
     assert rec.tokens > 0
     items_per_s = n / elapsed
+    data_mb = sum(_payload_bytes(item) for item in items) / 1e6
     label = f"tok {kind} {lane} ({detail})"
-    record_result(label, qps=items_per_s, total=n, elapsed=elapsed, failed=pending)
+    record_result(
+        label,
+        qps=items_per_s,
+        total=n,
+        data_mb=data_mb,
+        elapsed=elapsed,
+        failed=pending,
+    )
     print(
         f"\n  {label}: items/s={items_per_s:>9,.0f}  "
         f"tokens/s={rec.tokens / elapsed:>12,.0f}  "
+        f"data={data_mb:,.1f}MB ({data_mb / elapsed:,.1f}MB/s)  "
         f"total={n:,}  elapsed={elapsed:.2f}s"
     )

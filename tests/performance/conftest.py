@@ -173,6 +173,8 @@ def _fmt_cell(value: Any, kind: str) -> str:
             return f"{float(value):>7.2f}s"
         if kind == "failed":
             return f"{int(float(value)):>4}"
+        if kind == "data_mb":
+            return f"{float(value):>7.1f}MB"
     except (TypeError, ValueError):
         return str(value)
     return str(value)
@@ -193,9 +195,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:  # no
     tr.write_line(f"CPU:   {info['cpu']}")
     tr.write_line("")
 
-    headers = ["Test", "Stream", "QPS", "Total", "Elapsed", "Failed"]
-    kinds = ["label", "stream", "qps", "total", "elapsed", "failed"]
-    keys = ["label", "stream", "qps", "total", "elapsed", "failed"]
+    headers = ["Test", "Stream", "QPS", "Total", "Data", "Elapsed", "Failed"]
+    kinds = ["label", "stream", "qps", "total", "data_mb", "elapsed", "failed"]
+    keys = ["label", "stream", "qps", "total", "data_mb", "elapsed", "failed"]
 
     body = [
         [_fmt_cell(r.get(k), kind) for k, kind in zip(keys, kinds, strict=False)]
