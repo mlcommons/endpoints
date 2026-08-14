@@ -38,8 +38,6 @@ settings:
   timeouts:
     # Increase for slow worker startup (spawn, imports). Default 60s may be too short.
     worker_initialization_timeout_s: 120
-    performance_drain_timeout_s: null # Performance drain timeout in seconds (null = wait indefinitely)
-    accuracy_drain_timeout_s: null # Accuracy drain timeout in seconds (null = wait indefinitely)
   warmup:
     enabled: true # Enable warmup phase before performance run
     n_requests: 1600 # Warmup request count (None = full dataset once)
