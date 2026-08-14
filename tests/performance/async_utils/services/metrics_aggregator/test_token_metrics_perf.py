@@ -74,15 +74,14 @@ _TOKENIZER_ROOT = Path(__file__).resolve().parents[4] / "assets" / "tokenizers"
 TOKENIZER = str(_TOKENIZER_ROOT / "char")
 CHAT_TOKENIZER = str(_TOKENIZER_ROOT / "char_chat")
 
-# Pinned to 2 (the production default is 4) to keep the suite light and the
-# numbers comparable across machines; thread count barely moves the
-# chat-template kinds anyway (GIL-bound render).
+# Live thread-lane width for this suite (production default is 4). Thread
+# count barely moves the chat-template kinds (GIL-bound render).
 LIVE_WORKERS = 2
 
 # Per-(kind, lane) corpus sizes, sized so each cell runs whole seconds for a
-# stable items/s number on a dev box. Only the text drain gets the huge
-# corpus (it spans every shard); the chat-template kinds run per item on the
-# thread pool at ~1-2k items/s, so 16k items is already ~10s per cell.
+# stable items/s number. Only the text drain gets the huge corpus (it spans
+# every shard); the chat-template kinds run per item on the thread pool at
+# ~1-2k items/s, so 16k items is already ~10s per cell.
 _N = {
     ("text", "live"): 32_768,
     ("text", "drain"): 524_288,
@@ -91,14 +90,12 @@ _N = {
     ("prompt", "live"): 16_384,
     ("prompt", "drain"): 16_384,
 }
-# Regression floors: 50% of the slowest machine each lane was measured on
-# (thread-pool lanes: a 144-core aarch64 GB200 Grace node; text drain: a
-# 48-core x86 dev box with 6 shards — drain scales with shard count, so the
-# fewest-shard machine sets the bound). A cell failing its floor means the
-# lane runs at half the worst hardware we validated, i.e. a real regression,
-# not machine variance. Drain cells also get a time budget derived from the
-# floor (2 x n / floor): exceeding it fails the run like a production drain
-# timeout would (n_pending_tasks > 0).
+# Regression floors: 50% of the slowest hardware each lane was measured on
+# (drain scales with shard count, so the fewest-shard machine sets the text
+# drain bound). A cell failing its floor runs at half the worst validated
+# hardware — a real regression, not machine variance. Drain cells also get a
+# time budget derived from the floor (2 x n / floor): exceeding it fails the
+# run like a production drain timeout would (n_pending_tasks > 0).
 _FLOOR_ITEMS_PER_S = {
     ("text", "live"): 2_800,
     ("text", "drain"): 39_000,
@@ -237,8 +234,7 @@ async def test_tokenizer_lane_throughput(kind, lane, record_result):
     # drain rows showing shard counts while matching the 2-thread live rows
     # is the architectural point, not a config mistake. Live cells skip the
     # shard spawn (n_workers=0): the live lane never touches shards.
-    # LIVE_WORKERS stays at 2 (see constant above); more threads do not
-    # help the structured kinds (GIL-bound render).
+    # more threads do not help the structured kinds (GIL-bound render).
     shards = lane == "drain"
     tokenizer_name = TOKENIZER if kind == "text" else CHAT_TOKENIZER
     loop = asyncio.get_running_loop()
