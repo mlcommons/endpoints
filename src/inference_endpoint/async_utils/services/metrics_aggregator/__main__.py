@@ -171,7 +171,7 @@ async def main() -> None:
     parser.add_argument(
         "--tokenizer-workers",
         type=int,
-        default=2,
+        default=4,
         help=(
             "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
             "(0 = no mid-run tokenization, everything defers to the "

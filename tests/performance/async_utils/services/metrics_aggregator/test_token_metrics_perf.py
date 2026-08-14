@@ -74,7 +74,9 @@ _TOKENIZER_ROOT = Path(__file__).resolve().parents[4] / "assets" / "tokenizers"
 TOKENIZER = str(_TOKENIZER_ROOT / "char")
 CHAT_TOKENIZER = str(_TOKENIZER_ROOT / "char_chat")
 
-# Matches the CLI default for --tokenizer-workers (the live thread lane).
+# Pinned to 2 (the production default is 4) to keep the suite light and the
+# numbers comparable across machines; thread count barely moves the
+# chat-template kinds anyway (GIL-bound render).
 LIVE_WORKERS = 2
 
 # Per-(kind, lane) corpus sizes, sized so each cell runs whole seconds for a
@@ -88,6 +90,22 @@ _N = {
     ("msg", "drain"): 16_384,
     ("prompt", "live"): 16_384,
     ("prompt", "drain"): 16_384,
+}
+# Regression floors: 50% of the slowest machine each lane was measured on
+# (thread-pool lanes: a 144-core aarch64 GB200 Grace node; text drain: a
+# 48-core x86 dev box with 6 shards — drain scales with shard count, so the
+# fewest-shard machine sets the bound). A cell failing its floor means the
+# lane runs at half the worst hardware we validated, i.e. a real regression,
+# not machine variance. Drain cells also get a time budget derived from the
+# floor (2 x n / floor): exceeding it fails the run like a production drain
+# timeout would (n_pending_tasks > 0).
+_FLOOR_ITEMS_PER_S = {
+    ("text", "live"): 2_800,
+    ("text", "drain"): 39_000,
+    ("msg", "live"): 700,
+    ("msg", "drain"): 700,
+    ("prompt", "live"): 380,
+    ("prompt", "drain"): 380,
 }
 
 _WORDS = (
@@ -219,8 +237,8 @@ async def test_tokenizer_lane_throughput(kind, lane, record_result):
     # drain rows showing shard counts while matching the 2-thread live rows
     # is the architectural point, not a config mistake. Live cells skip the
     # shard spawn (n_workers=0): the live lane never touches shards.
-    # LIVE_WORKERS=2 mirrors the CLI default --tokenizer-workers; more
-    # threads do not help the structured kinds (GIL-bound render).
+    # LIVE_WORKERS stays at 2 (see constant above); more threads do not
+    # help the structured kinds (GIL-bound render).
     shards = lane == "drain"
     tokenizer_name = TOKENIZER if kind == "text" else CHAT_TOKENIZER
     loop = asyncio.get_running_loop()
@@ -240,10 +258,11 @@ async def test_tokenizer_lane_throughput(kind, lane, record_result):
                 await queue.flush_live_once()
             pending = queue.pending
         else:
-            pending = await queue.flush_remaining(None)
+            drain_budget_s = 2 * n / _FLOOR_ITEMS_PER_S[(kind, lane)]
+            pending = await queue.flush_remaining(drain_budget_s)
         elapsed = time.perf_counter() - t0
 
-    assert pending == 0
+    assert pending == 0, f"drain timed out: {pending} items left uncounted"
     assert rec.items == n
     assert rec.tokens > 0
     items_per_s = n / elapsed
@@ -262,4 +281,9 @@ async def test_tokenizer_lane_throughput(kind, lane, record_result):
         f"tokens/s={rec.tokens / elapsed:>12,.0f}  "
         f"chars={chars:,} ({chars / elapsed / 1e6:,.1f}M chars/s)  "
         f"total={n:,}  elapsed={elapsed:.2f}s"
+    )
+    floor = _FLOOR_ITEMS_PER_S[(kind, lane)]
+    assert items_per_s >= floor, (
+        f"{label}: {items_per_s:,.0f} items/s below regression floor "
+        f"{floor:,} (50% of slowest measured hardware)"
     )
