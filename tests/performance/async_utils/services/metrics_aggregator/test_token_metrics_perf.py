@@ -13,40 +13,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Throughput benchmarks for the metrics-tokenizer lanes.
+"""Throughput matrix for the metrics-tokenizer paths.
 
-Drives :class:`TokenBatchQueue` end-to-end (enqueue → flush → recorder
-callback) over the production tokenization paths:
+One parametrized test drives :class:`TokenBatchQueue` end-to-end (enqueue →
+flush → recorder callback) over every input kind × flush lane combination,
+so a single run gives the full token-throughput overview:
 
-* **Live text lane** — ``flush_live_once`` in a loop, exactly as the mid-run
-  flush cadence does: each flush takes at most ``_LIVE_FLUSH_MAX_ITEMS``
-  per input kind and encodes on the small in-process thread pool (rayon
-  capped to ``live_workers`` cores).
+* ``text`` — the pre-existing batched plain-text path. The live lane encodes
+  on the small in-process thread pool (≤1024 items/flush, rayon capped to
+  ``live_workers``); the drain lane fans the whole buffer out across every
+  pinned shard process.
 
-* **Drain text lane** — ``flush_remaining(None)``, as the end-of-run drain
-  does: the whole ``TextInput`` buffer fans out across every pinned shard
-  process.
+* ``msg`` — a structured assistant *output* (content + reasoning + tool
+  call), the chat-template OSL/TPOT path added with structured token
+  counting (#441). One ``apply_chat_template`` render per item on the
+  thread pool; never touches the shard pool, so live ≈ drain.
 
-* **Message lane** — structured assistant outputs (``MessageInput`` with
-  content + reasoning + a tool call) rendered per item via
-  ``apply_chat_template`` on the in-process thread pool. This is the OSL/TPOT
-  path for tool-call outputs and never touches the shard pool, so its
-  throughput bounds how fast a structured backlog drains.
-
-* **Prompt lane** — complete chat inputs (``PromptInput`` with message
-  history + tools + generation prompt), the structured-ISL path; same
-  per-item chat-template rendering.
+* ``prompt`` — a complete structured *input* (message history + tools +
+  generation prompt), the chat-template ISL path added with #441. Same
+  per-item rendering; the heavier render of the two (whole history +
+  framing).
 
 Uses the checked-in char-level tokenizers (``tests/assets/tokenizers/char``
-for text, ``char_chat`` — same Rust backend plus a minimal ChatML-style
-chat template — for the structured lanes; no network). Numbers track the
+for text; ``char_chat`` — same Rust backend plus a minimal ChatML-style chat
+template — for the structured kinds; no network). Numbers track the
 queue/flush/shard/template machinery rather than BPE merge cost — a real
-model tokenizer shifts the absolute texts/s but not the machinery
-regressions these guard.
+model tokenizer shifts absolute items/s but not the machinery regressions
+these guard, and real agentic content scales the chat-template kinds
+linearly with rendered length.
 
 Reports items/s per lane (asserting only correctness: every enqueued item
-recorded, nothing left pending); rows land in the shared
-``record_result`` summary table. Run::
+recorded, nothing left pending); rows land in the shared ``record_result``
+summary table. Run::
 
     pytest -vs -m performance --no-cov \
         tests/performance/async_utils/services/metrics_aggregator/test_token_metrics_perf.py
@@ -78,14 +76,18 @@ CHAT_TOKENIZER = str(_TOKENIZER_ROOT / "char_chat")
 # Matches the CLI default for --tokenizer-workers (the live thread lane).
 LIVE_WORKERS = 2
 
-# Sized so each lane runs long enough (seconds, not milliseconds) for a
-# stable items/s number on a dev box: the live lane is bounded to
-# _LIVE_FLUSH_MAX_ITEMS per flush on a 2-core rayon pool; the drain lane
-# spans every shard; the structured lanes render one chat template per item
-# on the thread pool.
-N_LIVE = 32_768
-N_DRAIN = 524_288
-N_STRUCTURED = 16_384
+# Per-(kind, lane) corpus sizes, sized so each cell runs whole seconds for a
+# stable items/s number on a dev box. Only the text drain gets the huge
+# corpus (it spans every shard); the chat-template kinds run per item on the
+# thread pool at ~1-2k items/s, so 16k items is already ~10s per cell.
+_N = {
+    ("text", "live"): 32_768,
+    ("text", "drain"): 524_288,
+    ("msg", "live"): 16_384,
+    ("msg", "drain"): 16_384,
+    ("prompt", "live"): 16_384,
+    ("prompt", "drain"): 16_384,
+}
 
 _WORDS = (
     "benchmark",
@@ -126,37 +128,31 @@ def _sentence(rng: random.Random, lo: int, hi: int) -> str:
     return " ".join(rng.choices(_WORDS, k=rng.randint(lo, hi)))
 
 
-def _make_texts(n: int, seed: int = 42) -> list[str]:
-    """Deterministic synthetic texts, 8-128 words each (~600 chars avg)."""
-    rng = random.Random(seed)
-    return [_sentence(rng, 8, 128) for _ in range(n)]
-
-
-def _make_messages(n: int, seed: int = 43) -> list[MessageInput]:
-    """Structured assistant outputs: content + reasoning + one tool call."""
-    rng = random.Random(seed)
-    return [
-        MessageInput(
-            content=_sentence(rng, 8, 64),
-            reasoning=_sentence(rng, 16, 96),
-            tool_calls=(
-                {
-                    "id": f"call_{i}",
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "arguments": {"city": _sentence(rng, 1, 3)},
+def _make_items(kind: str, n: int) -> list[TokenizationInput]:
+    """Deterministic synthetic inputs for one kind (fixed seed per kind)."""
+    if kind == "text":
+        rng = random.Random(42)
+        return [TextInput(_sentence(rng, 8, 128)) for _ in range(n)]
+    if kind == "msg":
+        rng = random.Random(43)
+        return [
+            MessageInput(
+                content=_sentence(rng, 8, 64),
+                reasoning=_sentence(rng, 16, 96),
+                tool_calls=(
+                    {
+                        "id": f"call_{i}",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"city": _sentence(rng, 1, 3)},
+                        },
                     },
-                },
-            ),
-        )
-        for i in range(n)
-    ]
-
-
-def _make_prompts(n: int, seed: int = 44) -> list[PromptInput]:
-    """Complete chat inputs: 4-message history + tools + generation prompt."""
-    rng = random.Random(seed)
+                ),
+            )
+            for i in range(n)
+        ]
+    rng = random.Random(44)
     return [
         PromptInput(
             messages=(
@@ -185,107 +181,48 @@ class _Recorder:
         self.tokens += count
 
 
-def _report(
-    record_result, label: str, n_items: int, elapsed: float, rec: _Recorder
-) -> None:
-    items_per_s = n_items / elapsed
-    record_result(label, qps=items_per_s, total=n_items, elapsed=elapsed, failed=0)
+@pytest.mark.performance
+@pytest.mark.xdist_group(name="serial_performance")
+@pytest.mark.parametrize("lane", ["live", "drain"])
+@pytest.mark.parametrize("kind", ["text", "msg", "prompt"])
+@pytest.mark.asyncio
+async def test_tokenizer_lane_throughput(kind, lane, record_result):
+    """One (input kind, flush lane) cell of the tokenizer throughput matrix."""
+    n = _N[(kind, lane)]
+    items = _make_items(kind, n)
+    # Only the text drain uses the shard pool; every other cell runs
+    # in-process (n_workers=0 skips the shard spawn). Structured kinds need
+    # the chat-template tokenizer so apply_chat_template really renders.
+    shards = kind == "text" and lane == "drain"
+    tokenizer_name = TOKENIZER if kind == "text" else CHAT_TOKENIZER
+    loop = asyncio.get_running_loop()
+    rec = _Recorder()
+    with BatchTokenizer(
+        tokenizer_name,
+        live_workers=LIVE_WORKERS,
+        n_workers=-1 if shards else 0,
+    ) as tok:
+        detail = f"{len(tok._procs)} shards" if shards else f"{LIVE_WORKERS} thr"
+        queue = TokenBatchQueue(tok, loop)
+        for item in items:
+            queue.enqueue(item, rec)
+        t0 = time.perf_counter()
+        if lane == "live":
+            while queue.pending:
+                await queue.flush_live_once()
+            pending = queue.pending
+        else:
+            pending = await queue.flush_remaining(None)
+        elapsed = time.perf_counter() - t0
+
+    assert pending == 0
+    assert rec.items == n
+    assert rec.tokens > 0
+    items_per_s = n / elapsed
+    label = f"tok {kind} {lane} ({detail})"
+    record_result(label, qps=items_per_s, total=n, elapsed=elapsed, failed=pending)
     print(
         f"\n  {label}: items/s={items_per_s:>9,.0f}  "
         f"tokens/s={rec.tokens / elapsed:>12,.0f}  "
-        f"total={n_items:,}  elapsed={elapsed:.2f}s"
+        f"total={n:,}  elapsed={elapsed:.2f}s"
     )
-
-
-@pytest.mark.performance
-@pytest.mark.xdist_group(name="serial_performance")
-@pytest.mark.asyncio
-async def test_live_text_lane_throughput(record_result):
-    """Mid-run live lane: bounded text flushes on the in-process thread pool."""
-    items: list[TokenizationInput] = [TextInput(t) for t in _make_texts(N_LIVE)]
-    loop = asyncio.get_running_loop()
-    rec = _Recorder()
-    with BatchTokenizer(TOKENIZER, live_workers=LIVE_WORKERS, n_workers=0) as tok:
-        queue = TokenBatchQueue(tok, loop)
-        for item in items:
-            queue.enqueue(item, rec)
-        t0 = time.perf_counter()
-        while queue.pending:
-            await queue.flush_live_once()
-        elapsed = time.perf_counter() - t0
-
-    assert rec.items == N_LIVE
-    assert queue.pending == 0
-    _report(record_result, f"tok live text ({LIVE_WORKERS} thr)", N_LIVE, elapsed, rec)
-
-
-@pytest.mark.performance
-@pytest.mark.xdist_group(name="serial_performance")
-@pytest.mark.asyncio
-async def test_drain_text_lane_throughput(record_result):
-    """End-of-run drain: full text buffer fanned out across every shard."""
-    items: list[TokenizationInput] = [TextInput(t) for t in _make_texts(N_DRAIN)]
-    loop = asyncio.get_running_loop()
-    rec = _Recorder()
-    with BatchTokenizer(TOKENIZER, live_workers=LIVE_WORKERS) as tok:
-        n_shards = len(tok._procs)
-        queue = TokenBatchQueue(tok, loop)
-        for item in items:
-            queue.enqueue(item, rec)
-        t0 = time.perf_counter()
-        pending = await queue.flush_remaining(None)
-        elapsed = time.perf_counter() - t0
-
-    assert pending == 0
-    assert rec.items == N_DRAIN
-    _report(record_result, f"tok drain text ({n_shards} shards)", N_DRAIN, elapsed, rec)
-
-
-@pytest.mark.performance
-@pytest.mark.xdist_group(name="serial_performance")
-@pytest.mark.asyncio
-async def test_message_lane_throughput(record_result):
-    """Structured assistant outputs (OSL/TPOT): per-item chat-template render.
-
-    Uses the ``char_chat`` tokenizer so ``apply_chat_template`` really renders
-    (the plain ``char`` tokenizer has no template and would exercise only the
-    whitespace fallback). Skips shard setup — structured items never touch the
-    shard pool.
-    """
-    items = _make_messages(N_STRUCTURED)
-    loop = asyncio.get_running_loop()
-    rec = _Recorder()
-    with BatchTokenizer(CHAT_TOKENIZER, live_workers=LIVE_WORKERS, n_workers=0) as tok:
-        queue = TokenBatchQueue(tok, loop)
-        for item in items:
-            queue.enqueue(item, rec)
-        t0 = time.perf_counter()
-        pending = await queue.flush_remaining(None)
-        elapsed = time.perf_counter() - t0
-
-    assert pending == 0
-    assert rec.items == N_STRUCTURED
-    assert rec.tokens > 0, "chat-template render produced no tokens"
-    _report(record_result, "tok msg chat-template", N_STRUCTURED, elapsed, rec)
-
-
-@pytest.mark.performance
-@pytest.mark.xdist_group(name="serial_performance")
-@pytest.mark.asyncio
-async def test_prompt_lane_throughput(record_result):
-    """Complete chat prompts (structured ISL): per-item chat-template render."""
-    items = _make_prompts(N_STRUCTURED)
-    loop = asyncio.get_running_loop()
-    rec = _Recorder()
-    with BatchTokenizer(CHAT_TOKENIZER, live_workers=LIVE_WORKERS, n_workers=0) as tok:
-        queue = TokenBatchQueue(tok, loop)
-        for item in items:
-            queue.enqueue(item, rec)
-        t0 = time.perf_counter()
-        pending = await queue.flush_remaining(None)
-        elapsed = time.perf_counter() - t0
-
-    assert pending == 0
-    assert rec.items == N_STRUCTURED
-    assert rec.tokens > 0, "chat-template render produced no tokens"
-    _report(record_result, "tok prompt chat-template", N_STRUCTURED, elapsed, rec)
