@@ -525,14 +525,12 @@ Two scenarios must be covered: **Offline** (`max_throughput`) and **SingleStream
 > catches a crashed run — but the examples default to equal for the clearest, least-contentious
 > comparison.
 
-> **`min_duration` is not a duration floor (current limitation).** The load-generator stop
-> check (`session.py`) halts a phase on **sample count** or **`max_duration_ms`** only;
-> `min_duration_ms` merely _derives_ a count when no explicit count is set. Because TEST04
-> drives an explicit `samples` count, each phase stops at `samples` and `min_duration_ms` is
-> **not** honored as a "run for at least 10 minutes" floor. MLCommons' 10-minute compliance
-> minimum therefore is **not** enforced today; combining a count floor with a duration floor
-> ("AND-semantics") is future work. Set `samples` large enough that each phase reaches a
-> stable throughput on its own.
+> **No duration floor (current limitation).** Runs are count-driven: the load-generator stop
+> check (`session.py`) halts a phase on **sample count** or **`runtime.max_duration_ms`**
+> only, and TEST04 drives explicit `samples` / `audit_samples` counts. MLCommons' 10-minute
+> compliance minimum therefore is **not** enforced today; combining a count floor with a
+> duration floor ("AND-semantics") is future work. Set `samples` large enough that each phase
+> reaches a stable throughput on its own.
 
 Both scenarios ship as committed configs (see also
 [`compliance/audit_test/README.md`](../src/inference_endpoint/compliance/audit_test/README.md)):

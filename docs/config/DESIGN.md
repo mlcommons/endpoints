@@ -45,13 +45,14 @@ the benchmark `type` and `endpoint_config`.
 
 Key nested models:
 
-| Model            | Purpose                                             |
-| ---------------- | --------------------------------------------------- |
-| `LoadPattern`    | Pattern type + parameters (target QPS, concurrency) |
-| `RuntimeConfig`  | Duration, sample count, RNG seeds                   |
-| `ClientSettings` | Worker count and HTTP client settings               |
-| `EndpointConfig` | Endpoint URLs, API key                              |
-| `Dataset`        | Dataset path, type (performance / accuracy)         |
+| Model              | Purpose                                                     |
+| ------------------ | ----------------------------------------------------------- |
+| `LoadPattern`      | Pattern type + parameters (target QPS, concurrency)         |
+| `RuntimeConfig`    | Sample count, perf-phase cap (`max_duration_ms`), RNG seeds |
+| `Timeouts`         | All global waits/deadlines (`settings.timeouts`)            |
+| `HTTPClientConfig` | Worker count and HTTP client settings (`settings.client`)   |
+| `EndpointConfig`   | Endpoint URLs, API key                                      |
+| `Dataset`          | Dataset path, type (performance / accuracy)                 |
 
 ### `RuntimeSettings` (frozen dataclass)
 
@@ -145,8 +146,8 @@ to the report output.
 | Consumer                        | Usage                                                        |
 | ------------------------------- | ------------------------------------------------------------ |
 | `load_generator/session.py`     | Receives `RuntimeSettings` at construction                   |
-| `load_generator/scheduler.py`   | Reads `load_pattern`, `n_samples_to_issue`, RNG seeds        |
+| `load_generator/strategy.py`    | Reads `load_pattern`, `n_samples_to_issue`, RNG seeds        |
 | `endpoint_client/config.py`     | Reads `api_type`, `num_workers`, streaming mode              |
-| `metrics/reporter.py`           | Reads `reported_metrics`, duration bounds                    |
+| `metrics/report.py`             | Reads `reported_metrics`, duration bounds                    |
 | `commands/benchmark/cli.py`     | Defines benchmark subcommands and resolves CLI vs YAML input |
 | `commands/benchmark/execute.py` | Runs the benchmark lifecycle from resolved configuration     |

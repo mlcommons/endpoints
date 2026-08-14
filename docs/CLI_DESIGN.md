@@ -67,7 +67,7 @@ Both paths produce the **same subclass with the same defaults**. A YAML file wit
 
 2. **Auto-selects subclass.** `type: "offline"` → `OfflineBenchmarkConfig`, `type: "online"` → `OnlineBenchmarkConfig`, others → base `BenchmarkConfig`.
 
-3. **Optional CLI overrides.** `--timeout` and `--mode` applied via `config.with_updates(...)` which re-runs validators.
+3. **Optional CLI overrides.** `--timeout` maps into `settings.timeouts.run_timeout_s` via `with_updates(...)` (re-runs validators); `--mode` selects the `TestMode` passed to the runner and never touches the config object.
 
 ### Why subclasses?
 

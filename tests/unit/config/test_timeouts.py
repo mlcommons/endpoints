@@ -13,11 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the consolidated ``settings.timeouts`` block (Timeouts model),
-the reworked ``runtime.max_duration_ms`` knob, and the hard removal of the
-pre-consolidation config surface (``settings.drain``, top-level ``timeout``,
-``settings.service_ready_timeout_s``, ``runtime.min_duration_ms``, and the
-``settings.client.worker_*`` knobs)."""
+"""Tests for the ``settings.timeouts`` block (Timeouts model), the
+``runtime.max_duration_ms`` perf-phase cap, and the rejection of config
+keys that do not exist (``settings.drain``, top-level ``timeout``,
+``settings.service_ready_timeout_s``, ``runtime.min_duration_ms``)."""
 
 import random
 
@@ -110,7 +109,7 @@ class TestTimeoutsValidation:
 
 
 class TestDeletedConfigSurface:
-    """Hard cutover: the pre-consolidation keys must error, not silently pass."""
+    """Removed config keys must error via extra=forbid, not silently pass."""
 
     @pytest.mark.unit
     def test_settings_drain_block_rejected(self):

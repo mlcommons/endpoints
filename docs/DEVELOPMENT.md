@@ -201,7 +201,7 @@ docs/short-description
 
 ## YAML Config Templates
 
-Config templates in `src/inference_endpoint/config/templates/` are auto-generated from schema defaults. When you change `config/schema.py`, regenerate them:
+Config templates in `src/inference_endpoint/config/templates/` are auto-generated from schema defaults. When you change any config schema module (`config/schema.py` and its sibling domain modules), regenerate them:
 
 ```bash
 uv run python scripts/regenerate_templates.py

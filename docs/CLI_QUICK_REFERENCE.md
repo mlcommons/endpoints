@@ -102,9 +102,8 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--endpoint-config.api-key --api-key` - API authentication
 - `--endpoint-config.api-type --api-type` - API type: openai/sglang (default: openai)
 - `--report-dir` - Report output directory
-  Note: applies to CLI-driven `benchmark offline` / `benchmark online`; `benchmark from-config`
-  does not expose a CLI override for `report_dir`. Set it in the YAML only if you need to control
-  the output location; otherwise a default report directory is used.
+  Note: `benchmark from-config` also accepts `--report-dir` as an override of the YAML value;
+  when neither is set a default report directory is used.
 - `--timeout` - Whole-run watchdog in seconds (off by default). If it fires, the run is aborted, the report is marked INTERRUPTED, and the process exits non-zero.
 - `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
 - `--no-early-stopping` - opt out of the MLPerf early-stopping percentile estimates in `result_summary.json` (default: on; see [early_stopping.md](early_stopping.md))
@@ -307,8 +306,8 @@ inference-endpoint init submission
 # 3. Run (YAML mode)
 inference-endpoint benchmark from-config \
   --config submission_template.yaml
-# Note: from-config only accepts --config, --timeout, and --mode via CLI.
-# Set report_dir in the YAML if you need a specific output location.
+# from-config accepts --config, --timeout, --mode, --accuracy-only, and
+# --report-dir; everything else comes from the YAML.
 ```
 
 ### Validate First

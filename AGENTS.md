@@ -128,7 +128,7 @@ The aggregator is a separate process (`python -m inference_endpoint.async_utils.
 CLI is auto-generated from `config/schema.py` Pydantic models via cyclopts. Fields annotated with `cyclopts.Parameter(alias="--flag")` get flat shorthands; all other fields get auto-generated dotted flags (kebab-case).
 
 - **CLI mode** (`offline`/`online`): cyclopts constructs `OfflineBenchmarkConfig`/`OnlineBenchmarkConfig` (subclasses in `config/schema.py`) directly from CLI args. Type locked via `Literal`. `--dataset` is repeatable with TOML-style format `[perf|acc:]<path>[,key=value...]` (e.g. `--dataset data.csv,samples=500,parser.prompt=article`). Full accuracy support via `accuracy_config.eval_method=pass_at_1` etc.
-- **YAML mode** (`from-config`): `BenchmarkConfig.from_yaml_file()` loads YAML, resolves env vars, and auto-selects the right subclass via Pydantic discriminated union. Optional `--timeout` (maps to `settings.timeouts.run_timeout_s`)/`--mode` overrides via `config.with_updates()`.
+- **YAML mode** (`from-config`): `BenchmarkConfig.from_yaml_file()` loads YAML, resolves env vars, and auto-selects the right subclass via Pydantic discriminated union. Optional `--timeout` override maps to `settings.timeouts.run_timeout_s` via `config.with_updates()`; `--mode` selects the `TestMode` passed to the runner.
 - **eval**: Not yet implemented (raises `CLIError` with a tracking issue link)
 
 ### Config Construction & Validation
@@ -315,7 +315,7 @@ All of these run automatically on commit:
 - `mypy` type checking
 - `prettier` for YAML/JSON/Markdown
 - License header enforcement
-- `regenerate-templates`: auto-regenerates YAML config templates from schema defaults when `schema.py`, `config.py`, or `regenerate_templates.py` change
+- `regenerate-templates`: auto-regenerates YAML config templates from schema defaults when any config schema module (`schema|audit|model_params|datasets|settings|timeouts`.py), `endpoint_client/config.py`, or `regenerate_templates.py` changes
 
 **IMPORTANT: Always run `pre-commit run --all-files` before every commit.** Hooks may modify files (prettier, ruff-format, license headers). If files are modified, stage the changes and commit once. Never commit without running pre-commit first.
 

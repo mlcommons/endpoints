@@ -51,6 +51,7 @@ from pydantic import (
 )
 
 from ..core.types import APIType
+from ..endpoint_client.config import HTTPClientConfig
 from ..exceptions import CLIError
 from ..utils import WithUpdatesMixin
 from .audit import AuditConfig, AuditTestId, OutputCachingTestConfig
@@ -97,6 +98,7 @@ __all__ = [
     "EarlyStoppingConfig",
     "EndpointConfig",
     "EvalMethod",
+    "HTTPClientConfig",
     "LoadPattern",
     "LoadPatternType",
     "ModelParams",
