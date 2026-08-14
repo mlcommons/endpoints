@@ -22,6 +22,7 @@ warmup/profiling settings and the ``Settings`` aggregate live here.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Annotated, Any, Self
 
 import cyclopts
@@ -36,8 +37,20 @@ from pydantic import (
 )
 
 from ..endpoint_client.config import HTTPClientConfig
-from .enums import LoadPatternType, ProfilerEngine
 from .timeouts import Timeouts
+
+
+class LoadPatternType(str, Enum):
+    """Load pattern types."""
+
+    MAX_THROUGHPUT = "max_throughput"  # Offline: all queries at t=0
+    POISSON = "poisson"  # Online: fixed QPS with Poisson distribution
+    CONCURRENCY = "concurrency"  # Online: fixed concurrent requests
+    AGENTIC_INFERENCE = (
+        "agentic_inference"  # Agentic inference conversations with turn sequencing
+    )
+    BURST = "burst"  # Burst pattern (TODO)
+    STEP = "step"  # Step pattern (TODO)
 
 
 class RuntimeConfig(BaseModel):
@@ -210,6 +223,18 @@ class WarmupConfig(BaseModel):
             help="RNG seed for warmup scheduling and sample ordering",
         ),
     ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
+
+
+class ProfilerEngine(str, Enum):
+    """Inference engine whose profiling protocol the client should drive.
+
+    Selects the HTTP path layout used to derive start/stop URLs from
+    ``endpoint_config.endpoints``. Each value corresponds to one server-side
+    profiling protocol; add a new variant + ``_PROFILE_PATHS`` row to support
+    another engine.
+    """
+
+    VLLM = "vllm"
 
 
 @cyclopts.Parameter(name="*")
