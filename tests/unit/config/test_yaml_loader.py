@@ -45,8 +45,6 @@ datasets:
     path: "test.jsonl"
 
 settings:
-  timeouts:
-    worker_initialization_timeout_s: 120
   load_pattern:
     type: "max_throughput"
   client:
@@ -67,7 +65,6 @@ endpoint_config:
         assert config.name == "test-config"
         assert config.type == BenchmarkTestType.OFFLINE
         assert len(config.datasets) == 1
-        assert config.settings.timeouts.worker_initialization_timeout_s == 120.0
         assert config.settings.client.transport.recv_buffer_size == 16777216
         assert config.settings.client.transport.send_buffer_size == 8388608
 
@@ -245,8 +242,8 @@ class TestSerialization:
         )
         assert loaded.settings.load_pattern.type == original.settings.load_pattern.type
         assert (
-            loaded.settings.timeouts.worker_initialization_timeout_s
-            == original.settings.timeouts.worker_initialization_timeout_s
+            loaded.settings.client.worker_initialization_timeout
+            == original.settings.client.worker_initialization_timeout
         )
         assert (
             loaded.settings.client.transport.recv_buffer_size
