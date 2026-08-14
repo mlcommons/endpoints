@@ -16,9 +16,9 @@
 """Whole-run watchdog (settings.timeouts.run_timeout_s) integration tests.
 
 Locking invariant: a fired run watchdog must never produce a COMPLETE
-report. The watchdog SIGTERMs the metrics aggregator (whose handler writes
-an INTERRUPTED final snapshot) before stopping the session, and
-``run_benchmark`` exits non-zero via ``ExecutionError``.
+report. The watchdog stops the session (ENDED still flows) and then
+SIGTERMs the metrics aggregator, whose handler writes an INTERRUPTED
+final snapshot; ``run_benchmark`` exits non-zero via ``ExecutionError``.
 """
 
 import json

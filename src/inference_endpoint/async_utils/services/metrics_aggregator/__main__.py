@@ -145,7 +145,7 @@ async def main() -> None:
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
             "after ENDED before the aggregator emits the final snapshot with "
             "n_pending_tasks > 0 (0 = wait indefinitely, the default; the "
-            "benchmark forwards the schema default, see config/schema.py). "
+            "benchmark forwards the schema default, see config/timeouts.py). "
             "Increase for very large datasets where the end-of-run tokenize "
             "batch is big."
         ),
@@ -176,7 +176,7 @@ async def main() -> None:
             "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
             "(0 = no mid-run tokenization, everything defers to the "
             "end-of-run drain; the benchmark forwards the schema default, "
-            "see config/schema.py). The drain always uses the auto-sized "
+            "see config/settings.py). The drain always uses the auto-sized "
             "sharded pool — one worker process per 8-core block."
         ),
     )
