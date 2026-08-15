@@ -154,7 +154,6 @@ class TestType(str, Enum):
     SUBMISSION = "submission"
 
 
-
 class EndpointConfig(BaseModel):
     """Endpoint connection configuration.
 
