@@ -406,8 +406,17 @@ def _load_datasets(
         # the same check later; this earlier call is deliberate (not redundant),
         # so an invalid dataset aborts before the subprocess fan-out.
         warmup = config.settings.warmup
-        if warmup.enabled and warmup.salt:
-            dataloader.validate_saltable()
+        if warmup.enabled:
+            if warmup.salt:
+                dataloader.validate_saltable()
+            else:
+                logger.warning(
+                    "Warmup is enabled without salt (--warmup-salt): warmup "
+                    "prompts are issued verbatim, so the server may serve the "
+                    "measured phase from a warm KV/prefix cache and understate "
+                    "latency. Enable --warmup-salt on text-'prompt' datasets to "
+                    "bust the cache."
+                )
 
         if perf_cfg.accuracy_config is not None:
             accuracy_config = perf_cfg.accuracy_config

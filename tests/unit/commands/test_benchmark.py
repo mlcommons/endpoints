@@ -443,6 +443,26 @@ class TestLoadDatasetsSaltValidation:
         _load_datasets(config, tmp_path, TestMode.PERF)
         mock_validate.assert_not_called()
 
+    def test_warns_when_warmup_enabled_without_salt(self, tmp_path, caplog):
+        """Warmup without salt primes the server cache with verbatim prompts,
+        risking an understated measured phase — surface it as a warning."""
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=False))
+        with caplog.at_level(logging.WARNING):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+        assert any(
+            "warmup is enabled without salt" in r.message.lower()
+            for r in caplog.records
+        )
+
+    def test_no_warning_when_warmup_salt_enabled(self, tmp_path, caplog):
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=True))
+        with caplog.at_level(logging.WARNING):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+        assert not any(
+            "warmup is enabled without salt" in r.message.lower()
+            for r in caplog.records
+        )
+
     def test_unsaltable_perf_dataset_raises_before_spawn(self, tmp_path):
         """Real validation (unpatched) rejects a non-saltable perf dataset at
         load time — an int 'prompt' cannot be salted."""
