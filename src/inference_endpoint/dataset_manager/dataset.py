@@ -261,14 +261,19 @@ def load_from_huggingface(
 def _can_salt(sample: Any) -> DatasetValidationError.Reason | None:
     """Return the Reason a sample cannot be salted, or None if it can.
 
-    Salt requires a dict sample with a str 'prompt' and no 'input_tokens' (which
-    adapters send verbatim, so a salted 'prompt' would not reach the server).
+    Salt requires a dict sample with a str 'prompt' and neither 'input_tokens'
+    nor 'messages'. Both are sent to the server ahead of 'prompt' — adapters
+    forward 'input_tokens' verbatim, and the OpenAI chat adapter prefers
+    'messages' over 'prompt' (openai_msgspec_adapter.py) — so a sample carrying
+    either would ship an unsalted payload even after 'prompt' is salted.
     """
     Reason = DatasetValidationError.Reason
     if not isinstance(sample, dict):
         return Reason.TYPE_MISMATCH
     if "input_tokens" in sample:
         return Reason.INPUT_TOKENS_SHADOWING
+    if "messages" in sample:
+        return Reason.MESSAGES_SHADOWING
     if "prompt" not in sample:
         return Reason.PROMPT_MISSING
     if not isinstance(sample["prompt"], str):
@@ -510,7 +515,7 @@ class Dataset:
         """Prepend a unique salt to the 'prompt' field.
 
         with_salt() has validated every sample, so ``data`` is guaranteed to be a
-        dict with a str 'prompt' and no 'input_tokens'.
+        dict with a str 'prompt' and neither 'input_tokens' nor 'messages'.
         """
         assert self._salt_rng is not None
         salt = self._salt_rng.randbytes(8).hex()

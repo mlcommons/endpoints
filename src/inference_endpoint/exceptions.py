@@ -52,6 +52,10 @@ class DatasetValidationError(InputValidationError):
         INPUT_TOKENS_SHADOWING = (
             "sample has 'input_tokens'; salt cannot bust a pre-tokenized cache"
         )
+        MESSAGES_SHADOWING = (
+            "sample has 'messages'; adapters send that verbatim and prefer it "
+            "over 'prompt', so a salted 'prompt' would never reach the server"
+        )
         PROMPT_MISSING = "sample has no 'prompt' field"
         PROMPT_TYPE_MISMATCH = "sample 'prompt' is not a str"
         UNSPECIFIED = "dataset validation failed"

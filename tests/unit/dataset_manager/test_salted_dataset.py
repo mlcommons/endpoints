@@ -186,15 +186,28 @@ class TestSaltValidation:
         with pytest.raises(DatasetValidationError, match="input_tokens"):
             inner.with_salt(random.Random())
 
-    def test_agentic_messages_sample_raises_prompt_missing(self):
-        # Agentic datasets store dict samples keyed by 'messages', not 'prompt' —
-        # salt has no text field to prepend, so it's a clear PROMPT_MISSING error.
+    def test_agentic_messages_sample_raises_messages_shadowing(self):
+        # Agentic datasets store dict samples keyed by 'messages'. The chat
+        # adapter sends 'messages' verbatim, so salting 'prompt' cannot reach the
+        # server — reject with the shadowing reason.
         inner = _make_loaded_dataset(
             [{"messages": [{"role": "user", "content": "hi"}]}]
         )
         with pytest.raises(DatasetValidationError) as exc_info:
             inner.with_salt(random.Random())
-        assert exc_info.value.reason is DatasetValidationError.Reason.PROMPT_MISSING
+        assert exc_info.value.reason is DatasetValidationError.Reason.MESSAGES_SHADOWING
+
+    def test_messages_and_prompt_raises_messages_shadowing(self):
+        # A sample carrying both 'messages' and a valid str 'prompt' would pass a
+        # prompt-only check, but to_endpoint_request() prefers 'messages' — so
+        # _apply_salt() would salt an ignored field and silently fail to bust the
+        # cache. This must be a hard error, not a valid sample.
+        inner = _make_loaded_dataset(
+            [{"messages": [{"role": "user", "content": "hi"}], "prompt": "hello"}]
+        )
+        with pytest.raises(DatasetValidationError) as exc_info:
+            inner.with_salt(random.Random())
+        assert exc_info.value.reason is DatasetValidationError.Reason.MESSAGES_SHADOWING
 
     def test_input_tokens_and_prompt_raises(self):
         inner = _make_loaded_dataset([{"input_tokens": [1, 2, 3], "prompt": "hello"}])
@@ -240,6 +253,10 @@ class TestSaltValidation:
             (
                 {"input_tokens": [1, 2]},
                 DatasetValidationError.Reason.INPUT_TOKENS_SHADOWING,
+            ),
+            (
+                {"messages": [{"role": "user", "content": "hi"}], "prompt": "hi"},
+                DatasetValidationError.Reason.MESSAGES_SHADOWING,
             ),
             ({"question": "?"}, DatasetValidationError.Reason.PROMPT_MISSING),
             ({"prompt": 42}, DatasetValidationError.Reason.PROMPT_TYPE_MISMATCH),
