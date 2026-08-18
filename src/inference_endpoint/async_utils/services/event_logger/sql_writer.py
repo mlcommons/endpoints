@@ -82,6 +82,7 @@ class SQLWriter(RecordWriter):
         path: Path,
         url: str | None = None,
         flush_interval: int | None = None,
+        max_flush_latency_s: float | None = None,
         **kwargs: object,
     ):
         """Initialize the SQL writer.
@@ -90,8 +91,14 @@ class SQLWriter(RecordWriter):
             path: Base path for the database. For sqlite default, the file will be path.with_suffix(".db").
             url: Optional SQLAlchemy database URL. If None, uses sqlite at path.with_suffix(".db").
             flush_interval: If set, flush (commit) after every this many records.
+            max_flush_latency_s: If set, flush (commit) on the next write once this
+                many seconds have elapsed since the last flush, even below
+                flush_interval. Bounds on-disk staleness for low-rate streams.
         """
-        super().__init__(flush_interval=flush_interval)
+        super().__init__(
+            flush_interval=flush_interval,
+            max_flush_latency_s=max_flush_latency_s,
+        )
         if url is None:
             db_path = Path(path).with_suffix(".db")
             url = f"sqlite:///{db_path}"

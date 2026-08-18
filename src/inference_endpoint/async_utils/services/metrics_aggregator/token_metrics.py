@@ -53,7 +53,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
 from inference_endpoint.endpoint_client.cpu_affinity import (
     cgroup_clamped_cpus,
 )
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from transformers.utils import logging as transformers_logging
 
 # A single rayon pool peaks at ~8 cores for BPE (memory-bound; more threads
@@ -147,7 +147,12 @@ def load_reference_tokenizer(tokenizer_name: str) -> Any:
     tokenizer, the sharded length-counting workers, and finalize-side accuracy
     OSL, so every OSL number in a run comes from the same tokenizer.
     """
-    return AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+    try:
+        return AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+    except Exception:
+        # Some checkpoints (e.g. DeepSeek-V4) fail AutoTokenizer's config
+        # detection; fall back to loading the fast tokenizer directly.
+        return PreTrainedTokenizerFast.from_pretrained(tokenizer_name)
 
 
 def load_reference_backend(tokenizer_name: str) -> Any | None:

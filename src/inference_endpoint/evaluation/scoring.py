@@ -63,6 +63,16 @@ from .extractor import (
 logger = logging.getLogger(__name__)
 
 
+def _join_output_parts(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, tuple | list):
+        return "".join(str(part) for part in value)
+    return str(value)
+
+
 class Scorer(ABC):
     """Scorers will read in a dataset and outputs from a log and compute an accuracy score.
     An optional extractor can be provided to post-process the output to extract values that
@@ -210,7 +220,16 @@ class Scorer(ABC):
         that must transform before scoring (e.g. BFCL serializes ``tool_calls``)
         override this.
         """
-        return self.get_raw_outputs()
+        rows: list[dict[str, str]] = []
+        for u, d in self._iter_complete():
+            if isinstance(d, TextModelOutput):
+                output_text = _join_output_parts(d.output)
+                if not output_text.strip() and d.reasoning is not None:
+                    output_text = _join_output_parts(d.reasoning)
+            else:
+                output_text = str(d) if d is not None else ""
+            rows.append({"sample_uuid": u, "output": output_text})
+        return pd.DataFrame(rows, columns=["sample_uuid", "output"])
 
     def match_sample_index(self, row: pd.Series) -> pd.Series:
         # Pandas Apply function to create a new 'sample_index' column
@@ -229,10 +248,19 @@ class Scorer(ABC):
                 Returns None as the score if evaluation fails.
         """
         df = self.get_scoring_outputs()
+        if df.empty:
+            raise FileNotFoundError(
+                f"No COMPLETE events in {self.report_dir / 'events.jsonl'} "
+                f"for dataset {self.dataset_name}"
+            )
 
         # Outputs are for all samples, not just the target dataset
         valid_uuids = self.sample_index_map.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
+        if df.empty:
+            raise KeyError(
+                f"No COMPLETE events matched sample_idx_map for {self.dataset_name}"
+            )
 
         # Denominator is the number of samples *issued* for this dataset
         # (``sample_index_map``, written at issue time), not the number that
@@ -1076,12 +1104,15 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
             cmd = [
                 sys.executable,
                 "-m",
-                "inference_endpoint.dataset_manager.predefined.livecodebench.lcb_serve",
+                "inference_endpoint.evaluation.livecodebench.lcb_serve",
                 str(parquet_path),
                 "--version-tag",
                 self.lcb_version,
                 "--datasets-dir",
-                f"datasets/livecodebench/{self.lcb_version}",
+                os.environ.get(
+                    "LCB_DATASETS_DIR",
+                    f"datasets/livecodebench/{self.lcb_version}",
+                ),
                 "--timeout",
                 str(self.timeout),
             ]

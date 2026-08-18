@@ -39,9 +39,13 @@ class JSONLWriter(RecordWriter):
         file_path: Path,
         mode: str = "w",
         flush_interval: int | None = None,
+        max_flush_latency_s: float | None = None,
         **kwargs: object,
     ):
-        super().__init__(flush_interval=flush_interval)
+        super().__init__(
+            flush_interval=flush_interval,
+            max_flush_latency_s=max_flush_latency_s,
+        )
         self.file_path = Path(file_path).with_suffix(self.extension)
         self.file_obj = self.file_path.open(mode=mode)  # type: ignore[assignment]
         self.encoder = msgspec.json.Encoder(enc_hook=EventType.encode_hook)

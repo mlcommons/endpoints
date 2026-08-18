@@ -67,6 +67,7 @@ class EventLoggerService(ZmqMessageSubscriber[EventRecord]):
         *args,
         writer_classes: tuple[type[RecordWriter], ...] = (JSONLWriter,),
         flush_interval: int | None = 100,
+        max_flush_latency_s: float | None = 1.0,
         shutdown_event: asyncio.Event | None = None,
         **kwargs,
     ):
@@ -86,7 +87,11 @@ class EventLoggerService(ZmqMessageSubscriber[EventRecord]):
         self.writers: list[RecordWriter] = []
         for writer_class in writer_classes:
             self.writers.append(
-                writer_class(log_dir / "events", flush_interval=flush_interval)
+                writer_class(
+                    log_dir / "events",
+                    flush_interval=flush_interval,
+                    max_flush_latency_s=max_flush_latency_s,
+                )
             )
 
     def _write_record_to_writers(self, record: EventRecord) -> None:
