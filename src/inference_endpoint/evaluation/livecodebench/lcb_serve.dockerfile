@@ -63,6 +63,15 @@ COPY _server.py /app/server.py
 # Make lcb_serve.py available as a module
 ENV PYTHONPATH="/app"
 
+# Provenance: the endpoints repo commit this image was built from, supplied by
+# push_image.sh via --build-arg. Recorded as a config LABEL (not a manifest
+# annotation) so it survives the oci-mediatypes=false push and is visible in
+# `docker inspect`. Declared after the COPYs so a new SHA only rebuilds this
+# metadata layer, never the expensive dataset-generation stage above.
+ARG ENDPOINTS_SHA=unknown
+LABEL org.opencontainers.image.source="https://github.com/mlcommons/endpoints" \
+      org.opencontainers.image.revision="${ENDPOINTS_SHA}"
+
 # Launch the WebSocket server with long-running connection support
 # Default port 13835
 # - timeout-keep-alive: Allow connections to stay open for hours
