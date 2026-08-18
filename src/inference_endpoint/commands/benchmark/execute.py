@@ -732,15 +732,19 @@ class _RunWatchdog:
 
     Armed before the metrics pipeline starts (so service-launch and
     endpoint-connect stalls are bounded) and kept armed through the metrics
-    drain (so a stuck aggregator drain is bounded too). On fire: stop the
-    session first — it short-circuits its drain and publishes ENDED promptly,
-    so the event logger flushes and the aggregator records the buffered
-    tokenizer-drain samples — then SIGTERM the aggregator, whose handler
-    writes the INTERRUPTED final snapshot (``publish_final`` is first-wins,
-    so INTERRUPTED stays authoritative). ``run_benchmark`` raises
-    ``ExecutionError`` after finalization whenever ``fired`` is set, so a
-    timed-out run always fails loudly even if a still-draining aggregator
-    finalized COMPLETE first.
+    drain (so a stuck aggregator drain is bounded too). On fire, once the
+    session exists: stop the session (its run unwinds and publishes ENDED, so
+    the event logger — spared the SIGTERM — flushes and exits) and SIGTERM
+    the aggregator, whose handler immediately writes the INTERRUPTED final
+    snapshot with whatever stats it holds at that instant (``publish_final``
+    is first-wins, so INTERRUPTED stays authoritative). Before the session
+    exists (service launch / endpoint connect still pending), stopping
+    nothing would let those awaits run out their own readiness timeouts past
+    the deadline — so the orchestration task is cancelled instead, which
+    unwinds them promptly and lets ``MetricsPipeline.__aexit__`` kill the
+    services. ``run_benchmark`` raises ``ExecutionError`` after finalization
+    whenever ``fired`` is set, so a timed-out run always fails loudly even if
+    a still-draining aggregator finalized COMPLETE first.
     """
 
     def __init__(
@@ -751,12 +755,17 @@ class _RunWatchdog:
     ) -> None:
         self.fired = False
         self._session: BenchmarkSession | None = None
+        self._task: asyncio.Task | None = None
         self._pipe = pipe
         self._handle = (
             loop.call_later(max(0.0, deadline - time.monotonic()), self._fire)
             if deadline is not None
             else None
         )
+
+    def bind_task(self, task: asyncio.Task | None) -> None:
+        """Bind the orchestration task — the pre-session cancellation target."""
+        self._task = task
 
     def bind_session(self, session: BenchmarkSession) -> None:
         """Late-bind the session: it is created after the timer is armed."""
@@ -767,8 +776,17 @@ class _RunWatchdog:
         logger.error(
             "Run timeout reached; aborting run — report will be marked " "INTERRUPTED."
         )
-        if self._session is not None:
-            self._session.stop()
+        if self._session is None:
+            # Still in service launch / endpoint connect: cancel the
+            # orchestration task so those awaits unwind now instead of
+            # running out their own readiness timeouts past the deadline.
+            # No load was issued, so there are no artifacts to preserve;
+            # _run_benchmark_async translates the unwind into the run-timeout
+            # ExecutionError.
+            if self._task is not None:
+                self._task.cancel()
+            return
+        self._session.stop()
         self._pipe.terminate_metrics_aggregator()
 
     def cancel(self) -> None:
@@ -910,6 +928,7 @@ async def _run_benchmark_async(
     http_client: HTTPEndpointClient | None = None
 
     watchdog = _RunWatchdog(loop, deadline, pipe)
+    watchdog.bind_task(asyncio.current_task())
 
     try:
         tmpfs_dir.mkdir(parents=True, exist_ok=True)
@@ -1071,15 +1090,27 @@ async def _run_benchmark_async(
                         await http_client.shutdown_async()
                     except Exception as e:  # noqa: BLE001 — best-effort; idempotent
                         logger.warning(f"Client cleanup error: {e}")
-    except BaseException:
+    except BaseException as e:
         if tmpfs_dir.exists():
             try:
                 _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
                 shutil.rmtree(tmpfs_dir, ignore_errors=True)
-            except Exception as e:  # noqa: BLE001 — salvage best-effort; keep original exc
+            except Exception as salvage_err:  # noqa: BLE001 — salvage best-effort; keep original exc
                 logger.warning(
-                    "Failed to salvage tmpfs: %s — tmpfs retained at %s", e, tmpfs_dir
+                    "Failed to salvage tmpfs: %s — tmpfs retained at %s",
+                    salvage_err,
+                    tmpfs_dir,
                 )
+        if watchdog.fired and isinstance(e, Exception | asyncio.CancelledError):
+            # The watchdog aborted the run: the pre-session fire cancels this
+            # task, and a mid-teardown fire can surface as a launch/drain
+            # error (e.g. the SIGTERMed aggregator reads as a startup crash).
+            # Either way the run timed out — report it as that, not as the
+            # secondary exception. KeyboardInterrupt/SystemExit stay theirs.
+            raise ExecutionError(
+                "Run timeout (settings.timeouts.run_timeout_s) reached; run "
+                "aborted before a report could be produced"
+            ) from e
         raise
     finally:
         watchdog.cancel()
@@ -1233,8 +1264,11 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     if report is not None and bench.run_timed_out and report.complete:
         # Split-brain guard: the aggregator may have finalized COMPLETE before
         # the watchdog's SIGTERM landed. A timed-out run must never publish
-        # complete:true artifacts, so force the flag honest before writing.
-        report = msgspec.structs.replace(report, complete=False)
+        # complete:true artifacts, so force both fields honest before writing —
+        # state stays what the SIGTERM path would have recorded, and consumers
+        # keying on state=="complete" and not complete (the drain-timeout
+        # signature) don't misattribute a watchdog abort to a slow drain.
+        report = msgspec.structs.replace(report, complete=False, state="interrupted")
 
     # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
     # sample_idx_map.json + events.jsonl from here).
