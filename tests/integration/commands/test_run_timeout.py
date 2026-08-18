@@ -39,9 +39,9 @@ from inference_endpoint.config.schema import (
     StreamingMode,
     TestMode,
     TestType,
+    Timeouts,
     WarmupConfig,
 )
-from inference_endpoint.config.timeouts import Timeouts
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.exceptions import ExecutionError
 

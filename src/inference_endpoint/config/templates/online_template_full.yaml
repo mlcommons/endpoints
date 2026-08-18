@@ -84,7 +84,7 @@ settings:
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
-  timeouts:  # All global waits and deadlines (see config/timeouts.py)
+  timeouts:  # All global waits and deadlines (see config/schema.py)
     run_timeout_s: null  # Whole-run watchdog in seconds (None = off). Covers every phase including drains; firing aborts the run, marks the report INTERRUPTED, and exits non-zero. Never derives per-stage deadlines.
     service_ready_timeout_s: 30.0  # Seconds to wait for metrics-aggregator/event-logger services to become ready.
     warmup_drain_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)

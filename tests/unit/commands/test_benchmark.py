@@ -71,6 +71,7 @@ from inference_endpoint.config.schema import (
     StreamingMode,
     TestMode,
     TestType,
+    Timeouts,
     WarmupConfig,
 )
 from inference_endpoint.config.schema import (
@@ -82,7 +83,6 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.config.schema import (
     OnlineBenchmarkConfig as OnlineConfig,
 )
-from inference_endpoint.config.timeouts import Timeouts
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
 from inference_endpoint.core.types import APIType, QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
@@ -2792,7 +2792,7 @@ class TestSetupBenchmark:
         ctx = self._setup(
             config,
             TestMode.ACC,
-            (_simple_dataset, [], []),
+            (_simple_dataset, []),
             _rt_settings,
         )
 
