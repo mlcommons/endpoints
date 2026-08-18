@@ -18,13 +18,13 @@
 
 Measures additions + deletions and the changed-file count of the current branch
 against its merge-base with the base branch, excluding tests, lockfiles,
-vendored sources, and generated files, then reports the size class:
-
-    Normal      <= 500 non-test lines AND <= 20 non-test files
-    Large       501-1500 lines OR 21-50 files
-    Very large  > 1500 lines OR > 50 files
-
-The class is the higher of the two dimensions, evaluated independently.
+vendored sources, and generated files, then reports the size class -- Normal,
+Large, or Very large. The class is set by non-test line churn and changed-file
+count, evaluated independently, with the higher of the two dimensions winning.
+The exact line/file thresholds are the ``NORMAL_MAX_LINES`` / ``LARGE_MAX_LINES``
+/ ``NORMAL_MAX_FILES`` / ``LARGE_MAX_FILES`` constants below -- the single source
+of truth from which both ``classify`` and the printed ``-v/--verbose`` grid
+derive.
 
 The check is advisory and always exits 0. By default it prints a one-line
 verdict; ``-v/--verbose`` adds the threshold grid and per-class review
@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+from typing import Literal
 
 # Paths excluded from the size gate. Tests stay part of review but do not count
 # toward size so thorough testing is not discouraged; lockfiles, vendored
@@ -56,25 +57,41 @@ EXCLUDE_PATHSPECS = (
 # Covers the common local-checkout and fork-remote layouts.
 _BASE_CANDIDATES = ("origin/main", "main", "upstream/main")
 
-NORMAL, LARGE, VERY_LARGE = "normal", "large", "very-large"
+# Single source of truth for the policy thresholds. ``classify`` and the printed
+# ``_GRID`` are both derived from these, so the reported grid can never drift
+# from the classification it describes.
+NORMAL_MAX_LINES = 500
+LARGE_MAX_LINES = 1500
+NORMAL_MAX_FILES = 20
+LARGE_MAX_FILES = 50
 
-_REQUIREMENTS = {
+SizeClass = Literal["normal", "large", "very-large"]
+
+NORMAL: SizeClass = "normal"
+LARGE: SizeClass = "large"
+VERY_LARGE: SizeClass = "very-large"
+
+_REQUIREMENTS: dict[SizeClass, str] = {
     NORMAL: "2 approvals (>=1 from @mlcommons/endpoints-developers).",
     LARGE: 'add a "How to Review" section and split the PR when practical (2 approvals).',
     VERY_LARGE: 'add "Why This Cannot Be Split" and "How to Review" sections (3 approvals).',
 }
 
-_GRID = "Normal <=500 & <=20 files | Large 501-1500 or 21-50 | Very large >1500 or >50"
+_GRID = (
+    f"Normal <={NORMAL_MAX_LINES} & <={NORMAL_MAX_FILES} files | "
+    f"Large {NORMAL_MAX_LINES + 1}-{LARGE_MAX_LINES} or {NORMAL_MAX_FILES + 1}-{LARGE_MAX_FILES} | "
+    f"Very large >{LARGE_MAX_LINES} or >{LARGE_MAX_FILES}"
+)
 
 
-def classify(churn: int, files: int) -> str:
+def classify(churn: int, files: int) -> SizeClass:
     """Return the size class from non-test churn and file count.
 
     Thresholds are evaluated independently and the higher class wins.
     """
-    if churn > 1500 or files > 50:
+    if churn > LARGE_MAX_LINES or files > LARGE_MAX_FILES:
         return VERY_LARGE
-    if churn > 500 or files > 20:
+    if churn > NORMAL_MAX_LINES or files > NORMAL_MAX_FILES:
         return LARGE
     return NORMAL
 
@@ -160,7 +177,7 @@ def measure(base_ref: str, head_ref: str | None) -> tuple[int, int, str] | None:
 
 
 def build_summary(
-    cls: str, churn: int, files: int, base_ref: str, base_short: str
+    cls: SizeClass, churn: int, files: int, base_ref: str, base_short: str
 ) -> str:
     """One-line size verdict (default output)."""
     return (
@@ -170,7 +187,7 @@ def build_summary(
     )
 
 
-def build_details(cls: str) -> str:
+def build_details(cls: SizeClass) -> str:
     """Threshold grid and per-class review requirements (verbose output)."""
     return "\n".join(
         [
@@ -183,7 +200,7 @@ def build_details(cls: str) -> str:
     )
 
 
-def _write_github_output(cls: str, churn: int, files: int) -> None:
+def _write_github_output(cls: SizeClass, churn: int, files: int) -> None:
     path = os.environ.get("GITHUB_OUTPUT")
     if not path:
         return

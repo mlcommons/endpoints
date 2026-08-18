@@ -308,3 +308,94 @@ def test_main_skips_when_base_unresolvable(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "skipping" in out
+
+
+def test_resolve_base_ref_scans_remotes_when_candidates_absent(
+    tmp_path, monkeypatch, capsys
+):
+    """The last-resort ``<remote>/main`` scan resolves the base.
+
+    Reproduces a checkout where none of the ordered candidates
+    (``origin/main`` / ``main`` / ``upstream/main``) exist but a differently
+    named remote still carries ``main`` -- the fallback loop in
+    ``resolve_base_ref`` must find it.
+    """
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    _init_repo(canonical)
+    (canonical / "a.py").write_text("x = 1\n")
+    _git(canonical, "add", ".")
+    _git(canonical, "commit", "-m", "base")
+
+    work = tmp_path / "work"
+    _git(tmp_path, "clone", str(canonical), str(work))
+    _git(work, "config", "user.email", "test@example.com")
+    _git(work, "config", "user.name", "Test")
+    # Remove every ordered candidate: rename origin away, drop the local main.
+    _git(work, "remote", "rename", "origin", "myfork")
+    _git(work, "checkout", "-b", "feature")
+    _git(work, "branch", "-D", "main")
+    (work / "a.py").write_text("x = 1\ny = 2\n")
+    _git(work, "add", ".")
+    _git(work, "commit", "-m", "feature")
+
+    monkeypatch.chdir(work)
+    monkeypatch.delenv("PR_BASE_REF", raising=False)
+    monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # origin/main, main, upstream/main all absent -> the remote scan resolves
+    # myfork/main.
+    assert "base: myfork/main @" in out
+    assert "PR size: NORMAL" in out
+
+
+def test_measure_returns_none_on_unrelated_history(tmp_path, monkeypatch):
+    """``measure`` returns None when the refs share no merge-base."""
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+
+    # An orphan branch has no common ancestor with main.
+    _git(tmp_path, "checkout", "--orphan", "feature")
+    (tmp_path / "b.py").write_text("y = 2\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "unrelated")
+
+    monkeypatch.chdir(tmp_path)
+    assert mod.measure("main", "feature") is None
+
+
+def test_main_skips_when_diff_fails_on_unrelated_history(tmp_path, monkeypatch, capsys):
+    """A resolvable base that cannot be diffed skips cleanly (rc 0, no label).
+
+    Covers the ``measure() -> None`` path in ``main``: the base ref exists but
+    the merge-base with the head fails (unrelated history / shallow clone), so
+    the workflow gets no ``size_class`` to label.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+
+    _git(tmp_path, "checkout", "--orphan", "feature")
+    (tmp_path / "b.py").write_text("y = 2\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "unrelated")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_BASE_REF", raising=False)
+    monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+
+    rc = mod.main(["--base", "main", "--head", "feature"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "could not diff against main" in out
+    assert "skipping" in out
