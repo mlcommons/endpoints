@@ -258,7 +258,7 @@ def load_from_huggingface(
     return ds[split].to_pandas()
 
 
-def _can_salt(sample: Any) -> DatasetValidationError.Reason | None:
+def _check_unsaltable(sample: Any) -> DatasetValidationError.Reason | None:
     """Return the Reason a sample cannot be salted, or None if it can.
 
     Salt requires a dict sample with a str 'prompt' and neither 'input_tokens'
@@ -266,6 +266,9 @@ def _can_salt(sample: Any) -> DatasetValidationError.Reason | None:
     forward 'input_tokens' verbatim, and the OpenAI chat adapter prefers
     'messages' over 'prompt' (openai_msgspec_adapter.py) — so a sample carrying
     either would ship an unsalted payload even after 'prompt' is salted.
+    A list-form 'prompt' (an OpenAI batch / token-ID array, or this project's
+    multimodal content-part convention) is an explicitly unsupported salt path
+    and is rejected with its own reason.
     """
     Reason = DatasetValidationError.Reason
     if not isinstance(sample, dict):
@@ -276,6 +279,8 @@ def _can_salt(sample: Any) -> DatasetValidationError.Reason | None:
         return Reason.MESSAGES_SHADOWING
     if "prompt" not in sample:
         return Reason.PROMPT_MISSING
+    if isinstance(sample["prompt"], list):
+        return Reason.PROMPT_LIST_UNSUPPORTED
     if not isinstance(sample["prompt"], str):
         return Reason.PROMPT_TYPE_MISMATCH
     return None
@@ -467,9 +472,12 @@ class Dataset:
     def validate_saltable(self) -> None:
         """Raise if any loaded sample cannot be salted.
 
-        salt requires a dict sample with a text ('str') 'prompt' and no
-        'input_tokens' (adapters send those verbatim, so a salted 'prompt' would
-        never reach the server). A non-saltable sample is an error, not a silent
+        salt requires a dict sample with a text ('str') 'prompt' and neither
+        'input_tokens' nor 'messages' (adapters send those verbatim / prefer
+        'messages' over 'prompt', so a salted 'prompt' would never reach the
+        server); a list-form 'prompt' (batch / token-IDs / multimodal content
+        parts) is an unsupported salt path and is rejected too. A non-saltable
+        sample is an error, not a silent
         skip: skipping would leave the KV cache un-busted. Every sample is
         checked — a single invalid item fails the run, because the seeded warmup
         subset can draw any index and salt correctness is all-or-nothing. Called
@@ -482,13 +490,12 @@ class Dataset:
         """
         assert self.data is not None, "Dataset not loaded. Call load() first."
         for i, sample in enumerate(self.data):
-            reason = _can_salt(sample)
-            if reason is not None:
+            if reason := _check_unsaltable(sample):
                 raise DatasetValidationError(
                     reason,
                     detail=(
                         f"sample {i} (index into the loaded, post-transform "
-                        f"order); disable salt (--warmup-salt / warmup.salt: "
+                        f"order); disable salt (--no-warmup-salt / warmup.salt: "
                         f"false) or use a text-prompt dataset"
                     ),
                 )

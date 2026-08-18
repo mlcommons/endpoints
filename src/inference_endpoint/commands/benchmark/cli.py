@@ -38,7 +38,7 @@ from inference_endpoint.config.schema import (
 )
 from inference_endpoint.exceptions import (
     CLIError,
-    DatasetValidationError,
+    DatasetParseError,
     InputValidationError,
 )
 
@@ -67,14 +67,9 @@ def _run(
                 f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
                 for err in e.errors()
             )
-            # --dataset parse failures aren't yet mapped to a specific Reason.
-            raise DatasetValidationError(
-                DatasetValidationError.Reason.UNSPECIFIED, f"Invalid --dataset: {msgs}"
-            ) from e
+            raise DatasetParseError(f"Invalid --dataset: {msgs}") from e
         except ValueError as e:
-            raise DatasetValidationError(
-                DatasetValidationError.Reason.UNSPECIFIED, f"Invalid --dataset: {e}"
-            ) from e
+            raise DatasetParseError(f"Invalid --dataset: {e}") from e
     if config.audit is None:
         run_benchmark(config, mode)
         return

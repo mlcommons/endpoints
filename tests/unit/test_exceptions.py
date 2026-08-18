@@ -24,8 +24,13 @@ handling allows for:
 - Clear error categorization (validation vs setup vs execution)
 """
 
+import copy
+import pickle
+
+import pytest
 from inference_endpoint.exceptions import (
     CLIError,
+    DatasetValidationError,
     ExecutionError,
     InputValidationError,
     SetupError,
@@ -78,3 +83,54 @@ class TestExceptionHierarchy:
 
         assert chained.__cause__ is original
         assert isinstance(chained, InputValidationError)
+
+
+class TestDatasetValidationErrorRoundTrip:
+    """DatasetValidationError carries structured fields (reason + detail), so it
+    overrides __reduce__ to stay copy/pickle-safe: args holds only the formatted
+    message, which __init__ cannot consume as (reason, detail)."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            DatasetValidationError(
+                DatasetValidationError.Reason.INPUT_TOKENS_SHADOWING
+            ),
+            DatasetValidationError(
+                DatasetValidationError.Reason.PROMPT_LIST_UNSUPPORTED, "sample 3"
+            ),
+        ],
+        ids=["reason-only", "reason-and-detail"],
+    )
+    @pytest.mark.parametrize(
+        # pickle round-trips a self-constructed exception (trusted, not external
+        # input) — this asserts __reduce__ reconstructs it from reason + detail.
+        "clone_fn",
+        [copy.copy, copy.deepcopy, lambda e: pickle.loads(pickle.dumps(e))],
+        ids=["copy", "deepcopy", "pickle"],
+    )
+    def test_round_trip_preserves_reason_detail_message(self, exc, clone_fn):
+        clone = clone_fn(exc)
+        assert clone.reason is exc.reason
+        assert clone.detail == exc.detail
+        assert str(clone) == str(exc)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "clone_fn",
+        [copy.copy, copy.deepcopy, lambda e: pickle.loads(pickle.dumps(e))],
+        ids=["copy", "deepcopy", "pickle"],
+    )
+    def test_round_trip_preserves_notes_and_extra_state(self, clone_fn):
+        # The 3-tuple __reduce__ restores __dict__ as state, so __notes__ (PEP
+        # 678) and any caller-added attribute survive — matching CPython's
+        # default exception reducer.
+        exc = DatasetValidationError(
+            DatasetValidationError.Reason.MESSAGES_SHADOWING, "sample 7"
+        )
+        exc.add_note("diagnostic note")
+        exc.extra_attr = "kept"
+        clone = clone_fn(exc)
+        assert getattr(clone, "__notes__", None) == ["diagnostic note"]
+        assert clone.extra_attr == "kept"

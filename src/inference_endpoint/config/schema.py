@@ -757,14 +757,7 @@ class WarmupConfig(BaseModel):
     ] = Field(None, gt=0, description="Warmup request count (None = full dataset once)")
     salt: Annotated[
         bool,
-        cyclopts.Parameter(
-            alias="--warmup-salt",
-            help=(
-                "Prepend a unique random hex salt to each warmup prompt. Requires "
-                "text-'prompt' samples; enabling it on a pre-tokenized "
-                "('input_tokens') dataset is a hard error."
-            ),
-        ),
+        cyclopts.Parameter(alias="--warmup-salt"),
     ] = Field(
         False,
         description=(

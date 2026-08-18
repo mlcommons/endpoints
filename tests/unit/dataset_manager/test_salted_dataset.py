@@ -167,14 +167,22 @@ class TestSaltValidation:
         with pytest.raises(DatasetValidationError, match="dict"):
             inner.with_salt(random.Random())
 
-    def test_multimodal_list_prompt_raises(self):
+    def test_list_prompt_raises(self):
+        # A list-form 'prompt' (here, multimodal content parts; also OpenAI
+        # batch / token-ID arrays per the spec) is an explicitly unsupported
+        # salt path — reject with a dedicated, actionable reason, not the
+        # generic non-str message.
         content_parts = [
             {"type": "text", "text": "describe this image"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
         ]
         inner = _make_loaded_dataset([{"prompt": content_parts}])
-        with pytest.raises(DatasetValidationError, match="str"):
+        with pytest.raises(DatasetValidationError) as exc_info:
             inner.with_salt(random.Random())
+        assert (
+            exc_info.value.reason
+            is DatasetValidationError.Reason.PROMPT_LIST_UNSUPPORTED
+        )
 
     def test_non_str_prompt_raises(self):
         inner = _make_loaded_dataset([{"prompt": 42}])
@@ -260,6 +268,10 @@ class TestSaltValidation:
             ),
             ({"question": "?"}, DatasetValidationError.Reason.PROMPT_MISSING),
             ({"prompt": 42}, DatasetValidationError.Reason.PROMPT_TYPE_MISMATCH),
+            (
+                {"prompt": [{"type": "text", "text": "hi"}]},
+                DatasetValidationError.Reason.PROMPT_LIST_UNSUPPORTED,
+            ),
         ],
     )
     def test_error_exposes_typed_reason(self, sample, expected_reason):

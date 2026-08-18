@@ -403,6 +403,78 @@ class TestDatasetParsing:
             assert ds.accuracy_config is not None
             assert ds.accuracy_config.eval_method == acc_eval_method
 
+    @pytest.mark.unit
+    def test_malformed_dataset_string_raises_parse_error(self):
+        """A malformed --dataset string surfaces as DatasetParseError, not a
+        DatasetValidationError with a vestigial Reason. 'badoption' (no '=')
+        raises inside the field validator, which pydantic wraps — exercising the
+        `except ValidationError` arm of _run."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.exceptions import DatasetParseError
+
+        config = OfflineConfig(**_OFFLINE_KWARGS | {"datasets": []})
+        with pytest.raises(DatasetParseError, match="Invalid --dataset"):
+            cli._run(config, ["data.csv,badoption"], TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_dataset_string_raw_valueerror_raises_parse_error(self):
+        """A bare ValueError from with_updates (not wrapped by pydantic) also
+        surfaces as DatasetParseError — covering _run's second `except` arm."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.exceptions import DatasetParseError
+
+        config = MagicMock()
+        config.datasets = []
+        config.with_updates.side_effect = ValueError("raw parse failure")
+        with pytest.raises(DatasetParseError, match="Invalid --dataset"):
+            cli._run(config, ["x.jsonl"], TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_scalar_then_dotted_key_collision_raises_parse_error(self):
+        """A scalar option shadowed by a dotted one (parser=x,parser.prompt=y)
+        must surface as DatasetParseError, not an uncaught TypeError → exit-1
+        traceback. parse_dataset_string raises ValueError, which _run wraps."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.exceptions import DatasetParseError
+
+        config = OfflineConfig(**_OFFLINE_KWARGS | {"datasets": []})
+        with pytest.raises(DatasetParseError, match="Invalid --dataset"):
+            cli._run(config, ["d.jsonl,parser=x,parser.prompt=y"], TestMode.PERF)
+
+
+@pytest.mark.unit
+class TestRunAuditErrorPropagation:
+    """run_audit must not mask a phase's typed CLI error as a generic
+    ExecutionError. An unsaltable warmup makes setup_benchmark raise
+    DatasetValidationError (InputValidationError → exit 2); in the audit.only
+    path that must propagate, not become ExecutionError (exit 4)."""
+
+    def test_phase_input_validation_error_propagates(self, monkeypatch, tmp_path):
+        from inference_endpoint.commands import audit as audit_mod
+        from inference_endpoint.config.schema import DatasetType
+        from inference_endpoint.exceptions import DatasetValidationError
+
+        spec = MagicMock(label="reference", test_mode=TestMode.PERF)
+        fake_test = MagicMock()
+        fake_test.plan_runs.return_value = [spec]
+        monkeypatch.setattr(audit_mod, "get_audit_test", lambda _test: fake_test)
+
+        def _raise_validation(*args, **kwargs):
+            raise DatasetValidationError(
+                DatasetValidationError.Reason.INPUT_TOKENS_SHADOWING, "sample 0"
+            )
+
+        monkeypatch.setattr(audit_mod, "setup_benchmark", _raise_validation)
+
+        config = MagicMock()
+        config.audit = MagicMock()
+        config.datasets = [MagicMock(type=DatasetType.PERFORMANCE)]
+        config.with_updates.return_value = MagicMock()
+
+        # Not recast to ExecutionError — the typed validation error propagates.
+        with pytest.raises(DatasetValidationError):
+            audit_mod.run_audit(config, tmp_path)
+
 
 @pytest.mark.unit
 class TestLoadDatasetsSaltValidation:
@@ -624,6 +696,33 @@ class TestCommandHandlers:
         )
         lp = bound.arguments["config"].settings.load_pattern
         assert lp.use_legacy_loadgen_qps_metrics is False
+
+    @pytest.mark.unit
+    def test_warmup_salt_flag_default_and_negative(self):
+        """warmup.salt defaults off; --warmup-salt enables it; --no-warmup-salt
+        (the flag the salt-validation remediation message points to) disables
+        it."""
+        base = [
+            "offline",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+        ]
+        _, bound, _ = benchmark_app.parse_args(base, exit_on_error=False)
+        assert bound.arguments["config"].settings.warmup.salt is False
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--warmup-salt"], exit_on_error=False
+        )
+        assert bound.arguments["config"].settings.warmup.salt is True
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--no-warmup-salt"], exit_on_error=False
+        )
+        assert bound.arguments["config"].settings.warmup.salt is False
 
     @pytest.mark.unit
     def test_loadgen_flag_serialized_only_for_poisson(self):

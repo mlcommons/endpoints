@@ -20,10 +20,12 @@ against the same endpoint, then verifies the results and writes the result.
 
 run_audit returns an AuditResult; cli.py maps PASS/FAIL and main.run() maps
 exceptions to process exit codes:
-  0  PASS           — result.passed is True
-  1  FAIL           — result.passed is False (cli.py raises CLIError)
-  3  SetupError     — config invalid for the audit (bad sample count/index)
-  4  ExecutionError — a phase run failed or produced partial data
+  0  PASS                 — result.passed is True
+  1  FAIL                 — result.passed is False (cli.py raises CLIError)
+  2  InputValidationError — a phase rejected user input (e.g. an unsaltable
+                            warmup dataset), propagated verbatim from setup
+  3  SetupError           — config invalid for the audit (bad sample count/index)
+  4  ExecutionError       — a phase run failed or produced partial data
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from pathlib import Path
 from ..compliance import AuditRunArtifacts, get_audit_test
 from ..compliance.result import AuditResult, write_result
 from ..config.schema import BenchmarkConfig, DatasetType
-from ..exceptions import ExecutionError, SetupError
+from ..exceptions import CLIError, ExecutionError, SetupError
 from .benchmark.execute import (
     BenchmarkResult,
     TestMode,
@@ -65,6 +67,9 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
         AuditResult — always returned; caller maps passed/failed to exit code.
 
     Raises:
+        InputValidationError: A phase rejected user input (e.g. setup_benchmark
+            raising DatasetValidationError for an unsaltable warmup dataset);
+            propagated verbatim rather than recast as a phase ExecutionError.
         SetupError: Config invalid for audit (missing audit block, bad sample
             count/index for the dataset).
         ExecutionError: A phase benchmark run failed.
@@ -116,7 +121,11 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
                 )
             bench = run_benchmark_async(ctx)
             finalize_benchmark(ctx, bench)
-        except (SetupError, ExecutionError):
+        except CLIError:
+            # Typed CLI errors already carry the right exit code — SetupError (3),
+            # ExecutionError (4), and the InputValidationError (2) that
+            # setup_benchmark raises for an unsaltable warmup dataset. Propagate
+            # them; only genuinely unexpected exceptions become a phase failure.
             raise
         except Exception as exc:
             raise ExecutionError(f"Audit phase '{spec.label}' failed: {exc}") from exc

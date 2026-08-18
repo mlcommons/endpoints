@@ -39,14 +39,14 @@ class InputValidationError(CLIError):
 
 
 class DatasetValidationError(InputValidationError):
-    """Invalid --dataset string or dataset configuration.
+    """A loaded dataset sample fails salt validation.
 
     The failure category is a ``Reason``; ``detail`` carries the specifics
-    (offending sample index, remediation hint, parser error text).
+    (offending sample index, remediation hint).
     """
 
     class Reason(Enum):
-        """Why a dataset failed validation."""
+        """Why a sample cannot be salted."""
 
         TYPE_MISMATCH = "sample is not a dict"
         INPUT_TOKENS_SHADOWING = (
@@ -58,7 +58,11 @@ class DatasetValidationError(InputValidationError):
         )
         PROMPT_MISSING = "sample has no 'prompt' field"
         PROMPT_TYPE_MISMATCH = "sample 'prompt' is not a str"
-        UNSPECIFIED = "dataset validation failed"
+        PROMPT_LIST_UNSUPPORTED = (
+            "sample 'prompt' is a list (OpenAI batch / token-IDs, or this "
+            "project's multimodal content parts); salt supports only a single "
+            "text 'prompt'"
+        )
 
     def __init__(
         self,
@@ -69,6 +73,26 @@ class DatasetValidationError(InputValidationError):
         self.detail = detail
         message = reason.value if detail is None else f"{reason.value}: {detail}"
         super().__init__(message)
+
+    def __reduce__(
+        self,
+    ) -> tuple[type, tuple["DatasetValidationError.Reason", str | None], dict]:
+        # args holds the formatted message, but __init__ takes (reason, detail);
+        # reconstruct from the structured fields so copy/pickle round-trips. The
+        # third element mirrors CPython's default exception reducer: it restores
+        # __dict__ (and thus __notes__ / any caller-added attribute) as state.
+        return (type(self), (self.reason, self.detail), self.__dict__)
+
+
+class DatasetParseError(InputValidationError):
+    """A --dataset CLI string could not be parsed into a dataset config.
+
+    Distinct from DatasetValidationError: the failure is in the user's input
+    string (bad format / key=value), before any dataset is loaded — so there is
+    no sample index or Reason, just the underlying parse message.
+    """
+
+    pass
 
 
 class SetupError(CLIError):

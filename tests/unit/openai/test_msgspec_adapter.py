@@ -366,7 +366,7 @@ def test_messages_shadow_prompt_in_request():
     """'messages' takes precedence over 'prompt' in the emitted request.
 
     A sample carrying both fields sends only 'messages'; the 'prompt' is dropped
-    entirely. This is why Dataset._can_salt() rejects such samples — salting the
+    entirely. This is why _check_unsaltable() rejects such samples — salting the
     ignored 'prompt' would not change the payload and would silently fail to bust
     the KV cache.
     """
