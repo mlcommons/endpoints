@@ -38,7 +38,6 @@ from inference_endpoint.load_generator.session import (
     PhaseResult,
     PhaseType,
     SessionResult,
-    _extract_prompt_text,
 )
 from inference_endpoint.metrics.metric import Throughput
 
@@ -163,6 +162,143 @@ class TestPhaseIssuer:
         assert issued_events[0].conversation_id == ""
         assert issued_events[0].turn is None
 
+    def test_issue_preserves_structured_chat_input_for_isl(self):
+        class ChatDataset(FakeDataset):
+            def load_sample(self, index: int) -> dict:
+                return {
+                    "messages": [
+                        {"role": "user", "content": "question"},
+                        {
+                            "role": "assistant",
+                            "reasoning_content": "reasoning",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "lookup",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call-1",
+                            "content": "result",
+                        },
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {"name": "lookup", "parameters": {}},
+                        }
+                    ],
+                    "chat_template": "custom template",
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "tool_choice": "auto",
+                }
+
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(ChatDataset(1), issuer, publisher, lambda: False)
+
+        phase_issuer.issue(0, conversation_id="conv-1", turn=2)
+
+        prompt = publisher.events_of_type(SampleEventType.ISSUED)[0].data
+        assert prompt.messages == tuple(issuer.issued_queries[0].data["messages"])
+        assert prompt.tools == tuple(issuer.issued_queries[0].data["tools"])
+        assert prompt.chat_template == "custom template"
+        assert prompt.chat_template_kwargs == {"enable_thinking": False}
+        assert prompt.tool_choice == "auto"
+        assert prompt.text is None
+
+    def test_issue_messages_take_precedence_over_prompt(self):
+        class MessagesDataset(FakeDataset):
+            def load_sample(self, index: int) -> dict:
+                return {
+                    "messages": [{"role": "user", "content": "question"}],
+                    "prompt": "generic fallback",
+                }
+
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(MessagesDataset(1), issuer, publisher, lambda: False)
+
+        phase_issuer.issue(0)
+
+        prompt = publisher.events_of_type(SampleEventType.ISSUED)[0].data
+        assert prompt.messages == ({"role": "user", "content": "question"},)
+        assert prompt.text is None
+
+    def test_issue_rejects_both_token_id_fields(self):
+        class ConflictingTokensDataset(FakeDataset):
+            def load_sample(self, index: int) -> dict:
+                return {"input_tokens": [1, 2], "token_ids": [3, 4]}
+
+        phase_issuer = PhaseIssuer(
+            ConflictingTokensDataset(1), FakeIssuer(), FakePublisher(), lambda: False
+        )
+
+        with pytest.raises(ValueError, match="both input_tokens and token_ids"):
+            phase_issuer.issue(0)
+
+    def test_issue_empty_messages_falls_through_to_prompt(self):
+        class EmptyMessagesDataset(FakeDataset):
+            def load_sample(self, index: int) -> dict:
+                return {"messages": [], "prompt": "fallback prompt"}
+
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(
+            EmptyMessagesDataset(1), issuer, publisher, lambda: False
+        )
+
+        phase_issuer.issue(0)
+
+        prompt = publisher.events_of_type(SampleEventType.ISSUED)[0].data
+        assert prompt.messages is None
+        assert prompt.text == "fallback prompt"
+
+    def test_issue_list_prompt_without_isl_representation_does_not_warn(self, caplog):
+        class UnsupportedPromptDataset(FakeDataset):
+            def load_sample(self, index: int) -> dict:
+                return {"prompt": [{"type": "image_url"}]}
+
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(
+            UnsupportedPromptDataset(2), issuer, publisher, lambda: False
+        )
+
+        with caplog.at_level("WARNING"):
+            phase_issuer.issue(0)
+            phase_issuer.issue(1)
+
+        assert not caplog.records
+
+    def test_issue_warns_once_for_non_mapping_sample(self, caplog):
+        class NonMappingDataset(FakeDataset):
+            def load_sample(self, index: int):
+                return ["prompt"]
+
+        phase_issuer = PhaseIssuer(
+            NonMappingDataset(2), FakeIssuer(), FakePublisher(), lambda: False
+        )
+
+        with caplog.at_level("WARNING"):
+            phase_issuer.issue(0)
+            phase_issuer.issue(1)
+
+        warnings = [
+            record
+            for record in caplog.records
+            if "Non-mapping samples are issued normally" in record.message
+        ]
+        assert len(warnings) == 1
+
     def test_issue_returns_none_when_stopped(self):
         dataset = FakeDataset(5)
         issuer = FakeIssuer()
@@ -189,11 +325,20 @@ class TestPhaseIssuer:
         issuer = FakeIssuer()
         issuer._auto_respond = False
         publisher = FakePublisher()
-        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+        routing_headers = ("X-Session-ID", "X-SMG-Routing-Key")
+        phase_issuer = PhaseIssuer(
+            dataset,
+            issuer,
+            publisher,
+            lambda: False,
+            routing_headers=routing_headers,
+        )
 
         query_id = phase_issuer.issue(2, conversation_id="conv-1", turn=3)
         assert query_id is not None
-        assert issuer.issued_queries[0].headers == {"X-Session-ID": "conv-1"}
+        assert issuer.issued_queries[0].headers == dict.fromkeys(
+            routing_headers, "conv-1"
+        )
         assert phase_issuer.uuid_to_conv_info[query_id] == ("conv-1", 3)
 
         issued = publisher.events_of_type(SampleEventType.ISSUED)
@@ -1083,76 +1228,6 @@ class TestSessionResult:
         assert len(sr.perf_results) == 2
         assert len(sr.accuracy_results) == 1
         assert sr.perf_results[0].name == "perf1"
-
-
-@pytest.mark.unit
-class TestExtractPromptText:
-    def test_string_content_extracted(self):
-        messages = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi"},
-        ]
-        assert _extract_prompt_text(messages) == "Hello\nHi"
-
-    def test_multimodal_list_content_text_parts_extracted(self):
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this image"},
-                    {"type": "image_url"},
-                ],
-            }
-        ]
-        assert _extract_prompt_text(messages) == "Describe this image"
-
-    def test_mixed_string_and_list_content(self):
-        messages = [
-            {"role": "system", "content": "You are helpful"},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "What is this?"},
-                    {"type": "image_url"},
-                ],
-            },
-        ]
-        assert _extract_prompt_text(messages) == "You are helpful\nWhat is this?"
-
-    def test_none_content_skipped(self):
-        messages = [
-            {"role": "assistant", "content": None},
-            {"role": "user", "content": "Hello"},
-        ]
-        assert _extract_prompt_text(messages) == "Hello"
-
-    def test_list_content_with_no_text_parts_returns_none(self):
-        messages = [{"role": "user", "content": [{"type": "image_url"}]}]
-        assert _extract_prompt_text(messages) is None
-
-    def test_non_dict_messages_skipped(self):
-        messages = ["not a dict", {"role": "user", "content": "Valid"}]
-        assert _extract_prompt_text(messages) == "Valid"
-
-    def test_tool_calls_included(self):
-        messages = [
-            {"role": "user", "content": "What's the weather?"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "c1",
-                        "type": "function",
-                        "function": {"name": "get_weather", "arguments": "{}"},
-                    }
-                ],
-            },
-        ]
-        result = _extract_prompt_text(messages)
-        assert result is not None
-        assert "What's the weather?" in result
-        assert "get_weather" in result
 
 
 @pytest.mark.unit

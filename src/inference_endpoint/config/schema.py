@@ -416,6 +416,13 @@ class AgenticInferenceConfig(BaseModel):
             "in dataset."
         ),
     )
+    routing_headers: tuple[str, ...] = Field(
+        default=("X-Session-ID",),
+        description=(
+            "HTTP header names populated with the conversation ID on every "
+            "agentic request."
+        ),
+    )
     num_trajectories_to_issue: int | None = Field(
         default=None,
         gt=0,
@@ -852,11 +859,11 @@ class DrainConfig(BaseModel):
             ),
         ),
     ] = Field(
-        2,
+        4,
         ge=0,
         description=(
             "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
-            "(default: 2; 0 = defer everything to the end-of-run drain)."
+            "(default: 4; 0 = defer everything to the end-of-run drain)."
         ),
     )
 

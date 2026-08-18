@@ -880,6 +880,45 @@ class TestAsyncTriggers:
                 agg.close()
 
     @pytest.mark.asyncio
+    async def test_isl_structured_prompt_includes_reasoning_and_tools(self, tmp_path):
+        loop = asyncio.get_event_loop()
+        tokenizer = MockBatchTokenizer()
+        messages = (
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "reasoning_content": "think carefully",
+                "content": None,
+                "tool_calls": ({"function": {"name": "lookup"}},),
+            },
+            {"role": "tool", "content": "tool result"},
+        )
+        tools = ({"function": {"name": "lookup"}},)
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_isl_structured", tokenizer=tokenizer
+            )
+            try:
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(
+                            SampleEventType.ISSUED,
+                            "s1",
+                            ts=1000,
+                            data=PromptData(messages=messages, tools=tools),
+                        ),
+                    ]
+                )
+                await agg._token_queue.drain_all()
+                assert snapshot_series_count(registry, MetricSeriesKey.ISL.value) == 1
+                assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) > 5
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
     async def test_osl_emitted_on_complete(self, tmp_path):
         """OSL is emitted via async tokenization when COMPLETE carries text."""
         loop = asyncio.get_event_loop()
@@ -1164,10 +1203,7 @@ class TestAsyncTriggers:
         loop = asyncio.get_event_loop()
 
         class FailingBatchTokenizer:
-            async def count_texts_async(self, texts, _loop, live=False):
-                raise RuntimeError("tokenizer backend died")
-
-            async def token_count_message_async(self, *args):
+            async def count_batch_async(self, inputs, _loop, live=False):
                 raise RuntimeError("tokenizer backend died")
 
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
@@ -1211,13 +1247,9 @@ class TestAsyncTriggers:
         loop = asyncio.get_event_loop()
 
         class BlockingBatchTokenizer:
-            async def count_texts_async(self, texts, _loop, live=False):
+            async def count_batch_async(self, inputs, _loop, live=False):
                 await asyncio.sleep(10.0)  # exceeds drain timeout
-                return [0] * len(texts)
-
-            async def token_count_message_async(self, *args):
-                await asyncio.sleep(10.0)
-                return 0
+                return [0] * len(inputs)
 
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, _, publisher = make_aggregator(

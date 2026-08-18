@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urlparse, urlunparse
 
 import msgspec.json
@@ -85,6 +85,31 @@ _LOG_TAIL_MAX_BYTES = 64 * 1024
 _LOG_TAIL_MAX_LINES = 50
 _RUN_LABEL = "com.mlcommons.endpoints.swebench-run"
 _PROCESS_TERMINATE_TIMEOUT_S = 10
+_SWEBENCH_DATASETS = {
+    "verified": "princeton-nlp/SWE-bench_Verified",
+    "lite": "princeton-nlp/SWE-bench_Lite",
+}
+
+
+def _prepare_eval(request: RunRequest, run_dir: Path) -> tuple[str, str]:
+    run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
+    (run_dir / "swe_bench_eval_run_id.txt").write_text(run_id)
+    dataset_name = _SWEBENCH_DATASETS.get(request.subset)
+    if dataset_name is None:
+        raise RunnerError(f"unknown SWE-bench subset: {request.subset}")
+    return run_id, dataset_name
+
+
+def _resolve_eval_result(output_dir: Path, model_name: str, run_id: str) -> Path:
+    result_path = output_dir / f"{model_name.replace('/', '__')}.{run_id}.json"
+    if result_path.exists():
+        return result_path
+    candidates = sorted(output_dir.rglob(f"*{run_id}*.json"))
+    if not candidates:
+        raise RunnerError(f"SWE-bench result file not found for run_id={run_id}")
+    if len(candidates) > 1:
+        raise RunnerError(f"multiple SWE-bench result files found for run_id={run_id}")
+    return candidates[0]
 
 
 def _normalize_endpoint_base(endpoint: str) -> str:
@@ -241,7 +266,7 @@ class SweBenchRunner:
                 self._cleanup_containers(run_dir.name, **cleanup_kwargs)
             except Exception:
                 logger.warning(
-                    "Could not clean up SWE-bench Docker containers for run %s",
+                    "Could not clean up SWE-bench containers for run %s",
                     run_dir.name,
                     exc_info=True,
                 )
@@ -366,17 +391,22 @@ class SweBenchRunner:
         environment_cfg = cfg.get("environment")
         if not isinstance(environment_cfg, dict):
             raise RunnerError("swebench template must define environment")
-        environment_cfg["run_args"] = [
-            "--rm",
-            "--label",
-            f"{_RUN_LABEL}={run_id}",
-        ]
+        self._configure_environment(environment_cfg, run_id)
 
         config_dir.mkdir(parents=True, exist_ok=True)
         patched_path = config_dir / "swebench_patched.yaml"
         with patched_path.open("w") as f:
             yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
         return patched_path
+
+    def _configure_environment(
+        self, environment_cfg: dict[str, Any], run_id: str
+    ) -> None:
+        environment_cfg["run_args"] = [
+            "--rm",
+            "--label",
+            f"{_RUN_LABEL}={run_id}",
+        ]
 
     def _run_agent(
         self,
@@ -568,14 +598,7 @@ class SweBenchRunner:
         secret_values: set[str],
         cancel_token: CancellationToken | None = None,
     ) -> Path:
-        run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
-        (run_dir / "swe_bench_eval_run_id.txt").write_text(run_id)
-        dataset_name = {
-            "verified": "princeton-nlp/SWE-bench_Verified",
-            "lite": "princeton-nlp/SWE-bench_Lite",
-        }.get(request.subset)
-        if dataset_name is None:
-            raise RunnerError(f"unknown SWE-bench subset: {request.subset}")
+        run_id, dataset_name = _prepare_eval(request, run_dir)
         cmd = [
             sys.executable,
             "-m",
@@ -604,15 +627,177 @@ class SweBenchRunner:
             secret_values=secret_values,
             cancel_token=cancel_token,
         )
-        safe_model = request.model_name.replace("/", "__")
-        result_path = output_dir / f"{safe_model}.{run_id}.json"
-        if result_path.exists():
-            return result_path
-        candidates = sorted(output_dir.rglob(f"*{run_id}*.json"))
-        if not candidates:
-            raise RunnerError(f"SWE-bench result file not found for run_id={run_id}")
-        if len(candidates) > 1:
-            raise RunnerError(
-                f"multiple SWE-bench result files found for run_id={run_id}"
+        return _resolve_eval_result(output_dir, request.model_name, run_id)
+
+
+class PyxisSweBenchRunner(SweBenchRunner):
+    def __init__(
+        self,
+        *,
+        project_root: Path,
+        subprocess_timeout_s: int,
+        image_registry: str,
+    ):
+        super().__init__(
+            project_root=project_root,
+            subprocess_timeout_s=subprocess_timeout_s,
+        )
+        self.image_registry = image_registry
+
+    def _configure_environment(
+        self, environment_cfg: dict[str, Any], run_id: str
+    ) -> None:
+        for key in ("run_args", "pull_timeout", "container_timeout"):
+            environment_cfg.pop(key, None)
+        environment_cfg["environment_class"] = (
+            "swebench_service.pyxis_environment.PyxisEnvironment"
+        )
+        environment_cfg["run_id"] = run_id
+
+    def _run_agent(
+        self,
+        request: RunRequest,
+        patched_config: Path,
+        output_dir: Path,
+        run_dir: Path,
+        secret_values: set[str],
+        cancel_token: CancellationToken | None = None,
+    ) -> None:
+        command = [
+            sys.executable,
+            "-m",
+            "swebench_service.pyxis_worker",
+            "agent",
+            "--model",
+            request.model_name,
+            "--config",
+            str(patched_config),
+            "--subset",
+            request.subset,
+            "--split",
+            request.split,
+            "--filter",
+            _exact_instance_filter(request.evaluated_instance_ids),
+            "--workers",
+            str(request.workers),
+            "--output",
+            str(output_dir),
+            "--image-registry",
+            self.image_registry,
+        ]
+        self._run_logged_subprocess(
+            command,
+            run_dir / "swe_bench_agent.log",
+            cwd=output_dir,
+            timeout_s=self.subprocess_timeout_s,
+            env=self._base_env(request),
+            secret_values=secret_values,
+            cancel_token=cancel_token,
+        )
+
+    def _run_eval(
+        self,
+        request: RunRequest,
+        preds_path: Path,
+        output_dir: Path,
+        run_dir: Path,
+        secret_values: set[str],
+        cancel_token: CancellationToken | None = None,
+    ) -> Path:
+        run_id, dataset_name = _prepare_eval(request, run_dir)
+        command = [
+            sys.executable,
+            "-m",
+            "swebench_service.pyxis_worker",
+            "eval",
+            "--dataset-name",
+            dataset_name,
+            "--split",
+            request.split,
+            "--predictions-path",
+            str(preds_path),
+            "--max-workers",
+            str(request.max_eval_workers),
+            "--run-id",
+            run_id,
+            "--image-registry",
+            self.image_registry,
+            "--output-dir",
+            str(output_dir),
+            "--instance-ids",
+            *request.evaluated_instance_ids,
+        ]
+        env = dict(os.environ)
+        env.pop("OPENAI_API_KEY", None)
+        self._run_logged_subprocess(
+            command,
+            run_dir / "swe_bench_eval.log",
+            cwd=output_dir,
+            timeout_s=self.subprocess_timeout_s,
+            env=env,
+            secret_values=secret_values,
+            cancel_token=cancel_token,
+        )
+        return _resolve_eval_result(output_dir, request.model_name, run_id)
+
+    def _cleanup_containers(
+        self,
+        run_id: str,
+        *,
+        eval_run_id: str | None = None,
+        instance_ids: list[str] | None = None,
+    ) -> None:
+        # Local import avoids the runner <-> Pyxis environment import cycle.
+        from .pyxis_environment import build_srun_command, safe_srun_env
+
+        del eval_run_id, instance_ids
+        safe_run_id = re.sub(r"[^A-Za-z0-9_.-]", "-", run_id)[:24]
+        prefix = f"pyxis_mswe_{safe_run_id}_"
+        try:
+            listed = subprocess.run(
+                build_srun_command(argv=["enroot", "list", "-f"]),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=safe_srun_env(),
             )
-        return candidates[0]
+            for line in listed.stdout.splitlines():
+                fields = line.split(maxsplit=1)
+                name = fields[0] if fields else ""
+                if name.startswith(prefix):
+                    subprocess.run(
+                        build_srun_command(argv=["enroot", "remove", "-f", name]),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        env=safe_srun_env(),
+                    )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RunnerError(
+                f"failed to clean up Pyxis containers for SWE-bench run {run_id}"
+            ) from exc
+
+
+def create_runner(
+    runtime: Literal["docker", "pyxis"],
+    *,
+    project_root: Path,
+    subprocess_timeout_s: int,
+    image_registry: str | None,
+) -> RunnerProtocol:
+    if runtime == "docker":
+        return SweBenchRunner(
+            project_root=project_root,
+            subprocess_timeout_s=subprocess_timeout_s,
+        )
+    if runtime == "pyxis":
+        if image_registry is None:
+            raise ValueError("Pyxis runtime requires an image registry")
+        return PyxisSweBenchRunner(
+            project_root=project_root,
+            subprocess_timeout_s=subprocess_timeout_s,
+            image_registry=image_registry,
+        )
+    raise ValueError(f"unknown SWE-bench runtime: {runtime}")
