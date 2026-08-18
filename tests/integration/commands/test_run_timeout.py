@@ -22,10 +22,15 @@ final snapshot; ``run_benchmark`` exits non-zero via ``ExecutionError``.
 """
 
 import json
+import time
 from pathlib import Path
 
 import pytest
-from inference_endpoint.commands.benchmark.execute import run_benchmark
+from inference_endpoint.commands.benchmark.execute import (
+    run_benchmark,
+    run_benchmark_async,
+    setup_benchmark,
+)
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
     Dataset,
@@ -78,9 +83,12 @@ def test_run_timeout_produces_interrupted_report(
             load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=5),
             client=_FAST_CLIENT,
             # 600 samples at 5 QPS is a ~120 s workload, so only the watchdog
-            # can end the run.
+            # can end the run. The budget must comfortably exceed service +
+            # worker startup (a fire before the session exists aborts the
+            # launch instead, without mid-run artifacts — a different path,
+            # covered by test_run_timeout_during_service_launch_aborts_promptly).
             runtime=RuntimeConfig(n_samples_to_issue=600),
-            timeouts=Timeouts(run_timeout_s=2.0),
+            timeouts=Timeouts(run_timeout_s=6.0),
             warmup=WarmupConfig(enabled=False),
         ),
     )
@@ -217,3 +225,41 @@ def test_metrics_drain_timeout_fails_run(mock_http_echo_server, tmp_path):
 
     summary = _read_result_summary(report_dir)
     assert summary["complete"] is False
+
+
+@pytest.mark.integration
+def test_run_timeout_during_service_launch_aborts_promptly(
+    mock_http_echo_server, ds_dataset_path, tmp_path
+):
+    """A deadline expiring before the session exists cancels the launch.
+
+    The watchdog's pre-session fire path cancels the orchestration task so
+    pending service-launch/endpoint-connect awaits unwind immediately instead
+    of running out their own readiness timeouts, and the abort is attributed
+    to the run timeout (ExecutionError), not to a secondary launch error.
+    """
+    config = BenchmarkConfig(
+        type=TestType.ONLINE,
+        endpoint_config=EndpointConfig(endpoints=[mock_http_echo_server.url]),
+        model_params=ModelParams(name="echo-server", streaming=StreamingMode.OFF),
+        datasets=[Dataset(path=str(ds_dataset_path), type=DatasetType.PERFORMANCE)],
+        report_dir=tmp_path,
+        settings=Settings(
+            load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=5),
+            client=_FAST_CLIENT,
+            runtime=RuntimeConfig(n_samples_to_issue=10),
+            warmup=WarmupConfig(enabled=False),
+        ),
+    )
+    ctx = setup_benchmark(config, TestMode.PERF)
+
+    start = time.monotonic()
+    # An already-expired deadline fires the watchdog on the first event-loop
+    # iteration — deterministically before the metrics services report ready.
+    with pytest.raises(ExecutionError, match="Run timeout"):
+        run_benchmark_async(ctx, deadline=time.monotonic())
+    elapsed = time.monotonic() - start
+
+    # Prompt unwind: nowhere near the 30 s service_ready_timeout_s the
+    # pre-fix behavior would have waited out.
+    assert elapsed < 15.0, f"launch abort took {elapsed:.1f}s"

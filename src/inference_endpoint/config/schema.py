@@ -147,8 +147,7 @@ class ScorerMethod(str, Enum):
 
 # --------------------------------------------------------------------- audit
 # The root-level ``audit:`` block: per-test config models and their id enum.
-# The runnable test registry lives in ``compliance/``; these are small enough
-# to live beside the root aggregate they plug into.
+# The runnable test registry lives in ``compliance/``.
 class AuditTestId(str, Enum):
     """Registered compliance audit test identifiers."""
 
@@ -955,7 +954,7 @@ class EarlyStoppingConfig(BaseModel):
 
 
 @cyclopts.Parameter(name="*")
-class Settings(BaseModel):
+class Settings(WithUpdatesMixin, BaseModel):
     """Test settings."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)

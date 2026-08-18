@@ -137,7 +137,9 @@ run_benchmark ── run_timeout_s deadline captured here ───────�
 │               │               │        └─ performance_drain_timeout_s            │
 │               └───────────────┴─ max_duration_ms caps ISSUING only; reaching it  │
 │                                  ends the phase NORMALLY (valid report) and      │
-│                                  SKIPS the drain — the two never run together    │
+│                                  SKIPS the drain — both knobs may be set; the    │
+│                                  drain timeout applies only when issuance        │
+│                                  finishes before the cap                         │
 │                                                                                  │
 ├─ ACCURACY     issue ──────────┤ drain ─┤  ── accuracy_drain_timeout_s            │
 │                                                                                  │
@@ -146,24 +148,29 @@ run_benchmark ── run_timeout_s deadline captured here ───────�
 │                                              complete: false + non-zero exit)    │
 ├─ worker shutdown                          ── client.worker_graceful_shutdown_wait│
 │                                              then client.worker_force_kill_timeout
-└─ finalize: score accuracy, write artifacts                                       │
-                                                                                   │
+│                                                                                  │
  run_timeout_s (whole-run watchdog) ───────────────────────────────────────────────┘
  firing at ANY point above aborts the run: report marked INTERRUPTED, non-zero exit
+└─ finalize: score accuracy, write artifacts   (OUTSIDE the watchdog: a timed-out
+                                                run SKIPS scoring, writes its
+                                                INTERRUPTED artifacts, exits
+                                                non-zero; scoring of a run that
+                                                finished within budget is not
+                                                deadline-bounded)
 ```
 
-| YAML path                                       | CLI flag                                 | Semantics                                                                                                                                                                        |
-| ----------------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `settings.runtime.max_duration_ms`              | `--runtime.max-duration-ms`              | Caps performance-phase issuing (ms, or suffix: `600s`, `10m`); reaching it ends the phase NORMALLY — the report stays valid — and skips the performance drain                    |
-| `settings.timeouts.run_timeout_s`               | `--timeout`                              | Whole-run watchdog over everything above; firing aborts the entire run — report marked INTERRUPTED, non-zero exit                                                                |
-| `settings.timeouts.service_ready_timeout_s`     | `--service-ready-timeout`                | Wait for the metrics-aggregator/event-logger services to become ready (default 30)                                                                                               |
-| `settings.timeouts.warmup_drain_timeout_s`      | `--warmup-drain-timeout`                 | Bound on in-flight warmup requests after the warmup phase ends (default 240)                                                                                                     |
-| `settings.timeouts.performance_drain_timeout_s` | `--performance-drain-timeout`            | Bound on in-flight performance requests after the phase stops issuing (default: wait indefinitely)                                                                               |
-| `settings.timeouts.accuracy_drain_timeout_s`    | `--accuracy-drain-timeout`               | Bound on in-flight accuracy requests after the phase ends (default: wait indefinitely)                                                                                           |
-| `settings.timeouts.metrics_drain_timeout_s`     | `--metrics-drain-timeout`                | Budget for the metrics aggregator to finish tokenizing buffered samples after the run ends (default: wait indefinitely); expiring fails the run with `complete: false` artifacts |
-| `settings.client.worker_initialization_timeout` | `--client.worker-initialization-timeout` | Wait for endpoint-client worker processes to start (default 60)                                                                                                                  |
-| `settings.client.worker_graceful_shutdown_wait` | `--client.worker-graceful-shutdown-wait` | Post-run wait for workers to exit gracefully (default 0.5)                                                                                                                       |
-| `settings.client.worker_force_kill_timeout`     | `--client.worker-force-kill-timeout`     | Wait after the graceful window before force-killing workers (default 0.5)                                                                                                        |
+| YAML path                                       | CLI flag                                 | Semantics                                                                                                                                                                                                                     |
+| ----------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `settings.runtime.max_duration_ms`              | `--runtime.max-duration-ms`              | Caps performance-phase issuing (ms, or suffix: `600s`, `10m`); reaching it ends the phase NORMALLY — the report stays valid — and skips the performance drain                                                                 |
+| `settings.timeouts.run_timeout_s`               | `--timeout`                              | Whole-run watchdog from setup through worker shutdown; firing aborts the run — report marked INTERRUPTED, non-zero exit. Finalization (accuracy scoring, artifact writes) runs after the watchdog and is not deadline-bounded |
+| `settings.timeouts.service_ready_timeout_s`     | `--service-ready-timeout`                | Wait for the metrics-aggregator/event-logger services to become ready (default 30)                                                                                                                                            |
+| `settings.timeouts.warmup_drain_timeout_s`      | `--warmup-drain-timeout`                 | Bound on in-flight warmup requests after the warmup phase ends (default 240)                                                                                                                                                  |
+| `settings.timeouts.performance_drain_timeout_s` | `--performance-drain-timeout`            | Bound on in-flight performance requests after the phase stops issuing (default: wait indefinitely)                                                                                                                            |
+| `settings.timeouts.accuracy_drain_timeout_s`    | `--accuracy-drain-timeout`               | Bound on in-flight accuracy requests after the phase ends (default: wait indefinitely)                                                                                                                                        |
+| `settings.timeouts.metrics_drain_timeout_s`     | `--metrics-drain-timeout`                | Budget for the metrics aggregator to finish tokenizing buffered samples after the run ends (default: wait indefinitely); expiring fails the run with `complete: false` artifacts                                              |
+| `settings.client.worker_initialization_timeout` | `--client.worker-initialization-timeout` | Wait for endpoint-client worker processes to start (default 60)                                                                                                                                                               |
+| `settings.client.worker_graceful_shutdown_wait` | `--client.worker-graceful-shutdown-wait` | Post-run wait for workers to exit gracefully (default 0.5)                                                                                                                                                                    |
+| `settings.client.worker_force_kill_timeout`     | `--client.worker-force-kill-timeout`     | Wait after the graceful window before force-killing workers (default 0.5)                                                                                                                                                     |
 
 How the knobs compose:
 

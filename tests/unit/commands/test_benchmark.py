@@ -506,6 +506,24 @@ datasets:
         assert called_mode == TestMode.BOTH
 
     @pytest.mark.unit
+    def test_from_config_rejects_non_positive_timeout(self, tmp_path):
+        yaml_content = """
+type: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "test.jsonl"
+"""
+        config_file = tmp_path / "test.yaml"
+        config_file.write_text(yaml_content)
+        # Timeouts.run_timeout_s is gt=0; a bad --timeout must be a clean
+        # input error (exit 2), not a raw pydantic traceback.
+        with pytest.raises(InputValidationError, match="Invalid --timeout"):
+            from_config(config=config_file, timeout=0.0)
+
+    @pytest.mark.unit
     @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
     def test_from_config_report_dir_override(self, mock_run, tmp_path):
         yaml_content = """
