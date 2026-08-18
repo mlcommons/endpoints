@@ -24,7 +24,7 @@ import random
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error as urllib_error
 
 import inference_endpoint.commands.benchmark.execute as execute_mod
@@ -42,18 +42,22 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkResult,
     ResponseCollector,
     _build_phases,
-    _derive_profile_urls,
     _load_datasets,
     _PerfPhaseTimeout,
-    _post_profile,
-    _render_profile_status,
     _run_benchmark_async,
-    _write_profiling_section,
     finalize_benchmark,
     setup_benchmark,
 )
+from inference_endpoint.commands.benchmark.profiling import (
+    ProfileController,
+    _derive_profile_urls,
+    _post_profile,
+    _render_profile_status,
+    write_profiling_section,
+)
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
+    AgenticInferenceConfig,
     BenchmarkConfig,
     DatasetType,
     DrainConfig,
@@ -68,6 +72,9 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
     WarmupConfig,
+)
+from inference_endpoint.config.schema import (
+    Dataset as DatasetConfig,
 )
 from inference_endpoint.config.schema import (
     OfflineBenchmarkConfig as OfflineConfig,
@@ -85,7 +92,11 @@ from inference_endpoint.evaluation.scoring import (
     Scorer,
     SWEBenchScorer,
 )
-from inference_endpoint.exceptions import InputValidationError, SetupError
+from inference_endpoint.exceptions import (
+    ExecutionError,
+    InputValidationError,
+    SetupError,
+)
 from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import (
     PhaseResult,
@@ -684,7 +695,7 @@ class TestAccuracyOnlyDataset:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("datasets, expected_scorer, expected_type, " "expected_accuracy_datasets"),
+        ("datasets, expected_scorer, expected_type, expected_accuracy_datasets"),
         [
             (
                 [
@@ -788,13 +799,17 @@ class TestAccuracyOnlyDataset:
             patch.object(SWEBenchScorer, "preflight") as mock_preflight,
             patch.object(SWEBench, "generate") as mock_generate,
         ):
-            _, accuracy_datasets, eval_configs = _load_datasets(
-                config, tmp_path, TestMode.PERF
-            )
+            _, eval_configs = _load_datasets(config, tmp_path, TestMode.PERF)
         mock_preflight.assert_not_called()
         mock_generate.assert_not_called()
 
-        assert len(accuracy_datasets) == expected_accuracy_datasets
+        # eval_configs holds both real accuracy datasets and the inline entry a
+        # performance dataset's accuracy_config produces, so count by dataset_type
+        # rather than length -- an inline perf scorer is not an accuracy dataset.
+        acc_eval_configs = [
+            ec for ec in eval_configs if ec.dataset_type == DatasetType.ACCURACY
+        ]
+        assert len(acc_eval_configs) == expected_accuracy_datasets
         assert len(eval_configs) == (1 if expected_scorer is not None else 0)
         if expected_scorer is not None:
             assert eval_configs[0].scorer is expected_scorer
@@ -831,12 +846,9 @@ class TestAccuracyOnlyDataset:
             patch.object(SWEBenchScorer, "preflight") as mock_preflight,
             patch.object(SWEBench, "generate", return_value=fake_acc_df),
         ):
-            _, accuracy_datasets, eval_configs = _load_datasets(
-                config, tmp_path, test_mode
-            )
+            _, eval_configs = _load_datasets(config, tmp_path, test_mode)
 
         mock_preflight.assert_called_once_with({})
-        assert len(accuracy_datasets) == 1
         assert len(eval_configs) == 1
         assert eval_configs[0].scorer is SWEBenchScorer
 
@@ -1142,16 +1154,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -1192,16 +1204,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -1246,16 +1258,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -1273,6 +1285,253 @@ class TestAggregatorArgs:
         tmpfs_base = shm if shm.exists() else Path(tempfile.gettempdir())
         tmpfs_dir = tmpfs_base / "benchmark_cli_benchmark_deadbeef"
         assert not tmpfs_dir.exists()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_setup_failure_after_launch_kills_services(self, tmp_path):
+        """A setup failure *after* the services launch but *before* session.run
+        must kill the aggregator/event-logger subprocesses, not orphan them.
+
+        The graceful drain (which waits for the services to self-exit on ENDED)
+        is only reached once session.run runs; a failure before it never sends
+        ENDED, and with drain-timeout defaulting to unlimited the services would
+        otherwise linger. Here launch succeeds and _create_issuer then raises, so
+        the run never drains — MetricsPipeline.__aexit__ sees the publisher still
+        set and kills the services (terminate_all).
+        """
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None  # services are now "running"
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(side_effect=RuntimeError("setup boom")),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="setup boom"):
+                await _run_benchmark_async(ctx, loop)
+
+        # __aexit__ kills the services (drain never ran) → launcher.terminate_all();
+        # called exactly once, and never for a clean run.
+        MockLauncher.return_value.terminate_all.assert_called_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_setup_error_after_launch_aborts_exactly_once(self, tmp_path):
+        """A SetupError after launch never drains, so MetricsPipeline.__aexit__
+        kills the services exactly once — terminate_all() runs a single time (there is
+        one teardown path now, not an explicit abort plus a finally abort).
+        """
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(side_effect=SetupError("connect boom")),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(SetupError, match="connect boom"):
+                await _run_benchmark_async(ctx, loop)
+
+        # The setup-error path never drains, so __aexit__ kills the services once.
+        MockLauncher.return_value.terminate_all.assert_called_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_http_client_shut_down_on_setup_error_after_create_issuer(
+        self, tmp_path
+    ):
+        """A setup error AFTER _create_issuer (client already created) but before
+        session.run must still shut the HTTP client down — otherwise its worker
+        subprocesses leak (the session finally that used to own the shutdown is
+        never reached on this path)."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        mock_client = MagicMock()
+        mock_client.shutdown_async = AsyncMock()
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(return_value=(MagicMock(), mock_client)),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_agentic_strategy",
+                side_effect=RuntimeError("setup boom after client create"),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="setup boom"):
+                await _run_benchmark_async(ctx, loop)
+
+        # Client was created; the run failed before the session finally, so the
+        # outer finally must have shut it down (idempotent, called once here).
+        mock_client.shutdown_async.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("drain_kwargs", "expected_error", "expected_match"),
+        [
+            pytest.param(
+                {"side_effect": RuntimeError("drain boom")},
+                RuntimeError,
+                "drain boom",
+                id="drain-raises",
+            ),
+            pytest.param(
+                {"return_value": None},
+                ExecutionError,
+                "without a usable metrics report",
+                id="drain-returns-no-report",
+            ),
+        ],
+    )
+    async def test_clean_run_drain_failure_propagates(
+        self, tmp_path, drain_kwargs, expected_error, expected_match
+    ):
+        """A clean session must fail if draining raises or yields no report."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+        mock_client = MagicMock()
+        mock_client.shutdown_async = AsyncMock()
+        mock_session = MagicMock()
+        mock_session.run = AsyncMock(return_value=MagicMock())  # clean success
+
+        loop = asyncio.get_event_loop()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(return_value=(MagicMock(), mock_client)),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_agentic_strategy",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.BenchmarkSession",
+                return_value=mock_session,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_phases",
+                return_value=[],
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline."
+                "MetricsPipeline.drain_and_build_report",
+                new=AsyncMock(**drain_kwargs),
+            ),
+            # The perf run reaches the SIGINT handler on the clean path; patch it
+            # out so the test doesn't touch real process signal state.
+            patch.object(loop, "add_signal_handler"),
+            patch.object(loop, "remove_signal_handler"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            with pytest.raises(expected_error, match=expected_match):
+                await _run_benchmark_async(ctx, loop)
 
 
 class TestAccuracyOnlyDatasetLoading:
@@ -1312,12 +1571,10 @@ class TestAccuracyOnlyDatasetLoading:
                 return_value=(Scorer.get("pass_at_1"), None),
             ),
         ):
-            dataloader, acc_datasets, eval_configs = _load_datasets(
-                config, tmp_path, TestMode.ACC
-            )
+            dataloader, eval_configs = _load_datasets(config, tmp_path, TestMode.ACC)
 
         assert dataloader is None
-        assert len(acc_datasets) == 1
+        assert len(eval_configs) == 1
         # Only the accuracy dataset is loaded; the perf dataset is never touched.
         assert mock_create.call_count == 1
         # No inline "performance" eval is registered in accuracy-only mode.
@@ -1338,12 +1595,10 @@ class TestAccuracyOnlyDatasetLoading:
                 return_value=(Scorer.get("pass_at_1"), None),
             ),
         ):
-            dataloader, acc_datasets, _ = _load_datasets(
-                config, tmp_path, TestMode.BOTH
-            )
+            dataloader, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
 
         assert dataloader is not None
-        assert len(acc_datasets) == 1
+        assert len(eval_configs) == 1
         # Both the perf and accuracy datasets are loaded.
         assert mock_create.call_count == 2
 
@@ -1382,7 +1637,6 @@ class TestBuildPhases:
             dataloader=dataloader,
             rt_settings=rt_settings,
             total_samples=dataloader.num_samples(),
-            accuracy_datasets=[],
             eval_configs=[],
         )
 
@@ -1407,6 +1661,36 @@ class TestBuildPhases:
 
         assert len(phases) == 1
         assert phases[0].phase_type == PhaseType.PERFORMANCE
+
+    @pytest.mark.unit
+    def test_agentic_routing_headers_propagate_to_performance_phase(
+        self, base_rt_settings, simple_dataset
+    ):
+        routing_headers = ["X-Session-ID", "X-SMG-Routing-Key"]
+        config = OnlineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "datasets": [
+                    DatasetConfig(
+                        path="agentic.jsonl",
+                        agentic_inference=AgenticInferenceConfig(
+                            routing_headers=routing_headers
+                        ),
+                    )
+                ],
+                "settings": OnlineSettings(
+                    load_pattern=LoadPattern(
+                        type=LoadPatternType.AGENTIC_INFERENCE,
+                        target_concurrency=8,
+                    )
+                ),
+            }
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+
+        phases = _build_phases(ctx)
+
+        assert phases[0].routing_headers == tuple(routing_headers)
 
     @pytest.mark.unit
     def test_warmup_enabled_produces_two_phases(self, base_rt_settings, simple_dataset):
@@ -2188,7 +2472,7 @@ class TestSetupBenchmarkTokenizer:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
+                return_value=(_simple_dataset, []),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -2213,7 +2497,7 @@ class TestSetupBenchmarkTokenizer:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
+                return_value=(_simple_dataset, []),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -2237,7 +2521,7 @@ class TestSetupBenchmarkTokenizer:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
+                return_value=(_simple_dataset, []),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -2315,7 +2599,7 @@ class TestSetupBenchmark:
         ctx = self._setup(
             config,
             TestMode.ACC,
-            (_simple_dataset, [], []),
+            (_simple_dataset, []),
             _rt_settings,
         )
 
@@ -2343,7 +2627,7 @@ class TestSetupBenchmark:
         ctx = self._setup(
             config,
             TestMode.PERF,
-            (_simple_dataset, [], []),
+            (_simple_dataset, []),
             _rt_settings,
         )
 
@@ -2371,7 +2655,7 @@ class TestSetupBenchmark:
         ctx = self._setup(
             config,
             TestMode.BOTH,
-            (_simple_dataset, [accuracy_dataset], [eval_config]),
+            (_simple_dataset, [eval_config]),
             _rt_settings,
         )
 
@@ -2420,7 +2704,7 @@ class TestReportConfigSecretRedaction:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(None, [], []),
+                return_value=(None, []),
             ),
         ):
             ctx = setup_benchmark(config, test_mode)
@@ -2571,7 +2855,7 @@ class TestSetupBenchmarkExternalSampleCountLogging:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(dataset, [], eval_configs),
+                return_value=(dataset, eval_configs),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -2619,7 +2903,7 @@ class TestProfilingHelpers:
         resp = MagicMock()
         resp.__enter__.return_value.status = 200
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             return_value=resp,
         ):
             rec = _post_profile("http://h/start_profile")
@@ -2632,7 +2916,7 @@ class TestProfilingHelpers:
     def test_post_profile_http_error(self):
         err = urllib_error.HTTPError("http://h", 404, "Not Found", {}, None)
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             side_effect=err,
         ):
             rec = _post_profile("http://h/start_profile")
@@ -2642,7 +2926,7 @@ class TestProfilingHelpers:
     @pytest.mark.unit
     def test_post_profile_connection_failure_never_raises(self):
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             side_effect=OSError("refused"),
         ):
             rec = _post_profile("http://h/start_profile")
@@ -2683,7 +2967,7 @@ class TestProfilingHelpers:
             ],
         }
         buf = io.StringIO()
-        _write_profiling_section(buf, payload)
+        write_profiling_section(buf, payload)
         text = buf.getvalue()
         assert "Profiling" in text
         assert "http://h/start_profile" in text
@@ -2691,6 +2975,78 @@ class TestProfilingHelpers:
         assert "Trigger span" in text
         # Mirrors what finalize_benchmark dumps to profiling.json
         assert json.loads(json.dumps(payload))["engine"] == "vllm"
+
+    @pytest.mark.unit
+    def test_controller_start_then_stop_maps_indices(self):
+        """start() posts each /start_profile; stop() posts /stop_profile only for
+        the starts that returned 200, mapped by the same index, tagging stop_reason."""
+
+        def _fake_post(url):
+            # b's /start_profile fails (500); everything else succeeds.
+            status = 500 if url == "http://b/start_profile" else 200
+            return {
+                "url": url,
+                "status": status,
+                "error": None,
+                "sent_at_ns": 1,
+                "sent_at_iso": "x",
+            }
+
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+            side_effect=_fake_post,
+        ):
+            ctrl = ProfileController(
+                ProfilerEngine.VLLM, ["http://a/v1", "http://b/v1"], None
+            )
+            ctrl.start()
+            ctrl.stop(completed_normally=True)
+
+        payload = ctrl.payload()
+        assert payload["engine"] == "vllm"
+        assert [s["url"] for s in payload["starts"]] == [
+            "http://a/start_profile",
+            "http://b/start_profile",
+        ]
+        # Only a's start returned 200 → only a's stop fires; b (500) is skipped.
+        assert [s["url"] for s in payload["stops"]] == ["http://a/stop_profile"]
+        assert payload["stops"][0]["stop_reason"] == "phase_end"
+
+    @pytest.mark.unit
+    def test_controller_stop_reason_abort_when_not_completed(self):
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+            side_effect=lambda url: {
+                "url": url,
+                "status": 200,
+                "error": None,
+                "sent_at_ns": 1,
+                "sent_at_iso": "x",
+            },
+        ):
+            ctrl = ProfileController(ProfilerEngine.VLLM, ["http://a/v1"], None)
+            ctrl.start()
+            ctrl.stop(completed_normally=False)
+        assert ctrl.payload()["stops"][0]["stop_reason"] == "abort"
+
+    @pytest.mark.unit
+    def test_controller_disabled_is_noop(self):
+        """engine=None → no URLs derived, start/stop do nothing, payload is None."""
+        ctrl = ProfileController(None, ["http://a/v1"], None)
+        ctrl.start()
+        ctrl.stop(completed_normally=True)
+        assert ctrl.payload() is None
+
+    @pytest.mark.unit
+    def test_controller_stop_without_start_posts_nothing(self):
+        """stop() before any start() records nothing (empty _starts, early return)."""
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+        ) as mock_post:
+            ctrl = ProfileController(ProfilerEngine.VLLM, ["http://a/v1"], None)
+            ctrl.stop(completed_normally=True)
+        mock_post.assert_not_called()
+        assert ctrl.payload()["stops"] == []
 
 
 class _OverrideTestBase:
@@ -2781,11 +3137,9 @@ class _OverrideTestBase:
                 "chat_template_kwargs": {"enable_thinking": False},
             },
         )
-        perf_ds, acc_datasets, eval_configs = _load_datasets(
-            config, tmp_path, TestMode.BOTH
-        )
+        perf_ds, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
         assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
-        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
+        assert eval_configs[0].dataset.load_sample(0)[self.max_tokens_key] == 32768
         assert eval_configs[0].model_params.max_new_tokens == 32768
         assert eval_configs[0].model_params.temperature == 0.2
         assert eval_configs[0].model_params.seed == 7
@@ -2799,9 +3153,9 @@ class _OverrideTestBase:
         """Without overrides, both datasets use the global model_params."""
         perf_path, acc_path = self._write_fixture(tmp_path)
         config = self._build_config(perf_path, acc_path, acc_override=None)
-        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.BOTH)
+        perf_ds, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
         assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
-        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 1024
+        assert eval_configs[0].dataset.load_sample(0)[self.max_tokens_key] == 1024
 
     @pytest.mark.unit
     def test_perf_dataset_override_also_honored(self, tmp_path):
@@ -2814,9 +3168,10 @@ class _OverrideTestBase:
             acc_override={"max_new_tokens": 32768},
             perf_override={"max_new_tokens": 10240},
         )
-        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.BOTH)
+        perf_ds, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
         assert perf_ds.load_sample(0)[self.max_tokens_key] == 10240
-        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
+        assert eval_configs[0].dataset.load_sample(0)[self.max_tokens_key] == 32768
+        assert eval_configs[0].model_params.max_new_tokens == 32768
 
     @pytest.mark.unit
     def test_invalid_override_value_raises_at_construction(self, tmp_path):

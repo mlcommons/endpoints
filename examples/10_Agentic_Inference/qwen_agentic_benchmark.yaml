@@ -21,8 +21,10 @@ datasets:
       eval_method: agentic_inference_inline # required benchmark default.
     agentic_inference:
       turn_timeout_s: 14400.0
-      enable_salt: true # do not change.
-      inject_tool_delay: true # do not change.
+      enable_salt: true
+      inject_tool_delay: true
+      num_trajectories_to_issue: 613
+      stop_issuing_on_first_user_complete: false
   - name: swe_bench # Default PERF skips external evaluation; use ACC or BOTH.
     type: "accuracy"
     accuracy_config:

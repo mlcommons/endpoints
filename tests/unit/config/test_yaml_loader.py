@@ -72,6 +72,40 @@ endpoint_config:
         assert config.settings.client.transport.recv_buffer_size == 16777216
         assert config.settings.client.transport.send_buffer_size == 8388608
 
+    def test_load_agentic_routing_headers(self, tmp_path):
+        config_file = tmp_path / "agentic_routing_headers.yaml"
+        config_file.write_text(
+            """
+type: online
+model_params:
+  name: test-model
+datasets:
+  - name: agentic
+    type: performance
+    path: agentic.jsonl
+    agentic_inference:
+      routing_headers:
+        - X-Session-ID
+        - X-SMG-Routing-Key
+settings:
+  load_pattern:
+    type: agentic_inference
+    target_concurrency: 8
+endpoint_config:
+  endpoints:
+    - http://localhost:8000
+"""
+        )
+
+        config = BenchmarkConfig.from_yaml_file(config_file)
+
+        agentic_config = config.datasets[0].agentic_inference
+        assert agentic_config is not None
+        assert agentic_config.routing_headers == (
+            "X-Session-ID",
+            "X-SMG-Routing-Key",
+        )
+
     def test_load_nonexistent_file(self):
         """Test error when file doesn't exist."""
         with pytest.raises(FileNotFoundError, match="not found"):

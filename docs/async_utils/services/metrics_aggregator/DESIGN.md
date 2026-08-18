@@ -26,9 +26,11 @@ partial snapshot tagged `INTERRUPTED`.
 
 ## Token metrics pipeline
 
-ISL/OSL/TPOT require tokenizer passes per completed sample; at high completion
-rates a per-event dispatch model accumulates an unbounded backlog. The
-pipeline batches instead: **defer-to-flush** + **process-sharded encoding**.
+ISL/OSL/TPOT may require tokenizer passes: ISL is emitted at `ISSUED` from
+pre-tokenized input IDs or raw prompt text, while OSL and TPOT are emitted from
+completion data. At high event rates a per-event dispatch model accumulates an
+unbounded backlog. The pipeline batches instead: **defer-to-flush** +
+**process-sharded encoding**.
 
 ### Defer-to-flush (`TokenBatchQueue`)
 

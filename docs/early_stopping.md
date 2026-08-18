@@ -17,7 +17,10 @@ estimate stays honest, which is exactly the regime edge/T2V workloads live in.
 
 For each target percentile `p` — every entry of the series' own report percentile grid at or above
 the median (`es_targets_from_grid`; the default grid yields p50/p75/p80/p90/p95/p97/p99/p99.9) —
-at confidence `c = 0.99`, over the `n` ascending-sorted latencies of a series:
+at confidence `c = 0.99`, over the `n` ascending-sorted latencies of a series
+(percentiles use the grid convention — 0-100 — at every surface; only the LoadGen-parity
+kernel keeps LoadGen's fraction domain, converted exactly once and unrounded, the same `/100`
+`np.percentile` applies internally):
 
 ```
 estimate = sorted[n - t],  t = max{ i : n >= find_min_passing(i, p, d, c) + i }
@@ -35,7 +38,7 @@ lowering `c` or raising `d` weakens the certified claim (`d > 0` certifies perce
 The pure math keeps defaulted arguments for parity tests only.
 
 **The percentile targets are not a separate list either** — they derive from the series' report
-percentile grid, filtered to `p ≥ 0.5` (`ES_MIN_PERCENTILE`): the estimate is a _tail_
+percentile grid, filtered to `≥ p50` (`ES_MIN_PERCENTILE = 50.0`, grid convention): the estimate is a _tail_
 certification (a conservative upper confidence bound), so below-median grid entries are skipped.
 One source of truth: whatever percentiles a series reports, ES covers — every scenario's gate
 percentile (p99 Server, p90 SingleStream/T2V) is always included, with nothing to tune.
@@ -43,6 +46,65 @@ percentile (p99 Server, p90 SingleStream/T2V) is always included, with nothing t
 Each estimate is a _marginal_ `c`-confidence statement per percentile. Reporting several at once is
 fine for diagnostics, but a joint gate across all of them holds at lower than `c` confidence
 (multiple testing) — compliance gates should use the single scenario percentile.
+
+## How the estimate is computed
+
+The statistical question: for a candidate bound `B`, can we claim "the true p-percentile is `<= B`"
+at confidence `c`? Each sample is a Bernoulli trial — over or under `B`. If the true p-percentile
+actually exceeded `B`, samples would land over `B` at a rate above `1 - p`, so observing few
+over-latency samples in a long run is evidence for the bound. LoadGen accepts `B` when
+
+```
+P( <= t over-latency among n samples | over-latency rate = 1 - p )  <  1 - c
+```
+
+— a false certification slips through with probability below `1 - c = 1%`. That binomial tail has a
+closed form as a regularized incomplete beta, `I_p(n - t, t + 1)`, evaluated with the Numerical
+Recipes `betai` continued fraction (no scipy; numerically equal to LoadGen's Gauss-hypergeometric
+form but converging in tens of iterations — see the docstrings in `metrics/early_stopping.py`).
+
+The reported estimate takes `B` to be an actual sample — the t-th highest — with `t` pushed as low
+into the tail as the test allows. Both searches exploit monotonicity (exponential bracketing +
+binary search), so the whole computation is `O(log² n)` beta evaluations on the sorted array:
+
+```
+odds(h, t)          = P(<= t over-latency among h + t trials | rate 1 - p)   # = I_p(h, t + 1)
+find_min_passing(t) = min h with odds(h, t) < 1 - c    # under-latency samples needed to absorb t
+floor               = find_min_passing(1) + 1          # smallest certifiable n (see cheat sheet)
+
+estimate(sorted, p):
+    if n < floor:  return None                         # too few samples for any claim
+    t = largest t >= 1 with find_min_passing(t) + t <= n   # the run's over-latency budget
+    return sorted[n - t]                               # t-th highest sample; t - 1 sit above it
+```
+
+Worked example (n = 10,000, p99): the floor is 662, the budget resolves to `t = 77`, and the
+estimate is the 77th-highest sample — 76 samples sit strictly above it (one budget slot is spent on
+the estimate itself, which keeps the claim strict). At the floor the budget is `t = 1` and the
+estimate is the maximum observed sample — honest but maximally conservative; as `n` grows,
+`t/n -> 1 - p` and the estimate converges onto the empirical percentile from above.
+
+## Cheat sheet: minimum samples per percentile
+
+The floor is `find_min_passing(1, p) + 1` at confidence 0.99 — the smallest run that can
+certify percentile p at all. Below it the map reports `null` for that percentile (the run
+"does not meet the standard" for that gate); at or above it the estimate is a valid
+c = 0.99 upper confidence bound.
+
+| percentile | minimum samples |
+| ---------- | --------------- |
+| p50        | 11              |
+| p75        | 24              |
+| p80        | 31              |
+| p90        | 64              |
+| p95        | 130             |
+| p97        | 219             |
+| p99        | 662             |
+| p99.9      | 6,636           |
+| p99.99     | 66,381          |
+
+Rule of thumb: floor ≈ 6.64 / (1 − p/100) — one more "9" costs 10× the samples. Contrast
+with the fixed-sample regime the feature replaces (~270k queries for Server p99).
 
 ## Layering (who owns what)
 

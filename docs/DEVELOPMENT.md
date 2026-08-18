@@ -97,6 +97,9 @@ uv run pytest -xvs tests/unit/path/to/test_file.py
 
 # With coverage
 uv run pytest --cov=src --cov-report=html
+
+# Performance suites (CI-skipped; run on demand — see docs/CLIENT_PERFORMANCE_TUNING.md)
+uv run pytest -vs -m performance --no-cov tests/performance
 ```
 
 ### Test Markers

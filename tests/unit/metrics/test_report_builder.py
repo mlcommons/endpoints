@@ -97,10 +97,10 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
     """A registry populated with the metrics ``Report.from_snapshot`` reads.
 
     Only the metrics consumed by ``Report.from_snapshot`` are registered:
-    the tracked counters (issued/completed/failed/duration) and the four
-    series surfaced on the report (ttft_ns, sample_latency_ns, osl,
-    tpot_ns). ISL/chunk_delta_ns are intentionally not registered to
-    keep the test data minimal — ``Report.from_snapshot`` ignores them.
+    the tracked counters (issued/completed/failed/duration) and the five
+    series surfaced on the report (ttft_ns, sample_latency_ns, isl, osl,
+    tpot_ns). ``chunk_delta_ns`` is intentionally not registered to keep the
+    test data minimal — ``Report.from_snapshot`` ignores it.
     """
     registry = MetricsRegistry()
     for key in MetricCounterKey.__members__.values():
@@ -117,6 +117,14 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
         MetricSeriesKey.TTFT_NS.value,
         hdr_low=1,
         hdr_high=_NS_HIGH,
+        sig_figs=3,
+        n_histogram_buckets=10,
+        percentiles=(50.0, 90.0, 99.0),
+    )
+    registry.register_series(
+        MetricSeriesKey.ISL.value,
+        hdr_low=1,
+        hdr_high=10_000_000,
         sig_figs=3,
         n_histogram_buckets=10,
         percentiles=(50.0, 90.0, 99.0),
@@ -148,6 +156,7 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
             registry.record(
                 MetricSeriesKey.SAMPLE_LATENCY_NS.value, 5_000_000 + i * 50_000
             )
+            registry.record(MetricSeriesKey.ISL.value, 50 + i)
             registry.record(MetricSeriesKey.OSL.value, 100 + i)
 
     return registry
@@ -203,6 +212,7 @@ class TestFromSnapshot:
         # Series with count==0 should produce empty dicts.
         assert report.ttft == {}
         assert report.latency == {}
+        assert report.input_sequence_lengths == {}
         assert report.output_sequence_lengths == {}
         assert report.tpot == {}
 
@@ -222,6 +232,30 @@ class TestFromSnapshot:
         assert "histogram" in report.ttft
         assert report.ttft["min"] > 0
         assert report.latency["min"] > 0
+        isl = report.input_sequence_lengths
+        osl = report.output_sequence_lengths
+        # The fixture records distinct ranges (ISL: 50..99; OSL: 100..149).
+        # Assert the full scalar rollups so this fails if the report accidentally
+        # maps the OSL snapshot series into input_sequence_lengths.
+        assert isl["total"] == sum(range(50, 100))
+        assert isl["min"] == 50
+        assert isl["max"] == 99
+        assert isl["median"] == 74.0
+        assert isl["avg"] == 74.5
+        assert isl["std_dev"] == pytest.approx(math.sqrt(212.5))
+        assert osl["total"] == sum(range(100, 150))
+        assert osl["min"] == 100
+        assert osl["max"] == 149
+        assert osl["median"] == 124.0
+        assert osl["avg"] == 124.5
+        assert osl["std_dev"] == pytest.approx(math.sqrt(212.5))
+        # Both series retain the same schema, but preserve their own percentile
+        # values and histogram bucket edges from the snapshot.
+        assert set(isl) == set(osl)
+        assert isl["percentiles"] != osl["percentiles"]
+        assert isl["histogram"]["buckets"] != osl["histogram"]["buckets"]
+        assert sum(isl["histogram"]["counts"]) == 50
+        assert sum(osl["histogram"]["counts"]) == 50
         # No TPOT recordings in the registry → empty dict.
         assert report.tpot == {}
         # OSL data was written → tps is computable.
@@ -473,6 +507,7 @@ class TestReportDisplayAndSerialize:
             ttft={},
             tpot={},
             latency={},
+            input_sequence_lengths={},
             output_sequence_lengths={},
         )
         lines: list[str] = []
@@ -495,6 +530,7 @@ class TestReportDisplayAndSerialize:
             ttft={},
             tpot={},
             latency={},
+            input_sequence_lengths={},
             output_sequence_lengths={},
         )
         lines: list[str] = []
@@ -517,6 +553,7 @@ class TestReportDisplayAndSerialize:
             ttft={},
             tpot={},
             latency={},
+            input_sequence_lengths={},
             output_sequence_lengths={},
         )
         lines: list[str] = []
