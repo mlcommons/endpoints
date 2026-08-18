@@ -45,7 +45,6 @@ from inference_endpoint.metrics.early_stopping import (
     EarlyStoppingSpec,
     es_percentile_estimate,
     es_targets_from_grid,
-    grid_percentile_key,
 )
 
 from .snapshot import (
@@ -242,11 +241,28 @@ class SeriesSampler(MetricSampler):
         if self._es_spec is None:
             return None
         spec = self._es_spec
+        try:
+            return self._compute_es_estimates(sorted_values, spec)
+        except Exception:
+            # Best-effort by design: this runs inside publish_final's
+            # build_snapshot, where an exception would cost the ENTIRE final
+            # report (the publisher's finalized guard makes retries no-ops).
+            logger.exception(
+                "%s: early-stopping computation failed; omitting the map", self.name
+            )
+            return None
+
+    def _compute_es_estimates(
+        self, sorted_values, spec: EarlyStoppingSpec
+    ) -> dict[str, float | None]:
         if spec.percentiles is not None:  # explicit override: tests / offline analysis
-            targets = {
-                grid_percentile_key(f): f
-                for f in sorted(spec.percentiles, reverse=True)
-            }
+            # Descending, deduped on the parsed value so 99 and 99.0 are one target
+            # (the rule the post-hoc script applies to its --percentiles fallback);
+            # the first spelling wins the key, so an int override still keys "99".
+            seen: dict[float, str] = {}
+            for p in sorted(spec.percentiles, reverse=True):
+                seen.setdefault(float(p), str(p))
+            targets = {key: value for value, key in seen.items()}
         else:
             targets = es_targets_from_grid(self._percentiles)
         results = {
@@ -423,13 +439,12 @@ class MetricsRegistry:
 
     # -- registration -----------------------------------------------------
 
-    def register_counter(self, name: str, dtype: type = int) -> CounterSampler:
+    def register_counter(self, name: str, dtype: type = int) -> None:
         if name in self._seen_names:
             raise ValueError(f"Metric name already registered: {name}")
         sampler = CounterSampler(name, dtype=dtype)
         self._counters[name] = sampler
         self._seen_names.add(name)
-        return sampler
 
     def register_series(
         self,
@@ -442,7 +457,7 @@ class MetricsRegistry:
         percentiles: tuple[float, ...] = DEFAULT_PERCENTILES,
         dtype: type = int,
         tail_latency: bool = False,
-    ) -> SeriesSampler:
+    ) -> None:
         """Register a new series.
 
         ``percentiles`` MUST include ``50.0`` (or ``50``) — median is a
@@ -474,7 +489,6 @@ class MetricsRegistry:
         )
         self._series[name] = sampler
         self._seen_names.add(name)
-        return sampler
 
     # -- hot path ---------------------------------------------------------
     # Direct dict lookup, no isinstance dispatch — these are called once per

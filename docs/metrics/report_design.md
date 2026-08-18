@@ -22,7 +22,7 @@ final_snapshot.json  (dict form of MetricsSnapshot)
         ├── counters  → n_samples_issued/completed/failed, tracked_duration_ns,
         │                legacy_loadgen_window_duration_ns, finish-reason counts
         │
-        ├── for each series (ttft, tpot, latency, osl):
+        ├── for each series (ttft, tpot, latency, isl, osl):
         │       _series_to_metric_dict(stat) → rollup dict
         │
         └── derive qps / tps once (window chosen by run config)
@@ -67,8 +67,9 @@ p50. A zero-count series returns `{}` (or an all-null early-stopping map if the 
 ### `Report` (frozen `msgspec.Struct`)
 
 Fields: `version`, `git_sha`, `test_started_at`, `n_samples_issued/completed/failed`,
-`duration_ns`, `state`, `complete`, the four rollup dicts (`ttft`, `tpot`, `latency`,
-`output_sequence_lengths`), `legacy_loadgen_window_duration_ns`, `qps`, `tps`,
+`duration_ns`, `state`, `complete`, the five rollup dicts (`ttft`, `tpot`, `latency`,
+`input_sequence_lengths`, `output_sequence_lengths`), `legacy_loadgen_window_duration_ns`,
+`qps`, `tps`,
 `finish_reason_counts`, `run_config`, and `accuracy`.
 
 - `complete` = `state == "complete" and n_pending_tasks == 0` — `False` marks partial async metrics
@@ -88,7 +89,15 @@ Counter keys read: `tracked_samples_issued`, `tracked_samples_completed`,
 `tracked_samples_failed`, `tracked_duration_ns`, `legacy_loadgen_window_duration_ns`, and the
 `tracked_finish_reason_*` counters. Series read (snapshot key → report field, via
 `SERIES_TO_SUMMARY_FIELD`): `ttft_ns` → `ttft`, `tpot_ns` → `tpot`, `sample_latency_ns` →
-`latency`, and `osl` → `output_sequence_lengths`.
+`latency`. The token-length series are mapped directly: `isl` → `input_sequence_lengths` and
+`osl` → `output_sequence_lengths`. Both report fields use the same full distribution shape:
+`total`, `min`, `max`, `median`, `avg`, `std_dev`, `percentiles`, and `histogram`.
+
+**Input sequence length (ISL).** The metrics aggregator records ISL at `ISSUED`, using
+`len(token_ids)` when a dataset provides pre-tokenized input and otherwise tokenizing the raw
+text prompt with the configured reference tokenizer. This records the workload's intended input
+distribution as early as possible. `input_sequence_lengths` is empty when no ISL values were
+recorded (for example, no tokenizer is available for text-only inputs).
 
 **QPS/TPS window selection.** The snapshot always carries both a native window
 (`tracked_duration_ns`) and the MLPerf LoadGen "completed" window

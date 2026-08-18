@@ -284,17 +284,32 @@ class PromptData(
 ):  # type: ignore[call-arg]
     """Prompt input data attached to ISSUED events for ISL computation.
 
-    Exactly one of ``text`` or ``token_ids`` should be set:
+    AT-RISK (gc=False): Has mutable container fields ``messages``, ``tools``,
+    and ``chat_template_kwargs``. Any change that introduces cyclic references
+    must be audited; if cycles become possible, remove ``gc=False``.
+
+    Exactly one of ``text``, ``token_ids``, or ``messages`` should be set:
     - ``text``: raw prompt string (OpenAI path) — requires tokenization for ISL.
     - ``token_ids``: pre-tokenized token ID list (SGLang/Harmonize path) — ISL is len().
+    - ``messages``: structured chat history rendered with the model's template.
 
     Attributes:
         text: Raw prompt string. Set when the adapter sends text prompts.
         token_ids: Pre-computed token IDs. Set when the adapter pre-tokenizes (e.g. SGLang).
+        messages: Structured messages sent to a chat-completions endpoint.
+        tools: Tool declarations accompanying ``messages``.
+        chat_template_kwargs: Model-specific arguments used to render ``messages``.
+        chat_template: Per-request template used to render ``messages``.
+        tool_choice: Tool-selection mode passed to the chat template.
     """
 
     text: str | None = None
     token_ids: tuple[int, ...] | None = None
+    messages: tuple[dict[str, Any], ...] | None = None
+    tools: tuple[dict[str, Any], ...] | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
+    chat_template: str | None = None
+    tool_choice: str | dict[str, Any] | None = None
 
 
 class ErrorData(

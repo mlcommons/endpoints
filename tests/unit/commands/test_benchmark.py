@@ -57,6 +57,7 @@ from inference_endpoint.commands.benchmark.profiling import (
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
+    AgenticInferenceConfig,
     BenchmarkConfig,
     DatasetType,
     DrainConfig,
@@ -71,6 +72,9 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
     WarmupConfig,
+)
+from inference_endpoint.config.schema import (
+    Dataset as DatasetConfig,
 )
 from inference_endpoint.config.schema import (
     OfflineBenchmarkConfig as OfflineConfig,
@@ -1027,13 +1031,17 @@ class TestAccuracyOnlyDataset:
             patch.object(SWEBenchScorer, "preflight") as mock_preflight,
             patch.object(SWEBench, "generate") as mock_generate,
         ):
-            _, accuracy_datasets, eval_configs = _load_datasets(
-                config, tmp_path, TestMode.PERF
-            )
+            _, eval_configs = _load_datasets(config, tmp_path, TestMode.PERF)
         mock_preflight.assert_not_called()
         mock_generate.assert_not_called()
 
-        assert len(accuracy_datasets) == expected_accuracy_datasets
+        # eval_configs holds both real accuracy datasets and the inline entry a
+        # performance dataset's accuracy_config produces, so count by dataset_type
+        # rather than length -- an inline perf scorer is not an accuracy dataset.
+        acc_eval_configs = [
+            ec for ec in eval_configs if ec.dataset_type == DatasetType.ACCURACY
+        ]
+        assert len(acc_eval_configs) == expected_accuracy_datasets
         assert len(eval_configs) == (1 if expected_scorer is not None else 0)
         if expected_scorer is not None:
             assert eval_configs[0].scorer is expected_scorer
@@ -1070,12 +1078,9 @@ class TestAccuracyOnlyDataset:
             patch.object(SWEBenchScorer, "preflight") as mock_preflight,
             patch.object(SWEBench, "generate", return_value=fake_acc_df),
         ):
-            _, accuracy_datasets, eval_configs = _load_datasets(
-                config, tmp_path, test_mode
-            )
+            _, eval_configs = _load_datasets(config, tmp_path, test_mode)
 
         mock_preflight.assert_called_once_with({})
-        assert len(accuracy_datasets) == 1
         assert len(eval_configs) == 1
         assert eval_configs[0].scorer is SWEBenchScorer
 
@@ -1798,12 +1803,10 @@ class TestAccuracyOnlyDatasetLoading:
                 return_value=(Scorer.get("pass_at_1"), None),
             ),
         ):
-            dataloader, acc_datasets, eval_configs = _load_datasets(
-                config, tmp_path, TestMode.ACC
-            )
+            dataloader, eval_configs = _load_datasets(config, tmp_path, TestMode.ACC)
 
         assert dataloader is None
-        assert len(acc_datasets) == 1
+        assert len(eval_configs) == 1
         # Only the accuracy dataset is loaded; the perf dataset is never touched.
         assert mock_create.call_count == 1
         # No inline "performance" eval is registered in accuracy-only mode.
@@ -1824,12 +1827,10 @@ class TestAccuracyOnlyDatasetLoading:
                 return_value=(Scorer.get("pass_at_1"), None),
             ),
         ):
-            dataloader, acc_datasets, _ = _load_datasets(
-                config, tmp_path, TestMode.BOTH
-            )
+            dataloader, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
 
         assert dataloader is not None
-        assert len(acc_datasets) == 1
+        assert len(eval_configs) == 1
         # Both the perf and accuracy datasets are loaded.
         assert mock_create.call_count == 2
 
@@ -1868,7 +1869,6 @@ class TestBuildPhases:
             dataloader=dataloader,
             rt_settings=rt_settings,
             total_samples=dataloader.num_samples(),
-            accuracy_datasets=[],
             eval_configs=[],
         )
 
@@ -1893,6 +1893,36 @@ class TestBuildPhases:
 
         assert len(phases) == 1
         assert phases[0].phase_type == PhaseType.PERFORMANCE
+
+    @pytest.mark.unit
+    def test_agentic_routing_headers_propagate_to_performance_phase(
+        self, base_rt_settings, simple_dataset
+    ):
+        routing_headers = ["X-Session-ID", "X-SMG-Routing-Key"]
+        config = OnlineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "datasets": [
+                    DatasetConfig(
+                        path="agentic.jsonl",
+                        agentic_inference=AgenticInferenceConfig(
+                            routing_headers=routing_headers
+                        ),
+                    )
+                ],
+                "settings": OnlineSettings(
+                    load_pattern=LoadPattern(
+                        type=LoadPatternType.AGENTIC_INFERENCE,
+                        target_concurrency=8,
+                    )
+                ),
+            }
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+
+        phases = _build_phases(ctx)
+
+        assert phases[0].routing_headers == tuple(routing_headers)
 
     @pytest.mark.unit
     def test_warmup_enabled_produces_two_phases(self, base_rt_settings, simple_dataset):
@@ -2675,7 +2705,7 @@ class TestSetupBenchmarkTokenizer:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
+                return_value=(_simple_dataset, []),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -2700,7 +2730,7 @@ class TestSetupBenchmarkTokenizer:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
+                return_value=(_simple_dataset, []),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -2724,7 +2754,7 @@ class TestSetupBenchmarkTokenizer:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
+                return_value=(_simple_dataset, []),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -2802,7 +2832,7 @@ class TestSetupBenchmark:
         ctx = self._setup(
             config,
             TestMode.ACC,
-            (_simple_dataset, [], []),
+            (_simple_dataset, []),
             _rt_settings,
         )
 
@@ -2830,7 +2860,7 @@ class TestSetupBenchmark:
         ctx = self._setup(
             config,
             TestMode.PERF,
-            (_simple_dataset, [], []),
+            (_simple_dataset, []),
             _rt_settings,
         )
 
@@ -2858,7 +2888,7 @@ class TestSetupBenchmark:
         ctx = self._setup(
             config,
             TestMode.BOTH,
-            (_simple_dataset, [accuracy_dataset], [eval_config]),
+            (_simple_dataset, [eval_config]),
             _rt_settings,
         )
 
@@ -2907,7 +2937,7 @@ class TestReportConfigSecretRedaction:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(None, [], []),
+                return_value=(None, []),
             ),
         ):
             ctx = setup_benchmark(config, test_mode)
@@ -3058,7 +3088,7 @@ class TestSetupBenchmarkExternalSampleCountLogging:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(dataset, [], eval_configs),
+                return_value=(dataset, eval_configs),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -3340,11 +3370,9 @@ class _OverrideTestBase:
                 "chat_template_kwargs": {"enable_thinking": False},
             },
         )
-        perf_ds, acc_datasets, eval_configs = _load_datasets(
-            config, tmp_path, TestMode.BOTH
-        )
+        perf_ds, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
         assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
-        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
+        assert eval_configs[0].dataset.load_sample(0)[self.max_tokens_key] == 32768
         assert eval_configs[0].model_params.max_new_tokens == 32768
         assert eval_configs[0].model_params.temperature == 0.2
         assert eval_configs[0].model_params.seed == 7
@@ -3358,9 +3386,9 @@ class _OverrideTestBase:
         """Without overrides, both datasets use the global model_params."""
         perf_path, acc_path = self._write_fixture(tmp_path)
         config = self._build_config(perf_path, acc_path, acc_override=None)
-        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.BOTH)
+        perf_ds, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
         assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
-        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 1024
+        assert eval_configs[0].dataset.load_sample(0)[self.max_tokens_key] == 1024
 
     @pytest.mark.unit
     def test_perf_dataset_override_also_honored(self, tmp_path):
@@ -3373,9 +3401,10 @@ class _OverrideTestBase:
             acc_override={"max_new_tokens": 32768},
             perf_override={"max_new_tokens": 10240},
         )
-        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.BOTH)
+        perf_ds, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
         assert perf_ds.load_sample(0)[self.max_tokens_key] == 10240
-        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
+        assert eval_configs[0].dataset.load_sample(0)[self.max_tokens_key] == 32768
+        assert eval_configs[0].model_params.max_new_tokens == 32768
 
     @pytest.mark.unit
     def test_invalid_override_value_raises_at_construction(self, tmp_path):

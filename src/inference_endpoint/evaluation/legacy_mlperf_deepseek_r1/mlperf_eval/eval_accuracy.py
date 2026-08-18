@@ -39,6 +39,9 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Infrastructure failures (broken judge) must not be scored as wrong answers.
+_LCB_INFRA_ERRORS = (ImportError, FileNotFoundError, RuntimeError)
+
 
 # =============================================================================
 # MLPerf Log Accuracy Processing
@@ -573,6 +576,8 @@ def evaluate_livecodebench_worker(args: Tuple[str, str]) -> Tuple[str, bool]:
 
     try:
         return question_id, evaluate_livecodebench(code, question_id)
+    except _LCB_INFRA_ERRORS:
+        raise
     except Exception:
         return question_id, False
 
@@ -655,6 +660,11 @@ def process_livecodebench_parallel(
     if not work_items:
         return 0, 0
 
+    # Pre-flight: fail fast on a broken judge, and warm the lru_cache so
+    # fork-started workers inherit the loaded benchmark instead of each
+    # loading their own copy. The return value is intentionally discarded.
+    load_lcb_benchmark()
+
     # Process in parallel
     max_workers = min(multiprocessing.cpu_count(), len(work_items))
     logger.info(
@@ -679,6 +689,8 @@ def process_livecodebench_parallel(
                 total_evaluated += 1
                 if is_correct:
                     correct_count += 1
+            except _LCB_INFRA_ERRORS:
+                raise
             except Exception as e:
                 logger.error(f"Error evaluating row {idx}: {e}")
                 df.at[idx, 'prompt_accuracy'] = 0.0
@@ -745,15 +757,12 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def print_evaluation_results(df_evaluated: pd.DataFrame,
-                             logger: Optional[logging.Logger] = None) -> Dict[str, Any]:
+                             logger: Optional[logging.Logger] = None) -> None:
     """Print evaluation results in a unified format.
 
     Args:
         df_evaluated: DataFrame with evaluated results
         logger: Optional logger instance (uses module logger if not provided)
-
-    Returns:
-        Dictionary with evaluation statistics
     """
     if logger is None:
         logger = logging.getLogger(__name__)

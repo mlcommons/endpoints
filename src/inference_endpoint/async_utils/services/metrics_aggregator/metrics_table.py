@@ -25,6 +25,13 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import msgspec
+from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
+    MessageInput,
+    PromptInput,
+    TextInput,
+    TokenIdsInput,
+    TokenizationInput,
+)
 from inference_endpoint.core.record import SampleEventType, SessionEventType
 from inference_endpoint.core.types import PromptData, TextModelOutput
 
@@ -33,7 +40,6 @@ if TYPE_CHECKING:
         MetricsRegistry,
     )
     from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
-        MessageParts,
         TokenBatchQueue,
     )
     from inference_endpoint.core.record import EventRecord
@@ -184,13 +190,12 @@ class TimeDeltaTrigger(EmitTrigger):
 class TokenTrigger(EmitTrigger):
     """Base for triggers whose metric needs tokenization.
 
-    Subclasses implement ``_extract_text()`` to pull the text to tokenize from
-    the event record, and may override ``_extract_message()`` to return
-    (content, reasoning, tool_calls) for chat-template–aware tokenization when
-    tool calls are present. ``fire()`` does not tokenize inline — it enqueues
-    the work plus a recorder callback onto the shared ``TokenBatchQueue``, which
-    the aggregator flushes in batches. ``_compute_value()`` can transform the
-    token count before it is recorded.
+    Subclasses return one explicit tokenization input. ``fire()`` dispatches
+    already-tokenized IDs synchronously and sends every other variant through
+    the shared ``TokenBatchQueue``. The queue is ``None`` when no tokenizer was
+    configured or discovered for the run. In that state, pre-tokenized IDs are
+    still counted synchronously, while text and structured token metrics are
+    unavailable and therefore skipped.
     """
 
     def __init__(
@@ -205,21 +210,11 @@ class TokenTrigger(EmitTrigger):
         self._queue = queue
 
     @abstractmethod
-    def _extract_text(
+    def _extract_tokenization_input(
         self, ev_rec: EventRecord, row: SampleRow, pre_change: dict[str, Any]
-    ) -> str | None:
-        """Return the text to tokenize, or None to skip."""
+    ) -> TokenizationInput | None:
+        """Return the operation-specific tokenization input, or None to skip."""
         raise NotImplementedError()
-
-    def _extract_message(
-        self, ev_rec: EventRecord, row: SampleRow, pre_change: dict[str, Any]
-    ) -> MessageParts | None:
-        """Return (content, reasoning, tool_calls) for message-aware tokenization.
-
-        When non-None, the message (chat-template) path is used instead of the
-        plain-text path. Default returns None (use text path).
-        """
-        return None
 
     def _compute_value(
         self, token_count: int, ev_rec: EventRecord, pre_change: dict[str, Any]
@@ -241,21 +236,14 @@ class TokenTrigger(EmitTrigger):
         return record
 
     def fire(self, ev_rec, row, pre_change):
-        if self._queue is None:
+        item = self._extract_tokenization_input(ev_rec, row, pre_change)
+        if item is None:
             return
-        message_parts = self._extract_message(ev_rec, row, pre_change)
-        if message_parts is not None:
-            self._queue.enqueue_message(
-                message_parts, self._make_recorder(ev_rec, pre_change)
-            )
-            return
-        text = self._extract_text(ev_rec, row, pre_change)
-        if not text:
-            # Empty output (no text and no tool calls) is not an anomaly:
-            # there is nothing to tokenize, so we record no token-count
-            # sample rather than a spurious 0 that would skew the series.
-            return
-        self._queue.enqueue_text(text, self._make_recorder(ev_rec, pre_change))
+        if isinstance(item, TokenIdsInput):
+            self.registry.record(self.metric_name, len(item.token_ids))
+        elif isinstance(item, TextInput | MessageInput | PromptInput):
+            if self._queue is not None:
+                self._queue.enqueue(item, self._make_recorder(ev_rec, pre_change))
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +293,14 @@ class SampleLatencyTrigger(TimeDeltaTrigger):
 
 
 class IslTrigger(TokenTrigger):
-    """ISL from PromptData: ``len(token_ids)`` or the tokenized prompt text."""
+    """ISL from one prompt representation, in explicit priority order.
+
+    ``PromptData`` produced by ``PhaseIssuer`` normally has exactly one populated
+    representation. For defensive handling, token IDs take precedence over
+    plain text, which takes precedence over structured messages. An explicitly
+    empty token-ID tuple is therefore counted as zero rather than falling
+    through to another representation.
+    """
 
     def __init__(
         self,
@@ -314,23 +309,32 @@ class IslTrigger(TokenTrigger):
     ):
         super().__init__(MetricSeriesKey.ISL, registry, queue)
 
-    def fire(self, ev_rec, row, pre_change):
-        # Sync fast path: any backend that pre-populates token_ids (e.g. SGLang).
-        if isinstance(ev_rec.data, PromptData) and ev_rec.data.token_ids is not None:
-            self.registry.record(self.metric_name, len(ev_rec.data.token_ids))
-            return
-        # Text path: tokenize raw prompt text — used when token_ids are
-        # unavailable (e.g. OpenAI-compatible endpoints). Enqueued by the base.
-        super().fire(ev_rec, row, pre_change)
-
-    def _extract_text(self, ev_rec, row, pre_change):
-        if isinstance(ev_rec.data, PromptData) and ev_rec.data.text is not None:
-            return ev_rec.data.text
+    def _extract_tokenization_input(self, ev_rec, row, pre_change):
+        if not isinstance(ev_rec.data, PromptData):
+            return None
+        if ev_rec.data.token_ids is not None:
+            return TokenIdsInput(ev_rec.data.token_ids)
+        if ev_rec.data.text:
+            return TextInput(ev_rec.data.text)
+        if ev_rec.data.messages is not None:
+            return PromptInput(
+                ev_rec.data.messages,
+                ev_rec.data.tools,
+                ev_rec.data.chat_template_kwargs,
+                ev_rec.data.chat_template,
+                ev_rec.data.tool_choice,
+            )
         return None
 
 
 class OslTrigger(TokenTrigger):
-    """OSL = token_count(full output text) from COMPLETE event data."""
+    """OSL from one complete model output representation.
+
+    An output containing reasoning or tool calls uses ``MessageInput`` so the
+    chat template renders all structured fields, including ordinary content.
+    Otherwise, non-empty output content uses ``TextInput``. ``TextModelOutput``
+    does not carry server token IDs, so OSL has no token-ID/text precedence.
+    """
 
     def __init__(
         self,
@@ -339,18 +343,14 @@ class OslTrigger(TokenTrigger):
     ):
         super().__init__(MetricSeriesKey.OSL, registry, queue)
 
-    def _extract_text(self, ev_rec, row, pre_change):
-        if isinstance(ev_rec.data, TextModelOutput):
-            if ev_rec.data.tool_calls:
-                # Delegate to _extract_message for chat-template tokenization.
-                return None
-            text = str(ev_rec.data)
-            return text if text else None
-        return None
-
-    def _extract_message(self, ev_rec, row, pre_change):
-        if isinstance(ev_rec.data, TextModelOutput) and ev_rec.data.tool_calls:
-            return ev_rec.data.as_message_parts()
+    def _extract_tokenization_input(self, ev_rec, row, pre_change):
+        if not isinstance(ev_rec.data, TextModelOutput):
+            return None
+        if ev_rec.data.reasoning or ev_rec.data.tool_calls:
+            return MessageInput(*ev_rec.data.as_message_parts())
+        text = str(ev_rec.data)
+        if text:
+            return TextInput(text)
         return None
 
 
@@ -378,21 +378,16 @@ class TpotTrigger(TokenTrigger):
             dtype=float,
         )
 
-    def _extract_text(self, ev_rec, row, pre_change):
+    def _extract_tokenization_input(self, ev_rec, row, pre_change):
         if pre_change.get(SampleField.RECV_FIRST_NS) is None:
             return None
-        if isinstance(ev_rec.data, TextModelOutput):
-            if ev_rec.data.tool_calls:
-                # Delegate to _extract_message for chat-template tokenization.
-                return None
-            return ev_rec.data.text_after_first_chunk() or None
-        return None
-
-    def _extract_message(self, ev_rec, row, pre_change):
-        if pre_change.get(SampleField.RECV_FIRST_NS) is None:
+        if not isinstance(ev_rec.data, TextModelOutput):
             return None
-        if isinstance(ev_rec.data, TextModelOutput) and ev_rec.data.tool_calls:
-            return ev_rec.data.as_message_parts_after_first_chunk()
+        if ev_rec.data.reasoning or ev_rec.data.tool_calls:
+            return MessageInput(*ev_rec.data.as_message_parts_after_first_chunk())
+        text = ev_rec.data.text_after_first_chunk()
+        if text:
+            return TextInput(text)
         return None
 
     def _compute_value(self, token_count, ev_rec, pre_change):

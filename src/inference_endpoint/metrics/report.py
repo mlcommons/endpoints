@@ -202,6 +202,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     tpot: dict[str, Any]
     latency: dict[str, Any]
     output_sequence_lengths: dict[str, Any]
+    input_sequence_lengths: dict[str, Any]
     # Legacy MLPerf LoadGen Server "completed" window (poisson only): first
     # issued request -> completion of the last-issued request
     # (final_query_all_samples_done_time analog; see mlcommons/inference
@@ -289,14 +290,16 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         def _series_dict(key: str) -> dict[str, Any]:
             stat = series.get(key)
-            if stat is None or stat.get("count", 0) == 0:
-                return {}
-            return _series_to_metric_dict(stat)
+            # count==0 handling lives in _series_to_metric_dict, which preserves
+            # the all-null early_stopping_percentiles map for enabled-but-empty
+            # series — short-circuiting here would silently drop it.
+            return _series_to_metric_dict(stat) if stat is not None else {}
 
         version_info = get_version_info()
         raw_duration_ns = _counter("tracked_duration_ns")
         duration_ns = raw_duration_ns if raw_duration_ns > 0 else None
         n_completed = _counter("tracked_samples_completed")
+        isl = _series_dict("isl")
         osl = _series_dict("osl")
 
         # Legacy MLPerf LoadGen Server "completed" window (poisson only): first
@@ -361,6 +364,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 field: _series_dict(series)
                 for series, field in SERIES_TO_SUMMARY_FIELD.items()
             },
+            input_sequence_lengths=isl,
             output_sequence_lengths=osl,
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
@@ -495,6 +499,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             ("TTFT", self.ttft, "ms", 1e-6),
             ("TPOT", self.tpot, "ms", 1e-6),
             ("Latency", self.latency, "ms", 1e-6),
+            ("Input sequence lengths", self.input_sequence_lengths, "tokens", 1.0),
             ("Output sequence lengths", self.output_sequence_lengths, "tokens", 1.0),
         ]:
             if not metric_dict:
