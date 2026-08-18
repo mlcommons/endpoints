@@ -28,8 +28,8 @@ from inference_endpoint.config.schema import (
     LoadPatternType,
     RuntimeConfig,
     TestType,
+    Timeouts,
 )
-from inference_endpoint.config.timeouts import Timeouts
 from inference_endpoint.metrics.metric import Throughput
 from pydantic import ValidationError
 

@@ -123,7 +123,7 @@ COMPLETE event ─► trigger.fire ─► queue.enqueue(text, on_count)        [
 `--drain-timeout` and `--tokenizer-workers` have service-side defaults (`0`
 and `2`) so the service is launchable by hand without tuning knobs, but
 the config schema is the single source of truth (`settings.timeouts.metrics_drain_timeout_s`
-in `config/timeouts.py`, `settings.metrics_tokenizer_workers` in `config/settings.py`): the benchmark always
+in `config/schema/settings.py`, `settings.metrics_tokenizer_workers` in `config/schema.py`): the benchmark always
 forwards the schema values (`--metrics-drain-timeout`,
 `--metrics-tokenizer-workers`), overriding these defaults in normal runs.
 
