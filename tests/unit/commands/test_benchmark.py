@@ -608,7 +608,7 @@ class TestLoadDatasetsSaltValidation:
             patch.object(SWEBenchScorer, "preflight"),
             patch.object(SWEBench, "generate", return_value=fake_acc_df),
         ):
-            perf_loader, _, _ = _load_datasets(config, tmp_path, TestMode.ACC)
+            perf_loader, _ = _load_datasets(config, tmp_path, TestMode.ACC)
         assert perf_loader is None
 
 
