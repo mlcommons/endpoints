@@ -392,6 +392,16 @@ class BenchmarkSession:
         if self._strategy_task and not self._strategy_task.done():
             self._strategy_task.cancel()
 
+    @property
+    def stop_requested(self) -> bool:
+        """True once stop() ran — Ctrl-C, transport closure, or watchdog.
+
+        Distinguishes a session whose run() returned after an abort from one
+        that completed normally; the per-phase cap (stop_current_phase) does
+        NOT set it, since reaching max_duration_ms is a normal phase end.
+        """
+        return self._stop_requested
+
     def stop_current_phase(self) -> None:
         """End the in-progress phase without aborting the session.
 

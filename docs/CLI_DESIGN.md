@@ -69,6 +69,8 @@ Both paths produce the **same subclass with the same defaults**. A YAML file wit
 
 3. **Optional CLI overrides.** `--timeout` maps into `settings.timeouts.run_timeout_s` via `with_updates(...)` (re-runs validators); `--mode` selects the `TestMode` passed to the runner and never touches the config object.
 
+> CLI `--timeout` overrides YAML `settings.timeouts.run_timeout_s`.
+
 ### Why subclasses?
 
 `OfflineBenchmarkConfig` and `OnlineBenchmarkConfig` exist in the schema (not just CLI) so both paths share them:

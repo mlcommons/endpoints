@@ -45,7 +45,9 @@ class SessionState(str, Enum):
     LIVE        → run in progress; tick task publishing live HDR-derived stats.
     DRAINING    → ``SessionEventType.ENDED`` has been received; the aggregator
                   is tokenizing the buffered samples (bounded by the
-                  ``--drain-timeout`` budget / ``settings.timeouts.metrics_drain_timeout_s``: None or omitted = unlimited, 0 = give up immediately). Tick task
+                  ``--drain-timeout`` budget, i.e.
+                  ``settings.timeouts.metrics_drain_timeout_s``: None or an
+                  omitted flag = unlimited, 0 = give up immediately). Tick task
                   continues at this stage, still HDR-derived; no new events
                   will arrive.
     COMPLETE    → terminal clean state. The ``publish_final()`` snapshot

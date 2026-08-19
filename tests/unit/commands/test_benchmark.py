@@ -1432,6 +1432,7 @@ class TestAggregatorArgs:
         mock_client.shutdown_async = AsyncMock()
         mock_session = MagicMock()
         mock_session.run = AsyncMock(return_value=MagicMock())  # clean success
+        mock_session.stop_requested = False  # nothing aborted this session
 
         loop = asyncio.get_event_loop()
         with (
