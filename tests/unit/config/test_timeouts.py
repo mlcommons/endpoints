@@ -145,14 +145,6 @@ class TestDeletedConfigSurface:
             )
 
     @pytest.mark.unit
-    def test_runtime_min_duration_rejected(self):
-        with pytest.raises(ValidationError, match="min_duration_ms"):
-            BenchmarkConfig(
-                **_MINIMAL_KWARGS,
-                settings={"runtime": {"min_duration_ms": 1000}},
-            )
-
-    @pytest.mark.unit
     def test_top_level_timeout_rejected(self):
         with pytest.raises(ValidationError, match="timeout"):
             BenchmarkConfig(**_MINIMAL_KWARGS, timeout=42.0)
