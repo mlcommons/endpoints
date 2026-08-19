@@ -556,6 +556,31 @@ class TestBenchmarkConfigMethods:
         assert rt.total_samples_to_issue() == 100
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "load_pattern",
+        [
+            {"type": "max_throughput"},
+            {"type": "concurrency", "target_concurrency": 8},
+        ],
+    )
+    def test_min_duration_requires_poisson_target_qps(self, load_pattern):
+        """Duration sizing has no rate to multiply by outside poisson —
+        rejected instead of inventing a synthetic default QPS."""
+        with pytest.raises(ValidationError, match="min_duration_ms .* requires"):
+            BenchmarkConfig(
+                type=TestType.ONLINE
+                if load_pattern["type"] == "concurrency"
+                else TestType.OFFLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D"}],
+                settings={
+                    "load_pattern": load_pattern,
+                    "runtime": {"min_duration_ms": "600s"},
+                },
+            )
+
+    @pytest.mark.unit
     def test_from_yaml_file_not_found(self):
         from pathlib import Path
 

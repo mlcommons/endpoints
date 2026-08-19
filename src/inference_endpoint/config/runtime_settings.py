@@ -88,7 +88,7 @@ class RuntimeSettings:
     during benchmark execution.
     """
 
-    metric_target: metrics.Metric
+    metric_target: metrics.Metric | None
     """Primary metric to target (e.g., Throughput(100) for 100 QPS)"""
 
     reported_metrics: list[metrics.Metric]
@@ -176,18 +176,19 @@ class RuntimeSettings:
         runtime_cfg = config.settings.runtime
         load_pattern_cfg = config.settings.load_pattern
 
-        # TODO: The default target_qps should be None in Offline mode, but we use 10.0 for now.
-        # This is a temporary solution to avoid breaking changes.
-        effective_qps = (
-            load_pattern_cfg.target_qps
-            if load_pattern_cfg.target_qps is not None
-            else 10.0
-        )
+        # No synthetic default: patterns without an explicit target_qps carry
+        # no throughput target (min_duration_ms sizing requires one — enforced
+        # at the schema layer).
+        target_qps = load_pattern_cfg.target_qps
 
         # Build kwargs from Pydantic models
         kwargs = {
-            "metric_target": metrics.Throughput(effective_qps),
-            "reported_metrics": [metrics.Throughput(effective_qps)],
+            "metric_target": (
+                metrics.Throughput(target_qps) if target_qps is not None else None
+            ),
+            "reported_metrics": (
+                [metrics.Throughput(target_qps)] if target_qps is not None else []
+            ),
             "min_duration_ms": runtime_cfg.min_duration_ms,
             "max_duration_ms": runtime_cfg.max_duration_ms,
             "n_samples_from_dataset": dataloader_num_samples,
@@ -259,6 +260,12 @@ class RuntimeSettings:
             return result
 
         # Calculate from duration and metric target
+        if self.metric_target is None:
+            # Schema validation rejects min_duration_ms without a poisson
+            # target_qps; guard the programmatic path too.
+            raise ValueError(
+                "min_duration_ms requires an explicit load_pattern.target_qps"
+            )
         if isinstance(self.metric_target, metrics.Throughput):
             expected_sps = self.metric_target.target
             expected_samples = expected_sps * (self.min_duration_ms / 1000)
