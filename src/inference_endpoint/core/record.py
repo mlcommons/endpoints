@@ -124,6 +124,12 @@ class SessionEventType(EventType):
 
     STARTED = "started"
     ENDED = "ended"
+    # Abort marker published by BenchmarkSession just before ENDED whenever
+    # the session was stopped early (Ctrl-C, transport closure, run watchdog).
+    # NOT a terminal event: consumers still shut down on ENDED; the metrics
+    # aggregator latches it so its ENDED-driven finalize writes
+    # state=interrupted instead of a lying COMPLETE snapshot.
+    INTERRUPTED = "interrupted"
     STOP_LOADGEN = "stop_loadgen"
     START_PERFORMANCE_TRACKING = "start_performance_tracking"
     STOP_PERFORMANCE_TRACKING = "stop_performance_tracking"

@@ -24,7 +24,9 @@ Currently supported:
 import argparse
 import asyncio
 import importlib.util
+import logging
 import os
+import signal
 from pathlib import Path
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
@@ -189,6 +191,19 @@ async def main() -> None:
         )
 
         service.start()
+
+        # No-op SIGINT handler, mirroring the metrics aggregator: on an
+        # interactive ^C the OS delivers SIGINT to the whole foreground
+        # process group. The default KeyboardInterrupt would kill this
+        # child mid-run and lose every buffered (unflushed) event record;
+        # the parent's ENDED event is the authoritative shutdown signal.
+        loop.add_signal_handler(
+            signal.SIGINT,
+            lambda: logging.getLogger(__name__).info(
+                "event logger received SIGINT — ignoring "
+                "(parent's ENDED path is authoritative)"
+            ),
+        )
 
         if args.readiness_path:
             await send_ready_signal(zmq_ctx, args.readiness_path, args.readiness_id)

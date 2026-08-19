@@ -105,6 +105,7 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.metric import Throughput
+from inference_endpoint.metrics.report import Report
 from pydantic import ValidationError
 
 TEMPLATE_DIR = (
@@ -2248,6 +2249,51 @@ class TestFinalizeBenchmark:
         assert results["accuracy_scores"][0]["dataset_name"] == "external_accuracy"
         assert results["accuracy_scores"][0]["unit_samples"] == expected
         assert results["accuracy_scores"][0]["total_samples"] == expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("abort_field", ["run_timed_out", "user_interrupted"])
+    def test_aborted_run_never_writes_complete_artifacts(self, tmp_path, abort_field):
+        """Split-brain guard: the aggregator finalized a COMPLETE snapshot but
+        the run was aborted — watchdog fired late, or a ^C landed after the
+        session's terminal ENDED (drain window), so the INTERRUPTED marker
+        never went out. result_summary.json must still land complete:false /
+        state:interrupted; an aborted run must never ship complete artifacts."""
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
+        report = Report.from_snapshot(
+            {
+                "counter": 1,
+                "timestamp_ns": 12345,
+                "state": "complete",
+                "n_pending_tasks": 0,
+                "metrics": [
+                    {
+                        "type": "counter",
+                        "name": "tracked_samples_completed",
+                        "value": 3,
+                    },
+                    {"type": "counter", "name": "tracked_samples_issued", "value": 3},
+                    {
+                        "type": "counter",
+                        "name": "tracked_duration_ns",
+                        "value": 1_000_000_000,
+                    },
+                    {"type": "counter", "name": "tracked_samples_failed", "value": 0},
+                ],
+            }
+        )
+        assert report.complete is True, "precondition: aggregator said COMPLETE"
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = report
+        setattr(bench, abort_field, True)
+
+        finalize_benchmark(ctx, bench)
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["complete"] is False
+        assert summary["state"] == "interrupted"
 
 
 class TestScorerMethodSync:

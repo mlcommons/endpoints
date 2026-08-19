@@ -235,19 +235,25 @@ class MetricsPipeline:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> bool | None:
-        """Release the pipeline. Kill the services iff the run never drained.
+        """Release the pipeline. Kill the services unless the run drained cleanly.
 
         ``drain_and_build_report`` nulls ``self.publisher`` at drain initiation; a
         still-set publisher means the drain was never initiated (setup / connect /
-        session error before it),
-        so the service subprocesses are killed rather than left on the aggregator's
-        unlimited drain-timeout. The ``ExitStack`` then releases publisher, subscriber
-        and the ZMQ scope — running every step even under ``BaseException``.
+        session error before it), so the service subprocesses are killed rather
+        than left on the aggregator's unlimited drain-timeout. An in-flight
+        exception forces the kill even after drain initiation: a KeyboardInterrupt
+        (or teardown error) that aborts the drain wait must not leave the
+        aggregator/event-logger children orphaned — ``terminate_all`` is a no-op
+        for processes that already exited. The ``ExitStack`` then releases
+        publisher, subscriber and the ZMQ scope — running every step even under
+        ``BaseException``.
         """
         if self._stack is None:
             return None
         stack, self._stack = self._stack, None
-        if self.publisher is not None and self._launcher is not None:
+        if self._launcher is not None and (
+            self.publisher is not None or exc_type is not None
+        ):
             # Register this last so it runs first. ExitStack still executes the
             # publisher/subscriber/ZMQ callbacks if terminate_all raises BaseException
             # (for example, a second Ctrl-C during teardown).

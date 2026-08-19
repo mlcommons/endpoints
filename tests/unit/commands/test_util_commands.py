@@ -200,6 +200,8 @@ class TestMainRunExceptionHandling:
             (CLIError("cli error"), 1),
             (NotImplementedError("not impl"), 1),
             (RuntimeError("unexpected"), 1),
+            # Ctrl-C: scripts distinguish user-abort (130) from failure (1).
+            (KeyboardInterrupt(), 130),
         ],
     )
     def test_exception_exit_codes(self, exc, code):

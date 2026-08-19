@@ -454,6 +454,12 @@ class BenchmarkSession:
                     await self._recv_task
                 except asyncio.CancelledError:
                     pass
+            if self._stop_requested:
+                # Aborted run (Ctrl-C, transport closure, run watchdog): mark
+                # it BEFORE the terminal ENDED so the aggregator's ENDED-driven
+                # finalize — which still drains buffered samples first — writes
+                # state=interrupted rather than a normal COMPLETE snapshot.
+                self._publish_session_event(SessionEventType.INTERRUPTED)
             self._publish_session_event(SessionEventType.ENDED)
 
         return SessionResult(

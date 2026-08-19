@@ -185,6 +185,24 @@ How the knobs compose:
 4. **`timeouts.run_timeout_s` is the only total-wall-time bound** (setup, every phase, every
    drain) — firing aborts the run, marks the report INTERRUPTED, and exits non-zero.
 
+### Ctrl-C (SIGINT)
+
+One handler owns SIGINT for the whole run:
+
+- **First ^C**: graceful abort. The session stops issuing, in-flight drains are
+  released, buffered samples still reach the metrics aggregator, and the
+  artifacts land honest — `final_snapshot.json` `state: interrupted`,
+  `result_summary.json` `complete: false`, `events.jsonl` flushed. Exit 130.
+- **^C again (after ~1 s)**: force quit — teardown is abandoned, service
+  children are killed, exit 130 with whatever artifacts were already written.
+  (Repeat deliveries within ~1 s are treated as the same keystroke: process
+  runners like `uv run` forward the terminal's group SIGINT to their child,
+  which already received it.)
+- **^C during setup** (dataset/tokenizer load, before services): immediate
+  abort, exit 130, no artifacts.
+
+A ^C'd run never exits 0 and never writes `complete: true` artifacts.
+
 ## Environment Variables
 
 **In YAML files** — use `${VAR}` or `${VAR:-default}` syntax:
