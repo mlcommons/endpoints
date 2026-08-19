@@ -57,17 +57,6 @@ from .run_lcb_tests import run_test
 
 logger = logging.getLogger(__name__)
 
-# The pool is created from a worker thread of the event loop's default
-# executor (the server calls evaluate via run_in_executor), so it must not
-# fork the multithreaded parent; spawn (fork+exec) is safe from threads.
-# forkserver would also work in theory but hangs at pool shutdown in this
-# container.
-_MP_POOL_CTX = mp.get_context("spawn")
-
-# Grading assumes fork semantics; forking here is safe because the
-# spawn-started pool worker is freshly exec'd and single-threaded.
-_MP_CTX = mp.get_context("fork")
-
 # Error codes that mean the judge is broken, as opposed to the submitted code
 # failing its tests: -5 TestRunnerError, -6 GradingChildDied (child died
 # before grading started, e.g. a bad start method). Submission-attributed
@@ -169,11 +158,11 @@ def run_code_subprocess(
         suite["inputs"]
     ) + flat_timeout_extension
 
-    with _MP_CTX.Manager() as manager:
+    with mp.Manager() as manager:
         resp_buffer = manager.list()
         # typeshed types ctx.Value() as SynchronizedBase, which lacks .value
-        started_flag = cast(Synchronized, _MP_CTX.Value(ctypes.c_bool, False))
-        p = _MP_CTX.Process(
+        started_flag = cast(Synchronized, mp.Value(ctypes.c_bool, False))
+        p = mp.Process(
             target=execute_code_single_suppressed_errors,
             args=(
                 test_suite_json,
@@ -351,9 +340,7 @@ class _LCBWorker:
         futures = {}
         infra_errors = 0
 
-        with ProcessPoolExecutor(
-            max_workers=self.n_lcb_workers, mp_context=_MP_POOL_CTX
-        ) as executor:
+        with ProcessPoolExecutor(max_workers=self.n_lcb_workers) as executor:
             for qid, test_codes in zip(question_ids, codes, strict=False):
                 test_suite_json = self.test_loader[qid]
                 for i, code in enumerate(test_codes):
@@ -451,11 +438,7 @@ class LCBServe:
         if n_workers is None:
             n_workers = mp.cpu_count() // 2
         logger.info("Using %d workers for LCB eval", n_workers)
-        logger.info(
-            "Multiprocessing start methods: pool=%s, grading child=%s",
-            _MP_POOL_CTX.get_start_method(),
-            _MP_CTX.get_start_method(),
-        )
+        logger.info("Multiprocessing start method: %s", mp.get_start_method())
         self.n_workers = n_workers
 
         self.path_to_dataset = (

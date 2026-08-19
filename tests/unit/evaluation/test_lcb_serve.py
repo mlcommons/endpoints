@@ -25,12 +25,12 @@ child that reports no result into exactly one of:
                          run_test's dispatch into it, was executing)
 
 These tests call run_code_subprocess directly (not through _LCBWorker's
-spawn pool) so that monkeypatches applied in the test process are inherited
-by the forked grading child; the batch-level guard tests below need the
-real pool and monkeypatch _MP_POOL_CTX to fork for the same reason.
+pool) so that monkeypatches applied in the test process are inherited by
+the forked grading child; the batch-level guard tests below go through the
+real pool instead, and rely on the interpreter's default start method
+being "fork" (true on 3.11/3.12) for the same reason.
 """
 
-import multiprocessing as mp
 import os
 
 import pytest
@@ -184,8 +184,11 @@ def test_submission_error_logs_at_warning_not_error(caplog):
 
 def test_infra_error_logs_at_error_level(monkeypatch, caplog):
     """A judge-side death (-6) must log at ERROR so it's distinguishable
-    from the routine submission-attributed WARNINGs above."""
-    monkeypatch.setattr(lcb_serve, "_MP_POOL_CTX", mp.get_context("fork"))
+    from the routine submission-attributed WARNINGs above.
+
+    Relies on the pool using the default "fork" start method (true on
+    3.11/3.12) so the monkeypatch below reaches the pool workers.
+    """
 
     def _die_immediately(*args, **kwargs):
         os._exit(1)
@@ -215,12 +218,12 @@ def test_all_judge_startup_death_batch_raises(monkeypatch):
     means the judge itself is broken, not that every sample failed -- the
     all-infra guard must raise instead of silently reporting a 0.
 
-    Uses a fork pool so the monkeypatch below (applied in this process)
-    reaches the pool workers; spawn workers re-import the module fresh and
-    would not see it. The guard logic under test lives in
+    Relies on the pool using the default "fork" start method (true on
+    3.11/3.12) so the monkeypatch below (applied in this process) reaches
+    the pool workers; a spawn/forkserver worker would re-import the module
+    fresh and not see it. The guard logic under test lives in
     _LCBWorker.__call__ and is identical regardless of pool context.
     """
-    monkeypatch.setattr(lcb_serve, "_MP_POOL_CTX", mp.get_context("fork"))
 
     def _die_immediately(*args, **kwargs):
         os._exit(1)
