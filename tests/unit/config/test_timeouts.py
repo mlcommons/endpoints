@@ -66,20 +66,37 @@ class TestTimeoutsDefaults:
 class TestTimeoutsValidation:
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "field, value",
+        [
+            # A zero-length run budget is certainly a mistake: rejected, never
+            # reinterpreted. Drain budgets accept an honest 0 (skip the drain)
+            # and reject only negatives.
+            ("run_timeout_s", 0),
+            ("run_timeout_s", -1.0),
+            ("warmup_drain_timeout_s", -1.0),
+            ("performance_drain_timeout_s", -1.0),
+            ("accuracy_drain_timeout_s", -1.0),
+            ("metrics_drain_timeout_s", -1.0),
+        ],
+    )
+    def test_deadline_must_be_positive_or_none(self, field, value):
+        # The 0-sentinel is dead: unlimited is spelled None, never 0.
+        with pytest.raises(ValidationError):
+            Timeouts(**{field: value})
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "field",
         [
-            "run_timeout_s",
             "warmup_drain_timeout_s",
             "performance_drain_timeout_s",
             "accuracy_drain_timeout_s",
             "metrics_drain_timeout_s",
         ],
     )
-    @pytest.mark.parametrize("value", [0, -1.0])
-    def test_deadline_must_be_positive_or_none(self, field, value):
-        # The 0-sentinel is dead: unlimited is spelled None, never 0.
-        with pytest.raises(ValidationError):
-            Timeouts(**{field: value})
+    def test_zero_drain_budget_is_valid(self, field):
+        """One convention: None = unlimited, an explicit 0 = zero budget."""
+        assert getattr(Timeouts(**{field: 0}), field) == 0
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

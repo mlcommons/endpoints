@@ -809,36 +809,37 @@ class Timeouts(WithUpdatesMixin, BaseModel):
         float | None,
         cyclopts.Parameter(
             alias="--warmup-drain-timeout",
-            help="Warmup drain timeout in seconds (None = wait indefinitely)",
+            help="Warmup drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
         ),
     ] = Field(
         240.0,
-        gt=0,
-        description="Warmup drain timeout in seconds (None = wait indefinitely)",
+        ge=0,
+        description="Warmup drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
     )
     performance_drain_timeout_s: Annotated[
         float | None,
         cyclopts.Parameter(
             alias="--performance-drain-timeout",
-            help="Performance drain timeout in seconds (None = wait indefinitely)",
+            help="Performance drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
         ),
     ] = Field(
         None,
-        gt=0,
-        description="Performance drain timeout in seconds (None = wait indefinitely)",
+        ge=0,
+        description="Performance drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
     )
     accuracy_drain_timeout_s: Annotated[
         float | None,
         cyclopts.Parameter(
             alias="--accuracy-drain-timeout",
-            help="Accuracy drain timeout in seconds (None = wait indefinitely)",
+            help="Accuracy drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
         ),
     ] = Field(
         None,
-        gt=0,
+        ge=0,
         description=(
             "Accuracy drain timeout in seconds (None = wait indefinitely; "
-            "accuracy is unbounded by default because every sample must complete)"
+            "0 = skip the drain; accuracy is unbounded by default because "
+            "every sample must complete)"
         ),
     )
     metrics_drain_timeout_s: Annotated[
@@ -848,15 +849,16 @@ class Timeouts(WithUpdatesMixin, BaseModel):
             help=(
                 "Wall-clock budget (seconds) for the metrics aggregator to finish "
                 "tokenizing buffered samples after the run ends "
-                "(None = wait indefinitely)"
+                "(None = wait indefinitely; 0 = give up immediately)"
             ),
         ),
     ] = Field(
         None,
-        gt=0,
+        ge=0,
         description=(
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
-            "after ENDED (None = wait indefinitely). An incomplete drain fails "
+            "after ENDED (None = wait indefinitely; 0 = give up immediately). "
+            "An incomplete drain fails "
             "the run: artifacts are written with complete: false, then "
             "run_benchmark exits non-zero."
         ),

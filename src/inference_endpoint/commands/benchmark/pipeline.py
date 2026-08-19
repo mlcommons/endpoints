@@ -121,11 +121,10 @@ def _build_aggregator_args(
         args.append("--early-stopping")
     if tokenizer_name is not None:
         args.extend(["--tokenizer", tokenizer_name])
-    # Aggregator argv contract keeps 0 = unlimited (hand-launch default);
-    # the schema uses None = unlimited, so convert at the argv boundary.
-    args.extend(
-        ["--drain-timeout", "0" if drain_timeout_s is None else str(drain_timeout_s)]
-    )
+    # One convention everywhere: None = unlimited (flag omitted; also the
+    # aggregator's hand-launch default), an explicit 0 = zero budget.
+    if drain_timeout_s is not None:
+        args.extend(["--drain-timeout", str(drain_timeout_s)])
     args.extend(["--tokenizer-workers", str(tokenizer_workers)])
     return args
 

@@ -1292,7 +1292,7 @@ class TestAggregatorArgs:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "timeout_s, expected_flag",
-        [(120.0, "120.0"), (None, "0"), (60.0, "60.0")],
+        [(120.0, "120.0"), (None, None), (0.0, "0.0"), (60.0, "60.0")],
     )
     async def test_drain_timeout_forwarded_to_aggregator_args(
         self, tmp_path, timeout_s, expected_flag
@@ -1341,13 +1341,17 @@ class TestAggregatorArgs:
 
         aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
         args = aggregator_cfg.args
-        assert "--drain-timeout" in args
-        idx = args.index("--drain-timeout")
-        assert args[idx + 1] == expected_flag
+        if expected_flag is None:
+            # None = unlimited: the flag is omitted; the aggregator's own
+            # default (no --drain-timeout) is also unlimited.
+            assert "--drain-timeout" not in args
+        else:
+            idx = args.index("--drain-timeout")
+            assert args[idx + 1] == expected_flag
 
     @pytest.mark.unit
-    def test_none_drain_timeout_builds_unlimited_argv(self):
-        """None (= unlimited) must cross the argv boundary as "0", never "None"."""
+    def test_none_drain_timeout_omits_flag(self):
+        """None (= unlimited) omits --drain-timeout; 0 means a zero budget."""
         args = _build_aggregator_args(
             socket_dir="/tmp/sockets",
             pub_socket_name="pub",
@@ -1359,8 +1363,7 @@ class TestAggregatorArgs:
             tokenizer_workers=2,
             early_stopping=False,
         )
-        idx = args.index("--drain-timeout")
-        assert args[idx + 1] == "0"
+        assert "--drain-timeout" not in args
 
     @pytest.mark.unit
     @pytest.mark.asyncio
