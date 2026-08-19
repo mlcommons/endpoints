@@ -82,7 +82,7 @@ class RuntimeSettings:
     and ruleset constraints. It should never be instantiated directly by users,
     but rather created through:
     - Ruleset.apply_user_config() for ruleset-constrained configs
-    - RuntimeSettings.from_config() factory method (to be added in Phase 3)
+    - RuntimeSettings.from_config() factory method
 
     All fields are immutable (frozen dataclass) to prevent accidental modification
     during benchmark execution.
@@ -145,15 +145,13 @@ class RuntimeSettings:
         Returns:
             Immutable RuntimeSettings instance
 
-        Note: If a ruleset is provided, it would handle the conversion with competition-specific logic.
-        For now, we use default conversion. Full ruleset integration is deferred to Phase 4.
+        Note: the ``ruleset`` argument is accepted but NOT applied — wiring
+        ``BenchmarkSuiteRuleset.apply_user_config()`` (which would need a
+        ``UserConfig`` the CLI flow doesn't build yet) into this factory is
+        future work with no active tracking issue; until then every config
+        gets the default conversion below (rulesets still enforce their
+        schema-side constraints, e.g. pinned RNG seeds).
         """
-        if ruleset is not None:
-            # Ruleset handles conversion with competition-specific logic
-            # This would need UserConfig which we don't have in the current CLI flow
-            # For now, we use default conversion even if ruleset is provided
-            # Full ruleset integration is deferred to Phase 4
-            pass
 
         return cls._from_config_default(config, dataloader_num_samples, **overrides)
 
