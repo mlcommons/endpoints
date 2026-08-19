@@ -111,8 +111,16 @@ class RunWatchdog:
         self._task = task
 
     def bind_session(self, session: BenchmarkSession) -> None:
-        """Late-bind the session: it is created after the timer is armed."""
+        """Late-bind the session: it is created after the timer is armed.
+
+        A deadline that already fired stops the session immediately, so no
+        load is ever issued past it — the caller still runs the stopped
+        session so STARTED/ENDED flow (the event logger exits only on ENDED)
+        and the INTERRUPTED artifacts get written.
+        """
         self._session = session
+        if self.fired:
+            session.stop()
 
     def _fire(self) -> None:
         self.fired = True

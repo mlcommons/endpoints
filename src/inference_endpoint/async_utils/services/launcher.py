@@ -147,7 +147,7 @@ class ServiceLauncher:
             # re-raise the exception.
             raise
 
-    def terminate(self, module: str) -> None:
+    def terminate_module(self, module: str) -> None:
         """SIGTERM managed subprocesses whose module exactly matches ``module``.
 
         Targeted so the whole-run watchdog can abort the metrics aggregator

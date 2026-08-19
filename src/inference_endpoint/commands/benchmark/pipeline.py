@@ -372,7 +372,7 @@ class MetricsPipeline:
         """
         if self._launcher is None:
             return
-        self._launcher.terminate(_AGGREGATOR_MODULE)
+        self._launcher.terminate_module(_AGGREGATOR_MODULE)
 
     def _kill_services(self) -> None:
         """Best-effort service termination owned by the pipeline ExitStack.

@@ -891,20 +891,17 @@ async def _run_benchmark_async(
 
                 loop.add_signal_handler(signal.SIGINT, session.stop)
                 try:
-                    if watchdog.fired:
-                        # Deadline elapsed during setup — never start issuing
-                        # load after it. Run the already-stopped session so
-                        # STARTED/ENDED still flow: the event logger exits only
-                        # on ENDED, and the drain below waits for it. Zero
-                        # samples issue; the INTERRUPTED artifacts still get
-                        # written.
-                        session.stop()
-                        result = await session.run(phases)
-                    else:
-                        result = await session.run(
-                            phases, on_phase_start=_on_phase_start
-                        )
-                        session_completed_normally = True
+                    # A pre-session fire already stopped the session inside
+                    # bind_session: zero samples issue, STARTED/ENDED still
+                    # flow (the event logger exits only on ENDED), and the
+                    # INTERRUPTED artifacts get written. It also never arms
+                    # the profiler/perf-cap hook.
+                    fired_before_run = watchdog.fired
+                    result = await session.run(
+                        phases,
+                        on_phase_start=None if fired_before_run else _on_phase_start,
+                    )
+                    session_completed_normally = not fired_before_run
                 except Exception as e:
                     if watchdog.fired:
                         # The watchdog already aborted the run; a teardown race
