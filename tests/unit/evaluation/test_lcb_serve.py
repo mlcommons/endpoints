@@ -27,16 +27,41 @@ child that reports no result into exactly one of:
 These tests call run_code_subprocess directly (not through _LCBWorker's
 pool) so that monkeypatches applied in the test process are inherited by
 the forked grading child; the batch-level guard tests below go through the
-real pool instead, and rely on the interpreter's default start method
-being "fork" (true on 3.11/3.12) for the same reason.
+real pool instead, for the same reason.
+
+The fault-injection tests below need "fork" specifically -- not just as the
+interpreter's default, but pinned explicitly -- because pytest runs this
+whole suite in one process, and some other module (see
+endpoint_client/worker.py's multiprocessing.set_start_method("spawn"),
+called at import time) may have already claimed the process-wide default
+before this file's tests run. Pinning fork here, locally, keeps the fault
+injection deterministic regardless of import order without deciding
+lcb_serve's own production start-method policy, which is being tracked in
+a follow-up PR.
 """
 
+import multiprocessing
 import os
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 
 import pytest
 from inference_endpoint.evaluation.livecodebench import lcb_serve, run_lcb_tests
 
 pytestmark = pytest.mark.unit
+
+
+def _force_fork_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin lcb_serve's pool and inner Process/Manager/Value to "fork" for a
+    single test, regardless of the process-wide multiprocessing default."""
+    fork_ctx = multiprocessing.get_context("fork")
+    monkeypatch.setattr(lcb_serve, "mp", fork_ctx)
+    monkeypatch.setattr(
+        lcb_serve,
+        "ProcessPoolExecutor",
+        partial(ProcessPoolExecutor, mp_context=fork_ctx),
+    )
+
 
 CALL_BASED_SUITE = '{"fn_name": "solve", "inputs": ["1"], "outputs": ["1"]}'
 PASSING_CALL_BASED = "def solve(x):\n    return x\n"
@@ -72,9 +97,10 @@ def test_os_exit_in_submission_is_submission_killed_child_not_infra():
     assert metadata["error_code"] not in lcb_serve._LCB_INFRA_ERROR_CODES
 
 
-def test_death_before_run_test_is_infra_error():
+def test_death_before_run_test_is_infra_error(monkeypatch):
     """A judge process that dies before run_test is even reached (e.g. a
     bad start method, or a crash while importing) is -6, not -8."""
+    _force_fork_context(monkeypatch)
     orig = lcb_serve.execute_code_single_suppressed_errors
 
     def _die_immediately(*args, **kwargs):
@@ -92,12 +118,13 @@ def test_death_before_run_test_is_infra_error():
     assert metadata["error_code"] in lcb_serve._LCB_INFRA_ERROR_CODES
 
 
-def test_death_during_judge_setup_is_infra_error_not_submission():
+def test_death_during_judge_setup_is_infra_error_not_submission(monkeypatch):
     """A death inside run_test's own setup (reliability_guard, suite parse)
     -- after run_test has started but before started_flag is set -- must
     still be -6. This is the exact boundary the started_flag fix moved: it
     used to flip True on wrapper entry, before this setup ran, which would
     have misattributed this case as -8."""
+    _force_fork_context(monkeypatch)
     orig_guard = run_lcb_tests.reliability_guard
 
     def _guard_then_die(*args, **kwargs):
@@ -186,9 +213,10 @@ def test_infra_error_logs_at_error_level(monkeypatch, caplog):
     """A judge-side death (-6) must log at ERROR so it's distinguishable
     from the routine submission-attributed WARNINGs above.
 
-    Relies on the pool using the default "fork" start method (true on
-    3.11/3.12) so the monkeypatch below reaches the pool workers.
+    Forces the pool onto "fork" so the monkeypatch below reaches the pool
+    workers -- see _force_fork_context.
     """
+    _force_fork_context(monkeypatch)
 
     def _die_immediately(*args, **kwargs):
         os._exit(1)
@@ -218,12 +246,13 @@ def test_all_judge_startup_death_batch_raises(monkeypatch):
     means the judge itself is broken, not that every sample failed -- the
     all-infra guard must raise instead of silently reporting a 0.
 
-    Relies on the pool using the default "fork" start method (true on
-    3.11/3.12) so the monkeypatch below (applied in this process) reaches
-    the pool workers; a spawn/forkserver worker would re-import the module
-    fresh and not see it. The guard logic under test lives in
-    _LCBWorker.__call__ and is identical regardless of pool context.
+    Forces the pool onto "fork" so the monkeypatch below (applied in this
+    process) reaches the pool workers -- see _force_fork_context. A
+    spawn/forkserver worker would re-import the module fresh and not see
+    it. The guard logic under test lives in _LCBWorker.__call__ and is
+    identical regardless of pool context.
     """
+    _force_fork_context(monkeypatch)
 
     def _die_immediately(*args, **kwargs):
         os._exit(1)
