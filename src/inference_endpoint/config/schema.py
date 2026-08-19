@@ -614,7 +614,8 @@ class RuntimeConfig(BaseModel):
             help=(
                 "Size the run by time instead of sample count: issue "
                 "target_qps × duration samples (ms, or with suffix: 600s, 10m; "
-                "None = issue the dataset once)"
+                "None = issue the dataset once). Poisson only — requires an "
+                "explicit target_qps"
             ),
         ),
     ] = Field(
@@ -1025,6 +1026,24 @@ class Settings(WithUpdatesMixin, BaseModel):
             "(default: 4; 0 = defer everything to the end-of-run drain)."
         ),
     )
+
+    @model_validator(mode="after")
+    def _min_duration_requires_qps(self) -> Self:
+        # min_duration_ms sizes the run as target_qps × duration, so it is
+        # only meaningful when an explicit issue rate exists: poisson with
+        # target_qps. Offline bursts and fixed-concurrency runs have no rate
+        # to multiply by — no synthetic default is invented.
+        if self.runtime.min_duration_ms is not None and (
+            self.load_pattern.type != LoadPatternType.POISSON
+            or self.load_pattern.target_qps is None
+        ):
+            raise ValueError(
+                "runtime.min_duration_ms (--duration) requires a poisson load "
+                "pattern with an explicit target_qps; offline/max_throughput "
+                "and concurrency runs are sized by --num-samples or the "
+                "dataset size"
+            )
+        return self
 
 
 class OfflineSettings(Settings):
