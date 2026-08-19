@@ -43,7 +43,6 @@ from inference_endpoint.commands.benchmark.execute import (
     ResponseCollector,
     _build_phases,
     _load_datasets,
-    _PerfPhaseTimeout,
     _run_benchmark_async,
     finalize_benchmark,
     setup_benchmark,
@@ -56,6 +55,7 @@ from inference_endpoint.commands.benchmark.profiling import (
     _render_profile_status,
     write_profiling_section,
 )
+from inference_endpoint.commands.benchmark.watchdog import PerfPhaseTimeout
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     AgenticInferenceConfig,
@@ -2964,7 +2964,7 @@ class TestPerfPhaseTimeout:
     def test_armed_on_performance_phase(self):
         loop = _FakeLoop()
         fired: list[bool] = []
-        timeout = _PerfPhaseTimeout(loop, 4000, lambda: fired.append(True))
+        timeout = PerfPhaseTimeout(loop, 4000, lambda: fired.append(True))
 
         timeout.on_phase_start(PhaseType.PERFORMANCE)
 
@@ -2978,7 +2978,7 @@ class TestPerfPhaseTimeout:
     @pytest.mark.unit
     def test_cancelled_when_accuracy_phase_starts(self):
         loop = _FakeLoop()
-        timeout = _PerfPhaseTimeout(loop, 4000, lambda: None)
+        timeout = PerfPhaseTimeout(loop, 4000, lambda: None)
 
         timeout.on_phase_start(PhaseType.PERFORMANCE)
         perf_handle = loop.scheduled[0][2]
@@ -2991,7 +2991,7 @@ class TestPerfPhaseTimeout:
     @pytest.mark.unit
     def test_not_armed_without_max_duration(self):
         loop = _FakeLoop()
-        timeout = _PerfPhaseTimeout(loop, None, lambda: None)
+        timeout = PerfPhaseTimeout(loop, None, lambda: None)
 
         timeout.on_phase_start(PhaseType.PERFORMANCE)
 
@@ -3000,7 +3000,7 @@ class TestPerfPhaseTimeout:
     @pytest.mark.unit
     def test_not_armed_for_non_performance_phase(self):
         loop = _FakeLoop()
-        timeout = _PerfPhaseTimeout(loop, 4000, lambda: None)
+        timeout = PerfPhaseTimeout(loop, 4000, lambda: None)
 
         timeout.on_phase_start(PhaseType.WARMUP)
         timeout.on_phase_start(PhaseType.ACCURACY)
@@ -3010,7 +3010,7 @@ class TestPerfPhaseTimeout:
     @pytest.mark.unit
     def test_cancel_is_idempotent(self):
         loop = _FakeLoop()
-        timeout = _PerfPhaseTimeout(loop, 4000, lambda: None)
+        timeout = PerfPhaseTimeout(loop, 4000, lambda: None)
 
         timeout.cancel()  # no handle yet — must not raise
         timeout.on_phase_start(PhaseType.PERFORMANCE)

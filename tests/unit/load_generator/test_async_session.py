@@ -537,7 +537,7 @@ class TestBenchmarkSession:
     async def test_stop_current_phase_advances_to_accuracy(self):
         """A perf-phase timeout must end only that phase, not skip accuracy.
 
-        Mirrors _PerfPhaseTimeout firing mid-perf: stop_current_phase cancels
+        Mirrors PerfPhaseTimeout firing mid-perf: stop_current_phase cancels
         the perf strategy without setting the session-wide stop flag, so the
         following accuracy phase still runs to completion.
         """
