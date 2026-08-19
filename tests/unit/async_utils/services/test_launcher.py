@@ -20,10 +20,10 @@ def test_terminate_sigterms_only_exact_module_match():
     launcher._procs = [target, bystander]
     launcher._modules = ["svc.metrics_aggregator", "prefix.svc.metrics_aggregator"]
     try:
-        launcher.terminate("svc.metrics_aggregator")
+        launcher.terminate_module("svc.metrics_aggregator")
         assert target.wait(timeout=5.0) == -signal.SIGTERM
         assert bystander.poll() is None, (
-            "terminate() must match the exact module name; a mere suffix match "
+            "terminate_module() must match the exact module name; a mere suffix match "
             "must stay alive"
         )
     finally:
@@ -41,6 +41,6 @@ def test_terminate_ignores_already_exited_proc():
     launcher._procs = [dead]
     launcher._modules = ["svc.metrics_aggregator"]
 
-    launcher.terminate("svc.metrics_aggregator")
+    launcher.terminate_module("svc.metrics_aggregator")
 
     assert dead.returncode == 0
