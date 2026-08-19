@@ -1019,10 +1019,11 @@ def run_benchmark_async(
     computes its own deadline at entry, so each audit phase gets a full
     per-phase budget.
     """
-    if deadline is None:
-        run_timeout_s = ctx.config.settings.timeouts.run_timeout_s
-        if run_timeout_s is not None:
-            deadline = time.monotonic() + run_timeout_s
+    if (
+        deadline is None
+        and (run_timeout_s := ctx.config.settings.timeouts.run_timeout_s) is not None
+    ):
+        deadline = time.monotonic() + run_timeout_s
     loop = LoopManager().default_loop
     return loop.run_until_complete(_run_benchmark_async(ctx, loop, deadline=deadline))
 
@@ -1234,8 +1235,7 @@ def run_benchmark(
     # Deadline for the whole-run watchdog is taken at entry so setup
     # (tokenizer/dataset load) counts against run_timeout_s too.
     deadline: float | None = None
-    run_timeout_s = config.settings.timeouts.run_timeout_s
-    if run_timeout_s is not None:
+    if (run_timeout_s := config.settings.timeouts.run_timeout_s) is not None:
         deadline = time.monotonic() + run_timeout_s
     ctx = setup_benchmark(config, test_mode)
     if deadline is not None and time.monotonic() >= deadline:
