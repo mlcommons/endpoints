@@ -647,7 +647,13 @@ class PyxisSweBenchRunner(SweBenchRunner):
     def _configure_environment(
         self, environment_cfg: dict[str, Any], run_id: str
     ) -> None:
-        for key in ("run_args", "pull_timeout", "container_timeout"):
+        # ``pull_timeout`` is the template's image-acquisition budget and is
+        # exactly what the Pyxis container-create step needs, so it is carried
+        # over rather than dropped. Without it the create step fell back to the
+        # per-command ``timeout`` (300s in both templates) and every image
+        # import slower than that was killed as an "infrastructure failure".
+        # ``run_args``/``container_timeout`` stay dropped: both are docker-only.
+        for key in ("run_args", "container_timeout"):
             environment_cfg.pop(key, None)
         environment_cfg["environment_class"] = (
             "swebench_service.pyxis_environment.PyxisEnvironment"
