@@ -155,6 +155,45 @@ class _FailingPreflightScorer(Scorer, scorer_id="_test_failing_preflight"):
         return 0.0
 
 
+class _ScorelessExternalScorer(Scorer, scorer_id="_test_scoreless_external"):
+    """Does all its work, exits cleanly, and returns no number.
+
+    Models the real shape of the SWE-bench fleet scorer whose merge gate
+    refuses: every unit reached a terminal record, nothing raised, and the
+    headline is ``None``.
+    """
+
+    SKIP_ENDPOINT_PHASE = True
+
+    @classmethod
+    def external_sample_count(cls, extras):
+        return 2
+
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+    def score(self):
+        self.complete = False
+        return None, 1
+
+
+class _PartialButScoredScorer(Scorer, scorer_id="_test_partial_but_scored"):
+    """A real number flagged partial — reported, not failed."""
+
+    SKIP_ENDPOINT_PHASE = True
+
+    @classmethod
+    def external_sample_count(cls, extras):
+        return 2
+
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+    def score(self):
+        self.complete = False
+        return 0.25, 1
+
+
 class _OrdinaryAccuracyScorer(Scorer, scorer_id="_test_ordinary_accuracy"):
     def score_single_sample(self, value, ground_truth):
         return 0.0
@@ -2561,6 +2600,129 @@ class TestFinalizeBenchmark:
                 ],
             }
         )
+
+
+class TestAccuracyRunWithoutANumberFails:
+    """rc=0, all work done, no number is a FAILURE.
+
+    This is the regression that cost a whole 200-instance GPU run: the
+    distributed SWE-bench scorer drove all 20 units to terminal records, the
+    merge gate refused (17 abandoned), ``score()`` returned ``None``,
+    ``report.txt`` printed ``N/A`` — and the process exited 0, so the sbatch
+    wrapper wrote ``disposition=run completed``. Any scorer path that finishes
+    its units but produces no accuracy must fail loudly instead.
+    """
+
+    def _eval_config(self, scorer, dataset, report_dir: Path, name: str):
+        return AccuracyConfiguration(
+            scorer=scorer,
+            extractor=None,
+            dataset_name=name,
+            dataset=dataset,
+            report_dir=report_dir,
+            ground_truth_column=None,
+            num_repeats=1,
+            dataset_type=DatasetType.ACCURACY,
+        )
+
+    def _ctx(self, tmp_path, scorer, name="external_accuracy"):
+        dataset = _make_loaded_dataset()
+        return _make_benchmark_context(
+            config=OfflineConfig(**_OFFLINE_KWARGS),
+            report_dir=tmp_path,
+            test_mode=TestMode.ACC,
+            dataloader=dataset,
+            eval_configs=[self._eval_config(scorer, dataset, tmp_path, name)],
+        )
+
+    @pytest.mark.unit
+    def test_scoreless_accuracy_run_raises(self, tmp_path):
+        ctx = self._ctx(tmp_path, _ScorelessExternalScorer)
+
+        with pytest.raises(ExecutionError, match="produced no score"):
+            finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+    @pytest.mark.unit
+    def test_artifacts_survive_the_failure(self, tmp_path):
+        """The failure must not cost the evidence needed to diagnose it."""
+        ctx = self._ctx(tmp_path, _ScorelessExternalScorer)
+
+        with pytest.raises(ExecutionError):
+            finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+        results = json.loads(
+            (tmp_path / "accuracy" / "accuracy_results.json").read_text()
+        )
+        entry = results["accuracy_scores"][0]
+        assert entry["dataset_name"] == "external_accuracy"
+        assert entry["score"] is None
+        assert entry["complete"] is False
+
+    @pytest.mark.unit
+    def test_one_scored_dataset_does_not_excuse_a_scoreless_peer(self, tmp_path):
+        """Averaging over datasets must not hide a dataset that scored nothing."""
+        dataset = _make_loaded_dataset()
+        ctx = _make_benchmark_context(
+            config=OfflineConfig(**_OFFLINE_KWARGS),
+            report_dir=tmp_path,
+            test_mode=TestMode.ACC,
+            dataloader=dataset,
+            eval_configs=[
+                self._eval_config(_SelfContainedScorer, dataset, tmp_path, "good"),
+                self._eval_config(_ScorelessExternalScorer, dataset, tmp_path, "bad"),
+            ],
+        )
+
+        with pytest.raises(ExecutionError, match="bad"):
+            finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+    @pytest.mark.unit
+    def test_partial_but_numeric_score_still_passes(self, tmp_path):
+        """A real number flagged incomplete is reportable, not a failure."""
+        ctx = self._ctx(tmp_path, _PartialButScoredScorer)
+
+        finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+        results = json.loads(
+            (tmp_path / "accuracy" / "accuracy_results.json").read_text()
+        )
+        assert results["accuracy_scores"][0]["score"] == 0.25
+        assert results["accuracy_scores"][0]["complete"] is False
+
+    @pytest.mark.unit
+    def test_perf_only_run_owes_no_accuracy_number(self, tmp_path):
+        """PERF mode never dispatches an external scorer, so it owes nothing."""
+        dataset = _make_loaded_dataset()
+        ctx = _make_benchmark_context(
+            config=OfflineConfig(**_OFFLINE_KWARGS),
+            report_dir=tmp_path,
+            test_mode=TestMode.PERF,
+            dataloader=dataset,
+            eval_configs=[
+                self._eval_config(
+                    _ScorelessExternalScorer, dataset, tmp_path, "external_accuracy"
+                )
+            ],
+        )
+
+        finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+    @pytest.mark.unit
+    def test_external_scorer_sample_count_is_the_evaluated_count(
+        self, tmp_path, caplog
+    ):
+        """'N samples evaluated' must match the dataset's own unit= line.
+
+        SWE-bench Verified loads 500 rows and scores ``num_instances`` of them;
+        reporting 500 against a ``unit=200`` headline is how a wrong scope goes
+        unnoticed.
+        """
+        ctx = self._ctx(tmp_path, _PartialButScoredScorer)
+
+        with caplog.at_level(logging.INFO, logger=execute_mod.logger.name):
+            finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+        assert "Accuracy-only: 2 samples evaluated" in caplog.text
 
 
 class TestScorerMethodSync:
