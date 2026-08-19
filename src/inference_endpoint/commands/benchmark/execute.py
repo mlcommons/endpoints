@@ -918,7 +918,12 @@ async def _run_benchmark_async(
                         phases,
                         on_phase_start=None if fired_before_run else _on_phase_start,
                     )
-                    session_completed_normally = not fired_before_run
+                    # session.run returns normally even when stop() aborted it
+                    # mid-run (Ctrl-C, transport closure, watchdog) — check the
+                    # session's own flag, not just the pre-run watchdog state.
+                    session_completed_normally = not (
+                        fired_before_run or session.stop_requested
+                    )
                 except Exception as e:
                     if watchdog.fired:
                         # The watchdog already aborted the run; a teardown race
