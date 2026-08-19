@@ -37,6 +37,7 @@ from inference_endpoint.config.schema import (
     OSLDistributionType,
     ProfilerEngine,
     ProfilingConfig,
+    RuntimeConfig,
     StreamingMode,
     SubmissionReference,
     TestType,
@@ -523,6 +524,36 @@ class TestBenchmarkConfigMethods:
         )
         rt = RuntimeSettings.from_config(config, dataloader_num_samples=100)
         assert rt.max_duration_ms is None
+
+    @pytest.mark.unit
+    def test_min_duration_sizes_the_run(self):
+        """--duration (runtime.min_duration_ms) drives target_qps × duration
+        sample-count derivation, with suffix parsing; None = dataset once."""
+        from inference_endpoint.config.runtime_settings import RuntimeSettings
+
+        config = BenchmarkConfig(
+            type=TestType.ONLINE,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[{"path": "D"}],
+            settings={
+                "load_pattern": {"type": "poisson", "target_qps": 10},
+                "runtime": {"min_duration_ms": "600s"},
+            },
+        )
+        assert config.settings.runtime.min_duration_ms == 600_000
+        rt = RuntimeSettings.from_config(config, dataloader_num_samples=100)
+        # 10 QPS × 600 s × 1.1 padding = 6600, ceil'd past the float artifact
+        # (6600.0000…01 → 6601) then padded up to the next dataset multiple.
+        assert rt.total_samples_to_issue() == 6700
+
+        no_duration = config.with_updates(
+            settings=config.settings.model_copy(
+                update={"runtime": RuntimeConfig(min_duration_ms=None)}
+            )
+        )
+        rt = RuntimeSettings.from_config(no_duration, dataloader_num_samples=100)
+        assert rt.total_samples_to_issue() == 100
 
     @pytest.mark.unit
     def test_from_yaml_file_not_found(self):

@@ -190,7 +190,7 @@ class RuntimeSettings:
         kwargs = {
             "metric_target": metrics.Throughput(effective_qps),
             "reported_metrics": [metrics.Throughput(effective_qps)],
-            "min_duration_ms": None,
+            "min_duration_ms": runtime_cfg.min_duration_ms,
             "max_duration_ms": runtime_cfg.max_duration_ms,
             "n_samples_from_dataset": dataloader_num_samples,
             "n_samples_to_issue": runtime_cfg.n_samples_to_issue,  # From config (CLI --num-samples or YAML)

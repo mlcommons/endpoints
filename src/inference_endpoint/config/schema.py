@@ -597,21 +597,41 @@ class RuntimeConfig(BaseModel):
 
     Sample count priority (in RuntimeSettings.total_samples_to_issue()):
     1. n_samples_to_issue (if specified) — explicit override
-    2. All dataset samples — issue the dataset once
+    2. Calculated from target_qps × min_duration_ms — when a min duration is set
+    3. All dataset samples — issue the dataset once (the default)
 
-    ``max_duration_ms`` is a workload duration (part of the benchmark
-    definition), not a give-up deadline — those live in ``settings.timeouts``.
+    ``min_duration_ms``/``max_duration_ms`` are workload durations (part of the
+    benchmark definition), not give-up deadlines — those live in
+    ``settings.timeouts``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    min_duration_ms: Annotated[
+        int | None,
+        cyclopts.Parameter(
+            alias="--duration",
+            help=(
+                "Size the run by time instead of sample count: issue "
+                "target_qps × duration samples (ms, or with suffix: 600s, 10m; "
+                "None = issue the dataset once)"
+            ),
+        ),
+    ] = Field(
+        None,
+        gt=0,
+        description=(
+            "Minimum test duration in ms; sizes the run as target_qps × "
+            "duration samples (None = no duration target, issue the dataset once)"
+        ),
+    )
     max_duration_ms: int | None = Field(
         None,
         gt=0,
         description="Maximum test duration in ms (None for no limit)",
     )
 
-    @field_validator("max_duration_ms", mode="before")
+    @field_validator("min_duration_ms", "max_duration_ms", mode="before")
     @classmethod
     def _parse_duration_suffix(cls, v: object) -> object:
         """Accept duration with unit suffix: 600s, 10m, 600000ms, or plain int (ms)."""
@@ -631,6 +651,19 @@ class RuntimeConfig(BaseModel):
     ] = Field(None, gt=0)
     scheduler_random_seed: int = Field(42, description="Scheduler RNG seed")
     dataloader_random_seed: int = Field(42, description="Dataloader RNG seed")
+
+    @model_validator(mode="after")
+    def _validate_durations(self) -> Self:
+        if (
+            self.max_duration_ms is not None
+            and self.min_duration_ms is not None
+            and self.max_duration_ms < self.min_duration_ms
+        ):
+            raise ValueError(
+                f"max_duration_ms ({self.max_duration_ms}) must be >= "
+                f"min_duration_ms ({self.min_duration_ms})"
+            )
+        return self
 
 
 @cyclopts.Parameter(name="*")
