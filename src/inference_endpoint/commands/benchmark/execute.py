@@ -1088,11 +1088,20 @@ def _summarize_and_log_metrics(
 
     logger.info(f"Completed in {perf_elapsed:.1f}s")
     if ctx.accuracy_only:
-        acc_total = sum(
-            ds.dataset.num_samples() * ds.num_repeats
-            for ds in ctx.eval_configs
-            if ds.dataset_type == DatasetType.ACCURACY
-        )
+        # Count what was actually evaluated, not what was loaded. An external
+        # scorer (SKIP_ENDPOINT_PHASE) evaluates its own clamped subset --
+        # SWE-bench Verified loads all 500 rows but scores `num_instances` of
+        # them -- and reporting the loaded size instead contradicts the
+        # per-dataset `unit=` line in the same summary.
+        acc_total = 0
+        for ec in ctx.eval_configs:
+            if ec.dataset_type != DatasetType.ACCURACY:
+                continue
+            external = effective_external_sample_count(ec)
+            if external is not None:
+                acc_total += external
+            else:
+                acc_total += ec.dataset.num_samples() * ec.num_repeats
         logger.info(f"Accuracy-only: {acc_total} samples evaluated")
     else:
         logger.info(
@@ -1154,6 +1163,53 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Emit the accuracy results as a focused artifact under accuracy/. Written
     # after the report artifacts so a write failure here can't discard them.
     write_accuracy_results(ctx.report_dir, accuracy_scores)
+
+    # Every artifact is on disk; only now may the run be declared a failure.
+    _require_accuracy_numbers(ctx, accuracy_scores)
+
+
+def _require_accuracy_numbers(
+    ctx: BenchmarkContext, accuracy_scores: list[dict[str, Any]]
+) -> None:
+    """Fail a run that was asked for accuracy and produced no number.
+
+    A scorer can complete every unit of work, exit cleanly, and still hand back
+    ``score=None`` -- an externally-scored run (``SKIP_ENDPOINT_PHASE``) whose
+    merge gate refused, a scorer whose responses never arrived. Without this
+    check the process exits 0, ``report.txt`` prints ``N/A``, and every wrapper
+    downstream (sbatch disposition, CI gate, dashboard) reads the run as a pass.
+    That failure shape -- rc=0, all work "done", no number -- is the one that
+    costs whole GPU allocations, so it is made loud here rather than left to
+    each caller to notice.
+
+    Scored-but-partial (a real number with ``complete=False``) is not failed:
+    the number exists and the entry already says it is partial.
+    """
+    # A PERF-mode run skips externally-scored datasets entirely (they are never
+    # dispatched), so they are not owed a number here.
+    expected = {
+        ec.dataset_name
+        for ec in ctx.eval_configs
+        if ec.dataset_type == DatasetType.ACCURACY
+        and not (ctx.test_mode == TestMode.PERF and ec.scorer.SKIP_ENDPOINT_PHASE)
+    }
+    if not expected:
+        return
+
+    scored = {
+        entry["dataset_name"]
+        for entry in accuracy_scores
+        if entry.get("dataset_type") == DatasetType.ACCURACY.value
+        and entry.get("score") is not None
+    }
+    missing = sorted(expected - scored)
+    if missing:
+        raise ExecutionError(
+            "accuracy scoring produced no score for: "
+            + ", ".join(missing)
+            + f". Artifacts were preserved in {ctx.report_dir}; see "
+            "accuracy/accuracy_results.json for the per-dataset detail."
+        )
 
 
 def run_benchmark(
