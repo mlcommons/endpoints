@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
@@ -10,6 +11,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -148,17 +150,78 @@ def run_srun_step(
             timeout=timeout_s + 30,
             env=safe_srun_env(),
         )
+    except subprocess.TimeoutExpired as exc:
+        if failure_path is not None:
+            failure_path.touch()
+        raise RunnerError(
+            f"Pyxis step exceeded its {timeout_s + 30}s deadline and was killed"
+            + _srun_evidence(exc.output)
+        ) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         if failure_path is not None:
             failure_path.touch()
         raise RunnerError(
-            "Pyxis infrastructure failure before the command completed"
+            "Pyxis infrastructure failure before the command completed: "
+            f"{type(exc).__name__}: {exc}"
         ) from exc
     if status_path.read_text().strip() != f"finished:{result.returncode}":
         if failure_path is not None:
             failure_path.touch()
-        raise RunnerError("Pyxis infrastructure failure before the command completed")
+        raise RunnerError(
+            "Pyxis infrastructure failure before the command completed "
+            f"(srun exited {result.returncode})" + _srun_evidence(result.stdout)
+        )
     return result
+
+
+#: Opt-in JSONL sink for container-create durations. Off unless set, so this
+#: adds nothing to a normal run. Creation is the step whose cost was invisible
+#: -- it was only ever observable as a uniform block of SIGKILLs in `sacct`,
+#: after the run was already lost -- so measuring it has to be possible without
+#: re-deriving it from step accounting.
+_CREATE_TIMING_ENV = "SWEBENCH_PYXIS_CREATE_TIMING_PATH"
+
+
+def _record_create_timing(image: str | Path, seconds: float, *, ok: bool) -> None:
+    path = os.environ.get(_CREATE_TIMING_ENV)
+    if not path:
+        return
+    record = {
+        "ts": time.time(),
+        "image": str(image),
+        "secs": round(seconds, 2),
+        "ok": ok,
+        "pid": os.getpid(),
+    }
+    try:
+        # One short line per create, O_APPEND from many concurrent workers.
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+    except OSError:
+        # Observability must never be able to fail a run. A create that
+        # succeeded and could not be logged is still a create that succeeded.
+        logger.debug("could not record Pyxis create timing", exc_info=True)
+
+
+def _srun_evidence(output: str | bytes | None, limit: int = 2000) -> str:
+    """Attach srun's own words to a Pyxis failure.
+
+    srun/pyxis/enroot report the actual cause -- image import failure, no space
+    left, a step that never got resources -- on the stream this function
+    captures. Dropping it turns every distinct infrastructure failure into one
+    indistinguishable message, which is exactly what made a 200-instance run's
+    17 lost units undiagnosable from its artifacts.
+    """
+    if not output:
+        return ""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    text = output.strip()
+    if not text:
+        return ""
+    if len(text) > limit:
+        text = "..." + text[-limit:]
+    return f"\n--- srun output ---\n{text}"
 
 
 def resolve_image(image_registry: str, instance_id: str) -> str:
@@ -183,6 +246,19 @@ class PyxisEnvironmentConfig(BaseModel):
         validation_alias=AliasChoices("timeout_s", "timeout"),
         serialization_alias="timeout",
     )
+    #: Deadline for *creating* the container, which under Pyxis includes the
+    #: enroot import of a multi-GB SWE-bench image from a remote registry.
+    #: Deliberately separate from ``timeout_s``: that is a per-*command*
+    #: budget, sized for `pytest`-scale work inside an already-running
+    #: container. Charging an image import against it made every agent whose
+    #: image was not already in the enroot cache fail once the registry was
+    #: shared by enough concurrent workers to push a single import past ~5
+    #: minutes. Defaults to, and accepts, mini-swe-agent's ``pull_timeout``.
+    create_timeout_s: int = Field(
+        default=3600,
+        validation_alias=AliasChoices("create_timeout_s", "pull_timeout"),
+        serialization_alias="pull_timeout",
+    )
     interpreter: list[str] = Field(default_factory=lambda: ["bash", "-c"])
     infrastructure_failure_path: Path | None = None
 
@@ -197,6 +273,7 @@ class PyxisEnvironment:
         self._tmp_dir.chmod(0o1777)
         self._lock = threading.Lock()
         self._cleaned = False
+        started = time.monotonic()
         try:
             # A no-op initializes and validates the named persistent container.
             run_srun_step(
@@ -206,14 +283,18 @@ class PyxisEnvironment:
                 workdir=self.config.cwd,
                 argv=["true"],
                 status_path=self._tmp_dir / Path(_STEP_STATUS).name,
-                timeout_s=self.config.timeout_s,
+                timeout_s=self.config.create_timeout_s,
                 failure_path=self.config.infrastructure_failure_path,
             )
         except RunnerError as exc:
+            _record_create_timing(
+                self.config.image, time.monotonic() - started, ok=False
+            )
             self.cleanup()
             raise RunnerError(
-                f"failed to start Pyxis container for {self.config.image}"
+                f"failed to start Pyxis container for {self.config.image}: {exc}"
             ) from exc
+        _record_create_timing(self.config.image, time.monotonic() - started, ok=True)
 
     def execute(
         self, action: dict[str, Any], cwd: str = "", *, timeout: int | None = None
