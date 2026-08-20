@@ -65,6 +65,7 @@ from inference_endpoint.commands.benchmark.profiling import (
 from inference_endpoint.commands.benchmark.watchdog import (
     PerfPhaseTimeout,
     RunWatchdog,
+    SigintGovernor,
 )
 from inference_endpoint.compliance import AuditRunSpec
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -172,60 +173,6 @@ class BenchmarkResult:
     # are finalized as interrupted first; run_benchmark then raises
     # KeyboardInterrupt so main.py maps the run to exit 130.
     user_interrupted: bool = False
-
-
-class _SigintGovernor:
-    """The run's single SIGINT policy — installed ONCE by ``run_benchmark``.
-
-    One ``signal.signal`` handler covers the entire run (setup, session,
-    metrics drain, finalize) instead of window-scoped install/remove pairs,
-    whose gaps are exactly where a ^C used to slip through as a raw
-    KeyboardInterrupt and abort teardown half-way.
-
-    Semantics:
-    - ^C with no live session (sync setup): nothing to stop gracefully —
-      raise KeyboardInterrupt immediately (default behavior, exit 130).
-    - First ^C with a session bound: graceful — ``session.stop()``; the
-      stopped run publishes INTERRUPTED+ENDED, services drain, artifacts land
-      as state=interrupted, then ``run_benchmark`` raises for exit 130.
-    - Repeat deliveries inside the burst window are the SAME keystroke:
-      process-runner wrappers sharing the foreground group (``uv run``,
-      ``npm exec``, ...) receive the group SIGINT and forward it to their
-      child, which already got it directly. Never an escalation.
-    - A later distinct ^C: force — raise KeyboardInterrupt, abandoning the
-      graceful teardown (pipeline ``__aexit__`` still kills service children).
-    """
-
-    _BURST_WINDOW_S = 1.0
-
-    def __init__(self) -> None:
-        self.interrupted = False
-        self._last_at = 0.0
-        self._session: BenchmarkSession | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-
-    def bind_session(
-        self, session: BenchmarkSession, loop: asyncio.AbstractEventLoop
-    ) -> None:
-        self._session = session
-        self._loop = loop
-
-    def __call__(self, signum: int, frame: object) -> None:
-        now = time.monotonic()
-        if self.interrupted:
-            if now - self._last_at < self._BURST_WINDOW_S:
-                return
-            raise KeyboardInterrupt
-        self.interrupted = True
-        self._last_at = now
-        if self._session is None or self._loop is None:
-            raise KeyboardInterrupt
-        logger.warning("SIGINT received: stopping benchmark (^C again to force)")
-        # A signal handler runs at an arbitrary bytecode boundary — possibly
-        # mid-event-loop-iteration. Don't mutate asyncio state (Event.set,
-        # Task.cancel) from here; hand session.stop to the loop, the one
-        # asyncio entry point documented as signal-handler safe.
-        self._loop.call_soon_threadsafe(self._session.stop)
 
 
 @dataclass
@@ -846,7 +793,7 @@ async def _run_benchmark_async(
     loop: asyncio.AbstractEventLoop,
     *,
     deadline: float | None = None,
-    sigint: _SigintGovernor | None = None,
+    sigint: SigintGovernor | None = None,
 ) -> BenchmarkResult:
     """Run async benchmark session."""
     config = ctx.config
@@ -1007,9 +954,8 @@ async def _run_benchmark_async(
                     _timeout_done = True
                     perf_timeout.cancel()
                     # NOTE: no SIGINT bookkeeping here — the process-level
-                    # _SigintGovernor (installed once by run_benchmark) covers
-                    # the metrics drain below with the same graceful/debounce
-                    # semantics.
+                    # SigintGovernor (installed once by run_benchmark) covers
+                    # the metrics drain below too.
                     # Fire /stop_profile for URLs whose /start_profile succeeded.
                     # Unifies the clean phase-end path and the abort path — both
                     # reach this block. A watchdog abort counts as an abort even
@@ -1097,7 +1043,7 @@ def run_benchmark_async(
     ctx: BenchmarkContext,
     *,
     deadline: float | None = None,
-    sigint: _SigintGovernor | None = None,
+    sigint: SigintGovernor | None = None,
 ) -> BenchmarkResult:
     """Run async benchmark. Sync entry point — drives the event loop.
 
@@ -1333,7 +1279,7 @@ def run_benchmark(
     # — no window-scoped install/remove pairs anywhere else in the run (their
     # gaps are where a ^C used to abort teardown as a raw KeyboardInterrupt).
     # No session bound yet, so a ^C during setup keeps default abort behavior.
-    sigint = _SigintGovernor()
+    sigint = SigintGovernor()
     prev_sigint = None
     try:
         prev_sigint = signal.signal(signal.SIGINT, sigint)
