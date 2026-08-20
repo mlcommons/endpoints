@@ -36,7 +36,7 @@ import signal
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
@@ -788,6 +788,28 @@ def _wire_on_sample_complete(
     return _on_sample_complete
 
 
+def _make_phase_start_hook(
+    profiler: ProfileController, perf_timeout: PerfPhaseTimeout
+) -> Callable[[PhaseConfig], Awaitable[None]]:
+    """The session's per-phase-start hook: arm the profiler, then the perf cap.
+
+    Ordering is load-bearing: /start_profile is awaited BEFORE the perf cap is
+    armed. ``_run_phase`` clears the phase-stop flag at entry, so a one-shot
+    cap that fired while profile arming was still awaiting would be silently
+    erased and the phase would run uncapped. (On non-PERFORMANCE phases this
+    only cancels the perf timer, so accuracy is never truncated.)
+    """
+
+    async def _on_phase_start(phase: PhaseConfig) -> None:
+        if phase.phase_type == PhaseType.PERFORMANCE:
+            # Fire /start_profile sequentially before any perf request is
+            # issued, so the server is armed when traffic begins.
+            await profiler.start()
+        perf_timeout.on_phase_start(phase.phase_type)
+
+    return _on_phase_start
+
+
 async def _run_benchmark_async(
     ctx: BenchmarkContext,
     loop: asyncio.AbstractEventLoop,
@@ -908,17 +930,7 @@ async def _run_benchmark_async(
                     loop, max_duration_ms, _on_global_timeout
                 )
 
-                async def _on_phase_start(phase: PhaseConfig) -> None:
-                    if phase.phase_type == PhaseType.PERFORMANCE:
-                        # Fire /start_profile sequentially before any perf request
-                        # is issued, so the server is armed when traffic begins.
-                        await profiler.start()
-                    # Arm the perf cap LAST — _run_phase clears the phase-stop
-                    # flag at entry, so a one-shot cap that fired while profile
-                    # arming was still awaiting would be silently erased and the
-                    # phase would run uncapped. (On non-PERFORMANCE phases this
-                    # cancels the perf timer, so accuracy is never truncated.)
-                    perf_timeout.on_phase_start(phase.phase_type)
+                _on_phase_start = _make_phase_start_hook(profiler, perf_timeout)
 
                 try:
                     # A pre-session fire already stopped the session inside

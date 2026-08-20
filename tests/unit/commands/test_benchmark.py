@@ -3048,6 +3048,51 @@ class TestSetupBenchmarkExternalSampleCountLogging:
         )
 
 
+class TestPhaseStartHook:
+    """_make_phase_start_hook ordering: profiler armed before the perf cap.
+
+    The order is load-bearing — _run_phase clears the phase-stop flag at
+    entry, so a perf cap armed before the awaited profile arming could fire
+    during the await and be silently erased (phase runs uncapped).
+    """
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_profiler_start_completes_before_perf_cap_arms(self):
+        order: list[str] = []
+        profiler = MagicMock()
+
+        async def _start() -> None:
+            await asyncio.sleep(0)  # a real suspend, like the to_thread POSTs
+            order.append("profiler.start")
+
+        profiler.start = _start
+        perf_timeout = MagicMock()
+        perf_timeout.on_phase_start.side_effect = lambda pt: order.append("cap.armed")
+
+        hook = execute_mod._make_phase_start_hook(profiler, perf_timeout)
+        await hook(MagicMock(phase_type=PhaseType.PERFORMANCE))
+
+        assert order == ["profiler.start", "cap.armed"]
+        perf_timeout.on_phase_start.assert_called_once_with(PhaseType.PERFORMANCE)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("phase_type", [PhaseType.WARMUP, PhaseType.ACCURACY])
+    async def test_non_performance_phase_skips_profiler_still_arms_timer(
+        self, phase_type
+    ):
+        profiler = MagicMock()
+        perf_timeout = MagicMock()
+
+        hook = execute_mod._make_phase_start_hook(profiler, perf_timeout)
+        await hook(MagicMock(phase_type=phase_type))
+
+        profiler.start.assert_not_called()
+        # on_phase_start cancels the perf timer for non-PERFORMANCE phases.
+        perf_timeout.on_phase_start.assert_called_once_with(phase_type)
+
+
 class TestProfilingHelpers:
     @pytest.mark.unit
     @pytest.mark.parametrize(

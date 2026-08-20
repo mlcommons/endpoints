@@ -21,10 +21,13 @@ The interruption paths no unit test can compose: a real
 service children alike). The contract, at every delivery point:
 
 - exit code 130 (user abort, distinct from failure exit codes 1-4);
-- artifacts are honest: ``final_snapshot.json`` ``state=interrupted`` (the
-  session's INTERRUPTED marker drives the aggregator's ENDED finalize) and
-  ``result_summary.json`` ``complete: false`` — or no artifacts at all,
-  never a COMPLETE-looking report from an aborted run;
+- artifacts are honest: ``result_summary.json`` ``state=interrupted``,
+  ``complete: false`` — or no artifacts at all, never a COMPLETE-looking
+  run outcome. ``final_snapshot.json`` usually reads ``state=interrupted``
+  too (the session's INTERRUPTED marker drives the aggregator's ENDED
+  finalize), except in the post-ENDED drain window, where the aggregator
+  legitimately records the normally-ended run it observed —
+  ``result_summary.json`` + the exit code are the run-level truth;
 - ``events.jsonl`` survives — the event logger ignores the group SIGINT and
   flushes on the session's terminal ENDED;
 - no service child outlives the run;
@@ -40,6 +43,7 @@ import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import IO
 
 import pytest
 
@@ -85,20 +89,32 @@ def _cli() -> str:
 
 
 @contextlib.contextmanager
-def _benchmark_proc(argv: list[str]) -> Iterator[subprocess.Popen]:
-    """A benchmark subprocess in its own group, SIGKILLed on exit if alive."""
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,  # own process group, like a foreground job
-    )
-    try:
-        yield proc
-    finally:
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+def _benchmark_proc(
+    argv: list[str], log_file: Path | None = None
+) -> Iterator[subprocess.Popen]:
+    """A benchmark subprocess in its own group, SIGKILLed on exit if alive.
+
+    ``log_file`` captures stdout+stderr (logging goes to stdout) for tests
+    that key on run-lifecycle log lines.
+    """
+    with contextlib.ExitStack() as stack:
+        out: IO[bytes] | int = (
+            stack.enter_context(log_file.open("wb"))
+            if log_file is not None
+            else subprocess.DEVNULL
+        )
+        proc = subprocess.Popen(
+            argv,
+            stdout=out,
+            stderr=subprocess.STDOUT if log_file is not None else subprocess.DEVNULL,
+            start_new_session=True,  # own process group, like a foreground job
+        )
+        try:
+            yield proc
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
 
 
 def _wait_services_ready(
@@ -294,3 +310,83 @@ def test_single_group_sigint_under_uv_run_is_graceful(mock_http_echo_server, tmp
     assert rc == 130, f"user abort must exit 130, got {rc}"
     # The graceful path writes the report; a force quit would have skipped it.
     _assert_interrupted_artifacts(report_dir)
+
+
+@pytest.mark.integration
+def test_sigint_in_drain_window_keeps_summary_authoritative(
+    mock_http_echo_server, tmp_path
+):
+    """^C after the session's terminal ENDED: result_summary is the truth.
+
+    The session ends normally and the aggregator drains a deferred
+    tokenization backlog when the ^C reaches the main process. The session
+    never publishes an INTERRUPTED marker (it already ENDED) and the
+    aggregator is not signaled, so final_snapshot.json legitimately reads
+    state=complete — that is what the aggregator observed. The run-level
+    artifacts must still be honest: exit 130 and result_summary.json
+    state=interrupted, complete=false. Pins the artifact-precedence contract
+    (docs/CLI_QUICK_REFERENCE.md "Ctrl-C (SIGINT)").
+    """
+    dataset_path = tmp_path / "big_prompts.jsonl"
+    prompt = "lorem ipsum " * 21_000  # ~250 KB per sample
+    with dataset_path.open("w") as f:
+        for i in range(30):
+            f.write(json.dumps({"prompt": f"{i} {prompt}"}) + "\n")
+
+    report_dir = tmp_path / "report"
+    config_path = tmp_path / "bench.yaml"
+    config_path.write_text(
+        f"""
+type: offline
+endpoint_config:
+  endpoints: ["{mock_http_echo_server.url}"]
+model_params:
+  name: "{_CHAR_TOKENIZER_DIR}"
+  streaming: "off"
+datasets:
+  - path: "{dataset_path}"
+    type: performance
+report_dir: {report_dir}
+settings:
+  load_pattern:
+    type: max_throughput
+  client:
+    num_workers: 1
+    warmup_connections: 0
+    max_connections: 10
+  metrics_tokenizer_workers: 0  # defer all tokenization to the drain
+  warmup:
+    enabled: false
+"""
+    )
+
+    log_file = tmp_path / "run.log"
+    with _benchmark_proc(
+        [_cli(), "benchmark", "from-config", "-c", str(config_path)],
+        log_file=log_file,
+    ) as proc:
+        # The pipeline logs this line once the session has ENDED and the
+        # aggregator drain wait begins — the divergence window.
+        deadline = time.monotonic() + 120.0
+        while "Waiting for services to finish processing" not in log_file.read_text(
+            errors="replace"
+        ):
+            assert proc.poll() is None, "benchmark exited before the drain"
+            assert time.monotonic() < deadline, "drain window never reached"
+            time.sleep(0.05)
+
+        os.kill(proc.pid, signal.SIGINT)  # main process only: aggregator unsignaled
+        rc = proc.wait(timeout=120.0)
+
+    assert rc == 130, f"drain-window ^C must exit 130, got {rc}"
+
+    summary = json.loads(
+        (report_dir / "performance" / "result_summary.json").read_text()
+    )
+    assert summary["state"] == "interrupted"
+    assert summary["complete"] is False
+
+    # The aggregator observed a normally-ended run: its own artifact says so.
+    snapshot = json.loads((report_dir / "metrics" / "final_snapshot.json").read_text())
+    assert snapshot["state"] == "complete"
+    _assert_no_leftover_children(report_dir, "drain-window run")
