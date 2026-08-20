@@ -24,7 +24,6 @@ sibling ``profiling.json``.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from datetime import datetime
@@ -171,15 +170,10 @@ class ProfileController:
             self._start_urls = _derive_profile_urls(profile_endpoints, engine, "start")
             self._stop_urls = _derive_profile_urls(profile_endpoints, engine, "stop")
 
-    async def start(self) -> None:
-        """Fire /start_profile sequentially before any perf request is issued.
-
-        Each POST runs in a worker thread so the event-loop thread never
-        blocks — a force-quit ``task.cancel`` lands between POSTs instead of
-        waiting out the full ``timeout × endpoints`` budget.
-        """
+    def start(self) -> None:
+        """Fire /start_profile sequentially before any perf request is issued."""
         for url in self._start_urls:
-            rec = await asyncio.to_thread(_post_profile, url)
+            rec = _post_profile(url)
             if rec["status"] == 200:
                 logger.info("Profile start: %s -> 200 OK", url)
             else:
@@ -188,11 +182,10 @@ class ProfileController:
                 )
             self._starts.append(rec)
 
-    async def stop(self, completed_normally: bool) -> None:
+    def stop(self, completed_normally: bool) -> None:
         """Fire /stop_profile for every start that returned 200.
 
         Unifies the clean phase-end path and the abort path — both call this.
-        POSTs run in worker threads (see ``start``).
         """
         if not self._starts:
             return
@@ -200,7 +193,7 @@ class ProfileController:
         for i, start_rec in enumerate(self._starts):
             if start_rec["status"] != 200 or i >= len(self._stop_urls):
                 continue
-            rec = await asyncio.to_thread(_post_profile, self._stop_urls[i])
+            rec = _post_profile(self._stop_urls[i])
             rec["stop_reason"] = stop_reason
             if rec["status"] == 200:
                 logger.info("Profile stop: %s -> 200 OK", self._stop_urls[i])

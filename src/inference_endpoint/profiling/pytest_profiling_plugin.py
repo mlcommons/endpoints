@@ -23,6 +23,7 @@ Automatically configures profiling for pytest test runs when ENABLE_LINE_PROFILE
 - Ensures clean output even on test failures
 """
 
+import atexit
 import glob
 import os
 import shutil
@@ -48,6 +49,9 @@ def pytest_configure(config):
         os.environ[ENV_VAR_LINE_PROFILER_LOGFILE] = (
             "/tmp/mlperf_client_profiles/profile"
         )
+
+    # Suppress stderr during interpreter shutdown to hide line_profiler internal errors
+    atexit.register(_suppress_stderr_during_shutdown)
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -104,3 +108,14 @@ def _cleanup_profile_files(output_file: str):
             shutil.rmtree(profile_dir, ignore_errors=True)
     except Exception:
         pass  # Silently fail cleanup
+
+
+def _suppress_stderr_during_shutdown():
+    """Suppress stderr at OS level to hide harmless line_profiler shutdown errors."""
+    try:
+        # Redirect stderr file descriptor to /dev/null
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+    except Exception:
+        pass  # Silently fail if stderr redirection fails

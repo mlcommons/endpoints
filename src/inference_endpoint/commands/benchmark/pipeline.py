@@ -43,7 +43,6 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -213,7 +212,6 @@ class MetricsPipeline:
         event_log_dir: Path,
         metrics_output_dir: Path,
         loop: asyncio.AbstractEventLoop,
-        force_quit: Callable[[], bool] | None = None,
     ) -> None:
         self._config = config
         self._tokenizer_name = tokenizer_name
@@ -221,10 +219,6 @@ class MetricsPipeline:
         self._event_log_dir = event_log_dir
         self._metrics_output_dir = metrics_output_dir
         self._loop = loop
-        # Force-quit predicate (second ^C): when true at teardown time the
-        # services are SIGKILLed with no SIGTERM grace — teardown must not
-        # wait on anything.
-        self._force_quit = force_quit if force_quit is not None else lambda: False
 
         self._stack: contextlib.ExitStack | None = None
         self._launcher: ServiceLauncher | None = None
@@ -261,8 +255,8 @@ class MetricsPipeline:
             self.publisher is not None or exc_type is not None
         ):
             # Register this last so it runs first. ExitStack still executes the
-            # publisher/subscriber/ZMQ callbacks if terminate_all raises BaseException
-            # (for example, a second Ctrl-C during teardown).
+            # publisher/subscriber/ZMQ callbacks if terminate_all raises
+            # BaseException (for example, a KeyboardInterrupt during teardown).
             stack.callback(self._kill_services)
         return stack.__exit__(exc_type, exc, tb)
 
@@ -346,9 +340,9 @@ class MetricsPipeline:
         )
         # Null the publisher before closing it so __aexit__ sees "drain initiated"
         # regardless of whether the subsequent await completes or is cancelled
-        # (e.g. second Ctrl-C). If we close first and then CancelledError fires
-        # before the null assignment, __aexit__ would call terminate_all() on an
-        # aggregator that is already draining and writing final_snapshot.json.
+        # (e.g. the run watchdog firing). If we close first and then CancelledError
+        # fires before the null assignment, __aexit__ would call terminate_all()
+        # on an aggregator that is already draining and writing final_snapshot.json.
         publisher, self.publisher = self.publisher, None
         publisher.close()
         logger.info("Waiting for services to finish processing...")
@@ -386,35 +380,27 @@ class MetricsPipeline:
             return
         self._launcher.terminate_module(_AGGREGATOR_MODULE)
 
-    def kill_now(self) -> None:
-        """SIGKILL every service child immediately; safe no-op before launch.
+    def abandon_drain(self) -> None:
+        """SIGTERM→SIGKILL every service child; safe no-op before/after launch.
 
-        Force-quit path (second ^C): no SIGTERM grace, no drain — the
-        aggregator's INTERRUPTED snapshot and the event logger's buffer are
-        deliberately abandoned. Idempotent: dead children are skipped.
+        Teardown-grace path (^C with a wedged drain): SIGTERM gives the
+        aggregator its chance to write an INTERRUPTED snapshot, SIGKILL reaps
+        it regardless, and the drain's ``wait_for_exit`` thread unblocks once
+        the children are gone. Idempotent — exited children are skipped.
         """
-        if self._launcher is None:
-            return
-        try:
-            self._launcher.kill_all()
-        except Exception as e:  # noqa: BLE001 — teardown best-effort
-            logger.warning("Service kill_all error: %s", e)
+        self._kill_services()
 
     def _kill_services(self) -> None:
         """Best-effort service termination owned by the pipeline ExitStack.
 
         Sends SIGTERM first so the metrics aggregator can flush an INTERRUPTED
         final_snapshot.json via its signal handler, escalating to SIGKILL after
-        a short timeout. Under force-quit (second ^C) it SIGKILLs immediately —
-        no grace, no snapshot.
+        a short timeout.
         """
         if self._launcher is None:
             return
         try:
-            if self._force_quit():
-                self._launcher.kill_all()
-            else:
-                self._launcher.terminate_all()
+            self._launcher.terminate_all()
         except Exception as e:  # noqa: BLE001 — teardown best-effort
             logger.warning("Service termination error: %s", e)
 

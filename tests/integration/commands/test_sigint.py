@@ -208,24 +208,38 @@ def test_sigint_mid_run_exits_130_with_interrupted_artifacts(
 
 
 @pytest.mark.integration
-def test_second_sigint_force_quits_immediately(mock_http_echo_server, tmp_path):
-    """Second ^C abandons a wedged metrics drain and exits 130 promptly.
+def test_sigint_grace_expiry_abandons_wedged_drain(mock_http_echo_server, tmp_path):
+    """A single ^C against a wedged metrics drain exits within the grace.
 
     The aggregator child is SIGSTOPped to simulate a wedged drain — the exact
-    hang the force-quit path exists for. SIGINT goes to the MAIN process only
-    (``os.kill``, not the group), as the governor's contract is per-process:
-    the first ^C stops the session gracefully and then parks forever waiting
-    for the stopped aggregator; the second ^C must SIGKILL the children and
-    exit 130 within seconds.
+    hang the teardown grace exists for. One SIGINT to the MAIN process only
+    (``os.kill``, not the group): the graceful stop parks on the wedged
+    drain; grace expiry must SIGTERM→SIGKILL the children so the drain's
+    wait-for-exit unblocks and the run exits 130 without a second keystroke.
+    The grace is shrunk to 3s via the class constant (fixed 30s in
+    production) so the test stays fast.
     """
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"
     _write_config(report_dir, mock_http_echo_server.url, config_path)
 
+    wrapper = (
+        "from inference_endpoint.commands.benchmark.watchdog import SigintGovernor; "
+        "SigintGovernor.TEARDOWN_GRACE_S = 3.0; "
+        "from inference_endpoint.main import run; run()"
+    )
     agg_pid: int | None = None
     try:
         with _benchmark_proc(
-            [_cli(), "benchmark", "from-config", "-c", str(config_path)]
+            [
+                shutil.which("python") or "python",
+                "-c",
+                wrapper,
+                "benchmark",
+                "from-config",
+                "-c",
+                str(config_path),
+            ]
         ) as proc:
             _wait_services_ready(proc, report_dir)
             time.sleep(3.0)  # comfortably inside the ~120 s performance phase
@@ -235,25 +249,22 @@ def test_second_sigint_force_quits_immediately(mock_http_echo_server, tmp_path):
             os.kill(agg_pid, signal.SIGSTOP)  # wedge the drain
 
             os.kill(proc.pid, signal.SIGINT)
-            time.sleep(2.0)  # graceful path engaged; drain parked on the wedge
-            assert proc.poll() is None, "first ^C must keep waiting on the drain"
-
-            os.kill(proc.pid, signal.SIGINT)
             start = time.monotonic()
-            rc = proc.wait(timeout=15.0)
-            force_quit_latency = time.monotonic() - start
+            rc = proc.wait(timeout=30.0)
+            abort_latency = time.monotonic() - start
     finally:
         if agg_pid is not None:
             try:
                 os.kill(agg_pid, signal.SIGKILL)  # SIGKILL reaps stopped procs
             except ProcessLookupError:
-                pass  # already gone — the force-quit killed it
+                pass  # already gone — grace escalation killed it
 
-    assert rc == 130, f"force quit must exit 130, got {rc}"
+    assert rc == 130, f"^C must exit 130, got {rc}"
+    assert abort_latency > 2.0, "exited before the grace — drain was not wedged"
     assert (
-        force_quit_latency < 10.0
-    ), f"force quit took {force_quit_latency:.1f}s — the drain was not abandoned"
-    _assert_no_leftover_children(report_dir, "force quit")
+        abort_latency < 20.0
+    ), f"abort took {abort_latency:.1f}s — grace escalation did not fire"
+    _assert_no_leftover_children(report_dir, "grace-expired abort")
 
 
 @pytest.mark.integration
@@ -280,12 +291,12 @@ def test_sigint_before_session_exits_130(mock_http_echo_server, tmp_path):
 
 @pytest.mark.integration
 def test_single_group_sigint_under_uv_run_is_graceful(mock_http_echo_server, tmp_path):
-    """One keystroke under `uv run` counts once.
+    """One keystroke under `uv run` stays graceful.
 
     `uv run` forwards the terminal's group SIGINT to its child, so a single
     ^C is delivered twice (~200 ms apart, past kernel coalescing). The
-    duplicate must be suppressed: the run takes the graceful path — report
-    written, exit 130 — instead of force-quitting and losing the metrics.
+    duplicate is a harmless no-op (the stop is already in flight): the run
+    takes the graceful path — report written, exit 130.
     """
     uv = shutil.which("uv")
     if uv is None:
@@ -312,7 +323,7 @@ def test_single_group_sigint_under_uv_run_is_graceful(mock_http_echo_server, tmp
         rc = proc.wait(timeout=60.0)
 
     assert rc == 130, f"user abort must exit 130, got {rc}"
-    # The graceful path writes the report; a force quit would have skipped it.
+    # The graceful path writes the report before exiting.
     _assert_interrupted_artifacts(report_dir)
 
 

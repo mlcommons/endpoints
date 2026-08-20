@@ -620,8 +620,8 @@ class TestBenchmarkSession:
         assert session._stop_requested is False
 
     @pytest.mark.asyncio
-    async def test_async_phase_start_hook_awaited_before_issuing(self):
-        """``on_phase_start`` is awaited to completion before the phase issues."""
+    async def test_phase_start_hook_runs_before_issuing(self):
+        """``on_phase_start`` runs to completion before the phase issues."""
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         issuer._loop = loop
@@ -630,9 +630,8 @@ class TestBenchmarkSession:
 
         hook_done = False
 
-        async def hook(phase: PhaseConfig) -> None:
+        def hook(phase: PhaseConfig) -> None:
             nonlocal hook_done
-            await asyncio.sleep(0.01)
             assert issuer._issued == []
             hook_done = True
 

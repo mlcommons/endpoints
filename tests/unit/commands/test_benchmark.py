@@ -2510,17 +2510,16 @@ class TestFinalizeBenchmark:
         assert summary["state"] == "interrupted"
 
     @pytest.mark.unit
-    def test_sigint_during_scoring_keeps_completed_perf_artifacts(
-        self, tmp_path, monkeypatch
-    ):
-        """^C in the finalization window: completed perf artifacts survive.
+    def test_sigint_during_scoring_invalidates_run(self, tmp_path, monkeypatch):
+        """^C in the finalization window: the run becomes invalid.
 
-        The run genuinely completed (no abort flag) and the governor's
-        KeyboardInterrupt lands mid-scoring. The interrupt must propagate
-        (main.py exits 130) but the finally still writes the perf report as
-        complete:true — the measurement finished; only post-measurement
-        scoring was aborted. This is the documented exception to "a ^C'd
-        run's summary is never complete" (CLI_QUICK_REFERENCE "Ctrl-C").
+        The measurement completed (no abort flag) and the governor's
+        KeyboardInterrupt lands mid-scoring. A user abort makes the whole run
+        invalid: the interrupt must propagate (main.py exits 130) and the
+        finally must persist the report as interrupted/complete:false — the
+        metrics stay in the file as partial diagnostics, never as a
+        submittable result. An ordinary scoring *failure* (Exception) keeps
+        the completed report; only a user abort invalidates it.
         """
         config = OfflineConfig(**_OFFLINE_KWARGS)
         ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
@@ -2538,8 +2537,8 @@ class TestFinalizeBenchmark:
         summary = json.loads(
             (tmp_path / "performance" / "result_summary.json").read_text()
         )
-        assert summary["complete"] is True
-        assert summary["state"] == "complete"
+        assert summary["complete"] is False
+        assert summary["state"] == "interrupted"
 
     @staticmethod
     def _make_complete_report() -> Report:
@@ -3084,51 +3083,6 @@ class TestSetupBenchmarkExternalSampleCountLogging:
         )
 
 
-class TestPhaseStartHook:
-    """_make_phase_start_hook ordering: profiler armed before the perf cap.
-
-    The order is load-bearing — _run_phase clears the phase-stop flag at
-    entry, so a perf cap armed before the awaited profile arming could fire
-    during the await and be silently erased (phase runs uncapped).
-    """
-
-    @pytest.mark.unit
-    @pytest.mark.asyncio
-    async def test_profiler_start_completes_before_perf_cap_arms(self):
-        order: list[str] = []
-        profiler = MagicMock()
-
-        async def _start() -> None:
-            await asyncio.sleep(0)  # a real suspend, like the to_thread POSTs
-            order.append("profiler.start")
-
-        profiler.start = _start
-        perf_timeout = MagicMock()
-        perf_timeout.on_phase_start.side_effect = lambda pt: order.append("cap.armed")
-
-        hook = execute_mod._make_phase_start_hook(profiler, perf_timeout)
-        await hook(MagicMock(phase_type=PhaseType.PERFORMANCE))
-
-        assert order == ["profiler.start", "cap.armed"]
-        perf_timeout.on_phase_start.assert_called_once_with(PhaseType.PERFORMANCE)
-
-    @pytest.mark.unit
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("phase_type", [PhaseType.WARMUP, PhaseType.ACCURACY])
-    async def test_non_performance_phase_skips_profiler_still_arms_timer(
-        self, phase_type
-    ):
-        profiler = MagicMock()
-        perf_timeout = MagicMock()
-
-        hook = execute_mod._make_phase_start_hook(profiler, perf_timeout)
-        await hook(MagicMock(phase_type=phase_type))
-
-        profiler.start.assert_not_called()
-        # on_phase_start cancels the perf timer for non-PERFORMANCE phases.
-        perf_timeout.on_phase_start.assert_called_once_with(phase_type)
-
-
 class TestProfilingHelpers:
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -3234,8 +3188,7 @@ class TestProfilingHelpers:
         assert json.loads(json.dumps(payload))["engine"] == "vllm"
 
     @pytest.mark.unit
-    @pytest.mark.asyncio
-    async def test_controller_start_then_stop_maps_indices(self):
+    def test_controller_start_then_stop_maps_indices(self):
         """start() posts each /start_profile; stop() posts /stop_profile only for
         the starts that returned 200, mapped by the same index, tagging stop_reason."""
 
@@ -3257,8 +3210,8 @@ class TestProfilingHelpers:
             ctrl = ProfileController(
                 ProfilerEngine.VLLM, ["http://a/v1", "http://b/v1"], None
             )
-            await ctrl.start()
-            await ctrl.stop(completed_normally=True)
+            ctrl.start()
+            ctrl.stop(completed_normally=True)
 
         payload = ctrl.payload()
         assert payload["engine"] == "vllm"
@@ -3271,8 +3224,7 @@ class TestProfilingHelpers:
         assert payload["stops"][0]["stop_reason"] == "phase_end"
 
     @pytest.mark.unit
-    @pytest.mark.asyncio
-    async def test_controller_stop_reason_abort_when_not_completed(self):
+    def test_controller_stop_reason_abort_when_not_completed(self):
         with patch(
             "inference_endpoint.commands.benchmark.profiling._post_profile",
             side_effect=lambda url: {
@@ -3284,28 +3236,26 @@ class TestProfilingHelpers:
             },
         ):
             ctrl = ProfileController(ProfilerEngine.VLLM, ["http://a/v1"], None)
-            await ctrl.start()
-            await ctrl.stop(completed_normally=False)
+            ctrl.start()
+            ctrl.stop(completed_normally=False)
         assert ctrl.payload()["stops"][0]["stop_reason"] == "abort"
 
     @pytest.mark.unit
-    @pytest.mark.asyncio
-    async def test_controller_disabled_is_noop(self):
+    def test_controller_disabled_is_noop(self):
         """engine=None → no URLs derived, start/stop do nothing, payload is None."""
         ctrl = ProfileController(None, ["http://a/v1"], None)
-        await ctrl.start()
-        await ctrl.stop(completed_normally=True)
+        ctrl.start()
+        ctrl.stop(completed_normally=True)
         assert ctrl.payload() is None
 
     @pytest.mark.unit
-    @pytest.mark.asyncio
-    async def test_controller_stop_without_start_posts_nothing(self):
+    def test_controller_stop_without_start_posts_nothing(self):
         """stop() before any start() records nothing (empty _starts, early return)."""
         with patch(
             "inference_endpoint.commands.benchmark.profiling._post_profile",
         ) as mock_post:
             ctrl = ProfileController(ProfilerEngine.VLLM, ["http://a/v1"], None)
-            await ctrl.stop(completed_normally=True)
+            ctrl.stop(completed_normally=True)
         mock_post.assert_not_called()
         assert ctrl.payload()["stops"] == []
 
