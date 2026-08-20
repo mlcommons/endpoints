@@ -806,8 +806,9 @@ class Timeouts(WithUpdatesMixin, BaseModel):
 
     Two value conventions, stated once here:
 
-    - Wait bounds (``service_ready_timeout_s``, ``*_drain_timeout_s``):
-      ``None`` = wait indefinitely, ``0`` = zero budget (give up / skip
+    - Drain bounds (``*_drain_timeout_s``): ``None`` = wait indefinitely,
+      ``0`` = zero budget. ``service_ready_timeout_s`` is a finite
+      non-negative bound (never ``None``) (give up / skip
       immediately).
     - The watchdog (``run_timeout_s``): ``None`` = off; ``0`` is rejected
       (``gt=0``) because a zero-length run is never meaningful — there is no

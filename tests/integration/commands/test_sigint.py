@@ -122,31 +122,39 @@ def _benchmark_proc(
 
 
 def _wait_services_ready(
-    proc: subprocess.Popen, report_dir: Path, timeout: float = 60.0
+    proc: subprocess.Popen, report_dir: Path, timeout_s: float = 60.0
 ) -> None:
     """Block until the aggregator touches metrics/.ready (handlers installed);
     the session starts issuing right after service readiness."""
     ready = report_dir / "metrics" / ".ready"
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout_s
     while not ready.exists():
         assert proc.poll() is None, "benchmark died before services came up"
         assert time.monotonic() < deadline, "services never became ready"
         time.sleep(0.1)
 
 
-def _procs_referencing(needle: str) -> list[str]:
-    """Cmdlines of live processes whose argv mentions ``needle`` (Linux)."""
-    hits = []
+def _iter_proc_cmdlines() -> Iterator[tuple[int, bytes]]:
+    """(pid, cmdline) for every live process (Linux); racing exits skipped."""
     for pid_dir in Path("/proc").iterdir():
         if not pid_dir.name.isdigit():
             continue
         try:
-            cmdline = (pid_dir / "cmdline").read_bytes().replace(b"\0", b" ")
+            yield (
+                int(pid_dir.name),
+                (pid_dir / "cmdline").read_bytes().replace(b"\0", b" "),
+            )
         except OSError:
             continue  # process exited mid-scan
-        if needle.encode() in cmdline:
-            hits.append(cmdline.decode(errors="replace"))
-    return hits
+
+
+def _procs_referencing(needle: str) -> list[str]:
+    """Cmdlines of live processes whose argv mentions ``needle``."""
+    return [
+        cmdline.decode(errors="replace")
+        for _, cmdline in _iter_proc_cmdlines()
+        if needle.encode() in cmdline
+    ]
 
 
 def _assert_no_leftover_children(report_dir: Path, what: str) -> None:
@@ -169,16 +177,10 @@ def _assert_interrupted_artifacts(report_dir: Path) -> None:
 
 
 def _pid_of_child(needle: str, extra: str) -> int | None:
-    """PID of a live process whose argv mentions both needles (Linux)."""
-    for pid_dir in Path("/proc").iterdir():
-        if not pid_dir.name.isdigit():
-            continue
-        try:
-            cmdline = (pid_dir / "cmdline").read_bytes().replace(b"\0", b" ")
-        except OSError:
-            continue  # process exited mid-scan
+    """PID of a live process whose argv mentions both needles."""
+    for pid, cmdline in _iter_proc_cmdlines():
         if needle.encode() in cmdline and extra.encode() in cmdline:
-            return int(pid_dir.name)
+            return pid
     return None
 
 
@@ -325,7 +327,7 @@ def test_single_group_sigint_under_uv_run_is_graceful(mock_http_echo_server, tmp
             str(config_path),
         ]
     ) as proc:
-        _wait_services_ready(proc, report_dir, timeout=90.0)
+        _wait_services_ready(proc, report_dir, timeout_s=90.0)
         time.sleep(3.0)
         os.killpg(proc.pid, signal.SIGINT)  # one keystroke: group + uv forward
         rc = proc.wait(timeout=60.0)

@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import signal
 from pathlib import Path
 
 from ..compliance import AuditRunArtifacts, AuditRunSpec, AuditTest, get_audit_test
@@ -47,7 +46,7 @@ from .benchmark.execute import (
     run_benchmark_async,
     setup_benchmark,
 )
-from .benchmark.watchdog import SigintGovernor
+from .benchmark.watchdog import SigintGovernor, sigint_policy
 
 logger = logging.getLogger(__name__)
 
@@ -90,22 +89,8 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
     # The flag persisting across phases is moot: an interrupted phase raises
     # before the next phase starts.
     sigint = SigintGovernor()
-    sigint_installed = False
-    # getsignal returns None for a C-installed handler Python cannot represent
-    # (and signal.signal would refuse to accept back): leave it untouched and
-    # keep the governor passive, exactly as off the main thread.
-    prev_sigint = signal.getsignal(signal.SIGINT)
-    if prev_sigint is not None:
-        try:
-            signal.signal(signal.SIGINT, sigint)
-            sigint_installed = True
-        except ValueError:
-            pass  # not the main thread (embedded use): governor stays passive
-    try:
+    with sigint_policy(sigint):
         artifacts = _run_phases(config, base_report_dir, test, audit_cfg, specs, sigint)
-    finally:
-        if sigint_installed:
-            signal.signal(signal.SIGINT, prev_sigint)
 
     # Normalizes verify()'s zero-QPS ValueError to exit 4, not a traceback.
     try:

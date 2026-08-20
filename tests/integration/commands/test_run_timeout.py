@@ -24,6 +24,7 @@ final snapshot; ``run_benchmark`` exits non-zero via ``ExecutionError``.
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from inference_endpoint.commands.benchmark.execute import (
@@ -58,13 +59,13 @@ _CHAR_TOKENIZER_DIR = Path(__file__).resolve().parents[2] / "assets/tokenizers/c
 _FAST_CLIENT = HTTPClientConfig(num_workers=1, warmup_connections=0, max_connections=10)
 
 
-def _read_final_snapshot(report_dir: Path) -> dict:
+def _read_final_snapshot(report_dir: Path) -> dict[str, Any]:
     snapshot_path = report_dir / "metrics" / "final_snapshot.json"
     assert snapshot_path.exists(), "aggregator must still write a final snapshot"
     return json.loads(snapshot_path.read_text())
 
 
-def _read_result_summary(report_dir: Path) -> dict:
+def _read_result_summary(report_dir: Path) -> dict[str, Any]:
     return json.loads((report_dir / "performance" / "result_summary.json").read_text())
 
 
@@ -80,7 +81,7 @@ def _make_config(
     timeouts: Timeouts | None = None,
     metrics_tokenizer_workers: int | None = None,
 ) -> BenchmarkConfig:
-    settings_kwargs: dict = {
+    settings_kwargs: dict[str, Any] = {
         "load_pattern": load_pattern
         or LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
         "client": _FAST_CLIENT,
