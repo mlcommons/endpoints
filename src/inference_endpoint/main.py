@@ -42,6 +42,7 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
+from inference_endpoint.profiling import shutdown as profiling_shutdown
 from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,10 @@ def run() -> None:
     except Exception:
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        # Dump any pending line-profiler stats before the process exits
+        # (no-op unless ENABLE_LINE_PROFILER=1).
+        profiling_shutdown()
 
 
 if __name__ == "__main__":
