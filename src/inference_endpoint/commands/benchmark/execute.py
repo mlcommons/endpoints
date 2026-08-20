@@ -1272,7 +1272,10 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # is written in the `finally` below so a scoring failure (e.g. lcb-service
     # unreachable, missing eval subproject, bad extras) still leaves the perf
     # run's result_summary.json / report.txt on disk instead of discarding them —
-    # then the exception propagates as before.
+    # then the exception propagates as before. The same holds for a ^C landing
+    # here (the governor raises KeyboardInterrupt mid-scoring once the run task
+    # is done): the run's measurement genuinely completed, so the completed perf
+    # artifacts are written as-is and the interrupt propagates for exit 130.
     accuracy_scores: list[dict[str, Any]] = []
     try:
         if aborted:

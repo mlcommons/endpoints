@@ -21,13 +21,17 @@ The interruption paths no unit test can compose: a real
 service children alike). The contract, at every delivery point:
 
 - exit code 130 (user abort, distinct from failure exit codes 1-4);
-- artifacts are honest: ``result_summary.json`` ``state=interrupted``,
-  ``complete: false`` — or no artifacts at all, never a COMPLETE-looking
-  run outcome. ``final_snapshot.json`` usually reads ``state=interrupted``
-  too (the session's INTERRUPTED marker drives the aggregator's ENDED
-  finalize), except in the post-ENDED drain window, where the aggregator
-  legitimately records the normally-ended run it observed —
-  ``result_summary.json`` + the exit code are the run-level truth;
+- artifacts are honest: a run whose measurement was cut short lands
+  ``result_summary.json`` ``state=interrupted``, ``complete: false`` — or no
+  artifacts at all, never a COMPLETE-looking outcome for an aborted
+  measurement. (A ^C during post-measurement finalization of an
+  already-completed run keeps the completed perf artifacts; see
+  TestFinalizeBenchmark.) ``final_snapshot.json`` usually reads
+  ``state=interrupted`` too (the session's INTERRUPTED marker drives the
+  aggregator's ENDED finalize), except in the post-ENDED drain window,
+  where the aggregator legitimately records the normally-ended run it
+  observed — ``result_summary.json`` + the exit code are the run-level
+  truth;
 - ``events.jsonl`` survives — the event logger ignores the group SIGINT and
   flushes on the session's terminal ENDED;
 - no service child outlives the run;

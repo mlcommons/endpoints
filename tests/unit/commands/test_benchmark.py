@@ -2495,7 +2495,55 @@ class TestFinalizeBenchmark:
         state:interrupted; an aborted run must never ship complete artifacts."""
         config = OfflineConfig(**_OFFLINE_KWARGS)
         ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
-        report = Report.from_snapshot(
+        report = self._make_complete_report()
+        assert report.complete is True, "precondition: aggregator said COMPLETE"
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = report
+        setattr(bench, abort_field, True)
+
+        finalize_benchmark(ctx, bench)
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["complete"] is False
+        assert summary["state"] == "interrupted"
+
+    @pytest.mark.unit
+    def test_sigint_during_scoring_keeps_completed_perf_artifacts(
+        self, tmp_path, monkeypatch
+    ):
+        """^C in the finalization window: completed perf artifacts survive.
+
+        The run genuinely completed (no abort flag) and the governor's
+        KeyboardInterrupt lands mid-scoring. The interrupt must propagate
+        (main.py exits 130) but the finally still writes the perf report as
+        complete:true — the measurement finished; only post-measurement
+        scoring was aborted. This is the documented exception to "a ^C'd
+        run's summary is never complete" (CLI_QUICK_REFERENCE "Ctrl-C").
+        """
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = self._make_complete_report()
+        monkeypatch.setattr(
+            execute_mod,
+            "score_accuracy",
+            MagicMock(side_effect=KeyboardInterrupt),
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            finalize_benchmark(ctx, bench)
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["complete"] is True
+        assert summary["state"] == "complete"
+
+    @staticmethod
+    def _make_complete_report() -> Report:
+        return Report.from_snapshot(
             {
                 "counter": 1,
                 "timestamp_ns": 12345,
@@ -2517,18 +2565,6 @@ class TestFinalizeBenchmark:
                 ],
             }
         )
-        assert report.complete is True, "precondition: aggregator said COMPLETE"
-        bench = _make_benchmark_result(tmp_path)
-        bench.report = report
-        setattr(bench, abort_field, True)
-
-        finalize_benchmark(ctx, bench)
-
-        summary = json.loads(
-            (tmp_path / "performance" / "result_summary.json").read_text()
-        )
-        assert summary["complete"] is False
-        assert summary["state"] == "interrupted"
 
 
 class TestScorerMethodSync:
