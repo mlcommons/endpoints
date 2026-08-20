@@ -141,8 +141,9 @@ class TestSigintPolicy:
     def test_restores_on_exception(self):
         gov = SigintGovernor()
         prev = signal.getsignal(signal.SIGINT)
-        with pytest.raises(RuntimeError), sigint_policy(gov):
-            raise RuntimeError("boom")
+        with pytest.raises(RuntimeError):
+            with sigint_policy(gov):
+                raise RuntimeError("boom")
         assert signal.getsignal(signal.SIGINT) is prev
 
     def test_unrepresentable_c_handler_stays_untouched(self, monkeypatch):
