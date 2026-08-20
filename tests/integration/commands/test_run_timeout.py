@@ -216,7 +216,7 @@ def test_metrics_drain_timeout_fails_run(mock_http_echo_server, tmp_path):
         ),
     )
 
-    with pytest.raises(ExecutionError, match="Metrics drain timed out"):
+    with pytest.raises(ExecutionError, match="Metrics tokenization did not finish"):
         run_benchmark(config, TestMode.PERF)
 
     snapshot = _read_final_snapshot(report_dir)

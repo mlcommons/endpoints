@@ -21,6 +21,7 @@ import asyncio
 import random
 
 import pytest
+from inference_endpoint.commands.benchmark.watchdog import PerfPhaseTimeout
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.core.record import (
@@ -618,6 +619,65 @@ class TestBenchmarkSession:
         assert result.accuracy_results[0].issued_count == 3
         # The session-wide stop flag was never set.
         assert session._stop_requested is False
+
+    @pytest.mark.asyncio
+    async def test_async_phase_start_hook_awaited_before_issuing(self):
+        """``on_phase_start`` is awaited to completion before the phase issues."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+
+        hook_done = False
+
+        async def hook(phase: PhaseConfig) -> None:
+            nonlocal hook_done
+            await asyncio.sleep(0.01)
+            assert issuer._issued == []
+            hook_done = True
+
+        phases = [PhaseConfig("perf", _make_settings(n_samples=3), FakeDataset(3))]
+        result = await session.run(phases, on_phase_start=hook)
+
+        assert hook_done
+        assert result.perf_results[0].issued_count == 3
+
+    @pytest.mark.asyncio
+    async def test_perf_cap_armed_after_slow_hook_still_bounds_phase(self):
+        """A perf cap shorter than a slow phase-start hook must still fire.
+
+        Mirrors execute.py's ``_on_phase_start`` ordering: the one-shot
+        ``PerfPhaseTimeout`` is armed AFTER the hook's await (profile arming).
+        Armed before it, a cap shorter than the hook delay fires while the
+        hook is still awaiting; ``_run_phase`` then clears the phase-stop
+        flag at entry, the fire is erased, and the phase runs uncapped.
+        """
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+
+        perf_timeout = PerfPhaseTimeout(loop, 30, session.stop_current_phase)
+
+        async def hook(phase: PhaseConfig) -> None:
+            await asyncio.sleep(0.05)  # slow profile arming, longer than the cap
+            perf_timeout.on_phase_start(phase.phase_type)
+
+        phases = [
+            PhaseConfig(
+                "perf",
+                _make_settings(n_samples=100_000, max_duration_ms=10_000),
+                FakeDataset(100),
+                PhaseType.PERFORMANCE,
+            ),
+        ]
+        result = await asyncio.wait_for(
+            session.run(phases, on_phase_start=hook), timeout=10.0
+        )
+
+        assert result.perf_results[0].issued_count < 100_000
 
     @pytest.mark.asyncio
     async def test_stop_current_phase_unblocks_unbounded_drain(self):

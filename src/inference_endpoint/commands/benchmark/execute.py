@@ -908,16 +908,17 @@ async def _run_benchmark_async(
                     loop, max_duration_ms, _on_global_timeout
                 )
 
-                def _on_phase_start(phase: PhaseConfig) -> None:
-                    # PerfPhaseTimeout arms the perf cap on PERFORMANCE and cancels
-                    # it when any later phase starts, so a combined perf+accuracy run
-                    # can never have its accuracy phase truncated by the perf cap.
+                async def _on_phase_start(phase: PhaseConfig) -> None:
+                    if phase.phase_type == PhaseType.PERFORMANCE:
+                        # Fire /start_profile sequentially before any perf request
+                        # is issued, so the server is armed when traffic begins.
+                        await profiler.start()
+                    # Arm the perf cap LAST — _run_phase clears the phase-stop
+                    # flag at entry, so a one-shot cap that fired while profile
+                    # arming was still awaiting would be silently erased and the
+                    # phase would run uncapped. (On non-PERFORMANCE phases this
+                    # cancels the perf timer, so accuracy is never truncated.)
                     perf_timeout.on_phase_start(phase.phase_type)
-                    if phase.phase_type != PhaseType.PERFORMANCE:
-                        return
-                    # Fire /start_profile sequentially before any perf request is
-                    # issued, so the server is armed when traffic begins.
-                    profiler.start()
 
                 try:
                     # A pre-session fire already stopped the session inside
@@ -967,7 +968,9 @@ async def _run_benchmark_async(
                     # when session.run returned normally after session.stop().
                     # Skipped on force-quit: no blocking HTTP on the way out.
                     if not (sigint is not None and sigint.forced):
-                        profiler.stop(session_completed_normally and not watchdog.fired)
+                        await profiler.stop(
+                            session_completed_normally and not watchdog.fired
+                        )
                     if sigint is not None and sigint.forced:
                         # Second ^C: abandon the drain entirely — SIGKILL the
                         # service children now so the pipeline __aexit__ has

@@ -47,8 +47,9 @@ class SigintGovernor:
     KeyboardInterrupt and abort teardown half-way.
 
     Semantics:
-    - ^C with no live run task (sync setup): nothing to stop gracefully —
-      raise KeyboardInterrupt immediately (default behavior, exit 130).
+    - ^C with no live run (sync setup, finalization after the loop returned,
+      between audit phases): nothing to stop gracefully — raise
+      KeyboardInterrupt immediately (default behavior, exit 130).
     - First ^C: graceful — ``session.stop()``; the stopped run publishes
       INTERRUPTED+ENDED, services drain (including the metrics-tokenization
       backlog), artifacts land as state=interrupted, then ``run_benchmark``
@@ -109,7 +110,16 @@ class SigintGovernor:
                 return
             raise KeyboardInterrupt
         self.interrupted = True
-        if self._session is None or self._loop is None:
+        if (
+            self._session is None
+            or self._task is None
+            or self._task.done()
+            or self._loop is None
+            or not self._loop.is_running()
+        ):
+            # No live run to stop gracefully. call_soon_threadsafe on a
+            # stopped loop would queue session.stop and never run it —
+            # silently swallowing the ^C.
             raise KeyboardInterrupt
         logger.warning(
             "SIGINT received: stopping benchmark gracefully (^C again to force)"

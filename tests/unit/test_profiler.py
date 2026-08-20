@@ -223,3 +223,39 @@ class TestProfilerCleanup:
             state.shutdown()
             state.shutdown()
             state.shutdown()
+
+    def test_shutdown_after_print_stats_still_tears_down(self):
+        """print_stats() marks stats printed; shutdown() must still teardown."""
+        with mock.patch.dict(os.environ, {ENV_VAR_ENABLE_LINE_PROFILER: "1"}):
+            line_profiler.ProfilerState._instance = None
+            state = line_profiler.ProfilerState()
+
+            @state.profile
+            def traced(x):
+                return x + 1
+
+            traced(1)
+            state.print_stats(stream=io.StringIO())
+            assert state._stats_printed is True
+
+            state.shutdown()
+            assert state.profiler is None
+
+    def test_shutdown_tears_down_when_output_destination_fails(self):
+        """A failing stats dump must still leave the C profiler disabled."""
+        with mock.patch.dict(os.environ, {ENV_VAR_ENABLE_LINE_PROFILER: "1"}):
+            line_profiler.ProfilerState._instance = None
+            state = line_profiler.ProfilerState()
+
+            @state.profile
+            def traced(x):
+                return x + 1
+
+            traced(1)
+            with mock.patch.object(
+                state,
+                "_print_stats_to_destination",
+                side_effect=OSError("disk full"),
+            ):
+                state.shutdown()
+            assert state.profiler is None
