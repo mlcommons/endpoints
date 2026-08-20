@@ -46,38 +46,70 @@ class SigintGovernor:
     KeyboardInterrupt and abort teardown half-way.
 
     Semantics:
-    - ^C with no live session (sync setup): nothing to stop gracefully —
+    - ^C with no live run task (sync setup): nothing to stop gracefully —
       raise KeyboardInterrupt immediately (default behavior, exit 130).
-    - First ^C with a session bound: graceful — ``session.stop()``; the
-      stopped run publishes INTERRUPTED+ENDED, services drain, artifacts land
-      as state=interrupted, then ``run_benchmark`` raises for exit 130.
-    - Every later ^C is a no-op: one keystroke can be DELIVERED repeatedly
-      (process-runner wrappers like ``uv run`` forward the terminal's group
-      SIGINT to a child that already got it directly), so "another ^C"
-      cannot be told apart from the same one. A wedged teardown is bounded
-      by ``run_timeout_s`` or killed externally.
+    - First ^C: graceful — ``session.stop()``; the stopped run publishes
+      INTERRUPTED+ENDED, services drain (including the metrics-tokenization
+      backlog), artifacts land as state=interrupted, then ``run_benchmark``
+      raises for exit 130.
+    - Re-deliveries inside the burst window are the SAME keystroke: wrappers
+      sharing the foreground group (``uv run``, ``npm exec``, ...) forward
+      the terminal's group SIGINT to a child that already got it directly.
+      Never an escalation.
+    - A later distinct ^C: FORCE QUIT — the run task is cancelled, so the
+      teardown (metrics drain included) is abandoned; the pipeline
+      ``__aexit__`` kills the service children (the SIGTERMed aggregator
+      writes a best-effort INTERRUPTED snapshot without finishing its
+      drain), tmpfs is salvaged, exit 130.
     """
+
+    _BURST_WINDOW_S = 1.0
 
     def __init__(self) -> None:
         self.interrupted = False
+        self.forced = False
+        self._last_at = 0.0
         self._session: BenchmarkSession | None = None
+        self._task: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
-    def bind_session(
-        self, session: BenchmarkSession, loop: asyncio.AbstractEventLoop
+    def bind_task(
+        self, task: asyncio.Task | None, loop: asyncio.AbstractEventLoop
     ) -> None:
-        self._session = session
+        """Bind the run coroutine's task — the force-quit cancellation target."""
+        self._task = task
         self._loop = loop
 
+    def bind_session(self, session: BenchmarkSession) -> None:
+        self._session = session
+
     def __call__(self, signum: int, frame: object) -> None:
+        now = time.monotonic()
         if self.interrupted:
-            # ponytail: repeat ^C is a no-op; add a distinct-keystroke
-            # force-quit only if a real wedged-teardown report demands it.
-            return
+            if now - self._last_at < self._BURST_WINDOW_S:
+                return  # same keystroke, re-delivered by a wrapper
+            self.forced = True
+            logger.warning(
+                "second SIGINT: force quit — abandoning teardown/metrics drain"
+            )
+            if (
+                self._task is not None
+                and not self._task.done()
+                and self._loop is not None
+                and self._loop.is_running()
+            ):
+                # Cancelling the run task unwinds its finallys: the pipeline
+                # __aexit__ kills the service children and tmpfs is salvaged.
+                self._loop.call_soon_threadsafe(self._task.cancel)
+                return
+            raise KeyboardInterrupt
         self.interrupted = True
+        self._last_at = now
         if self._session is None or self._loop is None:
             raise KeyboardInterrupt
-        logger.warning("SIGINT received: stopping benchmark gracefully")
+        logger.warning(
+            "SIGINT received: stopping benchmark gracefully (^C again to force)"
+        )
         # A signal handler runs at an arbitrary bytecode boundary — possibly
         # mid-event-loop-iteration. Don't mutate asyncio state (Event.set,
         # Task.cancel) from here; hand session.stop to the loop, the one

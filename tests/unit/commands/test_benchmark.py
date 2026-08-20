@@ -1914,7 +1914,8 @@ class TestBuildPhases:
         assert warmup_rt.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
 
     @pytest.mark.unit
-    def test_warmup_phase_min_duration_is_zero(self, base_rt_settings, simple_dataset):
+    def test_warmup_phase_no_duration_target(self, base_rt_settings, simple_dataset):
+        """Warmup never inherits the perf run's duration sizing."""
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
@@ -1922,7 +1923,7 @@ class TestBuildPhases:
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
         phases = _build_phases(ctx)
 
-        assert phases[0].runtime_settings.min_duration_ms == 0
+        assert phases[0].runtime_settings.min_duration_ms is None
 
     @pytest.mark.unit
     def test_warmup_phase_no_max_duration(self, base_rt_settings, simple_dataset):
