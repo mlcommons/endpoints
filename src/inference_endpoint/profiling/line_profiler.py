@@ -80,18 +80,6 @@ class ProfilerState:
             self.profiler = LineProfiler()
             self.profiler.enable()
 
-    def _cleanup(self):
-        """Print pending stats and tear the profiler down. Idempotent."""
-        if not self.profiler or self._stats_printed or not self.profiler.functions:
-            self._teardown_profiler()
-            return
-
-        with contextlib.suppress(Exception):
-            self.pause()
-            self._print_stats_to_destination()
-            self._stats_printed = True
-            self._teardown_profiler()
-
     def _print_stats_to_destination(self):
         """Print stats to configured output destination."""
         pid = os.getpid()
@@ -165,10 +153,21 @@ class ProfilerState:
                 pass  # Already torn down
 
     def shutdown(self):
-        """Print pending stats and tear down. Safe to call multiple times."""
-        if self._stats_printed:
+        """Print pending stats and tear down. Safe to call multiple times.
+
+        Teardown runs unconditionally: ``_stats_printed`` only suppresses a
+        duplicate dump (e.g. ``print_stats()`` already ran), and a failing
+        output destination must still leave the C profiler disabled.
+        """
+        if not self.profiler:
             return
-        self._cleanup()
+        try:
+            if not self._stats_printed and self.profiler.functions:
+                with contextlib.suppress(Exception):
+                    self.pause()
+                    self._print_stats_to_destination()
+        finally:
+            self._teardown_profiler()
 
     def is_enabled(self) -> bool:
         """Check if profiling is currently enabled."""
