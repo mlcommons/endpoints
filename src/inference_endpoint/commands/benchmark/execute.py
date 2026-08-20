@@ -36,7 +36,7 @@ import signal
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
@@ -771,28 +771,6 @@ def _wire_on_sample_complete(
     return _on_sample_complete
 
 
-def _make_phase_start_hook(
-    profiler: ProfileController, perf_timeout: PerfPhaseTimeout
-) -> Callable[[PhaseConfig], Awaitable[None]]:
-    """The session's per-phase-start hook: arm the profiler, then the perf cap.
-
-    Ordering is load-bearing: /start_profile is awaited BEFORE the perf cap is
-    armed. ``_run_phase`` clears the phase-stop flag at entry, so a one-shot
-    cap that fired while profile arming was still awaiting would be silently
-    erased and the phase would run uncapped. (On non-PERFORMANCE phases this
-    only cancels the perf timer, so accuracy is never truncated.)
-    """
-
-    async def _on_phase_start(phase: PhaseConfig) -> None:
-        if phase.phase_type == PhaseType.PERFORMANCE:
-            # Fire /start_profile sequentially before any perf request is
-            # issued, so the server is armed when traffic begins.
-            await profiler.start()
-        perf_timeout.on_phase_start(phase.phase_type)
-
-    return _on_phase_start
-
-
 async def _run_benchmark_async(
     ctx: BenchmarkContext,
     loop: asyncio.AbstractEventLoop,
@@ -831,9 +809,6 @@ async def _run_benchmark_async(
         event_log_dir=event_log_dir,
         metrics_output_dir=metrics_output_dir,
         loop=loop,
-        # Second ^C: the pipeline teardown SIGKILLs instead of the graceful
-        # SIGTERM-and-wait, regardless of where the cancellation unwound from.
-        force_quit=lambda: sigint is not None and sigint.forced,
     )
     report: Report | None = None
     profiler: ProfileController
@@ -886,7 +861,12 @@ async def _run_benchmark_async(
                 )
                 watchdog.bind_session(session)
                 if sigint is not None:
-                    sigint.bind_session(session)
+                    # On ^C the governor stops the session and arms a teardown
+                    # grace timer; expiry SIGTERMs the aggregator (its handler
+                    # writes a best-effort INTERRUPTED snapshot, terminate_all
+                    # escalates to SIGKILL) so a wedged drain can't hang the
+                    # abort.
+                    sigint.bind_session(session, pipe.abandon_drain)
                 phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
 
                 max_duration_ms = (
@@ -913,7 +893,16 @@ async def _run_benchmark_async(
                     loop, max_duration_ms, _on_global_timeout
                 )
 
-                _on_phase_start = _make_phase_start_hook(profiler, perf_timeout)
+                def _on_phase_start(phase: PhaseConfig) -> None:
+                    if phase.phase_type == PhaseType.PERFORMANCE:
+                        # Fire /start_profile sequentially before any perf
+                        # request is issued, so the server is armed when
+                        # traffic begins.
+                        profiler.start()
+                    # Arms the perf cap on PERFORMANCE and cancels it when any
+                    # later phase starts, so a combined perf+accuracy run can
+                    # never have its accuracy phase truncated by the perf cap.
+                    perf_timeout.on_phase_start(phase.phase_type)
 
                 try:
                     # A pre-session fire already stopped the session inside
@@ -961,46 +950,38 @@ async def _run_benchmark_async(
                     # Unifies the clean phase-end path and the abort path — both
                     # reach this block. A watchdog abort counts as an abort even
                     # when session.run returned normally after session.stop().
-                    # Skipped on force-quit: no blocking HTTP on the way out.
-                    if not (sigint is not None and sigint.forced):
-                        await profiler.stop(
-                            session_completed_normally and not watchdog.fired
-                        )
-                    if sigint is not None and sigint.forced:
-                        # Second ^C: abandon the drain entirely — SIGKILL the
-                        # service children now so the pipeline __aexit__ has
-                        # nothing left to wait for. No report, no metrics
-                        # salvage; the run exits 130 immediately.
-                        pipe.kill_now()
-                    else:
-                        # Graceful drain runs on both the clean-finish and
-                        # session-failure paths (BenchmarkSession.run publishes
-                        # ENDED in its own finally, so a failed run still has a
-                        # terminal snapshot worth draining). Nulls
-                        # pipe.publisher so __aexit__ releases the ZMQ scope
-                        # without killing the services.
-                        try:
-                            report = await pipe.drain_and_build_report()
-                            if report is None:
-                                raise ExecutionError(
-                                    "Benchmark completed without a usable "
-                                    "metrics report"
-                                )
-                        except Exception as e:  # noqa: BLE001
-                            # On a clean run a drain / report-build failure must
-                            # be loud: silently returning report=None would exit
-                            # 0 with no perf artifacts. On the session-failure
-                            # path the run is already raising, so swallow it
-                            # there rather than let a teardown error replace the
-                            # in-flight exception; run_benchmark still fails the
-                            # run on a missing report.
-                            if session_completed_normally:
-                                raise
-                            logger.warning(
-                                "Drain/report build error suppressed (run "
-                                "already failing): %s",
-                                e,
+                    profiler.stop(session_completed_normally and not watchdog.fired)
+                    # Graceful drain runs on both the clean-finish and
+                    # session-failure paths (BenchmarkSession.run publishes
+                    # ENDED in its own finally, so a failed run still has a
+                    # terminal snapshot worth draining). Nulls pipe.publisher
+                    # so __aexit__ releases the ZMQ scope without killing the
+                    # services.
+                    try:
+                        report = await pipe.drain_and_build_report()
+                        if report is None:
+                            raise ExecutionError(
+                                "Benchmark completed without a usable " "metrics report"
                             )
+                    except Exception as e:  # noqa: BLE001
+                        # On a clean run a drain / report-build failure must
+                        # be loud: silently returning report=None would exit
+                        # 0 with no perf artifacts. On the session-failure
+                        # path the run is already raising, so swallow it
+                        # there rather than let a teardown error replace the
+                        # in-flight exception; run_benchmark still fails the
+                        # run on a missing report.
+                        if session_completed_normally:
+                            raise
+                        logger.warning(
+                            "Drain/report build error suppressed (run "
+                            "already failing): %s",
+                            e,
+                        )
+                    if sigint is not None:
+                        # Drain finished (or failed) on its own — the teardown
+                        # grace timer has nothing left to bound.
+                        sigint.cancel_grace()
             finally:
                 # Runs on every path, including a setup error before session.run
                 # (which never reaches the session finally above). pbar.close() is
@@ -1015,23 +996,13 @@ async def _run_benchmark_async(
                 except Exception as e:  # noqa: BLE001 — progress bar is cosmetic
                     logger.warning("Progress bar close error: %s", e)
                 if http_client is not None:
-                    if sigint is not None and sigint.forced:
-                        # Second ^C: SIGKILL the worker processes — no graceful
-                        # wait, no transport teardown; the process is exiting.
-                        http_client.kill_workers()
-                    else:
-                        try:
-                            await http_client.shutdown_async()
-                        except Exception as e:  # noqa: BLE001 — best-effort; idempotent
-                            logger.warning(f"Client cleanup error: {e}")
+                    try:
+                        await http_client.shutdown_async()
+                    except Exception as e:  # noqa: BLE001 — best-effort; idempotent
+                        logger.warning(f"Client cleanup error: {e}")
     except BaseException as e:
-        # Force-quit wins over exception identity: once the user pressed ^C
-        # twice, the exit is theirs no matter what the cancellation unwound
-        # into on its way out.
-        forced_quit = sigint is not None and sigint.forced
-        # Force-quit abandons even the tmpfs salvage; every other abnormal
-        # path preserves the event log.
-        if tmpfs_dir.exists() and not forced_quit:
+        # Abnormal unwind: preserve the event log before re-raising.
+        if tmpfs_dir.exists():
             try:
                 _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
                 shutil.rmtree(tmpfs_dir, ignore_errors=True)
@@ -1041,16 +1012,6 @@ async def _run_benchmark_async(
                     salvage_err,
                     tmpfs_dir,
                 )
-        if forced_quit:
-            # Second ^C: the pipeline __aexit__ above already SIGKILLed the
-            # service children (force_quit predicate); kill the HTTP workers
-            # too in case the cancellation landed inside their graceful
-            # shutdown await. Both are idempotent. Surface as the user's
-            # Ctrl-C, not a bare cancellation.
-            pipe.kill_now()
-            if http_client is not None:
-                http_client.kill_workers()
-            raise KeyboardInterrupt from e
         if watchdog.fired and isinstance(e, Exception | asyncio.CancelledError):
             # The watchdog aborted the run: the pre-session fire cancels this
             # task, and a mid-teardown fire can surface as a launch/drain
@@ -1255,10 +1216,12 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # is written in the `finally` below so a scoring failure (e.g. lcb-service
     # unreachable, missing eval subproject, bad extras) still leaves the perf
     # run's result_summary.json / report.txt on disk instead of discarding them —
-    # then the exception propagates as before. The same holds for a ^C landing
-    # here (the governor raises KeyboardInterrupt mid-scoring once the run task
-    # is done): the run's measurement genuinely completed, so the completed perf
-    # artifacts are written as-is and the interrupt propagates for exit 130.
+    # then the exception propagates as before. A ^C landing here (the governor
+    # raises KeyboardInterrupt mid-scoring once the run task is done) is
+    # different: a user abort makes the whole run invalid, so the report is
+    # rewritten interrupted/complete:false before the `finally` persists it —
+    # the metrics stay in the file as partial diagnostics — and the interrupt
+    # propagates for exit 130.
     accuracy_scores: list[dict[str, Any]] = []
     try:
         if aborted:
@@ -1272,6 +1235,12 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             )
         else:
             accuracy_scores = score_accuracy(ctx, result)
+    except KeyboardInterrupt:
+        if report is not None:
+            report = msgspec.structs.replace(
+                report, complete=False, state="interrupted"
+            )
+        raise
     finally:
         # Attach the per-dataset accuracy list so result_summary.json, the
         # console summary, and report.txt all carry it (stays [] on a scoring

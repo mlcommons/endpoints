@@ -13,15 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SigintGovernor state machine: graceful vs force vs no-live-run paths."""
+"""SigintGovernor (graceful stop + teardown grace) and PerfPhaseTimeout."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import itertools
 import signal
-import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -36,15 +33,15 @@ def _fire(gov: SigintGovernor) -> None:
     gov(signal.SIGINT, None)
 
 
-def _distinct_fire(gov: SigintGovernor) -> None:
-    """A ^C outside the duplicate-delivery window (a deliberate press)."""
-    gov._last_accepted_monotonic = float("-inf")
-    _fire(gov)
-
-
 @pytest.mark.unit
 class TestSigintGovernor:
-    def test_first_sigint_after_loop_returned_raises_immediately(self):
+    def test_unbound_sigint_raises_keyboard_interrupt(self):
+        gov = SigintGovernor()
+        with pytest.raises(KeyboardInterrupt):
+            _fire(gov)
+        assert gov.interrupted
+
+    def test_sigint_after_loop_returned_raises_immediately(self):
         """A ^C during sync finalization must not be swallowed.
 
         After ``run_until_complete`` returns, the session/task/loop stay
@@ -56,7 +53,7 @@ class TestSigintGovernor:
 
         async def run_phase() -> None:
             gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
-            gov.bind_session(session)
+            gov.bind_session(session, MagicMock())
 
         asyncio.run(run_phase())
 
@@ -65,88 +62,64 @@ class TestSigintGovernor:
         assert gov.interrupted
         session.stop.assert_not_called()
 
-    def test_second_distinct_sigint_after_loop_returned_raises(self):
-        """The force path with a finished task escalates to KeyboardInterrupt."""
+    @pytest.mark.asyncio
+    async def test_live_sigint_stops_session_and_arms_grace(self):
         gov = SigintGovernor()
         session = MagicMock()
+        on_grace = MagicMock()
+        gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
+        gov.bind_session(session, on_grace)
 
-        async def run_phase() -> None:
-            gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
-            gov.bind_session(session)
+        _fire(gov)
+        await asyncio.sleep(0)  # run the queued call_soon_threadsafe
 
-        asyncio.run(run_phase())
-
-        with pytest.raises(KeyboardInterrupt):
-            _fire(gov)
-        with pytest.raises(KeyboardInterrupt):
-            _distinct_fire(gov)
-        assert gov.forced
+        assert gov.interrupted
+        session.stop.assert_called_once()
+        assert gov._grace_handle is not None
+        on_grace.assert_not_called()  # armed, not fired
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("bound", [True, False], ids=["bound", "unbound"])
-    @pytest.mark.parametrize(
-        "deliveries",
-        [
-            seq
-            for n in (1, 2, 3)
-            for seq in itertools.product(("distinct", "dup"), repeat=n)
-            # A duplicate before any accepted delivery cannot occur: the dedup
-            # window opens on the first accepted ^C.
-            if seq[0] == "distinct"
-        ],
-        ids="-".join,
-    )
-    async def test_delivery_sequences_exhaustive(self, bound, deliveries):
-        """Every bind-state x delivery-sequence (length <= 3), exhaustively.
-
-        Contract: an accepted, distinct delivery is never silently dropped —
-        it schedules a graceful stop (first, bound), cancels the live run
-        task (second, bound), or raises KeyboardInterrupt (unbound). Only
-        duplicate deliveries inside the window are silent. Escalation to
-        force happens on exactly the second accepted delivery.
-        """
+    async def test_repeat_sigint_is_a_noop(self):
+        """Any repeat ^C (incl. a forwarded duplicate under `uv run`) is silent."""
         gov = SigintGovernor()
         session = MagicMock()
-        run_task = asyncio.create_task(asyncio.sleep(30))
-        await asyncio.sleep(0)  # let the child task start
-        if bound:
-            gov.bind_task(run_task, asyncio.get_running_loop())
-            gov.bind_session(session)
+        gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
+        gov.bind_session(session, MagicMock())
 
-        accepted = 0
-        try:
-            for kind in deliveries:
-                if kind == "dup":
-                    # Inside the duplicate window of the previous delivery.
-                    gov._last_accepted_monotonic = time.monotonic()
-                else:
-                    gov._last_accepted_monotonic = float("-inf")
-                    accepted += 1
-                if kind == "distinct" and not bound:
-                    with pytest.raises(KeyboardInterrupt):
-                        gov(signal.SIGINT, None)
-                else:
-                    gov(signal.SIGINT, None)  # silent: bound or deduped
+        _fire(gov)
+        _fire(gov)
+        _fire(gov)
+        await asyncio.sleep(0)
 
-            assert gov.interrupted
-            assert gov.forced == (accepted >= 2)
-            if bound:
-                await asyncio.sleep(0)  # run queued call_soon_threadsafe work
-                assert session.stop.call_count == 1
-                if accepted >= 2:
-                    # Force path cancelled the run task; let it settle.
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.wait_for(run_task, timeout=2.0)
-                    assert run_task.cancelled()
-                else:
-                    assert not run_task.done()
-            else:
-                session.stop.assert_not_called()
-                assert not run_task.done()
-        finally:
-            run_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait_for(run_task, timeout=2.0)
+        session.stop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_grace_expiry_fires_callback_once(self):
+        gov = SigintGovernor()
+        gov.TEARDOWN_GRACE_S = 0.02  # instance override; class default untouched
+        session = MagicMock()
+        fired = asyncio.Event()
+        gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
+        gov.bind_session(session, fired.set)
+
+        _fire(gov)
+        await asyncio.wait_for(fired.wait(), timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_cancel_grace_disarms_pending_timer(self):
+        gov = SigintGovernor()
+        gov.TEARDOWN_GRACE_S = 0.02
+        session = MagicMock()
+        on_grace = MagicMock()
+        gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
+        gov.bind_session(session, on_grace)
+
+        _fire(gov)
+        await asyncio.sleep(0)
+        gov.cancel_grace()  # the drain finished on its own
+        await asyncio.sleep(0.1)  # 5x the grace: a leaked timer would fire
+
+        on_grace.assert_not_called()
 
 
 @pytest.mark.unit

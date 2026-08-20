@@ -24,7 +24,7 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
@@ -425,7 +425,7 @@ class BenchmarkSession:
     async def run(
         self,
         phases: list[PhaseConfig],
-        on_phase_start: Callable[[PhaseConfig], Awaitable[None]] | None = None,
+        on_phase_start: Callable[[PhaseConfig], None] | None = None,
     ) -> SessionResult:
         """Run all benchmark phases sequentially.
 
@@ -442,7 +442,7 @@ class BenchmarkSession:
                 if self._stop_requested:
                     break
                 if on_phase_start is not None:
-                    await on_phase_start(phase)
+                    on_phase_start(phase)
                 result = await self._run_phase(phase)
                 if result is not None:
                     phase_results.append(result)

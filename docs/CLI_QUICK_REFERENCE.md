@@ -189,31 +189,36 @@ How the knobs compose:
 
 ### Ctrl-C (SIGINT)
 
-One handler owns SIGINT for the whole run:
+One handler owns SIGINT for the whole run, with one behavior:
 
-- **First ^C**: graceful abort. The session stops issuing, in-flight drains are
-  released, buffered samples still reach the metrics aggregator, and the
-  artifacts land honest — `result_summary.json` `state: interrupted`,
-  `complete: false`, `events.jsonl` flushed. Exit 130.
-- **Any further ^C**: force quit — the teardown (metrics drain included) is
-  abandoned, service children and HTTP workers are SIGKILLed, exit 130 with
-  whatever artifacts were already written. One keystroke counts once: runners
-  that forward the terminal's group SIGINT to their child (`uv run` does)
-  deliver a single ^C twice microseconds apart — the duplicate delivery is
-  suppressed, so only a deliberate second press forces.
+- **^C during a run**: graceful abort. The session stops issuing, in-flight
+  drains are released, buffered samples still reach the metrics aggregator,
+  and the artifacts land honest — `result_summary.json` `state: interrupted`,
+  `complete: false`, `events.jsonl` flushed. Exit 130. Teardown is bounded:
+  if the metrics drain has not finished within 30 s of the ^C, the service
+  children are SIGTERMed (the aggregator writes a best-effort INTERRUPTED
+  snapshot) then SIGKILLed — a wedged drain can never hang the abort.
+- **Repeat ^C**: logged no-op — the stop is already in flight and the grace
+  bounds the teardown. Runners that forward the terminal's group SIGINT to
+  their child (`uv run` does) deliver a single ^C twice; the duplicate is
+  equally harmless.
 - **^C during setup** (dataset/tokenizer load, before services): immediate
   abort, exit 130, no artifacts.
 
-A ^C'd run never exits 0. `result_summary.json` is never `complete: true`
-for a run whose measurement was cut short — with one honest exception: a ^C
-landing during post-measurement finalization (accuracy scoring) of an
-already-completed run still exits 130, but keeps the completed perf
-artifacts as written; the measurement really finished. **Precedence**:
+A ^C'd run never exits 0 and its `result_summary.json` is never
+`complete: true` — a ^C landing during post-measurement finalization
+(accuracy scoring) of an already-completed run also rewrites the report to
+`state: interrupted` before it is persisted. **Precedence**:
 `result_summary.json` + the exit code are the run-level truth;
 `metrics/final_snapshot.json` records what the aggregator itself observed
 and can legitimately read `state: complete` when the ^C lands after the
 session already published its terminal ENDED (the metrics-drain window) —
 the aggregator saw a run that ended normally.
+
+An interrupted (or timed-out) run is an **invalid run** — not a usable
+result. Its artifacts exist only to expose whatever partial metrics were
+available at abort time (diagnostics, triage), never to stand as a
+benchmark outcome; the non-zero exit code is the machine-readable verdict.
 
 ## Environment Variables
 

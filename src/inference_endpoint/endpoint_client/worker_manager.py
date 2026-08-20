@@ -158,16 +158,6 @@ class WorkerManager:
             except TimeoutError:
                 continue  # Loop to check liveness again
 
-    def kill_now(self) -> None:
-        """SIGKILL every worker immediately — force-quit path (second ^C).
-
-        No graceful terminate, no join, no transport cleanup: the parent
-        process is exiting and the kernel reaps the SIGKILLed children.
-        """
-        for worker in self.workers:
-            if worker.is_alive():
-                worker.kill()
-
     async def shutdown(self) -> None:
         """Shutdown workers and transports."""
         # Terminate workers

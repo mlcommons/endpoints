@@ -46,69 +46,75 @@ class SigintGovernor:
     whose gaps are exactly where a ^C used to slip through as a raw
     KeyboardInterrupt and abort teardown half-way.
 
-    Semantics:
+    One behavior, keystroke-count-independent (so runners that forward the
+    terminal's group SIGINT, like ``uv run``, need no special handling):
     - ^C with no live run (sync setup, finalization after the loop returned,
       between audit phases): nothing to stop gracefully — raise
       KeyboardInterrupt immediately (default behavior, exit 130).
-    - First ^C: graceful — ``session.stop()``; the stopped run publishes
-      INTERRUPTED+ENDED, services drain (including the metrics-tokenization
-      backlog), artifacts land as state=interrupted, then ``run_benchmark``
-      raises for exit 130.
-    - Any further ^C: FORCE QUIT — the run task is cancelled, the service
-      children and HTTP workers are SIGKILLed, the metrics drain and tmpfs
-      salvage are abandoned, exit 130.
-
-    One keystroke counts once: process runners that forward the terminal's
-    group SIGINT to their child (``uv run`` does) deliver a single ^C twice —
-    the kernel coalesces near-simultaneous deliveries, the forwarded copy can
-    land a few hundred ms later (~200 ms measured for ``uv run``). Deliveries
-    within ``_DUP_DELIVERY_WINDOW_S`` of the last accepted one are dropped as
-    duplicates; a deliberate later press always forces.
+    - ^C with a live run: graceful — ``session.stop()``; the stopped run
+      publishes INTERRUPTED+ENDED, services drain, artifacts land as
+      state=interrupted, then ``run_benchmark`` raises for exit 130. A
+      teardown grace timer is armed: if the metrics drain has not finished
+      within ``TEARDOWN_GRACE_S``, the aggregator is SIGTERMed (its handler
+      writes a best-effort INTERRUPTED snapshot; ``terminate_all`` escalates
+      to SIGKILL) so a wedged drain can never hang the abort.
+    - Any repeat ^C: logged no-op — the stop is already in flight and the
+      grace timer bounds the teardown.
     """
 
-    _DUP_DELIVERY_WINDOW_S = 1.0
+    TEARDOWN_GRACE_S = 30.0
+    """Seconds after a ^C before a still-running metrics drain is abandoned."""
 
     def __init__(self) -> None:
         self.interrupted = False
-        self.forced = False
         self._session: BenchmarkSession | None = None
         self._task: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._last_accepted_monotonic = float("-inf")
+        self._on_grace_expiry: Callable[[], None] | None = None
+        self._grace_handle: asyncio.TimerHandle | None = None
 
     def bind_task(
         self, task: asyncio.Task | None, loop: asyncio.AbstractEventLoop
     ) -> None:
-        """Bind the run coroutine's task — the force-quit cancellation target."""
+        """Bind the run coroutine's task — the live-run gate for the graceful path."""
         self._task = task
         self._loop = loop
 
-    def bind_session(self, session: BenchmarkSession) -> None:
+    def bind_session(
+        self, session: BenchmarkSession, on_grace_expiry: Callable[[], None]
+    ) -> None:
         self._session = session
+        self._on_grace_expiry = on_grace_expiry
+
+    def cancel_grace(self) -> None:
+        """Disarm the teardown grace timer (drain finished on its own)."""
+        if self._grace_handle is not None:
+            self._grace_handle.cancel()
+            self._grace_handle = None
+
+    def _stop_gracefully(self) -> None:
+        """Runs on the loop: stop the session and bound the teardown."""
+        assert self._session is not None and self._loop is not None
+        self._session.stop()
+        if self._on_grace_expiry is not None and self._grace_handle is None:
+
+            def _expire() -> None:
+                logger.warning(
+                    "Teardown did not finish within %.0fs of ^C — abandoning "
+                    "the metrics drain",
+                    self.TEARDOWN_GRACE_S,
+                )
+                assert self._on_grace_expiry is not None
+                self._on_grace_expiry()
+
+            self._grace_handle = self._loop.call_later(self.TEARDOWN_GRACE_S, _expire)
 
     def __call__(self, signum: int, frame: types.FrameType | None) -> None:
-        now = time.monotonic()
-        if now - self._last_accepted_monotonic < self._DUP_DELIVERY_WINDOW_S:
-            # Same keystroke, second delivery (group SIGINT + a forwarding
-            # runner like `uv run`) — not a user escalation.
-            return
-        self._last_accepted_monotonic = now
         if self.interrupted:
-            self.forced = True
-            logger.warning(
-                "SIGINT again: force quit — abandoning teardown/metrics drain"
-            )
-            if (
-                self._task is not None
-                and not self._task.done()
-                and self._loop is not None
-                and self._loop.is_running()
-            ):
-                # Cancelling the run task unwinds its finallys: the pipeline
-                # __aexit__ kills the service children and tmpfs is salvaged.
-                self._loop.call_soon_threadsafe(self._task.cancel)
-                return
-            raise KeyboardInterrupt
+            # Stop already in flight; the grace timer bounds the teardown. A
+            # forwarded duplicate delivery (uv run) lands here harmlessly too.
+            logger.warning("SIGINT again: shutdown already in progress")
+            return
         self.interrupted = True
         if (
             self._session is None
@@ -121,14 +127,12 @@ class SigintGovernor:
             # stopped loop would queue session.stop and never run it —
             # silently swallowing the ^C.
             raise KeyboardInterrupt
-        logger.warning(
-            "SIGINT received: stopping benchmark gracefully (^C again to force)"
-        )
+        logger.warning("SIGINT received: stopping benchmark gracefully")
         # A signal handler runs at an arbitrary bytecode boundary — possibly
         # mid-event-loop-iteration. Don't mutate asyncio state (Event.set,
-        # Task.cancel) from here; hand session.stop to the loop, the one
-        # asyncio entry point documented as signal-handler safe.
-        self._loop.call_soon_threadsafe(self._session.stop)
+        # call_later) from here; hand the stop to the loop, the one asyncio
+        # entry point documented as signal-handler safe.
+        self._loop.call_soon_threadsafe(self._stop_gracefully)
 
 
 class PerfPhaseTimeout:
