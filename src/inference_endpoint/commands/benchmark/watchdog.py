@@ -52,23 +52,16 @@ class SigintGovernor:
       INTERRUPTED+ENDED, services drain (including the metrics-tokenization
       backlog), artifacts land as state=interrupted, then ``run_benchmark``
       raises for exit 130.
-    - Re-deliveries inside the burst window are the SAME keystroke: wrappers
-      sharing the foreground group (``uv run``, ``npm exec``, ...) forward
-      the terminal's group SIGINT to a child that already got it directly.
-      Never an escalation.
-    - A later distinct ^C: FORCE QUIT — the run task is cancelled, so the
+    - Any further ^C: FORCE QUIT — the run task is cancelled, so the
       teardown (metrics drain included) is abandoned; the pipeline
       ``__aexit__`` kills the service children (the SIGTERMed aggregator
       writes a best-effort INTERRUPTED snapshot without finishing its
       drain), tmpfs is salvaged, exit 130.
     """
 
-    _BURST_WINDOW_S = 1.0
-
     def __init__(self) -> None:
         self.interrupted = False
         self.forced = False
-        self._last_at = 0.0
         self._session: BenchmarkSession | None = None
         self._task: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -84,13 +77,10 @@ class SigintGovernor:
         self._session = session
 
     def __call__(self, signum: int, frame: object) -> None:
-        now = time.monotonic()
         if self.interrupted:
-            if now - self._last_at < self._BURST_WINDOW_S:
-                return  # same keystroke, re-delivered by a wrapper
             self.forced = True
             logger.warning(
-                "second SIGINT: force quit — abandoning teardown/metrics drain"
+                "SIGINT again: force quit — abandoning teardown/metrics drain"
             )
             if (
                 self._task is not None
@@ -104,7 +94,6 @@ class SigintGovernor:
                 return
             raise KeyboardInterrupt
         self.interrupted = True
-        self._last_at = now
         if self._session is None or self._loop is None:
             raise KeyboardInterrupt
         logger.warning(
