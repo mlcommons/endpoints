@@ -31,6 +31,7 @@ locality is lost.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import logging
 import multiprocessing
@@ -156,6 +157,18 @@ def load_reference_backend(tokenizer_name: str) -> Any | None:
     return getattr(tokenizer, "backend_tokenizer", None)
 
 
+def _install_parent_death_signal() -> None:
+    """Linux prctl(PR_SET_PDEATHSIG, SIGKILL); silent no-op elsewhere."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        PR_SET_PDEATHSIG = 1
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+    except (OSError, AttributeError):
+        # Non-Linux: no prctl. The worker then relies on the executor's
+        # normal shutdown path.
+        logger.debug("could not arm parent-death signal for tokenizer worker")
+
+
 def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
     """Pin this worker to ``core_set``, then load its token-counting path.
 
@@ -167,6 +180,12 @@ def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
     # drives worker shutdown, so a worker dying mid-drain would break the pool
     # and lose the buffered tokenizations it was counting.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # If the aggregator is SIGKILLed (run-watchdog / ^C teardown-grace
+    # escalation), BatchTokenizer.close() never runs and these non-daemon
+    # workers are outside every launcher PID list — ask the kernel to SIGKILL
+    # this worker when its parent dies so no shard can outlive the run
+    # (PR_SET_PDEATHSIG; Linux-only, best-effort elsewhere).
+    _install_parent_death_signal()
     if core_set:
         # Size the Hugging Face rayon pool to the block explicitly: the parent
         # process caps its own pool for the live lane, and spawn children inherit

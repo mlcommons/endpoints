@@ -32,7 +32,6 @@ import json
 import logging
 import random
 import shutil
-import signal
 import tempfile
 import time
 import uuid
@@ -66,6 +65,7 @@ from inference_endpoint.commands.benchmark.watchdog import (
     PerfPhaseTimeout,
     RunWatchdog,
     SigintGovernor,
+    sigint_policy,
 )
 from inference_endpoint.compliance import AuditRunSpec
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -874,11 +874,11 @@ async def _run_benchmark_async(
                     if ctx.rt_settings is not None
                     else None
                 )
-                _timeout_done = False
+                _perf_cap_done = False
                 session_completed_normally = False
 
-                def _on_global_timeout() -> None:
-                    if not _timeout_done:
+                def _on_perf_phase_timeout() -> None:
+                    if not _perf_cap_done:
                         logger.warning(
                             "Performance phase max_duration reached (%d ms); "
                             "ending performance phase.",
@@ -890,7 +890,7 @@ async def _run_benchmark_async(
                         session.stop_current_phase()
 
                 perf_timeout = PerfPhaseTimeout(
-                    loop, max_duration_ms, _on_global_timeout
+                    loop, max_duration_ms, _on_perf_phase_timeout
                 )
 
                 def _on_phase_start(phase: PhaseConfig) -> None:
@@ -941,7 +941,7 @@ async def _run_benchmark_async(
                     else:
                         raise ExecutionError(f"Benchmark execution failed: {e}") from e
                 finally:
-                    _timeout_done = True
+                    _perf_cap_done = True
                     perf_timeout.cancel()
                     # NOTE: no SIGINT bookkeeping here — the process-level
                     # SigintGovernor (installed once by run_benchmark) covers
@@ -970,8 +970,12 @@ async def _run_benchmark_async(
                         # path the run is already raising, so swallow it
                         # there rather than let a teardown error replace the
                         # in-flight exception; run_benchmark still fails the
-                        # run on a missing report.
-                        if session_completed_normally:
+                        # run on a missing report. A ^C'd run swallows it too:
+                        # the user's abort (exit 130) outranks a drain error
+                        # its own grace escalation may have caused.
+                        if session_completed_normally and not (
+                            sigint is not None and sigint.interrupted
+                        ):
                             raise
                         logger.warning(
                             "Drain/report build error suppressed (run "
@@ -1201,6 +1205,10 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         # keying on state=="complete" and not complete (the drain-timeout
         # signature) then can't misattribute an abort to a slow drain.
         report = msgspec.structs.replace(report, complete=False, state="interrupted")
+        # Write back so callers holding the BenchmarkResult (the audit runner
+        # checks bench.report.state after each phase) see the honest state,
+        # not the aggregator's stale COMPLETE.
+        bench.report = report
 
     # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
     # sample_idx_map.json + events.jsonl from here).
@@ -1211,57 +1219,68 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # is written in the `finally` below so a scoring failure (e.g. lcb-service
     # unreachable, missing eval subproject, bad extras) still leaves the perf
     # run's result_summary.json / report.txt on disk instead of discarding them —
-    # then the exception propagates as before. A ^C landing here (the governor
-    # raises KeyboardInterrupt mid-scoring once the run task is done) is
-    # different: a user abort makes the whole run invalid, so the report is
-    # rewritten interrupted/complete:false before the `finally` persists it —
-    # the metrics stay in the file as partial diagnostics — and the interrupt
-    # propagates for exit 130.
+    # then the exception propagates as before. A ^C landing anywhere in
+    # finalization (the governor raises KeyboardInterrupt once the run task is
+    # done) is different: a user abort makes the whole run invalid, so the
+    # report is rewritten interrupted/complete:false and re-persisted by the
+    # outer handler below — the metrics stay in the file as partial
+    # diagnostics — and the interrupt propagates for exit 130.
     accuracy_scores: list[dict[str, Any]] = []
     try:
-        if aborted:
-            # Phases may never have started (scorer init KeyErrors on missing
-            # sample maps) and partial phases would yield misleading subset
-            # scores; the scoring artifacts above are still on disk for
-            # inspection.
-            logger.warning(
-                "Run aborted (%s) — skipping accuracy scoring on partial data",
-                "run timeout" if bench.run_timed_out else "user interrupt",
-            )
-        else:
-            accuracy_scores = score_accuracy(ctx, result)
+        try:
+            if aborted:
+                # Phases may never have started (scorer init KeyErrors on
+                # missing sample maps) and partial phases would yield
+                # misleading subset scores; the scoring artifacts above are
+                # still on disk for inspection.
+                logger.warning(
+                    "Run aborted (%s) — skipping accuracy scoring on partial data",
+                    "run timeout" if bench.run_timed_out else "user interrupt",
+                )
+            else:
+                accuracy_scores = score_accuracy(ctx, result)
+        finally:
+            # Attach the per-dataset accuracy list so result_summary.json,
+            # the console summary, and report.txt all carry it (stays [] on
+            # a scoring failure).
+            if report is not None:
+                report = msgspec.structs.replace(report, accuracy=accuracy_scores)
+            # Display the report + write result_summary.json / report.txt.
+            if report is not None:
+                _write_report_artifacts(ctx, report, bench.profiling)
+
+        _summarize_and_log_metrics(ctx, report, result, collector)
+
+        # Sibling profiling.json — kept separate so Report stays a pure
+        # snapshot-derived struct. Written after the report artifacts (and
+        # best-effort) so an OSError here can't discard the already-written
+        # perf report.
+        if bench.profiling is not None:
+            try:
+                (ctx.report_dir / "profiling.json").write_text(
+                    json.dumps(bench.profiling, indent=2)
+                )
+            except OSError as e:
+                logger.warning("Failed to write profiling.json: %s", e)
+
+        # Emit the accuracy results as a focused artifact under accuracy/.
+        # Written after the report artifacts so a write failure here can't
+        # discard them.
+        write_accuracy_results(ctx.report_dir, accuracy_scores)
     except KeyboardInterrupt:
-        if report is not None:
-            report = msgspec.structs.replace(
+        # ^C anywhere in finalization: the run is invalid. Rewrite and
+        # re-persist the summary (overwriting a COMPLETE one the finally may
+        # already have written), then propagate for exit 130.
+        if report is not None and report.state != "interrupted":
+            invalidated = msgspec.structs.replace(
                 report, complete=False, state="interrupted"
             )
+            _write_report_artifacts(ctx, invalidated, bench.profiling)
+            report = invalidated
+        bench.report = report
         raise
-    finally:
-        # Attach the per-dataset accuracy list so result_summary.json, the
-        # console summary, and report.txt all carry it (stays [] on a scoring
-        # failure).
-        if report is not None:
-            report = msgspec.structs.replace(report, accuracy=accuracy_scores)
-        # Display the report + write result_summary.json / report.txt.
-        if report is not None:
-            _write_report_artifacts(ctx, report, bench.profiling)
 
-    _summarize_and_log_metrics(ctx, report, result, collector)
-
-    # Sibling profiling.json — kept separate so Report stays a pure snapshot-
-    # derived struct. Written after the report artifacts (and best-effort) so an
-    # OSError here can't discard the already-written perf report.
-    if bench.profiling is not None:
-        try:
-            (ctx.report_dir / "profiling.json").write_text(
-                json.dumps(bench.profiling, indent=2)
-            )
-        except OSError as e:
-            logger.warning("Failed to write profiling.json: %s", e)
-
-    # Emit the accuracy results as a focused artifact under accuracy/. Written
-    # after the report artifacts so a write failure here can't discard them.
-    write_accuracy_results(ctx.report_dir, accuracy_scores)
+    bench.report = report
 
 
 def run_benchmark(
@@ -1294,100 +1313,94 @@ def run_benchmark(
     # (tokenizer/dataset load) counts against run_timeout_s too.
     deadline = _run_deadline(config)
     run_timeout_s = config.settings.timeouts.run_timeout_s
-    # The run's ONE SIGINT handler, installed here and restored in the finally
-    # — no window-scoped install/remove pairs anywhere else in the run, so
-    # there is no gap where a ^C aborts teardown as a raw KeyboardInterrupt.
-    # No session bound yet, so a ^C during setup keeps default abort behavior.
+    # The run's ONE SIGINT handler — no window-scoped install/remove pairs
+    # anywhere else in the run, so there is no gap where a ^C aborts teardown
+    # as a raw KeyboardInterrupt. No session bound yet, so a ^C during setup
+    # keeps default abort behavior. sigint_policy restores the previous
+    # handler only after the finally below, so a repeat ^C during salvage
+    # still hits the governor's no-op.
     sigint = SigintGovernor()
-    sigint_installed = False
-    # getsignal returns None for a C-installed handler Python cannot represent
-    # (and signal.signal would refuse to accept back): leave it untouched and
-    # keep the governor passive, exactly as off the main thread.
-    prev_sigint = signal.getsignal(signal.SIGINT)
-    if prev_sigint is not None:
-        try:
-            signal.signal(signal.SIGINT, sigint)
-            sigint_installed = True
-        except ValueError:
-            pass  # not the main thread (embedded use): governor stays passive
     bench: BenchmarkResult | None = None
-    try:
-        ctx = setup_benchmark(config, test_mode)
-        if deadline is not None and time.monotonic() >= deadline:
-            # Setup alone consumed the budget: fail before any services start.
-            raise ExecutionError(
-                f"Run timeout ({run_timeout_s}s) reached during setup; "
-                "no services were started"
-            )
-        bench = run_benchmark_async(ctx, deadline=deadline, sigint=sigint)
-        finalize_benchmark(ctx, bench)
-        if bench.user_interrupted or sigint.interrupted:
-            # Artifacts are finalized (state=interrupted, complete:false)
-            # ABOVE — only now surface the ^C so main.py exits 130. Checked
-            # before run_timed_out: if the user interrupted a run whose
-            # watchdog also fired, the user's abort is the truthful cause.
-            raise KeyboardInterrupt
-        if bench.run_timed_out:
-            raise ExecutionError(
-                f"Run timeout ({run_timeout_s}s) reached; run aborted and "
-                "report marked INTERRUPTED"
-            )
-        if (
-            bench.report is not None
-            and bench.report.state == "interrupted"
-            and not bench.run_timed_out
-        ):
-            # The session was stopped without a user ^C or a watchdog fire:
-            # transport closure or an external stop. Never exit 0 on
-            # interrupted artifacts.
-            raise ExecutionError(
-                "Session aborted before completion (transport closure or "
-                "external stop); report marked INTERRUPTED"
-            )
-        if (
-            bench.report is not None
-            and bench.report.state == "complete"
-            and not bench.report.complete
-        ):
-            # The aggregator gave up on its tokenization backlog when
-            # metrics_drain_timeout_s expired (state "complete" with pending
-            # tasks). The artifacts above are already written with
-            # complete: false; fail loudly instead of exiting 0 on partial
-            # ISL/OSL/TPOT stats.
-            raise ExecutionError(
-                "Metrics tokenization did not finish (n_pending_tasks > 0 in "
-                "the final snapshot): the drain deadline expired "
-                f"(metrics_drain_timeout_s="
-                f"{config.settings.timeouts.metrics_drain_timeout_s}) or the "
-                "tokenizer failed mid-drain — see the aggregator log; report "
-                "is partial (complete: false in result_summary.json)"
-            )
-        if bench.report is None:
-            # Aborted-without-flags path (e.g. transport closure) whose drain
-            # also failed: nothing above raised, but there is no report to
-            # stand behind — never exit 0 without one.
-            raise ExecutionError(
-                "Benchmark produced no usable metrics report; see the drain "
-                "errors above"
-            )
-    except KeyboardInterrupt:
-        # Salvage results (finally), then propagate to main.py -> exit 130.
-        logger.warning("Benchmark interrupted by user")
-        raise
-    finally:
-        if sigint_installed:
-            signal.signal(signal.SIGINT, prev_sigint)
-        if bench:
-            if bench.tmpfs_dir.exists():
-                try:
-                    _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
-                    shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
-                except Exception as e:  # noqa: BLE001 — salvage best-effort
-                    logger.warning(
-                        "Failed to salvage tmpfs: %s — tmpfs retained at %s",
-                        e,
-                        bench.tmpfs_dir,
-                    )
-            logger.info(f"Partial results saved to {ctx.report_dir}")
+    with sigint_policy(sigint):
+        try:
+            ctx = setup_benchmark(config, test_mode)
+            if deadline is not None and time.monotonic() >= deadline:
+                # Setup alone consumed the budget: fail before services start.
+                raise ExecutionError(
+                    f"Run timeout ({run_timeout_s}s) reached during setup; "
+                    "no services were started"
+                )
+            bench = run_benchmark_async(ctx, deadline=deadline, sigint=sigint)
+            # A ^C can land between the coroutine's own flag snapshot and the
+            # loop returning — refresh from the governor so finalization never
+            # writes COMPLETE artifacts for a run that exits 130.
+            bench.user_interrupted = bench.user_interrupted or sigint.interrupted
+            finalize_benchmark(ctx, bench)
+            if bench.user_interrupted or sigint.interrupted:
+                # Artifacts are finalized (state=interrupted, complete:false)
+                # ABOVE — only now surface the ^C so main.py exits 130. Checked
+                # before run_timed_out: if the user interrupted a run whose
+                # watchdog also fired, the user's abort is the truthful cause.
+                raise KeyboardInterrupt
+            if bench.run_timed_out:
+                raise ExecutionError(
+                    f"Run timeout ({run_timeout_s}s) reached; run aborted and "
+                    "report marked INTERRUPTED"
+                )
+            if (
+                bench.report is not None
+                and bench.report.state == "interrupted"
+                and not bench.run_timed_out
+            ):
+                # The session was stopped without a user ^C or a watchdog
+                # fire: transport closure or an external stop. Never exit 0
+                # on interrupted artifacts.
+                raise ExecutionError(
+                    "Session aborted before completion (transport closure or "
+                    "external stop); report marked INTERRUPTED"
+                )
+            if (
+                bench.report is not None
+                and bench.report.state == "complete"
+                and not bench.report.complete
+            ):
+                # The aggregator gave up on its tokenization backlog when
+                # metrics_drain_timeout_s expired (state "complete" with
+                # pending tasks). The artifacts above are already written with
+                # complete: false; fail loudly instead of exiting 0 on partial
+                # ISL/OSL/TPOT stats.
+                raise ExecutionError(
+                    "Metrics tokenization did not finish (n_pending_tasks > 0 "
+                    "in the final snapshot): the drain deadline expired "
+                    f"(metrics_drain_timeout_s="
+                    f"{config.settings.timeouts.metrics_drain_timeout_s}) or "
+                    "the tokenizer failed mid-drain — see the aggregator log; "
+                    "report is partial (complete: false in result_summary.json)"
+                )
+            if bench.report is None:
+                # Aborted-without-flags path (e.g. transport closure) whose
+                # drain also failed: nothing above raised, but there is no
+                # report to stand behind — never exit 0 without one.
+                raise ExecutionError(
+                    "Benchmark produced no usable metrics report; see the "
+                    "drain errors above"
+                )
+        except KeyboardInterrupt:
+            # Salvage results (finally), then propagate to main.py -> exit 130.
+            logger.warning("Benchmark interrupted by user")
+            raise
+        finally:
+            if bench:
+                if bench.tmpfs_dir.exists():
+                    try:
+                        _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
+                        shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
+                    except Exception as e:  # noqa: BLE001 — salvage best-effort
+                        logger.warning(
+                            "Failed to salvage tmpfs: %s — tmpfs retained at %s",
+                            e,
+                            bench.tmpfs_dir,
+                        )
+                logger.info(f"Partial results saved to {ctx.report_dir}")
 
     return ctx.report_dir

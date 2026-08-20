@@ -81,7 +81,9 @@ class TestTimeoutsValidation:
     )
     def test_deadline_must_be_positive_or_none(self, field, value):
         # The 0-sentinel is dead: unlimited is spelled None, never 0.
-        with pytest.raises(ValidationError):
+        # match=field: extra=forbid would also raise on a typo'd field name,
+        # so pin the error to the intended field.
+        with pytest.raises(ValidationError, match=field):
             Timeouts(**{field: value})
 
     @pytest.mark.unit

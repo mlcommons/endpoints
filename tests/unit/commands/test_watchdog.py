@@ -25,6 +25,7 @@ import pytest
 from inference_endpoint.commands.benchmark.watchdog import (
     PerfPhaseTimeout,
     SigintGovernor,
+    sigint_policy,
 )
 from inference_endpoint.load_generator.session import PhaseType
 
@@ -95,15 +96,21 @@ class TestSigintGovernor:
 
     @pytest.mark.asyncio
     async def test_grace_expiry_fires_callback_once(self):
+        """The grace fires exactly once, even after repeat ^C deliveries."""
         gov = SigintGovernor()
         gov.TEARDOWN_GRACE_S = 0.02  # instance override; class default untouched
         session = MagicMock()
         fired = asyncio.Event()
+        on_grace = MagicMock(side_effect=fired.set)
         gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
-        gov.bind_session(session, fired.set)
+        gov.bind_session(session, on_grace)
 
         _fire(gov)
+        _fire(gov)  # repeat ^C must not arm a second timer
         await asyncio.wait_for(fired.wait(), timeout=2.0)
+        await asyncio.sleep(0.05)  # room for an (incorrect) second fire
+
+        assert on_grace.call_count == 1
 
     @pytest.mark.asyncio
     async def test_cancel_grace_disarms_pending_timer(self):
@@ -120,6 +127,33 @@ class TestSigintGovernor:
         await asyncio.sleep(0.1)  # 5x the grace: a leaked timer would fire
 
         on_grace.assert_not_called()
+
+
+@pytest.mark.unit
+class TestSigintPolicy:
+    def test_installs_and_restores_previous_handler(self):
+        gov = SigintGovernor()
+        prev = signal.getsignal(signal.SIGINT)
+        with sigint_policy(gov):
+            assert signal.getsignal(signal.SIGINT) is gov
+        assert signal.getsignal(signal.SIGINT) is prev
+
+    def test_restores_on_exception(self):
+        gov = SigintGovernor()
+        prev = signal.getsignal(signal.SIGINT)
+        with pytest.raises(RuntimeError), sigint_policy(gov):
+            raise RuntimeError("boom")
+        assert signal.getsignal(signal.SIGINT) is prev
+
+    def test_unrepresentable_c_handler_stays_untouched(self, monkeypatch):
+        """getsignal()->None (C-installed handler): install nothing at all."""
+        gov = SigintGovernor()
+        monkeypatch.setattr(signal, "getsignal", lambda signum: None)
+        install_spy = MagicMock()
+        monkeypatch.setattr(signal, "signal", install_spy)
+        with sigint_policy(gov):
+            pass
+        install_spy.assert_not_called()
 
 
 @pytest.mark.unit

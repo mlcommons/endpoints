@@ -24,10 +24,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import signal
 import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
 from inference_endpoint.load_generator.session import BenchmarkSession, PhaseType
@@ -135,6 +137,33 @@ class SigintGovernor:
         self._loop.call_soon_threadsafe(self._stop_gracefully)
 
 
+@contextlib.contextmanager
+def sigint_policy(governor: SigintGovernor) -> Iterator[None]:
+    """Install ``governor`` as the SIGINT handler; restore the previous one.
+
+    Stays passive (installs nothing) when ``signal.getsignal`` returns
+    ``None`` — a C-installed handler Python cannot represent and
+    ``signal.signal`` would refuse to accept back — or when installation
+    raises ValueError (not the main thread; embedded use). Restoration
+    happens on exit, after the caller's own finally blocks, so a repeat ^C
+    during cleanup still hits the governor's no-op instead of the default
+    handler.
+    """
+    prev = signal.getsignal(signal.SIGINT)
+    if prev is None:
+        yield
+        return
+    try:
+        signal.signal(signal.SIGINT, governor)
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, prev)
+
+
 class PerfPhaseTimeout:
     """Session-stop timer that bounds the PERFORMANCE phase only.
 
@@ -179,7 +208,10 @@ class RunWatchdog:
     the event logger — spared the SIGTERM — flushes and exits) and SIGTERM
     the aggregator, whose handler immediately writes the INTERRUPTED final
     snapshot with whatever stats it holds at that instant (``publish_final``
-    is first-wins, so INTERRUPTED stays authoritative). Before the session
+    is first-wins, so INTERRUPTED stays authoritative). If the aggregator
+    ignores the SIGTERM (wedged/unschedulable), the same teardown grace as
+    the ^C path SIGTERM→SIGKILLs every service child so the drain's
+    wait-for-exit unblocks — the deadline is a hard bound. Before the session
     exists (service launch / endpoint connect still pending), stopping
     nothing would let those awaits run out their own readiness timeouts past
     the deadline — so the orchestration task is cancelled instead, which
@@ -188,6 +220,8 @@ class RunWatchdog:
     whenever ``fired`` is set, so a timed-out run always fails loudly even if
     a still-draining aggregator finalized COMPLETE first.
     """
+
+    TEARDOWN_GRACE_S = SigintGovernor.TEARDOWN_GRACE_S
 
     def __init__(
         self,
@@ -199,6 +233,8 @@ class RunWatchdog:
         self._session: BenchmarkSession | None = None
         self._task: asyncio.Task | None = None
         self._pipe = pipe
+        self._loop = loop
+        self._escalation: asyncio.TimerHandle | None = None
         self._handle = (
             loop.call_later(max(0.0, deadline - time.monotonic()), self._fire)
             if deadline is not None
@@ -238,8 +274,16 @@ class RunWatchdog:
             return
         self._session.stop()
         self._pipe.terminate_metrics_aggregator()
+        # A wedged aggregator ignores the SIGTERM; escalate so the deadline
+        # stays a hard bound (cancelled by cancel() when the drain finishes).
+        self._escalation = self._loop.call_later(
+            self.TEARDOWN_GRACE_S, self._pipe.abandon_drain
+        )
 
     def cancel(self) -> None:
         if self._handle is not None:
             self._handle.cancel()
             self._handle = None
+        if self._escalation is not None:
+            self._escalation.cancel()
+            self._escalation = None

@@ -16,7 +16,10 @@
 """Tests for BatchTokenizer and TokenBatchQueue."""
 
 import asyncio
+import ctypes
 import multiprocessing
+import signal
+import sys
 import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -991,3 +994,24 @@ def test_terminate_procs_kills_running_workers():
         ex.shutdown(wait=False, cancel_futures=True)
         if manager_thread is not None:
             manager_thread.join(5)
+
+
+def _report_pdeathsig() -> int:
+    """Arm the guard in this (child) process and read PR_GET_PDEATHSIG back."""
+    token_metrics_module._install_parent_death_signal()
+    sig = ctypes.c_int()
+    libc = ctypes.CDLL(None, use_errno=True)
+    PR_GET_PDEATHSIG = 2
+    libc.prctl(PR_GET_PDEATHSIG, ctypes.byref(sig), 0, 0, 0)
+    return sig.value
+
+
+@pytest.mark.unit
+def test_worker_parent_death_signal_is_sigkill():
+    """A tokenizer shard must die with its parent (aggregator SIGKILLed by
+    the run-watchdog / ^C teardown-grace escalation): the initializer arms
+    PR_SET_PDEATHSIG=SIGKILL so no shard can outlive the run."""
+    if not sys.platform.startswith("linux"):
+        pytest.skip("PR_SET_PDEATHSIG is Linux-only")
+    with ProcessPoolExecutor(max_workers=1) as ex:
+        assert ex.submit(_report_pdeathsig).result(timeout=30) == signal.SIGKILL
