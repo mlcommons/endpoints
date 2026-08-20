@@ -146,7 +146,7 @@ class TestSigintGovernor:
         finally:
             run_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await run_task
+                await asyncio.wait_for(run_task, timeout=2.0)
 
 
 @pytest.mark.unit
