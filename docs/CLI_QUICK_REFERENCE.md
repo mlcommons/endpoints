@@ -193,8 +193,8 @@ One handler owns SIGINT for the whole run:
 
 - **First ^C**: graceful abort. The session stops issuing, in-flight drains are
   released, buffered samples still reach the metrics aggregator, and the
-  artifacts land honest — `final_snapshot.json` `state: interrupted`,
-  `result_summary.json` `complete: false`, `events.jsonl` flushed. Exit 130.
+  artifacts land honest — `result_summary.json` `state: interrupted`,
+  `complete: false`, `events.jsonl` flushed. Exit 130.
 - **Any further ^C**: force quit — the teardown (metrics drain included) is
   abandoned, service children and HTTP workers are SIGKILLed, exit 130 with
   whatever artifacts were already written. One keystroke counts once: runners
@@ -204,7 +204,12 @@ One handler owns SIGINT for the whole run:
 - **^C during setup** (dataset/tokenizer load, before services): immediate
   abort, exit 130, no artifacts.
 
-A ^C'd run never exits 0 and never writes `complete: true` artifacts.
+A ^C'd run never exits 0 and its `result_summary.json` is never
+`complete: true`. **Precedence**: `result_summary.json` + the exit code are
+the run-level truth; `metrics/final_snapshot.json` records what the
+aggregator itself observed and can legitimately read `state: complete` when
+the ^C lands after the session already published its terminal ENDED (the
+metrics-drain window) — the aggregator saw a run that ended normally.
 
 ## Environment Variables
 
