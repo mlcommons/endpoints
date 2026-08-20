@@ -23,10 +23,10 @@ Place the dataset under `examples/10_Agentic_Inference/datasets/` or point the Y
 
 The Agentic Inference benchmark can support any model. The current iteration of the MLPerf Inference benchmark accepts official submissions for the following two models:
 
-| Model           | Architecture                   | Parameters            | Context        |
-| --------------- | ------------------------------ | --------------------- | -------------- |
-| Kimi K2.6       | MoE + MLA                      | 1T total / 32B active | 262,144 tokens |
-| Qwen3.6-35B-A3B | MoE + Gated DeltaNet/Attention | 35B total / 3B active | 262,144 tokens |
+| Model           | Architecture                   | Parameters               | Context          |
+| --------------- | ------------------------------ | ------------------------ | ---------------- |
+| Kimi K3         | MoE + KDA/Gated MLA            | 2.8T total / 104B active | 1,048,576 tokens |
+| Qwen3.6-35B-A3B | MoE + Gated DeltaNet/Attention | 35B total / 3B active    | 262,144 tokens   |
 
 Reference implementations and runnable examples for both models are provided below.
 
@@ -36,18 +36,18 @@ To run the benchmark, expose one of the supported models through an OpenAI-compa
 
 The following SGLang commands are reference examples. Adjust model paths, parallelism, ports, and memory settings for your hardware.
 
-### Kimi K2.6
+### Kimi K3
 
-See the [SGLang Kimi-K2.6 recipe](https://docs.sglang.io/cookbook/autoregressive/Moonshotai/Kimi-K2.6) for model-specific deployment guidance.
+See the [SGLang Kimi-K3 recipe](https://docs.sglang.io/cookbook/autoregressive/Moonshotai/Kimi-K3) for model-specific deployment guidance.
 
 ```bash
-python3 -m sglang.launch_server \
-  --model-path /path/to/Kimi-K2.6 \
-  --served-model-name kimi-k2.6 \
-  --tp 8 \
+sglang serve \
+  --model-path moonshotai/Kimi-K3 \
+  --served-model-name moonshotai/Kimi-K3 \
+  --tp-size 8 \
   --trust-remote-code \
-  --reasoning-parser kimi_k2 \
-  --tool-call-parser kimi_k2 \
+  --reasoning-parser kimi_k3 \
+  --tool-call-parser kimi_k3 \
   --host 0.0.0.0 \
   --port 8000
 ```
@@ -72,7 +72,7 @@ sglang serve \
 
 ## Client YAML
 
-Runnable example configs are provided for [Kimi K2.6](kimi_agentic_benchmark.yaml) and [Qwen3.6-35B-A3B](qwen_agentic_benchmark.yaml).
+Runnable example configs are provided for [Kimi K3](kimi_agentic_benchmark.yaml) and [Qwen3.6-35B-A3B](qwen_agentic_benchmark.yaml).
 
 Some key client features specific to the Agentic Inference benchmark are described below.
 
@@ -148,13 +148,11 @@ The YAML configuration gives submitters flexibility to configure the benchmark f
 
 Submitters must not modify the sampling parameters or thinking flags. The model-specific values in the example YAML files are authoritative and are repeated below for completeness:
 
-For Kimi K2.6:
+For Kimi K3:
 
 - `temperature: 1.0`
-- `top_p: 0.95`
+- `top_p: 1.0`
 - `max_new_tokens: 8192`
-- `chat_template_kwargs.thinking: true`
-- `chat_template_kwargs.preserve_thinking: true`
 
 For Qwen3.6-35B-A3B:
 
@@ -185,15 +183,15 @@ For official submissions, `agentic_inference.stop_issuing_on_first_user_complete
 
 Official submissions must enable both inline accuracy and SWE-bench accuracy. Configure the performance dataset with `accuracy_config.eval_method: agentic_inference_inline`, and configure the SWE-bench accuracy dataset with `accuracy_config.eval_method: swe_bench_scorer`. For SWE-bench, `accuracy_config.extras.num_instances` must be set to `200`. When using the example `online` configs, run with `--mode both` so performance, inline accuracy, and SWE-bench accuracy are all executed.
 
-Qwen3.6-35B-A3B submissions must set `accuracy_config.extras.swebench_template: qwen_tools`. Kimi K2.6 submissions must omit `accuracy_config.extras.swebench_template`.
+Qwen3.6-35B-A3B submissions must set `accuracy_config.extras.swebench_template: qwen_tools`. Kimi K3 submissions must omit `accuracy_config.extras.swebench_template`.
 
-Every submitted Pareto point must satisfy all of the following accuracy thresholds:
+Every submitted Pareto point must satisfy all of the following accuracy thresholds, except that SWE-bench accuracy is evaluated using mean-of-N for both models. For each model, average one SWE-bench accuracy result from each of the [four mandatory regions](https://github.com/mlcommons/endpoints_policies/blob/main/endpoints_rules.md#54-regions-of-interest) (`N = 4`), then compare that mean with the model-specific SWE-bench threshold below.
 
-| Metric             |        Kimi K2.6 |  Qwen3.6-35B-A3B |
+| Metric             |          Kimi K3 |  Qwen3.6-35B-A3B |
 | ------------------ | ---------------: | ---------------: |
-| Inline accuracy    |      `>= 63.08%` |      `>= 55.86%` |
-| OSL per-turn mean  | `404-494` tokens | `355-434` tokens |
-| SWE-bench accuracy |       `>= 76.5%` |       `>= 67.5%` |
+| Inline accuracy    |      `>= 58.32%` |      `>= 55.86%` |
+| OSL per-turn mean  | `390-475` tokens | `355-434` tokens |
+| SWE-bench accuracy |       `>= 93.5%` |         `>= 69%` |
 
 ### Speculative Decoding
 
@@ -202,4 +200,4 @@ Speculative decoding may be used in accordance with the MLPerf Endpoint Benchmar
 Allowed speculative-decoding heads:
 
 - Qwen3.6-35B-A3B: native MTP head included with the model
-- Kimi K2.6: `nvidia/Kimi-K2.6-Eagle3`
+- Kimi K3: DSPARK with [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark) on SGLang or [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark) on vLLM
