@@ -596,7 +596,7 @@ def _build_phases(
             )
             warmup_rt = dataclass_replace(
                 ctx.rt_settings,
-                min_duration_ms=0,
+                min_duration_ms=None,
                 max_duration_ms=None,
                 n_samples_from_dataset=ctx.dataloader.num_samples(),
                 n_samples_to_issue=warmup_cfg.n_requests,
@@ -663,7 +663,7 @@ def _build_phases(
         acc_settings = RuntimeSettings(
             metric_target=rng_settings.metric_target,
             reported_metrics=rng_settings.reported_metrics,
-            min_duration_ms=0,
+            min_duration_ms=None,
             max_duration_ms=None,
             n_samples_from_dataset=acc_ds.num_samples(),
             n_samples_to_issue=acc_ds.num_samples() * acc_ds.repeats,
@@ -820,6 +820,8 @@ async def _run_benchmark_async(
 
     watchdog = RunWatchdog(loop, deadline, pipe)
     watchdog.bind_task(asyncio.current_task())
+    if sigint is not None:
+        sigint.bind_task(asyncio.current_task(), loop)
 
     try:
         tmpfs_dir.mkdir(parents=True, exist_ok=True)
@@ -896,7 +898,7 @@ async def _run_benchmark_async(
                     profiler.start()
 
                 if sigint is not None:
-                    sigint.bind_session(session, loop)
+                    sigint.bind_session(session)
                 try:
                     # A pre-session fire already stopped the session inside
                     # bind_session: zero samples issue, STARTED/ENDED still
@@ -997,6 +999,15 @@ async def _run_benchmark_async(
                     salvage_err,
                     tmpfs_dir,
                 )
+        if (
+            sigint is not None
+            and sigint.forced
+            and isinstance(e, asyncio.CancelledError)
+        ):
+            # Second ^C cancelled this task to abandon the teardown; the
+            # pipeline __aexit__ has killed the service children above.
+            # Surface as the user's Ctrl-C, not a bare cancellation.
+            raise KeyboardInterrupt from e
         if watchdog.fired and isinstance(e, Exception | asyncio.CancelledError):
             # The watchdog aborted the run: the pre-session fire cancels this
             # task, and a mid-teardown fire can surface as a launch/drain

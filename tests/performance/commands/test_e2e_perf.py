@@ -143,8 +143,6 @@ def test_concurrency_roofline(
             "concurrency",
             "--concurrency",
             str(concurrency),
-            "--runtime.min-duration-ms",
-            "10s",
             "--runtime.max-duration-ms",
             "12000",
             # Headroom so wall time, not sample count, is the limit.
