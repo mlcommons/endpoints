@@ -610,20 +610,23 @@ class RuntimeConfig(BaseModel):
     min_duration_ms: Annotated[
         int | None,
         cyclopts.Parameter(
-            alias="--duration",
             help=(
-                "Size the run by time instead of sample count: issue "
-                "target_qps × duration samples (ms, or with suffix: 600s, 10m; "
-                "None = issue the dataset once). Poisson only — requires an "
-                "explicit target_qps"
+                "POISSON MODE ONLY (requires an explicit target_qps; rejected "
+                "for offline/max_throughput and concurrency runs). Size the "
+                "run by time: issue target_qps × this duration worth of "
+                "samples (ms, or suffix: 600s, 10m). Precedence: an explicit "
+                "--num-samples always wins; unset, this derivation applies; "
+                "both unset = issue the dataset once"
             ),
         ),
     ] = Field(
         None,
         gt=0,
         description=(
-            "Minimum test duration in ms; sizes the run as target_qps × "
-            "duration samples (None = no duration target, issue the dataset once)"
+            "Minimum test duration in ms (poisson only; requires explicit "
+            "target_qps): sizes the run as target_qps × duration samples. "
+            "Overridden by an explicit n_samples_to_issue; None = no duration "
+            "target (issue the dataset once)"
         ),
     )
     max_duration_ms: int | None = Field(
@@ -1038,7 +1041,8 @@ class Settings(WithUpdatesMixin, BaseModel):
             or self.load_pattern.target_qps is None
         ):
             raise ValueError(
-                "runtime.min_duration_ms (--duration) requires a poisson load "
+                "runtime.min_duration_ms (--runtime.min-duration-ms) requires "
+                "a poisson load "
                 "pattern with an explicit target_qps; offline/max_throughput "
                 "and concurrency runs are sized by --num-samples or the "
                 "dataset size"

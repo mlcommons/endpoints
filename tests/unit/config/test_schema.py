@@ -527,7 +527,7 @@ class TestBenchmarkConfigMethods:
 
     @pytest.mark.unit
     def test_min_duration_sizes_the_run(self):
-        """--duration (runtime.min_duration_ms) drives target_qps × duration
+        """runtime.min_duration_ms drives target_qps × duration
         sample-count derivation, with suffix parsing; None = dataset once."""
         from inference_endpoint.config.runtime_settings import RuntimeSettings
 
