@@ -193,12 +193,12 @@ One handler owns SIGINT for the whole run:
   released, buffered samples still reach the metrics aggregator, and the
   artifacts land honest — `final_snapshot.json` `state: interrupted`,
   `result_summary.json` `complete: false`, `events.jsonl` flushed. Exit 130.
-- **^C again (a distinct later press)**: force quit — the teardown (metrics
-  drain included) is abandoned, service children are killed, exit 130 with
-  whatever artifacts were already written. Rapid re-deliveries within ~1 s
-  are the same keystroke (process runners like `uv run` forward the
-  terminal's group SIGINT to a child that already received it) and never
-  escalate.
+- **Any further ^C**: force quit — the teardown (metrics drain included) is
+  abandoned, service children are killed (the aggregator still writes a
+  best-effort `interrupted` snapshot), exit 130 with whatever artifacts were
+  already written. Note: process runners that forward the terminal's group
+  SIGINT to their child (`uv run` does) deliver one keystroke twice — under
+  such wrappers a single ^C therefore force-quits immediately.
 - **^C during setup** (dataset/tokenizer load, before services): immediate
   abort, exit 130, no artifacts.
 
