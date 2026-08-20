@@ -264,6 +264,14 @@ def test_sigint_grace_expiry_abandons_wedged_drain(mock_http_echo_server, tmp_pa
     assert (
         abort_latency < 20.0
     ), f"abort took {abort_latency:.1f}s — grace escalation did not fire"
+    # The SIGKILLed aggregator never wrote a terminal snapshot, so the report
+    # was built from the last live pub/sub frame — the split-brain guard must
+    # still land the summary as interrupted, never state:"live".
+    summary = json.loads(
+        (report_dir / "performance" / "result_summary.json").read_text()
+    )
+    assert summary["state"] == "interrupted"
+    assert summary["complete"] is False
     _assert_no_leftover_children(report_dir, "grace-expired abort")
 
 

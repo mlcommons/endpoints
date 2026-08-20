@@ -38,7 +38,6 @@ from ..compliance.result import AuditResult, write_result
 from ..config.schema import AuditConfig, BenchmarkConfig, DatasetType
 from ..exceptions import ExecutionError, SetupError
 from .benchmark.execute import (
-    _SIGINT_NOT_INSTALLED,
     BenchmarkResult,
     TestMode,
     _salvage_tmpfs,
@@ -86,16 +85,22 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
     # The flag persisting across phases is moot: an interrupted phase raises
     # before the next phase starts.
     sigint = SigintGovernor()
-    prev_sigint: object = _SIGINT_NOT_INSTALLED
-    try:
-        prev_sigint = signal.signal(signal.SIGINT, sigint)
-    except ValueError:
-        pass  # not the main thread (embedded use): governor stays passive
+    sigint_installed = False
+    # getsignal returns None for a C-installed handler Python cannot represent
+    # (and signal.signal would refuse to accept back): leave it untouched and
+    # keep the governor passive, exactly as off the main thread.
+    prev_sigint = signal.getsignal(signal.SIGINT)
+    if prev_sigint is not None:
+        try:
+            signal.signal(signal.SIGINT, sigint)
+            sigint_installed = True
+        except ValueError:
+            pass  # not the main thread (embedded use): governor stays passive
     try:
         artifacts = _run_phases(config, base_report_dir, test, audit_cfg, specs, sigint)
     finally:
-        if prev_sigint is not _SIGINT_NOT_INSTALLED:
-            signal.signal(signal.SIGINT, prev_sigint)  # type: ignore[arg-type]
+        if sigint_installed:
+            signal.signal(signal.SIGINT, prev_sigint)
 
     # Normalizes verify()'s zero-QPS ValueError to exit 4, not a traceback.
     try:

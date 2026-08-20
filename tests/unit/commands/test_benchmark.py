@@ -2254,18 +2254,20 @@ class TestFinalizeBenchmark:
 
     @pytest.mark.unit
     @pytest.mark.parametrize("abort_field", ["run_timed_out", "user_interrupted"])
-    def test_aborted_run_never_writes_complete_artifacts(self, tmp_path, abort_field):
-        """Split-brain guard: the aggregator finalized a COMPLETE snapshot but
-        the run was aborted — watchdog fired late, or a ^C landed after the
-        session's terminal ENDED (drain window), so the INTERRUPTED marker
-        never went out. result_summary.json must still land complete:false /
-        state:interrupted; an aborted run must never ship complete artifacts."""
+    @pytest.mark.parametrize("snapshot_state", ["complete", "live"])
+    def test_aborted_run_never_writes_complete_artifacts(
+        self, tmp_path, abort_field, snapshot_state
+    ):
+        """Split-brain guard: an aborted run must never ship artifacts under
+        any non-interrupted state. "complete": the aggregator finalized before
+        the abort landed (watchdog late, or ^C after the session's terminal
+        ENDED). "live": the teardown grace SIGKILLed a wedged aggregator, so
+        the report was built from the last live pub/sub snapshot.
+        result_summary.json must land complete:false / state:interrupted."""
         config = OfflineConfig(**_OFFLINE_KWARGS)
         ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
-        report = self._make_complete_report()
-        assert report.complete is True, "precondition: aggregator said COMPLETE"
         bench = _make_benchmark_result(tmp_path)
-        bench.report = report
+        bench.report = self._make_report(state=snapshot_state)
         setattr(bench, abort_field, True)
 
         finalize_benchmark(ctx, bench)
@@ -2291,7 +2293,7 @@ class TestFinalizeBenchmark:
         config = OfflineConfig(**_OFFLINE_KWARGS)
         ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
         bench = _make_benchmark_result(tmp_path)
-        bench.report = self._make_complete_report()
+        bench.report = self._make_report(state="complete")
         monkeypatch.setattr(
             execute_mod,
             "score_accuracy",
@@ -2308,12 +2310,12 @@ class TestFinalizeBenchmark:
         assert summary["state"] == "interrupted"
 
     @staticmethod
-    def _make_complete_report() -> Report:
+    def _make_report(state: str) -> Report:
         return Report.from_snapshot(
             {
                 "counter": 1,
                 "timestamp_ns": 12345,
-                "state": "complete",
+                "state": state,
                 "n_pending_tasks": 0,
                 "metrics": [
                     {

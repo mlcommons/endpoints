@@ -1037,12 +1037,6 @@ async def _run_benchmark_async(
     )
 
 
-_SIGINT_NOT_INSTALLED = object()
-"""Sentinel separating "governor never installed" from a ``None`` previous
-handler (``signal.signal`` returns ``None`` for C-installed handlers, which
-must still be restored)."""
-
-
 def _run_deadline(config: BenchmarkConfig) -> float | None:
     """Monotonic deadline for ``settings.timeouts.run_timeout_s`` (None = off).
 
@@ -1194,17 +1188,18 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     collector = bench.collector
     report = bench.report
     aborted = bench.run_timed_out or bench.user_interrupted
-    if report is not None and aborted and report.state == "complete":
-        # Split-brain guard: the aggregator may have finalized COMPLETE before
-        # the watchdog's SIGTERM landed — or a ^C arrived after the session
-        # already published its terminal ENDED (drain window), so the
-        # INTERRUPTED marker never went out. Keyed on state (not the derived
-        # ``complete`` flag) so the drain-timeout subcase — state "complete"
-        # with pending tasks — is corrected too. An aborted run must never
-        # publish state-complete artifacts, so force both fields honest before
-        # writing; consumers keying on state=="complete" and not complete (the
-        # drain-timeout signature) then can't misattribute an abort to a slow
-        # drain.
+    if report is not None and aborted and report.state != "interrupted":
+        # Split-brain guard: an aborted run must never publish artifacts under
+        # any other state. "complete": the aggregator finalized before the
+        # watchdog's SIGTERM landed, or a ^C arrived after the session already
+        # published its terminal ENDED (drain window), so the INTERRUPTED
+        # marker never went out. "live": the teardown grace SIGKILLed a wedged
+        # aggregator, so the report was built from the subscriber's last live
+        # snapshot. Keyed on state (not the derived ``complete`` flag) so the
+        # drain-timeout subcase — state "complete" with pending tasks — is
+        # corrected too. Force both fields honest before writing; consumers
+        # keying on state=="complete" and not complete (the drain-timeout
+        # signature) then can't misattribute an abort to a slow drain.
         report = msgspec.structs.replace(report, complete=False, state="interrupted")
 
     # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
@@ -1304,11 +1299,17 @@ def run_benchmark(
     # there is no gap where a ^C aborts teardown as a raw KeyboardInterrupt.
     # No session bound yet, so a ^C during setup keeps default abort behavior.
     sigint = SigintGovernor()
-    prev_sigint: object = _SIGINT_NOT_INSTALLED
-    try:
-        prev_sigint = signal.signal(signal.SIGINT, sigint)
-    except ValueError:
-        pass  # not the main thread (embedded use): governor stays passive
+    sigint_installed = False
+    # getsignal returns None for a C-installed handler Python cannot represent
+    # (and signal.signal would refuse to accept back): leave it untouched and
+    # keep the governor passive, exactly as off the main thread.
+    prev_sigint = signal.getsignal(signal.SIGINT)
+    if prev_sigint is not None:
+        try:
+            signal.signal(signal.SIGINT, sigint)
+            sigint_installed = True
+        except ValueError:
+            pass  # not the main thread (embedded use): governor stays passive
     bench: BenchmarkResult | None = None
     try:
         ctx = setup_benchmark(config, test_mode)
@@ -1374,10 +1375,8 @@ def run_benchmark(
         logger.warning("Benchmark interrupted by user")
         raise
     finally:
-        if prev_sigint is not _SIGINT_NOT_INSTALLED:
-            # Restore whatever was installed before — including None (a
-            # C-installed handler), which `signal.signal` accepts back.
-            signal.signal(signal.SIGINT, prev_sigint)  # type: ignore[arg-type]
+        if sigint_installed:
+            signal.signal(signal.SIGINT, prev_sigint)
         if bench:
             if bench.tmpfs_dir.exists():
                 try:
