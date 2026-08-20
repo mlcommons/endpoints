@@ -27,11 +27,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error as urllib_error
 
-import inference_endpoint.commands.benchmark.cli as cli_mod
 import inference_endpoint.commands.benchmark.execute as execute_mod
 import pandas as pd
 import pytest
 from inference_endpoint.commands.benchmark.cli import (
+    _run,
     benchmark_app,
     from_config,
     offline,
@@ -3523,12 +3523,16 @@ class TestRunBenchmarkAuditDispatch:
         def _interrupt(cfg, mode):
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(cli_mod, "run_benchmark", _interrupt)
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_benchmark", _interrupt
+        )
         audit_spy = MagicMock()
-        monkeypatch.setattr(cli_mod, "run_audit", audit_spy)
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_audit", audit_spy
+        )
 
         with pytest.raises(KeyboardInterrupt):
-            cli_mod._run(config, [], TestMode.PERF)
+            _run(config, [], TestMode.PERF)
         audit_spy.assert_not_called()
 
     @pytest.mark.unit
@@ -3550,10 +3554,14 @@ class TestRunBenchmarkAuditDispatch:
             call_order.append(("benchmark", cfg, mode))
             return tmp_path
 
-        monkeypatch.setattr(cli_mod, "run_audit", _run_audit)
-        monkeypatch.setattr(cli_mod, "run_benchmark", _run_benchmark)
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_audit", _run_audit
+        )
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_benchmark", _run_benchmark
+        )
 
-        cli_mod._run(config, [], TestMode.PERF)
+        _run(config, [], TestMode.PERF)
 
         assert [c[0] for c in call_order] == ["benchmark", "audit"]
         _, benchmark_cfg, _ = call_order[0]
@@ -3569,11 +3577,16 @@ class TestRunBenchmarkAuditDispatch:
         """A failing (not crashed) audit maps to CLIError (exit 1) — both
         after a passing main run and standalone via audit.only."""
         config = _audit_cli_config(tmp_path, only=only)
-        monkeypatch.setattr(cli_mod, "run_audit", _failing_audit)
-        monkeypatch.setattr(cli_mod, "run_benchmark", MagicMock(return_value=tmp_path))
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_audit", _failing_audit
+        )
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_benchmark",
+            MagicMock(return_value=tmp_path),
+        )
 
         with pytest.raises(CLIError):
-            cli_mod._run(config, [], TestMode.PERF)
+            _run(config, [], TestMode.PERF)
 
     @pytest.mark.unit
     def test_audit_only_skips_main_run(self, monkeypatch, tmp_path):
@@ -3587,11 +3600,15 @@ class TestRunBenchmarkAuditDispatch:
             result.passed = True
             return result
 
-        monkeypatch.setattr(cli_mod, "run_audit", _run_audit)
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_audit", _run_audit
+        )
         benchmark_spy = MagicMock()
-        monkeypatch.setattr(cli_mod, "run_benchmark", benchmark_spy)
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_benchmark", benchmark_spy
+        )
 
-        cli_mod._run(config, [], TestMode.PERF)
+        _run(config, [], TestMode.PERF)
 
         benchmark_spy.assert_not_called()
         assert audit_calls == [tmp_path / "audit"]
