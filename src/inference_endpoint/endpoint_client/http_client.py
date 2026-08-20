@@ -162,6 +162,16 @@ class HTTPEndpointClient:
             return
         await self._shutdown_async()
 
+    def kill_workers(self) -> None:
+        """SIGKILL every worker process immediately — force-quit path.
+
+        Synchronous and loop-free (callable during teardown of a cancelled
+        task): no graceful wait, no transport cleanup. Marks the client shut
+        down so a later graceful call is a no-op.
+        """
+        self._shutdown = True
+        self.worker_manager.kill_now()
+
     async def _shutdown_async(self) -> None:
         """Async shutdown internals - must be called on the event loop."""
         self._shutdown = True

@@ -427,7 +427,7 @@ def _patch_phase(monkeypatch, *, num_samples, bench):
     )
     monkeypatch.setattr(
         "inference_endpoint.commands.audit.run_benchmark_async",
-        lambda ctx: bench,
+        lambda ctx, **kwargs: bench,
     )
     monkeypatch.setattr(
         "inference_endpoint.commands.audit.finalize_benchmark",
@@ -528,7 +528,7 @@ class TestRunAuditGuards:
         ctx = MagicMock()
         ctx.dataloader.num_samples.return_value = 100
 
-        def _interrupt(_ctx):
+        def _interrupt(_ctx, **kwargs):
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
@@ -675,7 +675,7 @@ class TestRunAuditSpecTestMode:
         bench.tmpfs_dir = Path("/nonexistent-tmpfs-path-for-tests")
         monkeypatch.setattr(
             "inference_endpoint.commands.audit.run_benchmark_async",
-            lambda ctx: bench,
+            lambda ctx, **kwargs: bench,
         )
         monkeypatch.setattr(
             "inference_endpoint.commands.audit.finalize_benchmark",

@@ -175,8 +175,10 @@ run_benchmark ── run_timeout_s deadline captured here ───────�
 
 How the knobs compose:
 
-1. **`--num-samples` / dataset-once defines the work.** An explicit `runtime.n_samples_to_issue`
-   sets the sample count; omitting it issues the performance dataset once.
+1. **`--num-samples` / duration / dataset-once defines the work.** An explicit
+   `runtime.n_samples_to_issue` sets the sample count; otherwise `runtime.min_duration_ms`
+   (poisson only) derives it as QPS x duration; with neither set, the performance dataset is
+   issued once.
 2. **`runtime.max_duration_ms` caps performance-phase issuing** and ends the phase normally —
    remaining samples are not issued, in-flight requests are abandoned (no drain), the report is
    valid. It does not bound the drain: issuing and draining are consecutive, never concurrent.
@@ -194,11 +196,11 @@ One handler owns SIGINT for the whole run:
   artifacts land honest — `final_snapshot.json` `state: interrupted`,
   `result_summary.json` `complete: false`, `events.jsonl` flushed. Exit 130.
 - **Any further ^C**: force quit — the teardown (metrics drain included) is
-  abandoned, service children are killed (the aggregator still writes a
-  best-effort `interrupted` snapshot), exit 130 with whatever artifacts were
-  already written. Note: process runners that forward the terminal's group
-  SIGINT to their child (`uv run` does) deliver one keystroke twice — under
-  such wrappers a single ^C therefore force-quits immediately.
+  abandoned, service children and HTTP workers are SIGKILLed, exit 130 with
+  whatever artifacts were already written. One keystroke counts once: runners
+  that forward the terminal's group SIGINT to their child (`uv run` does)
+  deliver a single ^C twice microseconds apart — the duplicate delivery is
+  suppressed, so only a deliberate second press forces.
 - **^C during setup** (dataset/tokenizer load, before services): immediate
   abort, exit 130, no artifacts.
 
