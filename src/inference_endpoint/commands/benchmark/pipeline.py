@@ -43,6 +43,7 @@ import contextlib
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -212,6 +213,7 @@ class MetricsPipeline:
         event_log_dir: Path,
         metrics_output_dir: Path,
         loop: asyncio.AbstractEventLoop,
+        force_quit: Callable[[], bool] | None = None,
     ) -> None:
         self._config = config
         self._tokenizer_name = tokenizer_name
@@ -219,6 +221,10 @@ class MetricsPipeline:
         self._event_log_dir = event_log_dir
         self._metrics_output_dir = metrics_output_dir
         self._loop = loop
+        # Force-quit predicate (second ^C): when true at teardown time the
+        # services are SIGKILLed with no SIGTERM grace — teardown must not
+        # wait on anything.
+        self._force_quit = force_quit if force_quit is not None else lambda: False
 
         self._stack: contextlib.ExitStack | None = None
         self._launcher: ServiceLauncher | None = None
@@ -380,19 +386,37 @@ class MetricsPipeline:
             return
         self._launcher.terminate_module(_AGGREGATOR_MODULE)
 
-    def _kill_services(self) -> None:
-        """Best-effort service termination owned by the pipeline ExitStack.
+    def kill_now(self) -> None:
+        """SIGKILL every service child immediately; safe no-op before launch.
 
-        Sends SIGTERM first so the metrics aggregator can flush an INTERRUPTED
-        final_snapshot.json via its signal handler. Escalates to SIGKILL after
-        a short timeout for any process that does not exit cleanly.
+        Force-quit path (second ^C): no SIGTERM grace, no drain — the
+        aggregator's INTERRUPTED snapshot and the event logger's buffer are
+        deliberately abandoned. Idempotent: dead children are skipped.
         """
         if self._launcher is None:
             return
         try:
-            self._launcher.terminate_all()
+            self._launcher.kill_all()
         except Exception as e:  # noqa: BLE001 — teardown best-effort
-            logger.warning("Service terminate_all error: %s", e)
+            logger.warning("Service kill_all error: %s", e)
+
+    def _kill_services(self) -> None:
+        """Best-effort service termination owned by the pipeline ExitStack.
+
+        Sends SIGTERM first so the metrics aggregator can flush an INTERRUPTED
+        final_snapshot.json via its signal handler, escalating to SIGKILL after
+        a short timeout. Under force-quit (second ^C) it SIGKILLs immediately —
+        no grace, no snapshot.
+        """
+        if self._launcher is None:
+            return
+        try:
+            if self._force_quit():
+                self._launcher.kill_all()
+            else:
+                self._launcher.terminate_all()
+        except Exception as e:  # noqa: BLE001 — teardown best-effort
+            logger.warning("Service termination error: %s", e)
 
     def _close_publisher(self) -> None:
         """Best-effort publisher close (ExitStack callback)."""

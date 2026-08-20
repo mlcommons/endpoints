@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import types
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -52,12 +53,19 @@ class SigintGovernor:
       INTERRUPTED+ENDED, services drain (including the metrics-tokenization
       backlog), artifacts land as state=interrupted, then ``run_benchmark``
       raises for exit 130.
-    - Any further ^C: FORCE QUIT — the run task is cancelled, so the
-      teardown (metrics drain included) is abandoned; the pipeline
-      ``__aexit__`` kills the service children (the SIGTERMed aggregator
-      writes a best-effort INTERRUPTED snapshot without finishing its
-      drain), tmpfs is salvaged, exit 130.
+    - Any further ^C: FORCE QUIT — the run task is cancelled, the service
+      children and HTTP workers are SIGKILLed, the metrics drain and tmpfs
+      salvage are abandoned, exit 130.
+
+    One keystroke counts once: process runners that forward the terminal's
+    group SIGINT to their child (``uv run`` does) deliver a single ^C twice —
+    the kernel coalesces near-simultaneous deliveries, the forwarded copy can
+    land a few hundred ms later (~200 ms measured for ``uv run``). Deliveries
+    within ``_DUP_DELIVERY_WINDOW_S`` of the last accepted one are dropped as
+    duplicates; a deliberate later press always forces.
     """
+
+    _DUP_DELIVERY_WINDOW_S = 1.0
 
     def __init__(self) -> None:
         self.interrupted = False
@@ -65,6 +73,7 @@ class SigintGovernor:
         self._session: BenchmarkSession | None = None
         self._task: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._last_accepted_monotonic = float("-inf")
 
     def bind_task(
         self, task: asyncio.Task | None, loop: asyncio.AbstractEventLoop
@@ -76,7 +85,13 @@ class SigintGovernor:
     def bind_session(self, session: BenchmarkSession) -> None:
         self._session = session
 
-    def __call__(self, signum: int, frame: object) -> None:
+    def __call__(self, signum: int, frame: types.FrameType | None) -> None:
+        now = time.monotonic()
+        if now - self._last_accepted_monotonic < self._DUP_DELIVERY_WINDOW_S:
+            # Same keystroke, second delivery (group SIGINT + a forwarding
+            # runner like `uv run`) — not a user escalation.
+            return
+        self._last_accepted_monotonic = now
         if self.interrupted:
             self.forced = True
             logger.warning(

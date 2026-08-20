@@ -826,6 +826,9 @@ async def _run_benchmark_async(
         event_log_dir=event_log_dir,
         metrics_output_dir=metrics_output_dir,
         loop=loop,
+        # Second ^C: the pipeline teardown SIGKILLs instead of the graceful
+        # SIGTERM-and-wait, regardless of where the cancellation unwound from.
+        force_quit=lambda: sigint is not None and sigint.forced,
     )
     report: Report | None = None
     profiler: ProfileController
@@ -877,6 +880,8 @@ async def _run_benchmark_async(
                     session_id=session_id,
                 )
                 watchdog.bind_session(session)
+                if sigint is not None:
+                    sigint.bind_session(session)
                 phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
 
                 max_duration_ms = (
@@ -914,8 +919,6 @@ async def _run_benchmark_async(
                     # issued, so the server is armed when traffic begins.
                     profiler.start()
 
-                if sigint is not None:
-                    sigint.bind_session(session)
                 try:
                     # A pre-session fire already stopped the session inside
                     # bind_session: zero samples issue, STARTED/ENDED still
@@ -962,31 +965,44 @@ async def _run_benchmark_async(
                     # Unifies the clean phase-end path and the abort path — both
                     # reach this block. A watchdog abort counts as an abort even
                     # when session.run returned normally after session.stop().
-                    profiler.stop(session_completed_normally and not watchdog.fired)
-                    # Graceful drain runs on both the clean-finish and session-
-                    # failure paths (BenchmarkSession.run publishes ENDED in its own
-                    # finally, so a failed run still has a terminal snapshot worth
-                    # draining). Nulls pipe.publisher so __aexit__ releases the ZMQ
-                    # scope without killing the services.
-                    try:
-                        report = await pipe.drain_and_build_report()
-                        if report is None:
-                            raise ExecutionError(
-                                "Benchmark completed without a usable metrics report"
+                    # Skipped on force-quit: no blocking HTTP on the way out.
+                    if not (sigint is not None and sigint.forced):
+                        profiler.stop(session_completed_normally and not watchdog.fired)
+                    if sigint is not None and sigint.forced:
+                        # Second ^C: abandon the drain entirely — SIGKILL the
+                        # service children now so the pipeline __aexit__ has
+                        # nothing left to wait for. No report, no metrics
+                        # salvage; the run exits 130 immediately.
+                        pipe.kill_now()
+                    else:
+                        # Graceful drain runs on both the clean-finish and
+                        # session-failure paths (BenchmarkSession.run publishes
+                        # ENDED in its own finally, so a failed run still has a
+                        # terminal snapshot worth draining). Nulls
+                        # pipe.publisher so __aexit__ releases the ZMQ scope
+                        # without killing the services.
+                        try:
+                            report = await pipe.drain_and_build_report()
+                            if report is None:
+                                raise ExecutionError(
+                                    "Benchmark completed without a usable "
+                                    "metrics report"
+                                )
+                        except Exception as e:  # noqa: BLE001
+                            # On a clean run a drain / report-build failure must
+                            # be loud: silently returning report=None would exit
+                            # 0 with no perf artifacts. On the session-failure
+                            # path the run is already raising, so swallow it
+                            # there rather than let a teardown error replace the
+                            # in-flight exception; run_benchmark still fails the
+                            # run on a missing report.
+                            if session_completed_normally:
+                                raise
+                            logger.warning(
+                                "Drain/report build error suppressed (run "
+                                "already failing): %s",
+                                e,
                             )
-                    except Exception as e:  # noqa: BLE001
-                        # On a clean run a drain / report-build failure must be loud:
-                        # silently returning report=None would exit 0 with no perf
-                        # artifacts. On the session-failure path the run is already
-                        # raising, so swallow it there rather than let a teardown
-                        # error replace the in-flight exception.
-                        if session_completed_normally:
-                            raise
-                        logger.warning(
-                            "Drain/report build error suppressed (run already "
-                            "failing): %s",
-                            e,
-                        )
             finally:
                 # Runs on every path, including a setup error before session.run
                 # (which never reaches the session finally above). pbar.close() is
@@ -1001,12 +1017,23 @@ async def _run_benchmark_async(
                 except Exception as e:  # noqa: BLE001 — progress bar is cosmetic
                     logger.warning("Progress bar close error: %s", e)
                 if http_client is not None:
-                    try:
-                        await http_client.shutdown_async()
-                    except Exception as e:  # noqa: BLE001 — best-effort; idempotent
-                        logger.warning(f"Client cleanup error: {e}")
+                    if sigint is not None and sigint.forced:
+                        # Second ^C: SIGKILL the worker processes — no graceful
+                        # wait, no transport teardown; the process is exiting.
+                        http_client.kill_workers()
+                    else:
+                        try:
+                            await http_client.shutdown_async()
+                        except Exception as e:  # noqa: BLE001 — best-effort; idempotent
+                            logger.warning(f"Client cleanup error: {e}")
     except BaseException as e:
-        if tmpfs_dir.exists():
+        # Force-quit wins over exception identity: once the user pressed ^C
+        # twice, the exit is theirs no matter what the cancellation unwound
+        # into on its way out.
+        forced_quit = sigint is not None and sigint.forced
+        # Force-quit abandons even the tmpfs salvage; every other abnormal
+        # path preserves the event log.
+        if tmpfs_dir.exists() and not forced_quit:
             try:
                 _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
                 shutil.rmtree(tmpfs_dir, ignore_errors=True)
@@ -1016,14 +1043,15 @@ async def _run_benchmark_async(
                     salvage_err,
                     tmpfs_dir,
                 )
-        if (
-            sigint is not None
-            and sigint.forced
-            and isinstance(e, asyncio.CancelledError)
-        ):
-            # Second ^C cancelled this task to abandon the teardown; the
-            # pipeline __aexit__ has killed the service children above.
-            # Surface as the user's Ctrl-C, not a bare cancellation.
+        if forced_quit:
+            # Second ^C: the pipeline __aexit__ above already SIGKILLed the
+            # service children (force_quit predicate); kill the HTTP workers
+            # too in case the cancellation landed inside their graceful
+            # shutdown await. Both are idempotent. Surface as the user's
+            # Ctrl-C, not a bare cancellation.
+            pipe.kill_now()
+            if http_client is not None:
+                http_client.kill_workers()
             raise KeyboardInterrupt from e
         if watchdog.fired and isinstance(e, Exception | asyncio.CancelledError):
             # The watchdog aborted the run: the pre-session fire cancels this
@@ -1050,6 +1078,23 @@ async def _run_benchmark_async(
     )
 
 
+_SIGINT_NOT_INSTALLED = object()
+"""Sentinel separating "governor never installed" from a ``None`` previous
+handler (``signal.signal`` returns ``None`` for C-installed handlers, which
+must still be restored)."""
+
+
+def _run_deadline(config: BenchmarkConfig) -> float | None:
+    """Monotonic deadline for ``settings.timeouts.run_timeout_s`` (None = off).
+
+    Callers anchor it deliberately: ``run_benchmark`` before setup (the whole
+    run counts), ``run_benchmark_async`` at entry (each audit phase gets a
+    full budget).
+    """
+    run_timeout_s = config.settings.timeouts.run_timeout_s
+    return None if run_timeout_s is None else time.monotonic() + run_timeout_s
+
+
 def run_benchmark_async(
     ctx: BenchmarkContext,
     *,
@@ -1062,11 +1107,8 @@ def run_benchmark_async(
     computes its own deadline at entry, so each audit phase gets a full
     per-phase budget.
     """
-    if (
-        deadline is None
-        and (run_timeout_s := ctx.config.settings.timeouts.run_timeout_s) is not None
-    ):
-        deadline = time.monotonic() + run_timeout_s
+    if deadline is None:
+        deadline = _run_deadline(ctx.config)
     loop = LoopManager().default_loop
     return loop.run_until_complete(
         _run_benchmark_async(ctx, loop, deadline=deadline, sigint=sigint)
@@ -1193,15 +1235,17 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     collector = bench.collector
     report = bench.report
     aborted = bench.run_timed_out or bench.user_interrupted
-    if report is not None and aborted and report.complete:
+    if report is not None and aborted and report.state == "complete":
         # Split-brain guard: the aggregator may have finalized COMPLETE before
         # the watchdog's SIGTERM landed — or a ^C arrived after the session
         # already published its terminal ENDED (drain window), so the
-        # INTERRUPTED marker never went out. An aborted run must never publish
-        # complete:true artifacts, so force both fields honest before writing —
-        # state stays what the abort path would have recorded, and consumers
-        # keying on state=="complete" and not complete (the drain-timeout
-        # signature) don't misattribute an abort to a slow drain.
+        # INTERRUPTED marker never went out. Keyed on state (not the derived
+        # ``complete`` flag) so the drain-timeout subcase — state "complete"
+        # with pending tasks — is corrected too. An aborted run must never
+        # publish state-complete artifacts, so force both fields honest before
+        # writing; consumers keying on state=="complete" and not complete (the
+        # drain-timeout signature) then can't misattribute an abort to a slow
+        # drain.
         report = msgspec.structs.replace(report, complete=False, state="interrupted")
 
     # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
@@ -1283,15 +1327,14 @@ def run_benchmark(
     )
     # Deadline for the whole-run watchdog is taken at entry so setup
     # (tokenizer/dataset load) counts against run_timeout_s too.
-    deadline: float | None = None
-    if (run_timeout_s := config.settings.timeouts.run_timeout_s) is not None:
-        deadline = time.monotonic() + run_timeout_s
+    deadline = _run_deadline(config)
+    run_timeout_s = config.settings.timeouts.run_timeout_s
     # The run's ONE SIGINT handler, installed here and restored in the finally
-    # — no window-scoped install/remove pairs anywhere else in the run (their
-    # gaps are where a ^C used to abort teardown as a raw KeyboardInterrupt).
+    # — no window-scoped install/remove pairs anywhere else in the run, so
+    # there is no gap where a ^C aborts teardown as a raw KeyboardInterrupt.
     # No session bound yet, so a ^C during setup keeps default abort behavior.
     sigint = SigintGovernor()
-    prev_sigint = None
+    prev_sigint: object = _SIGINT_NOT_INSTALLED
     try:
         prev_sigint = signal.signal(signal.SIGINT, sigint)
     except ValueError:
@@ -1341,19 +1384,30 @@ def run_benchmark(
             # complete: false; fail loudly instead of exiting 0 on partial
             # ISL/OSL/TPOT stats.
             raise ExecutionError(
-                "Metrics drain timed out "
+                "Metrics tokenization did not finish (n_pending_tasks > 0 in "
+                "the final snapshot): the drain deadline expired "
                 f"(metrics_drain_timeout_s="
-                f"{config.settings.timeouts.metrics_drain_timeout_s}): "
-                "tokenization did not finish before the deadline; report is "
-                "partial (complete: false in result_summary.json)"
+                f"{config.settings.timeouts.metrics_drain_timeout_s}) or the "
+                "tokenizer failed mid-drain — see the aggregator log; report "
+                "is partial (complete: false in result_summary.json)"
+            )
+        if bench.report is None:
+            # Aborted-without-flags path (e.g. transport closure) whose drain
+            # also failed: nothing above raised, but there is no report to
+            # stand behind — never exit 0 without one.
+            raise ExecutionError(
+                "Benchmark produced no usable metrics report; see the drain "
+                "errors above"
             )
     except KeyboardInterrupt:
         # Salvage results (finally), then propagate to main.py -> exit 130.
         logger.warning("Benchmark interrupted by user")
         raise
     finally:
-        if prev_sigint is not None:
-            signal.signal(signal.SIGINT, prev_sigint)
+        if prev_sigint is not _SIGINT_NOT_INSTALLED:
+            # Restore whatever was installed before — including None (a
+            # C-installed handler), which `signal.signal` accepts back.
+            signal.signal(signal.SIGINT, prev_sigint)  # type: ignore[arg-type]
         if bench:
             if bench.tmpfs_dir.exists():
                 try:

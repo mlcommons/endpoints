@@ -802,7 +802,16 @@ class WarmupConfig(BaseModel):
 
 
 class Timeouts(WithUpdatesMixin, BaseModel):
-    """All global waits and deadlines. ``None`` = wait indefinitely / off.
+    """All global waits and deadlines.
+
+    Two value conventions, stated once here:
+
+    - Wait bounds (``service_ready_timeout_s``, ``*_drain_timeout_s``):
+      ``None`` = wait indefinitely, ``0`` = zero budget (give up / skip
+      immediately).
+    - The watchdog (``run_timeout_s``): ``None`` = off; ``0`` is rejected
+      (``gt=0``) because a zero-length run is never meaningful — there is no
+      "skip" semantics for the run itself.
 
     Reaching an optional deadline means something is stuck; ``run_timeout_s``
     is the whole-run watchdog — when it fires the run is aborted and the
@@ -826,8 +835,11 @@ class Timeouts(WithUpdatesMixin, BaseModel):
         None,
         gt=0,
         description=(
-            "Whole-run watchdog in seconds (None = off). Covers every phase "
-            "including drains; firing aborts the run, marks the report "
+            "Whole-run watchdog in seconds (None = off). Bounds the run from "
+            "service launch through every phase and drain; synchronous setup "
+            "(tokenizer probe, dataset load) counts against the budget but is "
+            "only checked at its boundary — a hung setup call itself is not "
+            "interrupted. Firing aborts the run, marks the report "
             "INTERRUPTED, and exits non-zero. Never derives per-stage deadlines."
         ),
     )
