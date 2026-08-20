@@ -204,12 +204,16 @@ One handler owns SIGINT for the whole run:
 - **^C during setup** (dataset/tokenizer load, before services): immediate
   abort, exit 130, no artifacts.
 
-A ^C'd run never exits 0 and its `result_summary.json` is never
-`complete: true`. **Precedence**: `result_summary.json` + the exit code are
-the run-level truth; `metrics/final_snapshot.json` records what the
-aggregator itself observed and can legitimately read `state: complete` when
-the ^C lands after the session already published its terminal ENDED (the
-metrics-drain window) — the aggregator saw a run that ended normally.
+A ^C'd run never exits 0. `result_summary.json` is never `complete: true`
+for a run whose measurement was cut short — with one honest exception: a ^C
+landing during post-measurement finalization (accuracy scoring) of an
+already-completed run still exits 130, but keeps the completed perf
+artifacts as written; the measurement really finished. **Precedence**:
+`result_summary.json` + the exit code are the run-level truth;
+`metrics/final_snapshot.json` records what the aggregator itself observed
+and can legitimately read `state: complete` when the ^C lands after the
+session already published its terminal ENDED (the metrics-drain window) —
+the aggregator saw a run that ended normally.
 
 ## Environment Variables
 
