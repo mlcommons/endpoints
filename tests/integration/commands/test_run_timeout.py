@@ -68,29 +68,70 @@ def _read_result_summary(report_dir: Path) -> dict:
     return json.loads((report_dir / "performance" / "result_summary.json").read_text())
 
 
+def _make_config(
+    endpoint_url: str,
+    dataset_path: Path,
+    report_dir: Path,
+    *,
+    test_type: TestType = TestType.OFFLINE,
+    model_name: str = "echo-server",
+    load_pattern: LoadPattern | None = None,
+    runtime: RuntimeConfig | None = None,
+    timeouts: Timeouts | None = None,
+    metrics_tokenizer_workers: int | None = None,
+) -> BenchmarkConfig:
+    settings_kwargs: dict = {
+        "load_pattern": load_pattern
+        or LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        "client": _FAST_CLIENT,
+        "warmup": WarmupConfig(enabled=False),
+    }
+    if runtime is not None:
+        settings_kwargs["runtime"] = runtime
+    if timeouts is not None:
+        settings_kwargs["timeouts"] = timeouts
+    if metrics_tokenizer_workers is not None:
+        settings_kwargs["metrics_tokenizer_workers"] = metrics_tokenizer_workers
+    return BenchmarkConfig(
+        type=test_type,
+        endpoint_config=EndpointConfig(endpoints=[endpoint_url]),
+        model_params=ModelParams(name=model_name, streaming=StreamingMode.OFF),
+        datasets=[Dataset(path=str(dataset_path), type=DatasetType.PERFORMANCE)],
+        report_dir=report_dir,
+        settings=Settings(**settings_kwargs),
+    )
+
+
+def _write_big_prompts_dataset(tmp_path: Path) -> Path:
+    """~25 MB of prompt text; the echo server doubles it into OSL, so the
+    end-of-run drain has ~50M characters to tokenize — far more than any
+    small deadline allows on any hardware."""
+    dataset_path = tmp_path / "big_prompts.jsonl"
+    prompt = "lorem ipsum " * 21_000  # ~250 KB per sample
+    with dataset_path.open("w") as f:
+        for i in range(100):
+            f.write(json.dumps({"prompt": f"{i} {prompt}"}) + "\n")
+    return dataset_path
+
+
 @pytest.mark.integration
 def test_run_timeout_produces_interrupted_report(
     mock_http_echo_server, ds_dataset_path, tmp_path
 ):
     """run_timeout_s firing mid-run aborts with an INTERRUPTED report."""
-    config = BenchmarkConfig(
-        type=TestType.ONLINE,
-        endpoint_config=EndpointConfig(endpoints=[mock_http_echo_server.url]),
-        model_params=ModelParams(name="echo-server", streaming=StreamingMode.OFF),
-        datasets=[Dataset(path=str(ds_dataset_path), type=DatasetType.PERFORMANCE)],
-        report_dir=tmp_path,
-        settings=Settings(
-            load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=5),
-            client=_FAST_CLIENT,
-            # 600 samples at 5 QPS is a ~120 s workload, so only the watchdog
-            # can end the run. The budget must comfortably exceed service +
-            # worker startup (a fire before the session exists aborts the
-            # launch instead, without mid-run artifacts — a different path,
-            # covered by test_run_timeout_during_service_launch_aborts_promptly).
-            runtime=RuntimeConfig(n_samples_to_issue=600),
-            timeouts=Timeouts(run_timeout_s=6.0),
-            warmup=WarmupConfig(enabled=False),
-        ),
+    config = _make_config(
+        mock_http_echo_server.url,
+        ds_dataset_path,
+        tmp_path,
+        test_type=TestType.ONLINE,
+        load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=5),
+        # 600 samples at 5 QPS is a ~120 s workload, so only the watchdog
+        # can end the run. The budget must comfortably exceed service +
+        # worker startup (a fire before the session exists aborts the
+        # launch instead, without mid-run artifacts — a different path,
+        # covered by test_run_timeout_during_service_launch_aborts_promptly).
+        runtime=RuntimeConfig(n_samples_to_issue=600),
+        timeouts=Timeouts(run_timeout_s=6.0),
     )
 
     with pytest.raises(ExecutionError, match="Run timeout"):
@@ -110,18 +151,11 @@ def test_generous_run_timeout_completes_normally(
 ):
     """A run_timeout_s far above the workload length never fires: the run
     finishes cleanly and publishes a COMPLETE report."""
-    config = BenchmarkConfig(
-        type=TestType.OFFLINE,
-        endpoint_config=EndpointConfig(endpoints=[mock_http_echo_server.url]),
-        model_params=ModelParams(name="echo-server", streaming=StreamingMode.OFF),
-        datasets=[Dataset(path=str(ds_dataset_path), type=DatasetType.PERFORMANCE)],
-        report_dir=tmp_path,
-        settings=Settings(
-            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
-            client=_FAST_CLIENT,
-            timeouts=Timeouts(run_timeout_s=300.0),
-            warmup=WarmupConfig(enabled=False),
-        ),
+    config = _make_config(
+        mock_http_echo_server.url,
+        ds_dataset_path,
+        tmp_path,
+        timeouts=Timeouts(run_timeout_s=300.0),
     )
 
     run_benchmark(config, TestMode.PERF)  # must not raise
@@ -143,35 +177,19 @@ def test_run_timeout_during_metrics_drain_interrupts(mock_http_echo_server, tmp_
     aggregator drains, SIGTERM it, and surface the run as INTERRUPTED with
     a non-zero exit.
     """
-    # ~25 MB of prompt text; the echo server doubles it into OSL, so the
-    # drain has ~50M characters to tokenize — far more than run_timeout_s
-    # allows on any hardware.
-    dataset_path = tmp_path / "big_prompts.jsonl"
-    prompt = "lorem ipsum " * 21_000  # ~250 KB per sample
-    with dataset_path.open("w") as f:
-        for i in range(100):
-            f.write(json.dumps({"prompt": f"{i} {prompt}"}) + "\n")
-
-    report_dir = tmp_path / "report"
-    config = BenchmarkConfig(
-        type=TestType.OFFLINE,
-        endpoint_config=EndpointConfig(endpoints=[mock_http_echo_server.url]),
-        model_params=ModelParams(
-            name=str(_CHAR_TOKENIZER_DIR), streaming=StreamingMode.OFF
-        ),
-        datasets=[Dataset(path=str(dataset_path), type=DatasetType.PERFORMANCE)],
-        report_dir=report_dir,
-        settings=Settings(
-            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
-            client=_FAST_CLIENT,
-            # Defer every ISL/OSL tokenization to the end-of-run drain.
-            metrics_tokenizer_workers=0,
-            # metrics_drain_timeout_s stays None (unlimited): only the
-            # run watchdog can end the drain.
-            timeouts=Timeouts(run_timeout_s=2.5),
-            warmup=WarmupConfig(enabled=False),
-        ),
+    dataset_path = _write_big_prompts_dataset(tmp_path)
+    config = _make_config(
+        mock_http_echo_server.url,
+        dataset_path,
+        tmp_path / "report",
+        model_name=str(_CHAR_TOKENIZER_DIR),
+        # Defer every ISL/OSL tokenization to the end-of-run drain.
+        # metrics_drain_timeout_s stays None (unlimited): only the run
+        # watchdog can end the drain.
+        metrics_tokenizer_workers=0,
+        timeouts=Timeouts(run_timeout_s=2.5),
     )
+    report_dir = tmp_path / "report"
 
     with pytest.raises(ExecutionError, match="Run timeout"):
         run_benchmark(config, TestMode.PERF)
@@ -189,32 +207,19 @@ def test_metrics_drain_timeout_fails_run(mock_http_echo_server, tmp_path):
     with complete: false, and run_benchmark must raise so partial ISL/OSL
     stats can never look like a clean exit.
     """
-    dataset_path = tmp_path / "big_prompts.jsonl"
-    prompt = "lorem ipsum " * 21_000  # ~250 KB per sample
-    with dataset_path.open("w") as f:
-        for i in range(100):
-            f.write(json.dumps({"prompt": f"{i} {prompt}"}) + "\n")
-
-    report_dir = tmp_path / "report"
-    config = BenchmarkConfig(
-        type=TestType.OFFLINE,
-        endpoint_config=EndpointConfig(endpoints=[mock_http_echo_server.url]),
-        model_params=ModelParams(
-            name=str(_CHAR_TOKENIZER_DIR), streaming=StreamingMode.OFF
-        ),
-        datasets=[Dataset(path=str(dataset_path), type=DatasetType.PERFORMANCE)],
-        report_dir=report_dir,
-        settings=Settings(
-            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
-            client=_FAST_CLIENT,
-            # Defer every ISL/OSL tokenization to the end-of-run drain, then
-            # give the drain a budget far below the ~50M-char backlog. No run
-            # watchdog: the drain deadline itself must fail the run.
-            metrics_tokenizer_workers=0,
-            timeouts=Timeouts(metrics_drain_timeout_s=1.0),
-            warmup=WarmupConfig(enabled=False),
-        ),
+    dataset_path = _write_big_prompts_dataset(tmp_path)
+    config = _make_config(
+        mock_http_echo_server.url,
+        dataset_path,
+        tmp_path / "report",
+        model_name=str(_CHAR_TOKENIZER_DIR),
+        # Defer every ISL/OSL tokenization to the end-of-run drain, then
+        # give the drain a budget far below the ~50M-char backlog. No run
+        # watchdog: the drain deadline itself must fail the run.
+        metrics_tokenizer_workers=0,
+        timeouts=Timeouts(metrics_drain_timeout_s=1.0),
     )
+    report_dir = tmp_path / "report"
 
     with pytest.raises(ExecutionError, match="Metrics tokenization did not finish"):
         run_benchmark(config, TestMode.PERF)
@@ -238,18 +243,13 @@ def test_run_timeout_during_service_launch_aborts_promptly(
     of running out their own readiness timeouts, and the abort is attributed
     to the run timeout (ExecutionError), not to a secondary launch error.
     """
-    config = BenchmarkConfig(
-        type=TestType.ONLINE,
-        endpoint_config=EndpointConfig(endpoints=[mock_http_echo_server.url]),
-        model_params=ModelParams(name="echo-server", streaming=StreamingMode.OFF),
-        datasets=[Dataset(path=str(ds_dataset_path), type=DatasetType.PERFORMANCE)],
-        report_dir=tmp_path,
-        settings=Settings(
-            load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=5),
-            client=_FAST_CLIENT,
-            runtime=RuntimeConfig(n_samples_to_issue=10),
-            warmup=WarmupConfig(enabled=False),
-        ),
+    config = _make_config(
+        mock_http_echo_server.url,
+        ds_dataset_path,
+        tmp_path,
+        test_type=TestType.ONLINE,
+        load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=5),
+        runtime=RuntimeConfig(n_samples_to_issue=10),
     )
     ctx = setup_benchmark(config, TestMode.PERF)
 

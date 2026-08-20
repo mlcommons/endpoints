@@ -18,11 +18,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import itertools
 import signal
+import time
 from unittest.mock import MagicMock
 
 import pytest
-from inference_endpoint.commands.benchmark.watchdog import SigintGovernor
+from inference_endpoint.commands.benchmark.watchdog import (
+    PerfPhaseTimeout,
+    SigintGovernor,
+)
+from inference_endpoint.load_generator.session import PhaseType
 
 
 def _fire(gov: SigintGovernor) -> None:
@@ -37,27 +44,6 @@ def _distinct_fire(gov: SigintGovernor) -> None:
 
 @pytest.mark.unit
 class TestSigintGovernor:
-    def test_unbound_first_sigint_raises_keyboard_interrupt(self):
-        gov = SigintGovernor()
-        with pytest.raises(KeyboardInterrupt):
-            _fire(gov)
-        assert gov.interrupted
-        assert not gov.forced
-
-    @pytest.mark.asyncio
-    async def test_live_run_first_sigint_stops_session_gracefully(self):
-        gov = SigintGovernor()
-        session = MagicMock()
-        gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
-        gov.bind_session(session)
-
-        _fire(gov)
-        await asyncio.sleep(0)  # let the queued call_soon_threadsafe run
-
-        assert gov.interrupted
-        assert not gov.forced
-        session.stop.assert_called_once()
-
     def test_first_sigint_after_loop_returned_raises_immediately(self):
         """A ^C during sync finalization must not be swallowed.
 
@@ -97,31 +83,133 @@ class TestSigintGovernor:
         assert gov.forced
 
     @pytest.mark.asyncio
-    async def test_duplicate_delivery_within_window_is_dropped(self):
-        """One keystroke forwarded by a runner (uv run) must count once."""
+    @pytest.mark.parametrize("bound", [True, False], ids=["bound", "unbound"])
+    @pytest.mark.parametrize(
+        "deliveries",
+        [
+            seq
+            for n in (1, 2, 3)
+            for seq in itertools.product(("distinct", "dup"), repeat=n)
+            # A duplicate before any accepted delivery cannot occur: the dedup
+            # window opens on the first accepted ^C.
+            if seq[0] == "distinct"
+        ],
+        ids="-".join,
+    )
+    async def test_delivery_sequences_exhaustive(self, bound, deliveries):
+        """Every bind-state x delivery-sequence (length <= 3), exhaustively.
+
+        Contract: an accepted, distinct delivery is never silently dropped —
+        it schedules a graceful stop (first, bound), cancels the live run
+        task (second, bound), or raises KeyboardInterrupt (unbound). Only
+        duplicate deliveries inside the window are silent. Escalation to
+        force happens on exactly the second accepted delivery.
+        """
         gov = SigintGovernor()
         session = MagicMock()
-        gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
-        gov.bind_session(session)
+        run_task = asyncio.create_task(asyncio.sleep(30))
+        await asyncio.sleep(0)  # let the child task start
+        if bound:
+            gov.bind_task(run_task, asyncio.get_running_loop())
+            gov.bind_session(session)
 
-        _fire(gov)
-        _fire(gov)  # forwarded duplicate, inside the window
-        await asyncio.sleep(0)
+        accepted = 0
+        try:
+            for kind in deliveries:
+                if kind == "dup":
+                    # Inside the duplicate window of the previous delivery.
+                    gov._last_accepted_monotonic = time.monotonic()
+                else:
+                    gov._last_accepted_monotonic = float("-inf")
+                    accepted += 1
+                if kind == "distinct" and not bound:
+                    with pytest.raises(KeyboardInterrupt):
+                        gov(signal.SIGINT, None)
+                else:
+                    gov(signal.SIGINT, None)  # silent: bound or deduped
 
-        assert gov.interrupted
-        assert not gov.forced
-        session.stop.assert_called_once()
+            assert gov.interrupted
+            assert gov.forced == (accepted >= 2)
+            if bound:
+                await asyncio.sleep(0)  # run queued call_soon_threadsafe work
+                assert session.stop.call_count == 1
+                if accepted >= 2:
+                    # Force path cancelled the run task; let it settle.
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait_for(run_task, timeout=2.0)
+                    assert run_task.cancelled()
+                else:
+                    assert not run_task.done()
+            else:
+                session.stop.assert_not_called()
+                assert not run_task.done()
+        finally:
+            run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await run_task
+
+
+@pytest.mark.unit
+class TestPerfPhaseTimeout:
+    """The max_duration_ms cap bounds only the performance phase and never
+    truncates a subsequent accuracy phase (regression: a combined
+    perf+accuracy run was guillotined mid-accuracy because the perf timer
+    was never cancelled). Exercised against the real running loop.
+    """
 
     @pytest.mark.asyncio
-    async def test_second_distinct_sigint_cancels_live_run_task(self):
-        gov = SigintGovernor()
-        session = MagicMock()
-        gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
-        gov.bind_session(session)
+    async def test_cap_fires_after_max_duration(self):
+        fired = asyncio.Event()
+        timeout = PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
 
-        _fire(gov)
-        _distinct_fire(gov)
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.sleep(5)
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
 
-        assert gov.forced
+        await asyncio.wait_for(fired.wait(), timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_accuracy_phase_start_disarms_pending_perf_cap(self):
+        fired = asyncio.Event()
+        timeout = PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
+
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
+        timeout.on_phase_start(PhaseType.ACCURACY)
+
+        await asyncio.sleep(0.1)  # 5x the cap: a leaked timer would have fired
+        assert not fired.is_set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "max_duration_ms, phases",
+        [
+            pytest.param(None, [PhaseType.PERFORMANCE], id="no-max-duration"),
+            pytest.param(
+                20,
+                [PhaseType.WARMUP, PhaseType.ACCURACY],
+                id="non-performance-phases",
+            ),
+        ],
+    )
+    async def test_never_armed(self, max_duration_ms, phases):
+        fired = asyncio.Event()
+        timeout = PerfPhaseTimeout(
+            asyncio.get_running_loop(), max_duration_ms, fired.set
+        )
+
+        for phase_type in phases:
+            timeout.on_phase_start(phase_type)
+
+        await asyncio.sleep(0.1)
+        assert not fired.is_set()
+
+    @pytest.mark.asyncio
+    async def test_cancel_is_idempotent_and_disarms(self):
+        fired = asyncio.Event()
+        timeout = PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
+
+        timeout.cancel()  # no handle yet — must not raise
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
+        timeout.cancel()
+        timeout.cancel()
+
+        await asyncio.sleep(0.1)
+        assert not fired.is_set()

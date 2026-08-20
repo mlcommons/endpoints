@@ -13,29 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Whole-process Ctrl-C integration test.
+"""Whole-process Ctrl-C integration tests.
 
-The one interruption path no unit test can compose: a real
+The interruption paths no unit test can compose: a real
 ``inference-endpoint`` subprocess in its own process group receives SIGINT
 (exactly what a terminal ^C delivers to the foreground group — parent and
-service children alike) mid-run. The contract:
+service children alike). The contract, at every delivery point:
 
 - exit code 130 (user abort, distinct from failure exit codes 1-4);
 - artifacts are honest: ``final_snapshot.json`` ``state=interrupted`` (the
   session's INTERRUPTED marker drives the aggregator's ENDED finalize) and
-  ``result_summary.json`` ``complete: false``;
+  ``result_summary.json`` ``complete: false`` — or no artifacts at all,
+  never a COMPLETE-looking report from an aborted run;
 - ``events.jsonl`` survives — the event logger ignores the group SIGINT and
   flushes on the session's terminal ENDED;
 - no service child outlives the run;
 - teardown is prompt, not a hang on an unbounded drain.
 """
 
+import contextlib
 import json
 import os
 import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -75,6 +78,42 @@ settings:
     )
 
 
+def _cli() -> str:
+    cli = shutil.which("inference-endpoint")
+    assert cli is not None, "console script must be installed in the test venv"
+    return cli
+
+
+@contextlib.contextmanager
+def _benchmark_proc(argv: list[str]) -> Iterator[subprocess.Popen]:
+    """A benchmark subprocess in its own group, SIGKILLed on exit if alive."""
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,  # own process group, like a foreground job
+    )
+    try:
+        yield proc
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+
+def _wait_services_ready(
+    proc: subprocess.Popen, report_dir: Path, timeout: float = 60.0
+) -> None:
+    """Block until the aggregator touches metrics/.ready (handlers installed);
+    the session starts issuing right after service readiness."""
+    ready = report_dir / "metrics" / ".ready"
+    deadline = time.monotonic() + timeout
+    while not ready.exists():
+        assert proc.poll() is None, "benchmark died before services came up"
+        assert time.monotonic() < deadline, "services never became ready"
+        time.sleep(0.1)
+
+
 def _procs_referencing(needle: str) -> list[str]:
     """Cmdlines of live processes whose argv mentions ``needle`` (Linux)."""
     hits = []
@@ -90,64 +129,23 @@ def _procs_referencing(needle: str) -> list[str]:
     return hits
 
 
-@pytest.mark.integration
-def test_sigint_mid_run_exits_130_with_interrupted_artifacts(
-    mock_http_echo_server, tmp_path
-):
-    cli = shutil.which("inference-endpoint")
-    assert cli is not None, "console script must be installed in the test venv"
-
-    report_dir = tmp_path / "report"
-    config_path = tmp_path / "bench.yaml"
-    _write_config(report_dir, mock_http_echo_server.url, config_path)
-
-    proc = subprocess.Popen(
-        [cli, "benchmark", "from-config", "-c", str(config_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,  # own process group, like a foreground job
-    )
-    try:
-        # The aggregator touches metrics/.ready once its signal handlers are
-        # registered; the session starts issuing right after service readiness.
-        ready = report_dir / "metrics" / ".ready"
-        deadline = time.monotonic() + 60.0
-        while not ready.exists():
-            assert proc.poll() is None, "benchmark died before services came up"
-            assert time.monotonic() < deadline, "services never became ready"
-            time.sleep(0.1)
-        time.sleep(3.0)  # comfortably inside the ~120 s performance phase
-
-        os.killpg(proc.pid, signal.SIGINT)
-        rc = proc.wait(timeout=60.0)
-    finally:
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-
-    assert rc == 130, f"user abort must exit 130, got {rc}"
-
-    snapshot = json.loads((report_dir / "metrics" / "final_snapshot.json").read_text())
-    assert snapshot["state"] == "interrupted"
-
-    summary = json.loads(
-        (report_dir / "performance" / "result_summary.json").read_text()
-    )
-    assert summary["complete"] is False
-
-    # The event logger must survive the group SIGINT and flush on ENDED.
-    assert (
-        report_dir / "events.jsonl"
-    ).exists(), "events.jsonl missing — event logger died on ^C instead of flushing"
-
-    # No aggregator/event-logger child may outlive the run.
+def _assert_no_leftover_children(report_dir: Path, what: str) -> None:
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         leftovers = _procs_referencing(str(report_dir))
         if not leftovers:
-            break
+            return
         time.sleep(0.2)
-    assert not leftovers, f"service children outlived the run: {leftovers}"
+    raise AssertionError(f"service children outlived the {what}: {leftovers}")
+
+
+def _assert_interrupted_artifacts(report_dir: Path) -> None:
+    snapshot = json.loads((report_dir / "metrics" / "final_snapshot.json").read_text())
+    assert snapshot["state"] == "interrupted"
+    summary = json.loads(
+        (report_dir / "performance" / "result_summary.json").read_text()
+    )
+    assert summary["complete"] is False
 
 
 def _pid_of_child(needle: str, extra: str) -> int | None:
@@ -165,6 +163,31 @@ def _pid_of_child(needle: str, extra: str) -> int | None:
 
 
 @pytest.mark.integration
+def test_sigint_mid_run_exits_130_with_interrupted_artifacts(
+    mock_http_echo_server, tmp_path
+):
+    report_dir = tmp_path / "report"
+    config_path = tmp_path / "bench.yaml"
+    _write_config(report_dir, mock_http_echo_server.url, config_path)
+
+    with _benchmark_proc(
+        [_cli(), "benchmark", "from-config", "-c", str(config_path)]
+    ) as proc:
+        _wait_services_ready(proc, report_dir)
+        time.sleep(3.0)  # comfortably inside the ~120 s performance phase
+        os.killpg(proc.pid, signal.SIGINT)
+        rc = proc.wait(timeout=60.0)
+
+    assert rc == 130, f"user abort must exit 130, got {rc}"
+    _assert_interrupted_artifacts(report_dir)
+    # The event logger must survive the group SIGINT and flush on ENDED.
+    assert (
+        report_dir / "events.jsonl"
+    ).exists(), "events.jsonl missing — event logger died on ^C instead of flushing"
+    _assert_no_leftover_children(report_dir, "run")
+
+
+@pytest.mark.integration
 def test_second_sigint_force_quits_immediately(mock_http_echo_server, tmp_path):
     """Second ^C abandons a wedged metrics drain and exits 130 promptly.
 
@@ -175,45 +198,31 @@ def test_second_sigint_force_quits_immediately(mock_http_echo_server, tmp_path):
     for the stopped aggregator; the second ^C must SIGKILL the children and
     exit 130 within seconds.
     """
-    cli = shutil.which("inference-endpoint")
-    assert cli is not None, "console script must be installed in the test venv"
-
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"
     _write_config(report_dir, mock_http_echo_server.url, config_path)
 
-    proc = subprocess.Popen(
-        [cli, "benchmark", "from-config", "-c", str(config_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
     agg_pid: int | None = None
     try:
-        ready = report_dir / "metrics" / ".ready"
-        deadline = time.monotonic() + 60.0
-        while not ready.exists():
-            assert proc.poll() is None, "benchmark died before services came up"
-            assert time.monotonic() < deadline, "services never became ready"
-            time.sleep(0.1)
-        time.sleep(3.0)  # comfortably inside the ~120 s performance phase
+        with _benchmark_proc(
+            [_cli(), "benchmark", "from-config", "-c", str(config_path)]
+        ) as proc:
+            _wait_services_ready(proc, report_dir)
+            time.sleep(3.0)  # comfortably inside the ~120 s performance phase
 
-        agg_pid = _pid_of_child("metrics_aggregator", str(report_dir))
-        assert agg_pid is not None, "aggregator child not found"
-        os.kill(agg_pid, signal.SIGSTOP)  # wedge the drain
+            agg_pid = _pid_of_child("metrics_aggregator", str(report_dir))
+            assert agg_pid is not None, "aggregator child not found"
+            os.kill(agg_pid, signal.SIGSTOP)  # wedge the drain
 
-        os.kill(proc.pid, signal.SIGINT)
-        time.sleep(2.0)  # graceful path engaged; drain parked on the wedge
-        assert proc.poll() is None, "first ^C must keep waiting on the drain"
+            os.kill(proc.pid, signal.SIGINT)
+            time.sleep(2.0)  # graceful path engaged; drain parked on the wedge
+            assert proc.poll() is None, "first ^C must keep waiting on the drain"
 
-        os.kill(proc.pid, signal.SIGINT)
-        start = time.monotonic()
-        rc = proc.wait(timeout=15.0)
-        force_quit_latency = time.monotonic() - start
+            os.kill(proc.pid, signal.SIGINT)
+            start = time.monotonic()
+            rc = proc.wait(timeout=15.0)
+            force_quit_latency = time.monotonic() - start
     finally:
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
         if agg_pid is not None:
             try:
                 os.kill(agg_pid, signal.SIGKILL)  # SIGKILL reaps stopped procs
@@ -224,15 +233,7 @@ def test_second_sigint_force_quits_immediately(mock_http_echo_server, tmp_path):
     assert (
         force_quit_latency < 10.0
     ), f"force quit took {force_quit_latency:.1f}s — the drain was not abandoned"
-
-    # SIGKILLed children must not outlive the run.
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        leftovers = _procs_referencing(str(report_dir))
-        if not leftovers:
-            break
-        time.sleep(0.2)
-    assert not leftovers, f"service children outlived the force quit: {leftovers}"
+    _assert_no_leftover_children(report_dir, "force quit")
 
 
 @pytest.mark.integration
@@ -242,37 +243,19 @@ def test_sigint_before_session_exits_130(mock_http_echo_server, tmp_path):
     No session is bound yet, so the governor falls back to an immediate
     KeyboardInterrupt — the run must not hang or exit 0.
     """
-    cli = shutil.which("inference-endpoint")
-    assert cli is not None, "console script must be installed in the test venv"
-
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"
     _write_config(report_dir, mock_http_echo_server.url, config_path)
 
-    proc = subprocess.Popen(
-        [cli, "benchmark", "from-config", "-c", str(config_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    try:
+    with _benchmark_proc(
+        [_cli(), "benchmark", "from-config", "-c", str(config_path)]
+    ) as proc:
         time.sleep(1.5)  # interpreter up, setup underway; services not ready
         os.killpg(proc.pid, signal.SIGINT)
         rc = proc.wait(timeout=30.0)
-    finally:
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
 
     assert rc == 130, f"pre-session ^C must exit 130, got {rc}"
-
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        leftovers = _procs_referencing(str(report_dir))
-        if not leftovers:
-            break
-        time.sleep(0.2)
-    assert not leftovers, f"children outlived the aborted run: {leftovers}"
+    _assert_no_leftover_children(report_dir, "aborted run")
 
 
 @pytest.mark.integration
@@ -292,7 +275,7 @@ def test_single_group_sigint_under_uv_run_is_graceful(mock_http_echo_server, tmp
     config_path = tmp_path / "bench.yaml"
     _write_config(report_dir, mock_http_echo_server.url, config_path)
 
-    proc = subprocess.Popen(
+    with _benchmark_proc(
         [
             uv,
             "run",
@@ -301,33 +284,13 @@ def test_single_group_sigint_under_uv_run_is_graceful(mock_http_echo_server, tmp
             "from-config",
             "-c",
             str(config_path),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    try:
-        ready = report_dir / "metrics" / ".ready"
-        deadline = time.monotonic() + 90.0
-        while not ready.exists():
-            assert proc.poll() is None, "benchmark died before services came up"
-            assert time.monotonic() < deadline, "services never became ready"
-            time.sleep(0.1)
+        ]
+    ) as proc:
+        _wait_services_ready(proc, report_dir, timeout=90.0)
         time.sleep(3.0)
-
         os.killpg(proc.pid, signal.SIGINT)  # one keystroke: group + uv forward
         rc = proc.wait(timeout=60.0)
-    finally:
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
 
     assert rc == 130, f"user abort must exit 130, got {rc}"
-
     # The graceful path writes the report; a force quit would have skipped it.
-    summary = json.loads(
-        (report_dir / "performance" / "result_summary.json").read_text()
-    )
-    assert summary["complete"] is False
-    snapshot = json.loads((report_dir / "metrics" / "final_snapshot.json").read_text())
-    assert snapshot["state"] == "interrupted"
+    _assert_interrupted_artifacts(report_dir)
