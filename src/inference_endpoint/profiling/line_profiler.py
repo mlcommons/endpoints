@@ -20,10 +20,10 @@ This module provides a clean singleton API for profiling:
 - Controlled via ENABLE_LINE_PROFILER environment variable
 - No-op decorators when disabled (zero overhead)
 - Support for both sync and async functions
-- Automatic cleanup on process exit
+- Stats are dumped by an explicit ``shutdown()`` at each process's exit
+  point (CLI ``run()``, ``worker_main``, pytest sessionfinish) — no atexit
 """
 
-import atexit
 import contextlib
 import io
 import os
@@ -70,7 +70,6 @@ class ProfilerState:
         self._stats_printed = False
         logfile = os.environ.get(ENV_VAR_LINE_PROFILER_LOGFILE, None)
         self.output_file = Path(logfile) if logfile else None
-        self._atexit_registered = False
 
         if self.enabled:
             if LineProfiler is None:
@@ -80,25 +79,9 @@ class ProfilerState:
                 )
             self.profiler = LineProfiler()
             self.profiler.enable()
-            atexit.register(self._safe_cleanup)
-            self._atexit_registered = True
-
-    def _safe_cleanup(self):
-        """Safe cleanup wrapper that suppresses all errors during atexit."""
-        if not self._atexit_registered:
-            return
-
-        try:
-            self._cleanup()
-        except:  # noqa: E722
-            pass  # Suppress all errors during shutdown
 
     def _cleanup(self):
-        """Cleanup function called at interpreter exit or explicit shutdown.
-
-        Prints stats (if any) and then completely tears down the profiler
-        to prevent shutdown errors.
-        """
+        """Print pending stats and tear the profiler down. Idempotent."""
         if not self.profiler or self._stats_printed or not self.profiler.functions:
             self._teardown_profiler()
             return
@@ -182,11 +165,9 @@ class ProfilerState:
                 pass  # Already torn down
 
     def shutdown(self):
-        """Explicit shutdown for worker processes. Safe to call multiple times."""
+        """Print pending stats and tear down. Safe to call multiple times."""
         if self._stats_printed:
             return
-
-        self._atexit_registered = False  # Prevent double-printing via atexit
         self._cleanup()
 
     def is_enabled(self) -> bool:

@@ -46,6 +46,7 @@ from inference_endpoint.endpoint_client.http import (
     PooledConnection,
 )
 from inference_endpoint.profiling import profile
+from inference_endpoint.profiling import shutdown as profiling_shutdown
 from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,10 @@ def worker_main(
     except Exception as e:
         logger.error(f"Crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
         sys.exit(1)
+    finally:
+        # Dump this worker's line-profiler stats to its per-PID logfile
+        # before the process exits (no-op unless ENABLE_LINE_PROFILER=1).
+        profiling_shutdown()
 
 
 class Worker:
