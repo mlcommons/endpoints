@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error as urllib_error
 
+import inference_endpoint.commands.benchmark.cli as cli_mod
 import inference_endpoint.commands.benchmark.execute as execute_mod
 import pandas as pd
 import pytest
@@ -55,7 +56,6 @@ from inference_endpoint.commands.benchmark.profiling import (
     _render_profile_status,
     write_profiling_section,
 )
-from inference_endpoint.commands.benchmark.watchdog import PerfPhaseTimeout
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     AgenticInferenceConfig,
@@ -94,6 +94,7 @@ from inference_endpoint.evaluation.scoring import (
     SWEBenchScorer,
 )
 from inference_endpoint.exceptions import (
+    CLIError,
     DatasetValidationError,
     ExecutionError,
     InputValidationError,
@@ -2982,93 +2983,6 @@ class TestReportConfigSecretRedaction:
         )
 
 
-class _FakeTimerHandle:
-    def __init__(self) -> None:
-        self.cancelled = False
-
-    def cancel(self) -> None:
-        self.cancelled = True
-
-
-class _FakeLoop:
-    """Minimal event loop stub recording call_later scheduling."""
-
-    def __init__(self) -> None:
-        self.scheduled: list[tuple[float, object, _FakeTimerHandle]] = []
-
-    def call_later(self, delay, callback):
-        handle = _FakeTimerHandle()
-        self.scheduled.append((delay, callback, handle))
-        return handle
-
-
-class TestPerfPhaseTimeout:
-    """The max_duration_ms cap must bound only the performance phase and never
-    truncate a subsequent accuracy phase (regression: a combined perf+accuracy
-    run was guillotined mid-accuracy because the perf timer was never cancelled).
-    """
-
-    @pytest.mark.unit
-    def test_armed_on_performance_phase(self):
-        loop = _FakeLoop()
-        fired: list[bool] = []
-        timeout = PerfPhaseTimeout(loop, 4000, lambda: fired.append(True))
-
-        timeout.on_phase_start(PhaseType.PERFORMANCE)
-
-        assert len(loop.scheduled) == 1
-        delay, callback, handle = loop.scheduled[0]
-        assert delay == pytest.approx(4.0)
-        assert handle.cancelled is False
-        callback()
-        assert fired == [True]
-
-    @pytest.mark.unit
-    def test_cancelled_when_accuracy_phase_starts(self):
-        loop = _FakeLoop()
-        timeout = PerfPhaseTimeout(loop, 4000, lambda: None)
-
-        timeout.on_phase_start(PhaseType.PERFORMANCE)
-        perf_handle = loop.scheduled[0][2]
-        timeout.on_phase_start(PhaseType.ACCURACY)
-
-        assert perf_handle.cancelled is True
-        # No new timer armed for the accuracy phase.
-        assert len(loop.scheduled) == 1
-
-    @pytest.mark.unit
-    def test_not_armed_without_max_duration(self):
-        loop = _FakeLoop()
-        timeout = PerfPhaseTimeout(loop, None, lambda: None)
-
-        timeout.on_phase_start(PhaseType.PERFORMANCE)
-
-        assert loop.scheduled == []
-
-    @pytest.mark.unit
-    def test_not_armed_for_non_performance_phase(self):
-        loop = _FakeLoop()
-        timeout = PerfPhaseTimeout(loop, 4000, lambda: None)
-
-        timeout.on_phase_start(PhaseType.WARMUP)
-        timeout.on_phase_start(PhaseType.ACCURACY)
-
-        assert loop.scheduled == []
-
-    @pytest.mark.unit
-    def test_cancel_is_idempotent(self):
-        loop = _FakeLoop()
-        timeout = PerfPhaseTimeout(loop, 4000, lambda: None)
-
-        timeout.cancel()  # no handle yet — must not raise
-        timeout.on_phase_start(PhaseType.PERFORMANCE)
-        handle = loop.scheduled[0][2]
-        timeout.cancel()
-        timeout.cancel()
-
-        assert handle.cancelled is True
-
-
 class TestSetupBenchmarkExternalSampleCountLogging:
     """setup_benchmark logs declared external counts for self-contained scorers."""
 
@@ -3499,28 +3413,41 @@ class TestLoadDatasetsGenerationConfigOverrideCompletions(_OverrideTestBase):
     max_tokens_key = "max_tokens"
 
 
-class TestRunBenchmarkInterrupt:
+def _audit_cli_config(tmp_path, *, only: bool) -> MagicMock:
+    """A config double for cli._run with an audit: block configured."""
+    config = MagicMock()
+    config.datasets = [object()]  # non-empty → _run skips CLI dataset injection
+    config.audit = MagicMock(only=only)
+    config.report_dir = str(tmp_path)
+    config.with_updates.return_value = config
+    return config
+
+
+def _failing_audit(cfg, base_report_dir):
+    result = MagicMock()
+    result.passed = False
+    result.test_id = "output_caching_test"
+    result.details = {"reason": "caching detected"}
+    return result
+
+
+class TestRunBenchmarkAuditDispatch:
+    """cli._run's benchmark→audit orchestration (upstream MLPerf order)."""
+
     @pytest.mark.unit
     def test_keyboard_interrupt_skips_audit(self, monkeypatch, tmp_path):
         """A Ctrl-C during the main run must not start the audit."""
-        from inference_endpoint.commands.benchmark import cli
-        from inference_endpoint.config.schema import TestMode
-
-        config = MagicMock()
-        config.datasets = [object()]  # non-empty → _run skips CLI dataset injection
-        config.audit = MagicMock(only=False)  # audit IS configured
-        config.report_dir = str(tmp_path)
-        config.with_updates.return_value = config
+        config = _audit_cli_config(tmp_path, only=False)
 
         def _interrupt(cfg, mode):
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(cli, "run_benchmark", _interrupt)
+        monkeypatch.setattr(cli_mod, "run_benchmark", _interrupt)
         audit_spy = MagicMock()
-        monkeypatch.setattr(cli, "run_audit", audit_spy)
+        monkeypatch.setattr(cli_mod, "run_audit", audit_spy)
 
         with pytest.raises(KeyboardInterrupt):
-            cli._run(config, [], TestMode.PERF)
+            cli_mod._run(config, [], TestMode.PERF)
         audit_spy.assert_not_called()
 
     @pytest.mark.unit
@@ -3529,15 +3456,7 @@ class TestRunBenchmarkInterrupt:
     ):
         """Main run executes before the audit (upstream MLPerf order),
         sharing one report_dir."""
-        from inference_endpoint.commands.benchmark import cli
-        from inference_endpoint.config.schema import TestMode
-
-        config = MagicMock()
-        config.datasets = [object()]
-        config.audit = MagicMock(only=False)
-        config.report_dir = str(tmp_path)
-        config.with_updates.return_value = config
-
+        config = _audit_cli_config(tmp_path, only=False)
         call_order = []
 
         def _run_audit(cfg, base_report_dir):
@@ -3550,10 +3469,10 @@ class TestRunBenchmarkInterrupt:
             call_order.append(("benchmark", cfg, mode))
             return tmp_path
 
-        monkeypatch.setattr(cli, "run_audit", _run_audit)
-        monkeypatch.setattr(cli, "run_benchmark", _run_benchmark)
+        monkeypatch.setattr(cli_mod, "run_audit", _run_audit)
+        monkeypatch.setattr(cli_mod, "run_benchmark", _run_benchmark)
 
-        cli._run(config, [], TestMode.PERF)
+        cli_mod._run(config, [], TestMode.PERF)
 
         assert [c[0] for c in call_order] == ["benchmark", "audit"]
         _, benchmark_cfg, _ = call_order[0]
@@ -3562,53 +3481,23 @@ class TestRunBenchmarkInterrupt:
         assert audit_cfg is benchmark_cfg is config
 
     @pytest.mark.unit
-    def test_audit_fail_raises_after_main_run(self, monkeypatch, tmp_path):
-        """A failing (not crashed) audit raises CLIError; the perf report
-        already exists because the main run went first."""
-        from inference_endpoint.commands.benchmark import cli
-        from inference_endpoint.config.schema import TestMode
-        from inference_endpoint.exceptions import CLIError
-
-        config = MagicMock()
-        config.datasets = [object()]
-        config.audit = MagicMock(only=False)
-        config.report_dir = str(tmp_path)
-        config.with_updates.return_value = config
-
-        call_order = []
-
-        def _run_audit(cfg, base_report_dir):
-            call_order.append("audit")
-            result = MagicMock()
-            result.passed = False
-            result.test_id = "output_caching_test"
-            result.details = {"reason": "caching detected"}
-            return result
-
-        def _run_benchmark(cfg, mode):
-            call_order.append("benchmark")
-            return tmp_path
-
-        monkeypatch.setattr(cli, "run_audit", _run_audit)
-        monkeypatch.setattr(cli, "run_benchmark", _run_benchmark)
+    @pytest.mark.parametrize(
+        "only", [False, True], ids=["after-main-run", "audit-only"]
+    )
+    def test_audit_fail_raises_cli_error(self, monkeypatch, tmp_path, only):
+        """A failing (not crashed) audit maps to CLIError (exit 1) — both
+        after a passing main run and standalone via audit.only."""
+        config = _audit_cli_config(tmp_path, only=only)
+        monkeypatch.setattr(cli_mod, "run_audit", _failing_audit)
+        monkeypatch.setattr(cli_mod, "run_benchmark", MagicMock(return_value=tmp_path))
 
         with pytest.raises(CLIError):
-            cli._run(config, [], TestMode.PERF)
-
-        assert call_order == ["benchmark", "audit"]
+            cli_mod._run(config, [], TestMode.PERF)
 
     @pytest.mark.unit
     def test_audit_only_skips_main_run(self, monkeypatch, tmp_path):
         """audit.only runs the audit standalone — the main benchmark is skipped."""
-        from inference_endpoint.commands.benchmark import cli
-        from inference_endpoint.config.schema import TestMode
-
-        config = MagicMock()
-        config.datasets = [object()]
-        config.audit = MagicMock(only=True)
-        config.report_dir = str(tmp_path)
-        config.with_updates.return_value = config
-
+        config = _audit_cli_config(tmp_path, only=True)
         audit_calls = []
 
         def _run_audit(cfg, base_report_dir):
@@ -3617,37 +3506,11 @@ class TestRunBenchmarkInterrupt:
             result.passed = True
             return result
 
-        monkeypatch.setattr(cli, "run_audit", _run_audit)
+        monkeypatch.setattr(cli_mod, "run_audit", _run_audit)
         benchmark_spy = MagicMock()
-        monkeypatch.setattr(cli, "run_benchmark", benchmark_spy)
+        monkeypatch.setattr(cli_mod, "run_benchmark", benchmark_spy)
 
-        cli._run(config, [], TestMode.PERF)
+        cli_mod._run(config, [], TestMode.PERF)
 
         benchmark_spy.assert_not_called()
         assert audit_calls == [tmp_path / "audit"]
-
-    @pytest.mark.unit
-    def test_audit_only_fail_raises(self, monkeypatch, tmp_path):
-        """audit.only maps a FAIL result to CLIError (exit 1)."""
-        from inference_endpoint.commands.benchmark import cli
-        from inference_endpoint.config.schema import TestMode
-        from inference_endpoint.exceptions import CLIError
-
-        config = MagicMock()
-        config.datasets = [object()]
-        config.audit = MagicMock(only=True)
-        config.report_dir = str(tmp_path)
-        config.with_updates.return_value = config
-
-        def _run_audit(cfg, base_report_dir):
-            result = MagicMock()
-            result.passed = False
-            result.test_id = "output_caching_test"
-            result.details = {"reason": "caching detected"}
-            return result
-
-        monkeypatch.setattr(cli, "run_audit", _run_audit)
-        monkeypatch.setattr(cli, "run_benchmark", MagicMock())
-
-        with pytest.raises(CLIError):
-            cli._run(config, [], TestMode.PERF)

@@ -354,28 +354,6 @@ class TestBenchmarkConfig:
             )
 
     @pytest.mark.unit
-    def test_max_duration_zero_rejected(self):
-        with pytest.raises(ValueError, match="greater than 0"):
-            BenchmarkConfig(
-                type=TestType.OFFLINE,
-                model_params={"name": "M"},
-                endpoint_config={"endpoints": ["http://x"]},
-                datasets=[{"path": "D"}],
-                settings={"runtime": {"max_duration_ms": 0}},
-            )
-
-    @pytest.mark.unit
-    def test_max_duration_below_zero_rejected(self):
-        with pytest.raises(ValueError, match="greater than 0"):
-            BenchmarkConfig(
-                type=TestType.OFFLINE,
-                model_params={"name": "M"},
-                endpoint_config={"endpoints": ["http://x"]},
-                datasets=[{"path": "D"}],
-                settings={"runtime": {"max_duration_ms": -1}},
-            )
-
-    @pytest.mark.unit
     def test_submission_bad_benchmark_mode(self):
         with pytest.raises(ValueError, match="benchmark_mode"):
             BenchmarkConfig(

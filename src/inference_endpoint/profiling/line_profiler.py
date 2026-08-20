@@ -97,7 +97,13 @@ class ProfilerState:
         if not self.profiler:
             return
 
-        self.profiler.disable()
+        try:
+            self.profiler.disable()
+        except ValueError:
+            # Already disabled: line_profiler releases its sys.monitoring
+            # tool id on disable, and a second disable (e.g. after a stats
+            # snapshot) raises. The teardown below must still run.
+            pass
         self.profiler.functions.clear()
         self.profiler.enable_count = 0
         self.profiler = None
