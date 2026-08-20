@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run-scoped deadline timers for the benchmark orchestrator.
+"""Run-scoped abort machinery for the benchmark orchestrator.
 
 ``PerfPhaseTimeout`` bounds the PERFORMANCE phase (``runtime.max_duration_ms``);
-``RunWatchdog`` is the whole-run deadline (``settings.timeouts.run_timeout_s``).
-Both are event-loop timers owned by ``commands/benchmark/execute.py``.
+``RunWatchdog`` is the whole-run deadline (``settings.timeouts.run_timeout_s``);
+``SigintGovernor`` is the run's one Ctrl-C policy. All owned by
+``commands/benchmark/execute.py``.
 """
 
 from __future__ import annotations
@@ -34,6 +35,54 @@ if TYPE_CHECKING:
     from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
 
 logger = logging.getLogger(__name__)
+
+
+class SigintGovernor:
+    """The run's single SIGINT policy — installed ONCE by ``run_benchmark``.
+
+    One ``signal.signal`` handler covers the entire run (setup, session,
+    metrics drain, finalize) instead of window-scoped install/remove pairs,
+    whose gaps are exactly where a ^C used to slip through as a raw
+    KeyboardInterrupt and abort teardown half-way.
+
+    Semantics:
+    - ^C with no live session (sync setup): nothing to stop gracefully —
+      raise KeyboardInterrupt immediately (default behavior, exit 130).
+    - First ^C with a session bound: graceful — ``session.stop()``; the
+      stopped run publishes INTERRUPTED+ENDED, services drain, artifacts land
+      as state=interrupted, then ``run_benchmark`` raises for exit 130.
+    - Every later ^C is a no-op: one keystroke can be DELIVERED repeatedly
+      (process-runner wrappers like ``uv run`` forward the terminal's group
+      SIGINT to a child that already got it directly), so "another ^C"
+      cannot be told apart from the same one. A wedged teardown is bounded
+      by ``run_timeout_s`` or killed externally.
+    """
+
+    def __init__(self) -> None:
+        self.interrupted = False
+        self._session: BenchmarkSession | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_session(
+        self, session: BenchmarkSession, loop: asyncio.AbstractEventLoop
+    ) -> None:
+        self._session = session
+        self._loop = loop
+
+    def __call__(self, signum: int, frame: object) -> None:
+        if self.interrupted:
+            # ponytail: repeat ^C is a no-op; add a distinct-keystroke
+            # force-quit only if a real wedged-teardown report demands it.
+            return
+        self.interrupted = True
+        if self._session is None or self._loop is None:
+            raise KeyboardInterrupt
+        logger.warning("SIGINT received: stopping benchmark gracefully")
+        # A signal handler runs at an arbitrary bytecode boundary — possibly
+        # mid-event-loop-iteration. Don't mutate asyncio state (Event.set,
+        # Task.cancel) from here; hand session.stop to the loop, the one
+        # asyncio entry point documented as signal-handler safe.
+        self._loop.call_soon_threadsafe(self._session.stop)
 
 
 class PerfPhaseTimeout:

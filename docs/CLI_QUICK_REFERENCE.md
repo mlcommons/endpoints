@@ -193,11 +193,10 @@ One handler owns SIGINT for the whole run:
   released, buffered samples still reach the metrics aggregator, and the
   artifacts land honest — `final_snapshot.json` `state: interrupted`,
   `result_summary.json` `complete: false`, `events.jsonl` flushed. Exit 130.
-- **^C again (after ~1 s)**: force quit — teardown is abandoned, service
-  children are killed, exit 130 with whatever artifacts were already written.
-  (Repeat deliveries within ~1 s are treated as the same keystroke: process
-  runners like `uv run` forward the terminal's group SIGINT to their child,
-  which already received it.)
+- **Further ^C**: no-op. One keystroke can be delivered repeatedly (process
+  runners like `uv run` forward the terminal's group SIGINT to a child that
+  already received it), so repeats are indistinguishable from the first. A
+  wedged teardown is bounded by `run_timeout_s` or killed externally.
 - **^C during setup** (dataset/tokenizer load, before services): immediate
   abort, exit 130, no artifacts.
 
