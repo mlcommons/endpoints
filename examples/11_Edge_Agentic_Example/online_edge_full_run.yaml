@@ -91,7 +91,7 @@ settings:
   runtime:
     # Safety cap (4 h) so the performance phase stays bounded even if decode is
     # slower than expected; one pass should finish in ~2.5 h on an edge box.
-    max_duration_ms: 14400000
+    max_duration_ms: 14400000 # 4-hour cap on the performance phase
     dataloader_random_seed: 42 # BFCL accuracy sampling seed; compliance requires 42.
   load_pattern:
     # Drives the performance phase; the accuracy phase self-overrides to
