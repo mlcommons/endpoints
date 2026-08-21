@@ -40,14 +40,13 @@ from ..config.schema import AuditConfig, BenchmarkConfig, DatasetType
 from ..exceptions import CLIError, ExecutionError, SetupError
 from .benchmark.execute import (
     BenchmarkResult,
-    SigintGovernor,
     TestMode,
     _salvage_tmpfs,
     finalize_benchmark,
     run_benchmark_async,
     setup_benchmark,
-    sigint_policy,
 )
+from .benchmark.watchdog import SigintGovernor, sigint_policy
 
 logger = logging.getLogger(__name__)
 

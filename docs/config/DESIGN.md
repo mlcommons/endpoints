@@ -58,17 +58,17 @@ Key nested models:
 
 Immutable snapshot of all parameters needed to execute a run.
 
-| Field                | Type             | Source                                                                                                                                                          |
-| -------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `load_pattern`       | `LoadPattern`    | config                                                                                                                                                          |
-| `n_samples_to_issue` | `int \| None`    | explicit (`--num-samples`), else `target_qps` × `min_duration_ms` (padded) when a min duration is set, else dataset size                                        |
-| `min_duration_ms`    | `int \| None`    | `--runtime.min-duration-ms` / `runtime.min_duration_ms` (poisson only; None = no min_duration_ms target); a ruleset may override once ruleset integration lands |
-| `max_duration_ms`    | `int \| None`    | runtime config                                                                                                                                                  |
-| `min_sample_count`   | `int`            | current default / future ruleset hook                                                                                                                           |
-| `metric_target`      | `Metric \| None` | `Throughput(target_qps)` when set; no synthetic default                                                                                                         |
-| `reported_metrics`   | `list[Metric]`   | metrics validated after the run                                                                                                                                 |
-| `rng_sched`          | `Random`         | seeded from `scheduler_random_seed`                                                                                                                             |
-| `rng_sample_index`   | `Random`         | seeded from `dataloader_random_seed`                                                                                                                            |
+| Field                | Type             | Source                                                                                                                                                   |
+| -------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `load_pattern`       | `LoadPattern`    | config                                                                                                                                                   |
+| `n_samples_to_issue` | `int \| None`    | explicit (`--num-samples`), else `target_qps` × `min_duration_ms` (padded) when a min duration is set, else dataset size                                 |
+| `min_duration_ms`    | `int \| None`    | `--runtime.min-duration-ms` / `runtime.min_duration_ms` (poisson only; None = no duration target); a ruleset may override once ruleset integration lands |
+| `max_duration_ms`    | `int \| None`    | runtime config                                                                                                                                           |
+| `min_sample_count`   | `int`            | current default / future ruleset hook                                                                                                                    |
+| `metric_target`      | `Metric \| None` | `Throughput(target_qps)` when set; no synthetic default                                                                                                  |
+| `reported_metrics`   | `list[Metric]`   | metrics validated after the run                                                                                                                          |
+| `rng_sched`          | `Random`         | seeded from `scheduler_random_seed`                                                                                                                      |
+| `rng_sample_index`   | `Random`         | seeded from `dataloader_random_seed`                                                                                                                     |
 
 Once constructed, `RuntimeSettings` cannot be modified. All consumers receive the same instance.
 
