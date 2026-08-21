@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
 from unittest.mock import MagicMock
 
@@ -41,6 +42,23 @@ class TestSigintGovernor:
         with pytest.raises(KeyboardInterrupt):
             _fire(gov)
         assert gov.interrupted
+
+    @pytest.mark.asyncio
+    async def test_presession_sigint_cancels_run_task(self):
+        """^C after the task is bound but before the session exists must
+        cancel the task (unwinding kills the service children via the
+        pipeline __aexit__) — never raise raw and orphan them."""
+        gov = SigintGovernor(interrupted_teardown_grace_s=30.0)
+        run_task = asyncio.create_task(asyncio.sleep(30))
+        await asyncio.sleep(0)
+        gov.bind_task(run_task, asyncio.get_running_loop())
+
+        _fire(gov)  # no raise: session not bound yet
+
+        assert gov.interrupted
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(run_task, timeout=2.0)
+        assert run_task.cancelled()
 
     def test_sigint_after_loop_returned_raises_immediately(self):
         """A ^C during sync finalization must not be swallowed.

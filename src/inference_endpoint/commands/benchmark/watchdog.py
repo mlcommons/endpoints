@@ -144,15 +144,23 @@ class SigintGovernor:
             return
         self.interrupted = True
         if (
-            self._session is None
-            or self._task is None
+            self._task is None
             or self._task.done()
             or self._loop is None
             or not self._loop.is_running()
         ):
-            # No live run to stop gracefully; call_soon_threadsafe on a
-            # stopped loop would silently swallow the ^C.
+            # No live run at all (sync setup/finalize, between audit phases);
+            # call_soon_threadsafe on a stopped loop would silently swallow
+            # the ^C.
             raise KeyboardInterrupt
+        if self._session is None:
+            # Run task live but no session yet (service launch / endpoint
+            # connect): cancel the task — same as the watchdog's pre-session
+            # fire — so the pipeline __aexit__ kills the service children
+            # instead of a raw raise orphaning them. _run_benchmark_async
+            # maps the unwind back to KeyboardInterrupt.
+            self._loop.call_soon_threadsafe(self._task.cancel)
+            return
         logger.warning("SIGINT received: stopping benchmark gracefully")
         # Signal handlers run at arbitrary bytecode boundaries: hand the stop
         # to the loop via its one signal-safe entry point.
@@ -244,12 +252,13 @@ class RunWatchdog:
             return
         self._session.stop()
         self._pipe.terminate_metrics_aggregator()
-        if self._interrupted_teardown_grace_s is not None:
-            # A wedged aggregator ignores the SIGTERM; escalate so the
-            # deadline stays a hard bound (cancelled when the drain finishes).
-            self._escalation = self._loop.call_later(
-                self._interrupted_teardown_grace_s, self._pipe.abandon_drain
-            )
+        # A wedged aggregator ignores the SIGTERM; always escalate so
+        # run_timeout_s stays a hard bound — a null ^C-grace must not soften
+        # it (cancelled when the drain finishes on its own).
+        grace = self._interrupted_teardown_grace_s
+        self._escalation = self._loop.call_later(
+            grace if grace is not None else 30.0, self._pipe.abandon_drain
+        )
 
     def cancel(self) -> None:
         if self._handle is not None:
