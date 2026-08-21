@@ -50,7 +50,7 @@ audit:
 
 settings:
   runtime:
-    # NOTE: runs are count-driven (n_samples_to_issue / audit.samples); there is no duration
+    # NOTE: runs are count-driven (n_samples_to_issue / audit.samples); there is no min_duration_ms
     # floor — MLCommons' 10-min minimum / AND-semantics is future work. max_duration_ms only
     # caps the performance phase.
     max_duration_ms: 14400000 # 4-hour ceiling

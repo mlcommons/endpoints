@@ -118,8 +118,8 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 
 ## Time Knobs
 
-All give-up deadlines live under `settings.timeouts`; the only workload duration is
-`settings.runtime.max_duration_ms`; endpoint-client worker lifecycle timeouts are client
+All give-up deadlines live under `settings.timeouts`; the only runtime workload cap is
+`settings.runtime.max_duration_ms` (`min_duration_ms` is a sizing input, not a timer); endpoint-client worker lifecycle timeouts are client
 internals under `settings.client`. `null`/unset means "wait indefinitely" (or "off") everywhere.
 
 Where every knob acts over the life of a run:
@@ -176,10 +176,12 @@ run_benchmark ── run_timeout_s deadline captured here ───────�
 
 How the knobs compose:
 
-1. **`--num-samples` / duration / dataset-once defines the work.** An explicit
+1. **`--num-samples` / `min_duration_ms` / dataset-once defines the work.** An explicit
    `runtime.n_samples_to_issue` sets the sample count; otherwise `runtime.min_duration_ms`
-   (poisson only) derives it as QPS x duration; with neither set, the performance dataset is
+   (poisson only) derives it as target_qps x min_duration_ms; with neither set, the performance dataset is
    issued once.
+   Offline (`max_throughput`) and `concurrency` runs are purely count-driven: `min_duration_ms`
+   with those patterns is a config error (`max_duration_ms` still caps issuing for every pattern).
 2. **`runtime.max_duration_ms` caps performance-phase issuing** and ends the phase normally —
    remaining samples are not issued, in-flight requests are abandoned (no drain), the report is
    valid. It does not bound the drain: issuing and draining are consecutive, never concurrent.
