@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run-abort machinery: the run's SIGINT policy and whole-run deadline.
+"""Run timers and abort machinery for the benchmark orchestrator.
 
-``SigintGovernor`` (+ ``sigint_policy``) is the one Ctrl-C policy;
-``RunWatchdog`` enforces ``settings.timeouts.run_timeout_s``.
+``PerfPhaseTimeout`` bounds the PERFORMANCE phase (``runtime.max_duration_ms``);
+``RunWatchdog`` enforces ``settings.timeouts.run_timeout_s``;
+``SigintGovernor`` (+ ``sigint_policy``) is the run's one Ctrl-C policy.
 """
 
 from __future__ import annotations
@@ -30,12 +31,46 @@ import types
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
-from inference_endpoint.load_generator.session import BenchmarkSession
+from inference_endpoint.load_generator.session import BenchmarkSession, PhaseType
 
 if TYPE_CHECKING:
     from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
 
 logger = logging.getLogger(__name__)
+
+
+class PerfPhaseTimeout:
+    """Session-stop timer that bounds the PERFORMANCE phase only.
+
+    ``max_duration_ms`` is a safety cap on the performance phase. The timer is
+    armed when the performance phase starts and cancelled as soon as any later
+    phase starts, so it can never truncate a subsequent accuracy phase: a
+    combined perf+accuracy run must let accuracy finish regardless of how long
+    perf ran.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        max_duration_ms: int | None,
+        on_timeout: Callable[[], None],
+    ) -> None:
+        self._loop = loop
+        self._max_duration_ms = max_duration_ms
+        self._on_timeout = on_timeout
+        self._handle: asyncio.TimerHandle | None = None
+
+    def on_phase_start(self, phase_type: PhaseType) -> None:
+        self.cancel()
+        if phase_type == PhaseType.PERFORMANCE and self._max_duration_ms is not None:
+            self._handle = self._loop.call_later(
+                self._max_duration_ms / 1000.0, self._on_timeout
+            )
+
+    def cancel(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
 
 
 class SigintGovernor:
