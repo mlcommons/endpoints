@@ -119,6 +119,10 @@ class SteadyState(TypedDict):
     tpot: dict | None
     tps: TpsBlock | None
     anomaly: Anomaly
+    global_trend: dict[
+        str, Verdict
+    ]  # gated metric -> trend from the plateau to run end
+    drifting_up: list[str]  # gated metrics Drifting Up over the rest of the run
 
 
 class TrackedMetric(NamedTuple):
@@ -875,6 +879,27 @@ def detect_level_shift(
     return result
 
 
+def global_trend(
+    series: Sequence[SuperPassRollup],
+    from_idx: int,
+    gate_algo: str,
+    gated_metrics: Sequence[TrackedMetric] = GATED_METRICS,
+) -> dict[str, Verdict]:
+    """Trend verdict per gated metric over ``series[from_idx:]`` (plateau onset to end).
+
+    A window can be locally flat while the metric climbs across the rest of the run
+    (a slow drift the short per-window gate misses); this whole-tail test catches it.
+    """
+    gate = ALGORITHMS[gate_algo]
+    out: dict[str, Verdict] = {}
+    for m in gated_metrics:
+        traj = super_pass_percentile_series(
+            series[from_idx:], m.source_attr, m.percentile
+        )
+        out[m.key] = gate(traj).verdict if len(traj) >= MIN_TREND_N else "insufficient"
+    return out
+
+
 def build_steady_state(
     series: Sequence[SuperPassRollup],
     gate_algo: str = "mk_hamed_rao",
@@ -888,6 +913,7 @@ def build_steady_state(
     plateaus = segment_plateaus(series, gate_algo, cov_bounds, gated_metrics)
     anomaly = detect_level_shift(series, plateaus)
     if not plateaus:
+        gt = global_trend(series, 0, gate_algo, gated_metrics)
         return {
             "found": False,
             "reason": "no admissible steady plateau",
@@ -896,8 +922,11 @@ def build_steady_state(
             "tpot": None,
             "tps": None,
             "anomaly": anomaly,
+            "global_trend": gt,
+            "drifting_up": [k for k, v in gt.items() if v == "up"],
         }
     lo, hi = plateaus[0]  # first plateau is the reported steady state
+    gt = global_trend(series, lo, gate_algo, gated_metrics)
     ttft = pooled(series, lo, hi, "ttft_ns")
     tpot = pooled(series, lo, hi, "tpot_ns")
     mean_tpot = sum(tpot) / len(tpot) if tpot else 0.0
@@ -947,6 +976,8 @@ def build_steady_state(
             "system_ci": system_ci,
         },
         "anomaly": anomaly,
+        "global_trend": gt,
+        "drifting_up": [k for k, v in gt.items() if v == "up"],
     }
 
 
@@ -1102,6 +1133,11 @@ def _render_steady_state(ss: SteadyState) -> list[str]:
                     f"  p95 {_fmt_ms(s['p95'])}  p99 {_fmt_ms(s['p99'])}"
                     f"  mean {_fmt_ms(s['mean'])}"
                 )
+    if ss["drifting_up"]:
+        out.append(
+            f"  WARNING: {', '.join(ss['drifting_up'])} drifting UP over the rest of the "
+            f"run -- the window is a local plateau; global steady state is questionable"
+        )
     an = ss["anomaly"]
     if an["detected"]:
         out.append(

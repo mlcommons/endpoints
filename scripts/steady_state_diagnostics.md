@@ -89,6 +89,20 @@ Pettitt change-point. The headline steady result is still the **first** plateau;
 line says the run degraded later (e.g. KV-cache eviction, a sick worker). `delta_pct`
 is signed (+ = TPOT rose = worse).
 
+### `WARNING` line
+
+```
+  WARNING: ttft_p95 drifting UP over the rest of the run -- the window is a local
+  plateau; global steady state is questionable
+```
+
+The reported window is locally steady, but a gated metric keeps climbing over the
+super-passes **after** it (the trend gate over the whole tail, not just the window).
+This catches a slow global drift that a short per-window check misses — e.g. TTFT
+creeping up several-fold across a long high-concurrency run. Treat the steady number as
+a best-effort local plateau, not a clean whole-run steady state. (`drifting_up` in
+`--json` lists the affected metrics; distinct from `anomaly`, which is a discrete step.)
+
 ### Diagnostics (below the headline)
 
 Per `--window-size`: a **CoV steadiness** table (per gated/diagnostic metric, PASS/`fail`/`n/a`
