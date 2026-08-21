@@ -997,6 +997,12 @@ async def _run_benchmark_async(
                     salvage_err,
                     tmpfs_dir,
                 )
+        if sigint.interrupted and isinstance(e, asyncio.CancelledError):
+            # Pre-session ^C: the governor cancelled this task (so the
+            # pipeline __aexit__ above killed the service children). Surface
+            # as the user's abort for exit 130. Checked before the watchdog:
+            # the user's ^C is the truthful cause even if both fired.
+            raise KeyboardInterrupt from e
         if watchdog.fired and isinstance(e, Exception | asyncio.CancelledError):
             # The watchdog aborted the run: the pre-session fire cancels this
             # task, and a mid-teardown fire can surface as a launch/drain

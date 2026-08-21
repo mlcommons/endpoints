@@ -607,19 +607,7 @@ class RuntimeConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    min_duration_ms: Annotated[
-        int | None,
-        cyclopts.Parameter(
-            help=(
-                "POISSON MODE ONLY (requires an explicit target_qps; rejected "
-                "for offline/max_throughput and concurrency runs). Size the "
-                "run by time: derive the sample count as target_qps × "
-                "samples (ms, or suffix: 600s, 10m). Precedence: an explicit "
-                "--num-samples always wins; unset, this derivation applies; "
-                "both unset = issue the dataset once"
-            ),
-        ),
-    ] = Field(
+    min_duration_ms: int | None = Field(
         None,
         gt=0,
         description=(
@@ -829,13 +817,7 @@ class Timeouts(WithUpdatesMixin, BaseModel):
 
     run_timeout_s: Annotated[
         float | None,
-        cyclopts.Parameter(
-            alias="--timeout",
-            help=(
-                "Whole-run watchdog in seconds (None = off). Firing aborts the "
-                "run and marks the report INTERRUPTED."
-            ),
-        ),
+        cyclopts.Parameter(alias="--timeout"),
     ] = Field(
         None,
         gt=0,
@@ -1007,14 +989,7 @@ class Settings(WithUpdatesMixin, BaseModel):
     )
     metrics_tokenizer_workers: Annotated[
         int,
-        cyclopts.Parameter(
-            alias="--metrics-tokenizer-workers",
-            help=(
-                "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT in "
-                "the metrics aggregator. 0 defers all tokenization to the "
-                "end-of-run drain, which always uses the auto-sized sharded pool."
-            ),
-        ),
+        cyclopts.Parameter(alias="--metrics-tokenizer-workers"),
     ] = Field(
         4,
         ge=0,
