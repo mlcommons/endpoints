@@ -116,9 +116,14 @@ class RuntimeSettings:
     """Load pattern configuration"""
 
     min_duration_ms: int | None = field(default=None, kw_only=True)
-    """Sizing input, not a timer: n_samples_to_issue is derived as
-    target_qps x min_duration_ms when set (None/0 = no min_duration_ms
-    target: issue the dataset once). Only rulesets set this."""
+    """Sizing input for the performance phase — never a runtime timer.
+
+    When set, ``total_samples_to_issue()`` derives the sample count as
+    ``target_qps × min_duration_ms``; an explicit ``n_samples_to_issue``
+    wins. ``None`` — or ``0`` from programmatic ruleset callers — means no
+    sizing target: issue the dataset once. Populated from
+    ``settings.runtime.min_duration_ms`` (schema-validated: poisson with an
+    explicit ``target_qps`` only) or set directly by rulesets."""
 
     sample_order: SampleOrderSpec = field(default_factory=SampleOrderSpec, kw_only=True)
     """Sample-ordering strategy (default: without-replacement)."""
