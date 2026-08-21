@@ -210,11 +210,14 @@ def build_super_pass_series(
     events_path: str,
     superpass_size: int,
     count_tokens: Callable[[list[str]], list[int]],
+    flush_size: int = TOKENIZE_BATCH_SIZE,
 ) -> list[SuperPassRollup]:
     """Bucket performance-tracked samples into super-passes by issue order.
 
     ``count_tokens`` maps a batch of texts to token counts; injected so the parse is
-    testable without a real tokenizer and the tokenizer is swappable.
+    testable without a real tokenizer and the tokenizer is swappable. ``flush_size``
+    caps how many output texts are buffered before a tokenizer flush — lower it to bound
+    peak memory on long reasoning outputs (fewer texts held, smaller tokenizer calls).
     """
     if superpass_size <= 0:
         raise ValueError("superpass_size must be positive")
@@ -298,7 +301,7 @@ def build_super_pass_series(
                     pending_tpot[uuid] = (row.sp_index, float(ts - row.recv_first_ns))
                     batch_uuids.append(uuid)
                     batch_texts.append(text)
-                    if len(batch_texts) >= TOKENIZE_BATCH_SIZE:
+                    if len(batch_texts) >= flush_size:
                         flush_tpot()
     flush_tpot()
     return series
@@ -1030,6 +1033,7 @@ def run(
     cov_bounds: Sequence[float] = (0.03, 0.05, 0.08),
     alpha: float = 0.05,
     trend_gate: str = "mk_hamed_rao",
+    tokenize_batch_size: int = TOKENIZE_BATCH_SIZE,
 ) -> DiagnosticsResult:
     """Build the full diagnostics result (the ``--json`` blob).
 
@@ -1038,7 +1042,9 @@ def run(
     """
     if warmup < 0:
         raise ValueError(f"warmup must be >= 0, got {warmup}")
-    series = build_super_pass_series(events_path, superpass_size, count_tokens)
+    series = build_super_pass_series(
+        events_path, superpass_size, count_tokens, tokenize_batch_size
+    )
     post = series[warmup:] if warmup < len(series) else []
     trajectories = {
         m.key: super_pass_percentile_series(post, m.source_attr, m.percentile)
@@ -1247,6 +1253,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="trend algorithm gating plateau admissibility",
     )
     ap.add_argument(
+        "--tokenize-batch-size",
+        type=int,
+        default=TOKENIZE_BATCH_SIZE,
+        help="output texts buffered per tokenizer flush; lower to bound peak memory",
+    )
+    ap.add_argument(
         "--json", dest="json_out", default=None, help="write JSON blob here"
     )
     args = ap.parse_args(argv)
@@ -1262,6 +1274,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cov_bounds=args.cov_bounds,
         alpha=args.alpha,
         trend_gate=args.trend_gate,
+        tokenize_batch_size=args.tokenize_batch_size,
     )
     print(render_text(result, args.cov_bounds))
     if args.json_out:
