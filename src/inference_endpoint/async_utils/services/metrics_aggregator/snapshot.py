@@ -53,16 +53,11 @@ class SessionState(str, Enum):
     COMPLETE    → terminal clean state. The ``publish_final()`` snapshot
                   written from the ``ENDED`` path. Percentiles and histograms
                   are exact (computed from raw values).
-    INTERRUPTED → terminal interrupted state. Entered when the session's
-                  INTERRUPTED marker event preceded ``ENDED`` (a graceful ^C
-                  stops the session, which still publishes ENDED), or when
-                  SIGTERM landed (run watchdog escalation) before ``ENDED``.
-                  SIGINT itself is ignored — the parent's ENDED path is
-                  authoritative for ^C. Stats are best-effort partial
-                  captures — the drain didn't complete and raw values may be
-                  missing late samples. Distinguishes "run aborted" from
-                  "clean shutdown"; Report renders this with a clear
-                  interrupted indicator.
+    INTERRUPTED → terminal interrupted state: the session's INTERRUPTED
+                  marker preceded ``ENDED``, or SIGTERM landed first (run
+                  watchdog / teardown grace). SIGINT itself is ignored — the
+                  parent's ENDED path is authoritative for ^C. Stats are
+                  best-effort partial captures.
 
     Transitions are forward-only:
         INITIALIZE → LIVE → DRAINING → {COMPLETE | INTERRUPTED}

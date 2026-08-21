@@ -381,12 +381,10 @@ class MetricsPipeline:
         self._launcher.terminate_module(_AGGREGATOR_MODULE)
 
     def abandon_drain(self) -> None:
-        """SIGTERM→SIGKILL every service child; safe no-op before/after launch.
+        """SIGTERM→SIGKILL every service child; idempotent, safe pre-launch.
 
-        Teardown-grace path (^C with a wedged drain): SIGTERM gives the
-        aggregator its chance to write an INTERRUPTED snapshot, SIGKILL reaps
-        it regardless, and the drain's ``wait_for_exit`` thread unblocks once
-        the children are gone. Idempotent — exited children are skipped.
+        Teardown-grace path (abort with a wedged drain): once the children
+        are reaped, the drain's ``wait_for_exit`` thread unblocks.
         """
         self._kill_services()
 

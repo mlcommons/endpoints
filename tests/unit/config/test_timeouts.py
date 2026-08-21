@@ -48,6 +48,7 @@ class TestTimeoutsDefaults:
         assert cfg.run_timeout_s is None
         assert cfg.service_ready_timeout_s == 30.0
         assert cfg.warmup_drain_timeout_s == 240.0
+        assert cfg.teardown_grace_s == 30.0
         assert cfg.performance_drain_timeout_s is None
         assert cfg.accuracy_drain_timeout_s is None
         assert cfg.metrics_drain_timeout_s is None
@@ -74,6 +75,7 @@ class TestTimeoutsValidation:
             ("run_timeout_s", 0),
             ("run_timeout_s", -1.0),
             ("warmup_drain_timeout_s", -1.0),
+            ("teardown_grace_s", -1.0),
             ("performance_drain_timeout_s", -1.0),
             ("accuracy_drain_timeout_s", -1.0),
             ("metrics_drain_timeout_s", -1.0),
@@ -94,6 +96,7 @@ class TestTimeoutsValidation:
             "performance_drain_timeout_s",
             "accuracy_drain_timeout_s",
             "metrics_drain_timeout_s",
+            "teardown_grace_s",
         ],
     )
     def test_zero_drain_budget_is_valid(self, field):
@@ -109,6 +112,7 @@ class TestTimeoutsValidation:
             "performance_drain_timeout_s",
             "accuracy_drain_timeout_s",
             "metrics_drain_timeout_s",
+            "teardown_grace_s",
         ],
     )
     def test_deadline_none_means_unlimited(self, field):

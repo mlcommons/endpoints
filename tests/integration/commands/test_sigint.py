@@ -56,8 +56,18 @@ _CHAR_TOKENIZER_DIR = _TESTS_DIR / "assets/tokenizers/char"
 _DS_DATASET = _TESTS_DIR / "assets/datasets/ds_samples.jsonl"
 
 
-def _write_config(report_dir: Path, endpoint_url: str, config_path: Path) -> None:
+def _write_config(
+    report_dir: Path,
+    endpoint_url: str,
+    config_path: Path,
+    teardown_grace_s: float | None = None,
+) -> None:
     """~120 s workload (600 samples @ 5 QPS): only the ^C can end the run."""
+    grace = (
+        f"\n  timeouts:\n    teardown_grace_s: {teardown_grace_s}"
+        if teardown_grace_s is not None
+        else ""
+    )
     config_path.write_text(
         f"""
 type: online
@@ -81,7 +91,7 @@ settings:
   runtime:
     n_samples_to_issue: 600
   warmup:
-    enabled: false
+    enabled: false{grace}
 """
     )
 
@@ -218,30 +228,19 @@ def test_sigint_grace_expiry_abandons_wedged_drain(mock_http_echo_server, tmp_pa
     (``os.kill``, not the group): the graceful stop parks on the wedged
     drain; grace expiry must SIGTERM→SIGKILL the children so the drain's
     wait-for-exit unblocks and the run exits 130 without a second keystroke.
-    The grace is shrunk to 3s via the class constant (fixed 30s in
-    production) so the test stays fast.
+    The grace is shrunk to 3s (settings.timeouts.teardown_grace_s; default
+    30) so the test stays fast.
     """
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"
-    _write_config(report_dir, mock_http_echo_server.url, config_path)
-
-    wrapper = (
-        "from inference_endpoint.commands.benchmark.watchdog import SigintGovernor; "
-        "SigintGovernor.TEARDOWN_GRACE_S = 3.0; "
-        "from inference_endpoint.main import run; run()"
+    _write_config(
+        report_dir, mock_http_echo_server.url, config_path, teardown_grace_s=3.0
     )
+
     agg_pid: int | None = None
     try:
         with _benchmark_proc(
-            [
-                shutil.which("python") or "python",
-                "-c",
-                wrapper,
-                "benchmark",
-                "from-config",
-                "-c",
-                str(config_path),
-            ]
+            [_cli(), "benchmark", "from-config", "-c", str(config_path)]
         ) as proc:
             _wait_services_ready(proc, report_dir)
             time.sleep(3.0)  # comfortably inside the ~120 s performance phase

@@ -179,7 +179,6 @@ src/inference_endpoint/
 │   │   ├── __init__.py
 │   │   ├── cli.py             # benchmark_app: offline, online, from-config subcommands
 │   │   ├── execute.py         # Phased orchestration: setup_benchmark/run_benchmark_async/finalize_benchmark + BenchmarkContext; run_benchmark runs the main benchmark (cli._run dispatches run_audit when audit: is set)
-│   │   ├── watchdog.py        # PerfPhaseTimeout (perf-phase cap) + RunWatchdog (whole-run deadline) event-loop timers
 │   │   ├── profiling.py       # Profiler-trigger protocol (vLLM /start_profile,/stop_profile) + ProfileController (URL derivation + start/stop/payload lifecycle)
 │   │   ├── accuracy.py        # AccuracyConfiguration + per-dataset scoring (_score_accuracy, OSL/response-count rollups, write_accuracy_results)
 │   │   └── pipeline.py        # MetricsPipeline: async context manager for the ZMQ + metrics-aggregator/event-logger subprocess lifecycle (__aenter__/__aexit__/start/drain_and_build_report) + snapshot→Report
