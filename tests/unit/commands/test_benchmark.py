@@ -56,6 +56,7 @@ from inference_endpoint.commands.benchmark.profiling import (
     _render_profile_status,
     write_profiling_section,
 )
+from inference_endpoint.commands.benchmark.watchdog import SigintGovernor
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     AgenticInferenceConfig,
@@ -1107,7 +1108,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(KeyboardInterrupt):
-                await _run_benchmark_async(ctx, loop)
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
 
         aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
         args = aggregator_cfg.args
@@ -1177,7 +1178,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(KeyboardInterrupt):
-                await _run_benchmark_async(ctx, loop)
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
 
         aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
         args = aggregator_cfg.args
@@ -1231,7 +1232,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(RuntimeError, match="simulated mid-run crash"):
-                await _run_benchmark_async(ctx, loop)
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
 
         shm = Path("/dev/shm")
         tmpfs_base = shm if shm.exists() else Path(tempfile.gettempdir())
@@ -1287,7 +1288,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(RuntimeError, match="setup boom"):
-                await _run_benchmark_async(ctx, loop)
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
 
         # __aexit__ kills the services (drain never ran) → launcher.terminate_all();
         # called exactly once, and never for a clean run.
@@ -1336,7 +1337,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(SetupError, match="connect boom"):
-                await _run_benchmark_async(ctx, loop)
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
 
         # The setup-error path never drains, so __aexit__ kills the services once.
         MockLauncher.return_value.terminate_all.assert_called_once()
@@ -1393,7 +1394,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(RuntimeError, match="setup boom"):
-                await _run_benchmark_async(ctx, loop)
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
 
         # Client was created; the run failed before the session finally, so the
         # outer finally must have shut it down (idempotent, called once here).
@@ -1484,7 +1485,7 @@ class TestAggregatorArgs:
             MockLauncher.return_value.launch = _launch_ok
 
             with pytest.raises(expected_error, match=expected_match):
-                await _run_benchmark_async(ctx, loop)
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
 
 
 class TestAccuracyOnlyDatasetLoading:

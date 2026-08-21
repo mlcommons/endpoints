@@ -776,7 +776,7 @@ async def _run_benchmark_async(
     loop: asyncio.AbstractEventLoop,
     *,
     deadline: float | None = None,
-    sigint: SigintGovernor | None = None,
+    sigint: SigintGovernor,
 ) -> BenchmarkResult:
     """Run async benchmark session."""
     config = ctx.config
@@ -822,8 +822,7 @@ async def _run_benchmark_async(
         loop, deadline, pipe, config.settings.timeouts.interrupted_teardown_grace_s
     )
     watchdog.bind_task(asyncio.current_task())
-    if sigint is not None:
-        sigint.bind_task(asyncio.current_task(), loop)
+    sigint.bind_task(asyncio.current_task(), loop)
 
     try:
         tmpfs_dir.mkdir(parents=True, exist_ok=True)
@@ -862,10 +861,9 @@ async def _run_benchmark_async(
                     session_id=session_id,
                 )
                 watchdog.bind_session(session)
-                if sigint is not None:
-                    # ^C: graceful stop + grace timer; expiry abandons a
-                    # wedged drain (SIGTERM→SIGKILL via abandon_drain).
-                    sigint.bind_session(session, pipe.abandon_drain)
+                # ^C: graceful stop + grace timer; expiry abandons a
+                # wedged drain (SIGTERM→SIGKILL via abandon_drain).
+                sigint.bind_session(session, pipe.abandon_drain)
                 phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
 
                 max_duration_ms = (
@@ -959,19 +957,16 @@ async def _run_benchmark_async(
                         # swallowed when the run is already failing or ^C'd —
                         # the abort (exit 130) outranks a drain error its own
                         # grace escalation may have caused.
-                        if session_completed_normally and not (
-                            sigint is not None and sigint.interrupted
-                        ):
+                        if session_completed_normally and not sigint.interrupted:
                             raise
                         logger.warning(
                             "Drain/report build error suppressed (run "
                             "already failing): %s",
                             e,
                         )
-                    if sigint is not None:
-                        # Drain finished (or failed) on its own — the teardown
-                        # grace timer has nothing left to bound.
-                        sigint.cancel_grace()
+                    # Drain finished (or failed) on its own — the grace
+                    # timer has nothing left to bound.
+                    sigint.cancel_grace()
             finally:
                 # Runs on every path, including a setup error before session.run
                 # (which never reaches the session finally above). pbar.close() is
@@ -1023,7 +1018,7 @@ async def _run_benchmark_async(
         tmpfs_dir=tmpfs_dir,
         profiling=profiler.payload(),
         run_timed_out=watchdog.fired,
-        user_interrupted=sigint.interrupted if sigint is not None else False,
+        user_interrupted=sigint.interrupted,
     )
 
 
@@ -1048,8 +1043,14 @@ def run_benchmark_async(
 
     When ``deadline`` is None and ``settings.timeouts.run_timeout_s`` is set,
     computes its own deadline at entry, so each audit phase gets a full
-    per-phase budget.
+    per-phase budget. A caller without a governor (embedded/test use) gets a
+    passive one — never installed as a signal handler, ``interrupted`` stays
+    False — so downstream code has exactly one sigint state to reason about.
     """
+    if sigint is None:
+        sigint = SigintGovernor(
+            ctx.config.settings.timeouts.interrupted_teardown_grace_s
+        )
     if deadline is None:
         deadline = _run_deadline(ctx.config)
     loop = LoopManager().default_loop
@@ -1218,14 +1219,12 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             bench.report = report
         raise
     finally:
-        # Attach the per-dataset accuracy list so result_summary.json, the
-        # console summary, and report.txt all carry it (stays [] on a scoring
-        # failure).
+        # Attach the per-dataset accuracy list (stays [] on a scoring
+        # failure), then write result_summary.json / report.txt.
         if report is not None:
-            report = msgspec.structs.replace(report, accuracy=accuracy_scores)
-        # Display the report + write result_summary.json / report.txt.
-        if report is not None:
-            _write_report_artifacts(ctx, report, bench.profiling)
+            final_report = msgspec.structs.replace(report, accuracy=accuracy_scores)
+            _write_report_artifacts(ctx, final_report, bench.profiling)
+            report = final_report
     bench.report = report
 
     _summarize_and_log_metrics(ctx, report, result, collector)
