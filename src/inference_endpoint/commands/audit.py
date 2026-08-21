@@ -81,7 +81,7 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
     # One SIGINT policy for the whole audit (same pattern as run_benchmark):
     # first ^C stops the current phase gracefully, which surfaces as
     # report.state=="interrupted" and aborts the audit.
-    sigint = SigintGovernor(config.settings.timeouts.teardown_grace_s)
+    sigint = SigintGovernor(config.settings.timeouts.interrupted_teardown_grace_s)
     with sigint_policy(sigint):
         artifacts = _run_phases(config, base_report_dir, test, audit_cfg, specs, sigint)
 

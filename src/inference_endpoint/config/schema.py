@@ -848,7 +848,7 @@ class Timeouts(WithUpdatesMixin, BaseModel):
             "INTERRUPTED, and exits non-zero. Never derives per-stage deadlines."
         ),
     )
-    teardown_grace_s: float | None = Field(
+    interrupted_teardown_grace_s: float | None = Field(
         30.0,
         ge=0,
         description=(

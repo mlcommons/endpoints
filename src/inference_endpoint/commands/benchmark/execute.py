@@ -729,9 +729,9 @@ class SigintGovernor:
     is a logged no-op.
     """
 
-    def __init__(self, teardown_grace_s: float | None) -> None:
+    def __init__(self, interrupted_teardown_grace_s: float | None) -> None:
         self.interrupted = False
-        self._teardown_grace_s = teardown_grace_s
+        self._interrupted_teardown_grace_s = interrupted_teardown_grace_s
         self._session: BenchmarkSession | None = None
         self._task: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -763,7 +763,7 @@ class SigintGovernor:
         self._session.stop()
         if (
             self._on_grace_expiry is not None
-            and self._teardown_grace_s is not None
+            and self._interrupted_teardown_grace_s is not None
             and self._grace_handle is None
         ):
 
@@ -771,12 +771,14 @@ class SigintGovernor:
                 logger.warning(
                     "Teardown did not finish within %.0fs of ^C — abandoning "
                     "the metrics drain",
-                    self._teardown_grace_s,
+                    self._interrupted_teardown_grace_s,
                 )
                 assert self._on_grace_expiry is not None
                 self._on_grace_expiry()
 
-            self._grace_handle = self._loop.call_later(self._teardown_grace_s, _expire)
+            self._grace_handle = self._loop.call_later(
+                self._interrupted_teardown_grace_s, _expire
+            )
 
     def __call__(self, signum: int, frame: types.FrameType | None) -> None:
         if self.interrupted:
@@ -842,14 +844,14 @@ class RunWatchdog:
         loop: asyncio.AbstractEventLoop,
         deadline: float | None,
         pipe: MetricsPipeline,
-        teardown_grace_s: float | None,
+        interrupted_teardown_grace_s: float | None,
     ) -> None:
         self.fired = False
         self._session: BenchmarkSession | None = None
         self._task: asyncio.Task | None = None
         self._pipe = pipe
         self._loop = loop
-        self._teardown_grace_s = teardown_grace_s
+        self._interrupted_teardown_grace_s = interrupted_teardown_grace_s
         self._escalation: asyncio.TimerHandle | None = None
         self._handle = (
             loop.call_later(max(0.0, deadline - time.monotonic()), self._fire)
@@ -885,11 +887,11 @@ class RunWatchdog:
             return
         self._session.stop()
         self._pipe.terminate_metrics_aggregator()
-        if self._teardown_grace_s is not None:
+        if self._interrupted_teardown_grace_s is not None:
             # A wedged aggregator ignores the SIGTERM; escalate so the
             # deadline stays a hard bound (cancelled when the drain finishes).
             self._escalation = self._loop.call_later(
-                self._teardown_grace_s, self._pipe.abandon_drain
+                self._interrupted_teardown_grace_s, self._pipe.abandon_drain
             )
 
     def cancel(self) -> None:
@@ -1035,7 +1037,7 @@ async def _run_benchmark_async(
     http_client: HTTPEndpointClient | None = None
 
     watchdog = RunWatchdog(
-        loop, deadline, pipe, config.settings.timeouts.teardown_grace_s
+        loop, deadline, pipe, config.settings.timeouts.interrupted_teardown_grace_s
     )
     watchdog.bind_task(asyncio.current_task())
     if sigint is not None:
@@ -1495,7 +1497,7 @@ def run_benchmark(
     # The run's ONE SIGINT handler; sigint_policy restores the previous one
     # only after the finally below, so a repeat ^C during salvage still hits
     # the governor's no-op.
-    sigint = SigintGovernor(config.settings.timeouts.teardown_grace_s)
+    sigint = SigintGovernor(config.settings.timeouts.interrupted_teardown_grace_s)
     bench: BenchmarkResult | None = None
     with sigint_policy(sigint):
         try:
