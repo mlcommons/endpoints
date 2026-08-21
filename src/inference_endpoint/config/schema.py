@@ -613,7 +613,7 @@ class RuntimeConfig(BaseModel):
             help=(
                 "POISSON MODE ONLY (requires an explicit target_qps; rejected "
                 "for offline/max_throughput and concurrency runs). Size the "
-                "run by time: issue target_qps × this duration worth of "
+                "run by time: derive the sample count as target_qps × "
                 "samples (ms, or suffix: 600s, 10m). Precedence: an explicit "
                 "--num-samples always wins; unset, this derivation applies; "
                 "both unset = issue the dataset once"
@@ -623,16 +623,20 @@ class RuntimeConfig(BaseModel):
         None,
         gt=0,
         description=(
-            "Minimum test duration in ms (poisson only; requires explicit "
-            "target_qps): sizes the run as target_qps × duration samples. "
-            "Overridden by an explicit n_samples_to_issue; None = no duration "
+            "Sizing input, not a timer (poisson only; requires explicit "
+            "target_qps): derives the sample count as target_qps × "
+            "min_duration_ms. Overridden by an explicit n_samples_to_issue; "
+            "None = no min_duration_ms "
             "target (issue the dataset once)"
         ),
     )
     max_duration_ms: int | None = Field(
         None,
         gt=0,
-        description="Maximum test duration in ms (None for no limit)",
+        description=(
+            "Cap on performance-phase issuing in ms; reaching it ends the "
+            "phase normally (None = no cap)"
+        ),
     )
 
     @field_validator("min_duration_ms", "max_duration_ms", mode="before")

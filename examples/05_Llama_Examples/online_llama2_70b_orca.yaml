@@ -23,7 +23,7 @@ datasets:
 settings:
   runtime:
     max_duration_ms: 600000 # 10 minute cap on the performance phase
-    # Sample count: dataset issued once (the default) — replaces the old duration-derived count, which rounded up to one dataset pass.
+    # Sample count: dataset issued once (the default) — replaces the old min_duration_ms-derived count, which rounded up to one dataset pass.
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
 

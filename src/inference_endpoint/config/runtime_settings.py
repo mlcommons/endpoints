@@ -116,9 +116,9 @@ class RuntimeSettings:
     """Load pattern configuration"""
 
     min_duration_ms: int | None = field(default=None, kw_only=True)
-    """Minimum performance-phase duration in ms (None/0 = no duration target:
-    issue the dataset once). Only rulesets set this; the config surface has no
-    duration-derived sample count."""
+    """Sizing input, not a timer: n_samples_to_issue is derived as
+    target_qps x min_duration_ms when set (None/0 = no min_duration_ms
+    target: issue the dataset once). Only rulesets set this."""
 
     sample_order: SampleOrderSpec = field(default_factory=SampleOrderSpec, kw_only=True)
     """Sample-ordering strategy (default: without-replacement)."""
@@ -212,8 +212,8 @@ class RuntimeSettings:
 
         Priority:
         1. If `n_samples_to_issue` is set, return it (explicit override)
-        2. If no duration target is set, return all dataset samples
-        3. Otherwise, calculate from metric target * duration
+        2. If no min_duration_ms target is set, return all dataset samples
+        3. Otherwise, derive the count as target_qps x min_duration_ms
 
         Args:
             padding_factor (float): Factor to multiply the expected number of samples by to account for variance.
@@ -250,12 +250,12 @@ class RuntimeSettings:
             )
             return self.n_samples_from_dataset
 
-        # No duration target (None from config, 0 from programmatic callers):
+        # No min_duration_ms target (None from config, 0 from programmatic callers):
         # issue the dataset once.
         if not self.min_duration_ms:
             result = max(self.min_sample_count, self.n_samples_from_dataset)
             logger.debug(
-                f"Sample count: {result} (using all dataset samples, no duration target)"
+                f"Sample count: {result} (all dataset samples; no min_duration_ms target)"
             )
             return result
 
