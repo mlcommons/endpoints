@@ -37,7 +37,7 @@ def _fire(gov: SigintGovernor) -> None:
 @pytest.mark.unit
 class TestSigintGovernor:
     def test_unbound_sigint_raises_keyboard_interrupt(self):
-        gov = SigintGovernor(teardown_grace_s=30.0)
+        gov = SigintGovernor(interrupted_teardown_grace_s=30.0)
         with pytest.raises(KeyboardInterrupt):
             _fire(gov)
         assert gov.interrupted
@@ -49,7 +49,7 @@ class TestSigintGovernor:
         bound but the loop is stopped — ``call_soon_threadsafe`` would queue
         ``session.stop`` on it and never run it.
         """
-        gov = SigintGovernor(teardown_grace_s=30.0)
+        gov = SigintGovernor(interrupted_teardown_grace_s=30.0)
         session = MagicMock()
 
         async def run_phase() -> None:
@@ -65,7 +65,7 @@ class TestSigintGovernor:
 
     @pytest.mark.asyncio
     async def test_live_sigint_stops_session_and_arms_grace(self):
-        gov = SigintGovernor(teardown_grace_s=30.0)
+        gov = SigintGovernor(interrupted_teardown_grace_s=30.0)
         session = MagicMock()
         on_grace = MagicMock()
         gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
@@ -82,7 +82,7 @@ class TestSigintGovernor:
     @pytest.mark.asyncio
     async def test_repeat_sigint_is_a_noop(self):
         """Any repeat ^C (incl. a forwarded duplicate under `uv run`) is silent."""
-        gov = SigintGovernor(teardown_grace_s=30.0)
+        gov = SigintGovernor(interrupted_teardown_grace_s=30.0)
         session = MagicMock()
         gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
         gov.bind_session(session, MagicMock())
@@ -97,7 +97,7 @@ class TestSigintGovernor:
     @pytest.mark.asyncio
     async def test_grace_expiry_fires_callback_once(self):
         """The grace fires exactly once, even after repeat ^C deliveries."""
-        gov = SigintGovernor(teardown_grace_s=0.02)
+        gov = SigintGovernor(interrupted_teardown_grace_s=0.02)
         session = MagicMock()
         fired = asyncio.Event()
         on_grace = MagicMock(side_effect=fired.set)
@@ -113,7 +113,7 @@ class TestSigintGovernor:
 
     @pytest.mark.asyncio
     async def test_cancel_grace_disarms_pending_timer(self):
-        gov = SigintGovernor(teardown_grace_s=0.02)
+        gov = SigintGovernor(interrupted_teardown_grace_s=0.02)
         session = MagicMock()
         on_grace = MagicMock()
         gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
@@ -130,14 +130,14 @@ class TestSigintGovernor:
 @pytest.mark.unit
 class TestSigintPolicy:
     def test_installs_and_restores_previous_handler(self):
-        gov = SigintGovernor(teardown_grace_s=30.0)
+        gov = SigintGovernor(interrupted_teardown_grace_s=30.0)
         prev = signal.getsignal(signal.SIGINT)
         with sigint_policy(gov):
             assert signal.getsignal(signal.SIGINT) is gov
         assert signal.getsignal(signal.SIGINT) is prev
 
     def test_restores_on_exception(self):
-        gov = SigintGovernor(teardown_grace_s=30.0)
+        gov = SigintGovernor(interrupted_teardown_grace_s=30.0)
         prev = signal.getsignal(signal.SIGINT)
         with pytest.raises(RuntimeError):
             with sigint_policy(gov):
@@ -146,7 +146,7 @@ class TestSigintPolicy:
 
     def test_unrepresentable_c_handler_stays_untouched(self, monkeypatch):
         """getsignal()->None (C-installed handler): install nothing at all."""
-        gov = SigintGovernor(teardown_grace_s=30.0)
+        gov = SigintGovernor(interrupted_teardown_grace_s=30.0)
         monkeypatch.setattr(signal, "getsignal", lambda signum: None)
         install_spy = MagicMock()
         monkeypatch.setattr(signal, "signal", install_spy)
