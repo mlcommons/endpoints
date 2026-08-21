@@ -970,9 +970,9 @@ async def _run_benchmark_async(
                         # path the run is already raising, so swallow it
                         # there rather than let a teardown error replace the
                         # in-flight exception; run_benchmark still fails the
-                        # run on a missing report. A ^C'd run swallows it too:
-                        # the user's abort (exit 130) outranks a drain error
-                        # its own grace escalation may have caused.
+                        # run on a missing report. A ^C'd run swallows it
+                        # too: the user's abort (exit 130) outranks a drain
+                        # error its own grace escalation may have caused.
                         if session_completed_normally and not (
                             sigint is not None and sigint.interrupted
                         ):
@@ -1219,68 +1219,59 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # is written in the `finally` below so a scoring failure (e.g. lcb-service
     # unreachable, missing eval subproject, bad extras) still leaves the perf
     # run's result_summary.json / report.txt on disk instead of discarding them —
-    # then the exception propagates as before. A ^C landing anywhere in
-    # finalization (the governor raises KeyboardInterrupt once the run task is
-    # done) is different: a user abort makes the whole run invalid, so the
-    # report is rewritten interrupted/complete:false and re-persisted by the
-    # outer handler below — the metrics stay in the file as partial
-    # diagnostics — and the interrupt propagates for exit 130.
+    # then the exception propagates as before. A ^C landing here (the governor
+    # raises KeyboardInterrupt once the run task is done) is different: a user
+    # abort makes the whole run invalid, so the report is rewritten
+    # interrupted/complete:false before the `finally` persists it — the metrics
+    # stay in the file as partial diagnostics — and the interrupt propagates
+    # for exit 130.
     accuracy_scores: list[dict[str, Any]] = []
     try:
-        try:
-            if aborted:
-                # Phases may never have started (scorer init KeyErrors on
-                # missing sample maps) and partial phases would yield
-                # misleading subset scores; the scoring artifacts above are
-                # still on disk for inspection.
-                logger.warning(
-                    "Run aborted (%s) — skipping accuracy scoring on partial data",
-                    "run timeout" if bench.run_timed_out else "user interrupt",
-                )
-            else:
-                accuracy_scores = score_accuracy(ctx, result)
-        finally:
-            # Attach the per-dataset accuracy list so result_summary.json,
-            # the console summary, and report.txt all carry it (stays [] on
-            # a scoring failure).
-            if report is not None:
-                report = msgspec.structs.replace(report, accuracy=accuracy_scores)
-            # Display the report + write result_summary.json / report.txt.
-            if report is not None:
-                _write_report_artifacts(ctx, report, bench.profiling)
-
-        _summarize_and_log_metrics(ctx, report, result, collector)
-
-        # Sibling profiling.json — kept separate so Report stays a pure
-        # snapshot-derived struct. Written after the report artifacts (and
-        # best-effort) so an OSError here can't discard the already-written
-        # perf report.
-        if bench.profiling is not None:
-            try:
-                (ctx.report_dir / "profiling.json").write_text(
-                    json.dumps(bench.profiling, indent=2)
-                )
-            except OSError as e:
-                logger.warning("Failed to write profiling.json: %s", e)
-
-        # Emit the accuracy results as a focused artifact under accuracy/.
-        # Written after the report artifacts so a write failure here can't
-        # discard them.
-        write_accuracy_results(ctx.report_dir, accuracy_scores)
+        if aborted:
+            # Phases may never have started (scorer init KeyErrors on missing
+            # sample maps) and partial phases would yield misleading subset
+            # scores; the scoring artifacts above are still on disk for
+            # inspection.
+            logger.warning(
+                "Run aborted (%s) — skipping accuracy scoring on partial data",
+                "run timeout" if bench.run_timed_out else "user interrupt",
+            )
+        else:
+            accuracy_scores = score_accuracy(ctx, result)
     except KeyboardInterrupt:
-        # ^C anywhere in finalization: the run is invalid. Rewrite and
-        # re-persist the summary (overwriting a COMPLETE one the finally may
-        # already have written), then propagate for exit 130.
-        if report is not None and report.state != "interrupted":
-            invalidated = msgspec.structs.replace(
+        if report is not None:
+            report = msgspec.structs.replace(
                 report, complete=False, state="interrupted"
             )
-            _write_report_artifacts(ctx, invalidated, bench.profiling)
-            report = invalidated
-        bench.report = report
+            bench.report = report
         raise
-
+    finally:
+        # Attach the per-dataset accuracy list so result_summary.json, the
+        # console summary, and report.txt all carry it (stays [] on a scoring
+        # failure).
+        if report is not None:
+            report = msgspec.structs.replace(report, accuracy=accuracy_scores)
+        # Display the report + write result_summary.json / report.txt.
+        if report is not None:
+            _write_report_artifacts(ctx, report, bench.profiling)
     bench.report = report
+
+    _summarize_and_log_metrics(ctx, report, result, collector)
+
+    # Sibling profiling.json — kept separate so Report stays a pure snapshot-
+    # derived struct. Written after the report artifacts (and best-effort) so
+    # an OSError here can't discard the already-written perf report.
+    if bench.profiling is not None:
+        try:
+            (ctx.report_dir / "profiling.json").write_text(
+                json.dumps(bench.profiling, indent=2)
+            )
+        except OSError as e:
+            logger.warning("Failed to write profiling.json: %s", e)
+
+    # Emit the accuracy results as a focused artifact under accuracy/. Written
+    # after the report artifacts so a write failure here can't discard them.
+    write_accuracy_results(ctx.report_dir, accuracy_scores)
 
 
 def run_benchmark(
@@ -1331,9 +1322,9 @@ def run_benchmark(
                     "no services were started"
                 )
             bench = run_benchmark_async(ctx, deadline=deadline, sigint=sigint)
-            # A ^C can land between the coroutine's own flag snapshot and the
-            # loop returning — refresh from the governor so finalization never
-            # writes COMPLETE artifacts for a run that exits 130.
+            # A ^C can land between the coroutine's flag snapshot and the loop
+            # returning — refresh so finalization never writes COMPLETE
+            # artifacts for a run that exits 130.
             bench.user_interrupted = bench.user_interrupted or sigint.interrupted
             finalize_benchmark(ctx, bench)
             if bench.user_interrupted or sigint.interrupted:
