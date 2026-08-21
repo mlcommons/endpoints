@@ -120,6 +120,12 @@ result. Definitions used throughout:
   issued.
 - **Long-running sample.** A sample whose output length (OSL) or sample latency is
   much larger than the dataset average.
+- **Level shift (staircase).** A step change from one flat metric level to a higher
+  flat level partway through a run — distinct from a gradual drift or the drain tail.
+  Typically caused by long-running samples triggering KV-cache eviction toward the
+  end of a long run, or sudden failures in a subset of workers partway or at the end of a run.
+  It produces two (or more) legitimate plateaus; the window selection (§5.5) reports the first
+  and flags the shift to be reported as an anomaly.
 - **Hairball.** A build-up of long-running samples that grows as more dataset
   passes are issued and completed: because datasets are issued without
   replacement, fresh copies of a long-running sample are issued before earlier
@@ -212,10 +218,13 @@ The core is a sequence of pure stages over the per-super-pass series.
   [ guarded drain-tail cut ]              only if per-token-invariant
      |
      v
-  [ convergence: CoV ensemble + trend ]   window edge + steady/drift verdict
+  [ plateau segmentation: CoV + trend ]   admissible windows -> plateaus
      |
      v
-  { steady_state metrics + status }
+  [ select first plateau + shift flag ]   MSER precision; Pettitt level-shift
+     |
+     v
+  { steady_state metrics + status + anomaly }
 ```
 
 ### The hairball (drain tail)
@@ -264,53 +273,108 @@ workloads the tail is a strong long-output selection, so output-length coverage 
 reported alongside the steady metrics so a reader can see the steady set
 under-samples the output-length tail.
 
-## 5.5 Convergence: CoV ensemble, trend gate, drift up/down
+## 5.5 Convergence and steady-window selection
 
-The window edge and the steady/drift verdict come from two signals combined.
+The reported window and the steady/drift verdict come from two per-metric signals —
+a coefficient-of-variation (CoV) stopping rule and a mandatory trend gate — combined
+under a window-selection rule adapted from the steady-state simulation literature.
 
-**Metric set.** The convergence and trend tests run on TTFT and TPOT at the 50th,
-95th, 99th, and 99.9th percentiles (the 99.9th only where a super-pass holds
-enough samples to estimate it). End-to-end latency is reported as context only,
-never as a convergence signal (§5.1). A window is steady only when _every_ metric
-and percentile plateaus and is within its CoV threshold.
-
-_note: There is some discussion to relax core reported metric percentiles to p95 from p99.
-In this case, then the p99 and p99.9 percentiles not converging will be a warning, not a
-hard-fail signal._
+**Metric set.** The convergence and trend tests run on TTFT and TPOT. The **p50 and
+p95** percentiles are _gating_: a window is steady only when both plateau and are
+within CoV for both metrics. The **p99** (and p99.9 where a super-pass holds enough
+samples to estimate it) are carried as _diagnostic warnings_, not hard gates — a tail
+percentile that fails to converge is surfaced as a warning rather than voiding the
+window, because tail percentiles are estimated from far fewer samples per super-pass
+and are the noisiest signal available. End-to-end latency is reported as context
+only, never as a convergence signal (§5.1).
 
 **CoV stopping rule.** The coefficient of variation `CoV = sigma / mu` of a
-metric's per-super-pass percentile, over a trailing window of super-passes, is a
+metric's per-super-pass percentile, over a window of super-passes, is a
 scale-free measure of how much the metric is still moving relative to its own
-level. A region is a candidate steady state when `CoV < bound` for every tracked
-metric and percentile. The bound loosens toward the tail (a p99 is estimated from
+level. A region is a candidate steady state when `CoV < bound` for every gating
+metric and percentile. The bound loosens toward the tail (a p95 is estimated from
 fewer samples per super-pass, so its sampling-noise floor is higher than a p50's).
 
-**Trend gate (mandatory), drift up vs down.** A low CoV over a _trailing_ window
-certifies local flatness, not global convergence: a slowly drifting series can
-sit locally flat while climbing overall. An ordinary-least-squares trend test over
-the whole post-warmup series is therefore applied on top. A metric is _drifting_
-when the run-length change is both a large fraction of its typical value and large
-relative to the super-pass-to-super-pass residual scatter (so a noisy-but-flat
-series is not mistaken for a trend). The slope sign classifies the metric into one
-of three states — **Drifting Down**, **Plateau**, **Drifting Up**:
+**Trend gate (mandatory), drift up vs down.** A low CoV over a window certifies
+local flatness, not that the metric has stopped moving: a slowly drifting series can
+sit locally flat while climbing overall. A trend test over the window is therefore
+applied on top. Because per-super-pass series are autocorrelated, the primary gate is
+the rank-based **Mann–Kendall test with the Hamed–Rao autocorrelation correction**
+(so serial correlation does not fake a trend); an OLS slope-vs-scatter check and a
+Newey–West (autocorrelation-consistent) slope test corroborate it. The verdict
+classifies each metric into one of three states — **Drifting Down**, **Plateau**,
+**Drifting Up**:
 
-- **Drifting Up** — the metric worsens across the run (for example a p99 TTFT tail
-  that never plateaus). This is pathological: there is _no_ steady state to report
-  for that metric, and the step says so rather than emitting a number.
-- **Plateau** — near-zero slope: the metric is genuinely steady. Only a Plateau
+- **Drifting Up** — the metric worsens across the window (for example a p99 TTFT tail
+  that never plateaus). Pathological: there is _no_ steady state to report for that
+  metric, and the step says so rather than emitting a number.
+- **Plateau** — no significant trend: the metric is genuinely steady. Only a Plateau
   metric is eligible to contribute a steady value.
-- **Drifting Down** — the metric is still settling downward, i.e. the warmup crop
-  was slightly short. This is transparent (not a false alarm); the follow-up is a
-  larger crop for that metric.
+- **Drifting Down** — the metric is still settling downward, i.e. the warmup crop was
+  slightly short. Transparent (not a false alarm); the follow-up is a larger crop.
 
-**Ensemble and window selection.** CoV alone is insufficient — a window is only
-meaningful if the metric is in Plateau. In practice, over a large set of runs, no
-single `(window, bound)` fits all metrics and workloads, so the rule is run as an
-**ensemble** of preset `(window, bound)` settings. Among the settings that report
-a steady window, the **largest** steady window is selected (most statistically
-significant). Detector concordance (agreement on where the run settles) is a
-corroborating guardrail; the trend gate remains mandatory and primary, the CoV
-ensemble secondary.
+**Selection principle (MSER): maximize precision, never the metric.** Once a run may
+contain several windows that are both in Plateau and within CoV, the question is
+which to report. The governing rule is taken from the Marginal Standard Error Rule
+(MSER; White 1997) for steady-state truncation: **select the window by the precision
+of the estimate, never by the value of the reported metric.** Choosing the window by
+the very quantity being reported — the highest-TPS window, say — is selection bias:
+it reports the most favorable noise realization and inflates the number. MSER instead
+minimizes the standard error of the mean, `SE = sigma / sqrt(n)`. Because `n` grows
+with window length, `SE` is minimized by the _longest_ admissible window unless
+extending it drags in non-steady super-passes that inflate `sigma` faster than `n`
+grows — the classic bias-versus-variance knee. The operational consequence is simply:
+prefer more steady data, chosen by a criterion that never looks at the throughput
+level.
+
+**Admissibility.** A candidate window is _admissible_ when, for every gating metric
+and percentile, it is (1) in Plateau (trend gate) and (2) within at least one CoV
+bound of the ensemble. These two gates are the explicit form of MSER's implicit
+"post-transient" restriction, and they make each rejection interpretable (a window is
+excluded for a named reason, not a black-box score).
+
+**Candidate family — general contiguous windows, not fixed-endpoint truncation.**
+MSER's textbook form fixes the window's right edge at the end of the run and moves
+only the start: it drops warm-up and keeps everything to the end. That is insufficient
+here because of a possible failure mode seen in longer runs — a **staircase**: a flat region
+that steps up to a higher flat region, possible if KV-cache eviction is triggered towards
+the end of the run, or if workers suddenly crash, causing overall max throughput to degrade
+by a constant amount. A staircase contains a legitimate steady plateau that
+**ends before the end of the run**, and a fixed-endpoint window cannot
+isolate it — it can only capture the final, degraded plateau, or fail the gate on the
+jump. The candidate family is therefore **all contiguous super-pass windows**
+`[lo, hi)`, searched from longest down to a minimum-length floor (the trend test's
+minimum sample count). The floor is essential: minimizing `SE` over unconstrained
+contiguous windows is degenerate — a two-point flat window has `SE = 0` — so the floor
+together with the Plateau/CoV gates rules out the trivial micro-window solution.
+
+**Plateau segmentation and the reported window (first plateau).** The trend and CoV
+gates _implicitly segment_ the run: a window spanning a staircase jump has high CoV
+and reads as a trend, so it is inadmissible, while a window inside a single plateau is
+admissible. Growing an admissible window from the first post-warmup super-pass until
+admissibility breaks isolates the **first plateau**; resuming past the break isolates
+each subsequent plateau. **The first plateau is the reported steady state.** This
+deliberately overrides the pure longest/min-`SE` choice, because empirically the later
+plateaus of a staircase are generally _degradation_ steps — a skewed long-output workload
+building up, or a server going unhealthy — so the first plateau is the representative
+healthy steady state and the later steps are anomalies, not the number to report.
+
+**Level shifts (staircase) are detected and flagged, never hidden.** Reporting the
+first plateau must not silently discard the fact that the run degraded. A level-shift
+detector runs alongside the segmentation: when two or more disjoint admissible
+plateaus have pooled means differing by more than the CoV band, corroborated by a
+**Pettitt** change-point test (a nonparametric, rank-based single-change-point test
+that pairs naturally with the rank-based trend gate) on the TPOT series, the result
+carries an **anomaly flag** — the change-point super-pass and the magnitude and
+direction of the shift. The steady result is still reported from the first plateau,
+with an explicit, honest note that the run changed regime toward the end; every
+plateau is carried in the machine-readable output.
+
+**Ensemble.** Because no single `(window, bound)` CoV setting fits all metrics and
+workloads, the CoV rule is evaluated as an **ensemble** of preset settings; a window
+passes CoV if at least one ensemble setting certifies it for every gating metric.
+Detector concordance is a corroborating guardrail. The trend gate remains mandatory
+and primary; the CoV ensemble is secondary.
 
 ## 5.6 Edge cases and error handling
 
@@ -384,8 +448,20 @@ machine-readable summary produced from the report). Each tracked metric carries
 its steady value plus its state (`Plateau` / `Drifting Up` / `Drifting Down`), and
 the run carries its coverage `status`. Reported quantities:
 
-- **TPS** (output tokens/s).
-- **TTFT and TPOT** percentiles and histograms.
+- **The steady window** itself: its super-pass range `[start, end)` and sample count,
+  so a reader can see where in the run it was drawn from.
+- **TPS**, reported two ways because they answer different questions: **per-user TPS**
+  = `1 / mean(TPOT)` (output tokens/s/user, the interactivity number) and **system
+  TPS** = total output tokens in the window divided by its wall-clock span
+  (aggregate throughput). Each carries a confidence interval computed by
+  **non-overlapping batch means** with super-passes as batches, which accounts for
+  the per-super-pass autocorrelation rather than assuming independent samples.
+- **TTFT and TPOT** percentiles (p50/p90/p95/p99) and histograms, over the pooled raw
+  samples of the steady window.
+- **Anomaly.** When the level-shift detector fires (§5.5), an `anomaly` block records
+  the change-point super-pass, the shift magnitude and direction, and every detected
+  plateau — so a degradation toward the end is surfaced next to the (first-plateau)
+  steady result rather than hidden by it.
 - **QPS is dropped** for text/token-based LLM workloads — a request is not a unit
   of work when output length varies widely, so QPS is a legacy metric of little
   meaning; it is retained only for token-free, uniform-work loads.
@@ -414,10 +490,14 @@ per-super-pass series.
 - **Guard distance measure.** The exact two-sample statistic and acceptance bound
   for the per-token-invariance guard (§5.4) need to be fixed.
 - **No-steady-state runs.** When no steady state is found (a tracked metric is
-  Drifting Up), should the run be reported _invalid_ — analogous to legacy
-  LoadGen's statistical-significance gate — or reported with the offending metrics
-  flagged as unstable while the rest are reported steady? The current proposal is
-  the latter (show which metrics were stable vs unstable).
+  Drifting Up _throughout_, with no admissible plateau at any window), should the run
+  be reported _invalid_ — analogous to legacy LoadGen's statistical-significance gate
+  — or reported with the offending metrics flagged as unstable while the rest are
+  reported steady? The current proposal is the latter (show which metrics were stable
+  vs unstable). This is distinct from the **staircase** case, which is already decided
+  (§5.5): a run with a first steady plateau followed by a higher plateau _does_ have a
+  steady state — the first plateau is reported and the later shift is flagged as an
+  anomaly, not treated as no-steady-state.
 - **Offline drain-onset.** In offline/max-throughput the drain has no client-side
   boundary; the steady region is read from the TPS trend, and the robust definition
   (server occupancy dropping below saturation) is server-side and currently
