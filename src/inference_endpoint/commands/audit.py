@@ -32,9 +32,9 @@ import logging
 import shutil
 from pathlib import Path
 
-from ..compliance import AuditRunArtifacts, get_audit_test
+from ..compliance import AuditRunArtifacts, AuditRunSpec, AuditTest, get_audit_test
 from ..compliance.result import AuditResult, write_result
-from ..config.schema import BenchmarkConfig, DatasetType
+from ..config.schema import AuditConfig, BenchmarkConfig, DatasetType
 from ..exceptions import ExecutionError, SetupError
 from .benchmark.execute import (
     BenchmarkResult,
@@ -44,6 +44,7 @@ from .benchmark.execute import (
     run_benchmark_async,
     setup_benchmark,
 )
+from .benchmark.watchdog import SigintGovernor, sigint_policy
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,41 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
 
     specs = test.plan_runs(audit_cfg)
 
+    # One SIGINT policy for the whole audit (same pattern as run_benchmark):
+    # first ^C stops the current phase gracefully, which surfaces as
+    # report.state=="interrupted" and aborts the audit.
+    sigint = SigintGovernor(config.settings.timeouts.interrupted_teardown_grace_s)
+    with sigint_policy(sigint):
+        artifacts = _run_phases(config, base_report_dir, test, audit_cfg, specs, sigint)
+
+    # Normalizes verify()'s zero-QPS ValueError to exit 4, not a traceback.
+    try:
+        result = test.verify(artifacts, audit_cfg)
+    except (SetupError, ExecutionError):
+        raise
+    except Exception as exc:
+        raise ExecutionError(f"Audit verification failed: {exc}") from exc
+    write_result(result, base_report_dir)
+
+    status = "PASS" if result.passed else "FAIL"
+    logger.info(
+        "Audit %s %s — %s",
+        audit_cfg.test,
+        status,
+        result.details.get("reason", ""),
+    )
+    return result
+
+
+def _run_phases(
+    config: BenchmarkConfig,
+    base_report_dir: Path,
+    test: AuditTest,
+    audit_cfg: AuditConfig,
+    specs: list[AuditRunSpec],
+    sigint: SigintGovernor,
+) -> list[AuditRunArtifacts]:
+    """Execute the planned phases back-to-back; see ``run_audit``."""
     perf_datasets = [d for d in config.datasets if d.type == DatasetType.PERFORMANCE]
     if not perf_datasets:
         raise SetupError("Audit requires at least one performance dataset")
@@ -89,6 +125,10 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
     artifacts: list[AuditRunArtifacts] = []
     dataset_size: int | None = None
     for spec in specs:
+        if sigint.interrupted:
+            # A ^C that landed between phases hit a stale (finished) session
+            # and stopped nothing — never start another phase after it.
+            raise KeyboardInterrupt(f"Audit interrupted before phase '{spec.label}'")
         phase_dir = base_report_dir / spec.label
         phase_dir.mkdir(parents=True, exist_ok=True)
 
@@ -114,7 +154,7 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
                 test.validate(
                     audit_cfg, dataset_size, config.settings.load_pattern.type
                 )
-            bench = run_benchmark_async(ctx)
+            bench = run_benchmark_async(ctx, sigint=sigint)
             finalize_benchmark(ctx, bench)
         except (SetupError, ExecutionError):
             raise
@@ -129,6 +169,13 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
         report = bench.report
         if report is None:
             raise ExecutionError(f"Audit phase '{spec.label}' produced no report")
+        # A timed-out phase produced an INTERRUPTED report at best; certifying
+        # a compliance result from it is never valid.
+        if bench.run_timed_out:
+            raise ExecutionError(
+                f"Audit phase '{spec.label}' hit the run timeout "
+                "(settings.timeouts.run_timeout_s); report marked INTERRUPTED"
+            )
         # A SIGINT/SIGTERM during a (long) audit phase is turned into a graceful
         # stop, so the phase returns with an "interrupted" report. Propagate it
         # as KeyboardInterrupt so the CLI exits 130 (interrupted), not as a
@@ -158,20 +205,4 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
             )
         )
 
-    # Normalizes verify()'s zero-QPS ValueError to exit 4, not a traceback.
-    try:
-        result = test.verify(artifacts, audit_cfg)
-    except (SetupError, ExecutionError):
-        raise
-    except Exception as exc:
-        raise ExecutionError(f"Audit verification failed: {exc}") from exc
-    write_result(result, base_report_dir)
-
-    status = "PASS" if result.passed else "FAIL"
-    logger.info(
-        "Audit %s %s — %s",
-        audit_cfg.test,
-        status,
-        result.details.get("reason", ""),
-    )
-    return result
+    return artifacts

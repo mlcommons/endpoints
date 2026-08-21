@@ -45,29 +45,30 @@ the benchmark `type` and `endpoint_config`.
 
 Key nested models:
 
-| Model            | Purpose                                             |
-| ---------------- | --------------------------------------------------- |
-| `LoadPattern`    | Pattern type + parameters (target QPS, concurrency) |
-| `RuntimeConfig`  | Duration, sample count, RNG seeds                   |
-| `ClientSettings` | Worker count and HTTP client settings               |
-| `EndpointConfig` | Endpoint URLs, API key                              |
-| `Dataset`        | Dataset path, type (performance / accuracy)         |
+| Model              | Purpose                                                     |
+| ------------------ | ----------------------------------------------------------- |
+| `LoadPattern`      | Pattern type + parameters (target QPS, concurrency)         |
+| `RuntimeConfig`    | Sample count, perf-phase cap (`max_duration_ms`), RNG seeds |
+| `Timeouts`         | All global waits/deadlines (`settings.timeouts`)            |
+| `HTTPClientConfig` | Worker count and HTTP client settings (`settings.client`)   |
+| `EndpointConfig`   | Endpoint URLs, API key                                      |
+| `Dataset`          | Dataset path, type (performance / accuracy)                 |
 
 ### `RuntimeSettings` (frozen dataclass)
 
 Immutable snapshot of all parameters needed to execute a run.
 
-| Field                | Type           | Source                                  |
-| -------------------- | -------------- | --------------------------------------- |
-| `load_pattern`       | `LoadPattern`  | config                                  |
-| `n_samples_to_issue` | `int`          | calculated: QPS × duration, or explicit |
-| `min_duration_ms`    | `int`          | runtime config                          |
-| `max_duration_ms`    | `int`          | runtime config                          |
-| `min_sample_count`   | `int`          | current default / future ruleset hook   |
-| `metric_target`      | `Metric`       | primary target driving scheduler logic  |
-| `reported_metrics`   | `list[Metric]` | metrics validated after the run         |
-| `rng_sched`          | `Random`       | seeded from `scheduler_random_seed`     |
-| `rng_sample_index`   | `Random`       | seeded from `dataloader_random_seed`    |
+| Field                | Type             | Source                                                                                                                                                   |
+| -------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `load_pattern`       | `LoadPattern`    | config                                                                                                                                                   |
+| `n_samples_to_issue` | `int \| None`    | explicit (`--num-samples`), else `target_qps` × `min_duration_ms` (padded) when a min duration is set, else dataset size                                 |
+| `min_duration_ms`    | `int \| None`    | `--runtime.min-duration-ms` / `runtime.min_duration_ms` (poisson only; None = no duration target); a ruleset may override once ruleset integration lands |
+| `max_duration_ms`    | `int \| None`    | runtime config                                                                                                                                           |
+| `min_sample_count`   | `int`            | current default / future ruleset hook                                                                                                                    |
+| `metric_target`      | `Metric \| None` | `Throughput(target_qps)` when set; no synthetic default                                                                                                  |
+| `reported_metrics`   | `list[Metric]`   | metrics validated after the run                                                                                                                          |
+| `rng_sched`          | `Random`         | seeded from `scheduler_random_seed`                                                                                                                      |
+| `rng_sample_index`   | `Random`         | seeded from `dataloader_random_seed`                                                                                                                     |
 
 Once constructed, `RuntimeSettings` cannot be modified. All consumers receive the same instance.
 
@@ -145,8 +146,8 @@ to the report output.
 | Consumer                        | Usage                                                        |
 | ------------------------------- | ------------------------------------------------------------ |
 | `load_generator/session.py`     | Receives `RuntimeSettings` at construction                   |
-| `load_generator/scheduler.py`   | Reads `load_pattern`, `n_samples_to_issue`, RNG seeds        |
+| `load_generator/strategy.py`    | Reads `load_pattern`, `n_samples_to_issue`, RNG seeds        |
 | `endpoint_client/config.py`     | Reads `api_type`, `num_workers`, streaming mode              |
-| `metrics/reporter.py`           | Reads `reported_metrics`, duration bounds                    |
+| `metrics/report.py`             | Reads `reported_metrics`, duration bounds                    |
 | `commands/benchmark/cli.py`     | Defines benchmark subcommands and resolves CLI vs YAML input |
 | `commands/benchmark/execute.py` | Runs the benchmark lifecycle from resolved configuration     |

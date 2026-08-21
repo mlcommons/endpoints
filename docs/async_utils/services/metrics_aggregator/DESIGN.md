@@ -117,13 +117,14 @@ COMPLETE event ─► trigger.fire ─► queue.enqueue(text, on_count)        [
 | `--publish-interval`             | 0.25            | Live snapshot cadence (seconds)                     |
 | `--drain-timeout`                | `0` (unlimited) | End-of-run tokenize budget (`0` = unlimited)        |
 | `--tokenizer`                    | none            | HF name or local path; unset disables token metrics |
-| `--tokenizer-workers`            | `2`             | Live in-process threads (`0` = defer all to drain)  |
+| `--tokenizer-workers`            | `4`             | Live in-process threads (`0` = defer all to drain)  |
 | `--streaming`                    | off             | Register TTFT/chunk-delta/TPOT triggers             |
 
 `--drain-timeout` and `--tokenizer-workers` have service-side defaults (`0`
-and `2`) so the service is launchable by hand without tuning knobs, but
-`config/schema.py` is the single source of truth: the benchmark always
-forwards the schema values (`--metrics-drain-timeout`,
+and `4`) so the service is launchable by hand without tuning knobs, but
+the config schema is the single source of truth (`settings.timeouts.metrics_drain_timeout_s`
+in `config/schema.py`, `settings.metrics_tokenizer_workers` in `config/schema.py`): the benchmark always
+forwards the schema values (`settings.timeouts.metrics_drain_timeout_s`,
 `--metrics-tokenizer-workers`), overriding these defaults in normal runs.
 
 ## References

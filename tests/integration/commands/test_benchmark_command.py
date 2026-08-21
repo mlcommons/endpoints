@@ -42,7 +42,6 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 
 _TEST_SETTINGS = Settings(
-    runtime=RuntimeConfig(min_duration_ms=0),
     load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
     client=HTTPClientConfig(num_workers=1, warmup_connections=0, max_connections=10),
 )
@@ -61,8 +60,10 @@ def _config(endpoint_url: str, dataset_path: str, **overrides) -> BenchmarkConfi
 
 
 def _poisson_settings(target_qps: float, duration_s: int = 2) -> Settings:
+    # Pin the workload length via an explicit sample count equivalent to
+    # target_qps * duration_s.
     return Settings(
-        runtime=RuntimeConfig(min_duration_ms=duration_s * 1000),
+        runtime=RuntimeConfig(n_samples_to_issue=int(target_qps * duration_s)),
         load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=target_qps),
         client=HTTPClientConfig(
             num_workers=1, warmup_connections=0, max_connections=10
@@ -121,7 +122,7 @@ class TestBenchmarkCommandIntegration:
             type=TestType.ONLINE,
             model_params=ModelParams(name="echo-server", streaming=streaming),
             settings=Settings(
-                runtime=RuntimeConfig(min_duration_ms=2000),
+                runtime=RuntimeConfig(n_samples_to_issue=40),
                 load_pattern=LoadPattern(
                     type=LoadPatternType.CONCURRENCY, target_concurrency=4
                 ),
@@ -176,7 +177,6 @@ class TestBenchmarkCommandIntegration:
             (
                 TestType.OFFLINE,
                 Settings(
-                    runtime=RuntimeConfig(min_duration_ms=0),
                     load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
                     client=HTTPClientConfig(
                         num_workers=1, warmup_connections=0, max_connections=10
@@ -186,7 +186,6 @@ class TestBenchmarkCommandIntegration:
             (
                 TestType.ONLINE,
                 Settings(
-                    runtime=RuntimeConfig(min_duration_ms=0),
                     load_pattern=LoadPattern(
                         type=LoadPatternType.CONCURRENCY, target_concurrency=1
                     ),
@@ -281,7 +280,6 @@ class TestBenchmarkCommandIntegration:
             model_params=ModelParams(name="echo-server", streaming=StreamingMode.OFF),
             datasets=[Dataset(path=ds_dataset_path, type=DatasetType.PERFORMANCE)],
             settings=Settings(
-                runtime=RuntimeConfig(min_duration_ms=0),
                 load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
                 client=HTTPClientConfig(
                     num_workers=1, warmup_connections=0, max_connections=10
@@ -377,8 +375,7 @@ def _resolve_template(template_path: Path, server_url: str) -> dict:
     # The other 5 templates benefit from warm module / IPC caches and don't
     # need the headroom. 120 s is a generous safety margin that does not
     # change the production default, only this integration test.
-    data["settings"].setdefault("client", {})
-    data["settings"]["client"]["worker_initialization_timeout"] = 120.0
+    data["settings"].setdefault("client", {})["worker_initialization_timeout"] = 120.0
 
     # Accuracy datasets can't run e2e against echo server (no scorer), so keep only performance datasets.
     data["datasets"] = [

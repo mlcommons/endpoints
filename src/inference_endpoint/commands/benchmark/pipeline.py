@@ -100,7 +100,7 @@ def _build_aggregator_args(
     metrics_output_dir: Path,
     enable_streaming: bool,
     tokenizer_name: str | None,
-    drain_timeout_s: float,
+    drain_timeout_s: float | None,
     tokenizer_workers: int,
     early_stopping: bool,
 ) -> list[str]:
@@ -121,7 +121,10 @@ def _build_aggregator_args(
         args.append("--early-stopping")
     if tokenizer_name is not None:
         args.extend(["--tokenizer", tokenizer_name])
-    args.extend(["--drain-timeout", str(drain_timeout_s)])
+    # One convention everywhere: None = unlimited (flag omitted; also the
+    # aggregator's hand-launch default), an explicit 0 = zero budget.
+    if drain_timeout_s is not None:
+        args.extend(["--drain-timeout", str(drain_timeout_s)])
     args.extend(["--tokenizer-workers", str(tokenizer_workers)])
     return args
 
@@ -232,22 +235,28 @@ class MetricsPipeline:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> bool | None:
-        """Release the pipeline. Kill the services iff the run never drained.
+        """Release the pipeline. Kill the services unless the run drained cleanly.
 
         ``drain_and_build_report`` nulls ``self.publisher`` at drain initiation; a
         still-set publisher means the drain was never initiated (setup / connect /
-        session error before it),
-        so the service subprocesses are killed rather than left on the aggregator's
-        unlimited drain-timeout. The ``ExitStack`` then releases publisher, subscriber
-        and the ZMQ scope — running every step even under ``BaseException``.
+        session error before it), so the service subprocesses are killed rather
+        than left on the aggregator's unlimited drain-timeout. An in-flight
+        exception forces the kill even after drain initiation: a KeyboardInterrupt
+        (or teardown error) that aborts the drain wait must not leave the
+        aggregator/event-logger children orphaned — ``terminate_all`` is a no-op
+        for processes that already exited. The ``ExitStack`` then releases
+        publisher, subscriber and the ZMQ scope — running every step even under
+        ``BaseException``.
         """
         if self._stack is None:
             return None
         stack, self._stack = self._stack, None
-        if self.publisher is not None and self._launcher is not None:
+        if self._launcher is not None and (
+            self.publisher is not None or exc_type is not None
+        ):
             # Register this last so it runs first. ExitStack still executes the
-            # publisher/subscriber/ZMQ callbacks if terminate_all raises BaseException
-            # (for example, a second Ctrl-C during teardown).
+            # publisher/subscriber/ZMQ callbacks if terminate_all raises
+            # BaseException (for example, a KeyboardInterrupt during teardown).
             stack.callback(self._kill_services)
         return stack.__exit__(exc_type, exc, tb)
 
@@ -280,7 +289,7 @@ class MetricsPipeline:
             stack.callback(self._close_subscriber)
 
             self._launcher = ServiceLauncher(zmq_ctx)
-            drain = self._config.settings.drain
+            timeouts = self._config.settings.timeouts
             aggregator_args = _build_aggregator_args(
                 socket_dir=zmq_ctx.socket_dir,
                 pub_socket_name=pub_socket_name,
@@ -288,8 +297,8 @@ class MetricsPipeline:
                 metrics_output_dir=self._metrics_output_dir,
                 enable_streaming=self._enable_streaming,
                 tokenizer_name=self._tokenizer_name,
-                drain_timeout_s=drain.metrics_drain_timeout_s,
-                tokenizer_workers=drain.metrics_tokenizer_workers,
+                drain_timeout_s=timeouts.metrics_drain_timeout_s,
+                tokenizer_workers=self._config.settings.metrics_tokenizer_workers,
                 early_stopping=self._config.settings.early_stopping.enabled,
             )
             event_logger_args = _build_event_logger_args(
@@ -302,7 +311,7 @@ class MetricsPipeline:
                     ServiceConfig(module=_AGGREGATOR_MODULE, args=aggregator_args),
                     ServiceConfig(module=_EVENT_LOGGER_MODULE, args=event_logger_args),
                 ],
-                timeout=self._config.settings.service_ready_timeout_s,
+                timeout=timeouts.service_ready_timeout_s,
             )
         except BaseException as e:
             if self._launcher is not None:  # launch may have spawned children
@@ -331,9 +340,9 @@ class MetricsPipeline:
         )
         # Null the publisher before closing it so __aexit__ sees "drain initiated"
         # regardless of whether the subsequent await completes or is cancelled
-        # (e.g. second Ctrl-C). If we close first and then CancelledError fires
-        # before the null assignment, __aexit__ would call terminate_all() on an
-        # aggregator that is already draining and writing final_snapshot.json.
+        # (e.g. the run watchdog firing). If we close first and then CancelledError
+        # fires before the null assignment, __aexit__ would call terminate_all()
+        # on an aggregator that is already draining and writing final_snapshot.json.
         publisher, self.publisher = self.publisher, None
         publisher.close()
         logger.info("Waiting for services to finish processing...")
@@ -360,19 +369,38 @@ class MetricsPipeline:
         )
         return report
 
+    def terminate_metrics_aggregator(self) -> None:
+        """SIGTERM the metrics aggregator; safe no-op before launch.
+
+        Run-watchdog abort path: targeted so the aggregator's SIGTERM handler
+        writes the INTERRUPTED final snapshot while the event logger stays
+        alive to flush its buffer on the session's ENDED event.
+        """
+        if self._launcher is None:
+            return
+        self._launcher.terminate_module(_AGGREGATOR_MODULE)
+
+    def abandon_drain(self) -> None:
+        """SIGTERM→SIGKILL every service child; idempotent, safe pre-launch.
+
+        Teardown-grace path (abort with a wedged drain): once the children
+        are reaped, the drain's ``wait_for_exit`` thread unblocks.
+        """
+        self._kill_services()
+
     def _kill_services(self) -> None:
         """Best-effort service termination owned by the pipeline ExitStack.
 
         Sends SIGTERM first so the metrics aggregator can flush an INTERRUPTED
-        final_snapshot.json via its signal handler. Escalates to SIGKILL after
-        a short timeout for any process that does not exit cleanly.
+        final_snapshot.json via its signal handler, escalating to SIGKILL after
+        a short timeout.
         """
         if self._launcher is None:
             return
         try:
             self._launcher.terminate_all()
         except Exception as e:  # noqa: BLE001 — teardown best-effort
-            logger.warning("Service terminate_all error: %s", e)
+            logger.warning("Service termination error: %s", e)
 
     def _close_publisher(self) -> None:
         """Best-effort publisher close (ExitStack callback)."""

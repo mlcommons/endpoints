@@ -392,6 +392,16 @@ class BenchmarkSession:
         if self._strategy_task and not self._strategy_task.done():
             self._strategy_task.cancel()
 
+    @property
+    def stop_requested(self) -> bool:
+        """True once stop() ran — Ctrl-C, transport closure, or watchdog.
+
+        Distinguishes a session whose run() returned after an abort from one
+        that completed normally; the per-phase cap (stop_current_phase) does
+        NOT set it, since reaching max_duration_ms is a normal phase end.
+        """
+        return self._stop_requested
+
     def stop_current_phase(self) -> None:
         """End the in-progress phase without aborting the session.
 
@@ -404,7 +414,7 @@ class BenchmarkSession:
 
         Also sets the drain event: if the cap fires while the phase is already
         inside its ``_drain_inflight`` wait (strategy task finished), cancelling
-        the task is a no-op, so an unbounded (``performance_timeout_s: null``)
+        the task is a no-op, so an unbounded (``performance_drain_timeout_s: null``)
         drain would otherwise hang forever on a stuck in-flight response.
         """
         self._current_phase_stopped = True
@@ -444,6 +454,12 @@ class BenchmarkSession:
                     await self._recv_task
                 except asyncio.CancelledError:
                     pass
+            if self._stop_requested:
+                # Aborted run (Ctrl-C, transport closure, run watchdog): mark
+                # it BEFORE the terminal ENDED so the aggregator's ENDED-driven
+                # finalize — which still drains buffered samples first — writes
+                # state=interrupted rather than a normal COMPLETE snapshot.
+                self._publish_session_event(SessionEventType.INTERRUPTED)
             self._publish_session_event(SessionEventType.ENDED)
 
         return SessionResult(

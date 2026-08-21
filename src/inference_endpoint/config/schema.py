@@ -26,7 +26,7 @@ import logging
 from collections import Counter
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal, Self, Union
+from typing import Annotated, Any, Literal, Self, Union
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import cyclopts
@@ -44,7 +44,6 @@ from pydantic import (
     model_validator,
 )
 
-from .. import metrics
 from ..core.types import APIType
 from ..endpoint_client.config import HTTPClientConfig
 from ..exceptions import CLIError
@@ -53,11 +52,6 @@ from .ruleset_base import BenchmarkSuiteRuleset
 from .utils import parse_dataset_string, resolve_env_vars
 
 logger = logging.getLogger(__name__)
-
-
-class SystemDefaults(BaseModel):
-    DEFAULT_TIMEOUT: ClassVar[float] = 300.0
-    DEFAULT_METRIC: ClassVar[metrics.Metric] = metrics.Throughput(0.0)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -151,6 +145,9 @@ class ScorerMethod(str, Enum):
     SWE_BENCH = "swe_bench_scorer"
 
 
+# --------------------------------------------------------------------- audit
+# The root-level ``audit:`` block: per-test config models and their id enum.
+# The runnable test registry lives in ``compliance/``.
 class AuditTestId(str, Enum):
     """Registered compliance audit test identifiers."""
 
@@ -247,16 +244,6 @@ class TestType(str, Enum):
     ONLINE = "online"
     EVAL = "eval"
     SUBMISSION = "submission"
-
-
-# Mapping from template type strings to TestType enums
-# Single source of truth for template type conversion
-TEMPLATE_TYPE_MAP = {
-    "offline": TestType.OFFLINE,
-    "online": TestType.ONLINE,
-    "eval": TestType.EVAL,
-    "submission": TestType.SUBMISSION,
-}
 
 
 class OSLDistribution(BaseModel):
@@ -610,22 +597,34 @@ class RuntimeConfig(BaseModel):
 
     Sample count priority (in RuntimeSettings.total_samples_to_issue()):
     1. n_samples_to_issue (if specified) — explicit override
-    2. Calculated from QPS * duration — duration-based (default: 600000ms)
-    3. All dataset samples — fallback when duration is 0
+    2. Calculated from target_qps × min_duration_ms — when a min duration is set
+    3. All dataset samples — issue the dataset once (the default)
+
+    ``min_duration_ms``/``max_duration_ms`` are workload durations (part of the
+    benchmark definition), not give-up deadlines — those live in
+    ``settings.timeouts``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    min_duration_ms: Annotated[
-        int,
-        cyclopts.Parameter(
-            alias="--duration", help="Min duration (ms, or with suffix: 600s, 10m)"
+    min_duration_ms: int | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Sizing input, not a timer (poisson only; requires explicit "
+            "target_qps): derives the sample count as target_qps × "
+            "min_duration_ms. Overridden by an explicit n_samples_to_issue; "
+            "None = no min_duration_ms "
+            "target (issue the dataset once)"
         ),
-    ] = Field(600000, ge=0)
-    max_duration_ms: int = Field(
-        0,
-        ge=0,
-        description="Maximum test duration in ms (0 for no limit)",
+    )
+    max_duration_ms: int | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Cap on performance-phase issuing in ms; reaching it ends the "
+            "phase normally (None = no cap)"
+        ),
     )
 
     @field_validator("min_duration_ms", "max_duration_ms", mode="before")
@@ -651,7 +650,11 @@ class RuntimeConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_durations(self) -> Self:
-        if self.max_duration_ms != 0 and self.max_duration_ms < self.min_duration_ms:
+        if (
+            self.max_duration_ms is not None
+            and self.min_duration_ms is not None
+            and self.max_duration_ms < self.min_duration_ms
+        ):
             raise ValueError(
                 f"max_duration_ms ({self.max_duration_ms}) must be >= "
                 f"min_duration_ms ({self.min_duration_ms})"
@@ -790,80 +793,87 @@ class WarmupConfig(BaseModel):
     ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
 
 
-class DrainConfig(BaseModel):
-    """Per-phase in-flight response drain timeout configuration."""
+class Timeouts(WithUpdatesMixin, BaseModel):
+    """All global waits and deadlines.
+
+    Two value conventions, stated once here:
+
+    - Drain bounds (``*_drain_timeout_s``): ``None`` = wait indefinitely,
+      ``0`` = zero budget. ``service_ready_timeout_s`` is a finite
+      non-negative bound (never ``None``) (give up / skip
+      immediately).
+    - The watchdog (``run_timeout_s``): ``None`` = off; ``0`` is rejected
+      (``gt=0``) because a zero-length run is never meaningful — there is no
+      "skip" semantics for the run itself.
+
+    Reaching an optional deadline means something is stuck; ``run_timeout_s``
+    is the whole-run watchdog — when it fires the run is aborted and the
+    report is marked INTERRUPTED. It never derives or caps the other
+    deadlines. Workload durations (``runtime.max_duration_ms``) are NOT
+    timeouts and do not live here.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    warmup_timeout_s: Annotated[
+    run_timeout_s: Annotated[
         float | None,
-        cyclopts.Parameter(
-            alias="--warmup-drain-timeout",
-            help="Warmup drain timeout in seconds (None = wait indefinitely)",
-        ),
-    ] = Field(
-        240.0,
-        gt=0,
-        description="Warmup drain timeout in seconds (None = wait indefinitely)",
-    )
-    performance_timeout_s: Annotated[
-        float | None,
-        cyclopts.Parameter(
-            alias="--performance-drain-timeout",
-            help="Performance drain timeout in seconds (None = wait indefinitely)",
-        ),
-    ] = Field(
-        240.0,
-        gt=0,
-        description="Performance drain timeout in seconds (None = wait indefinitely)",
-    )
-    accuracy_timeout_s: Annotated[
-        float | None,
-        cyclopts.Parameter(
-            alias="--accuracy-drain-timeout",
-            help="Accuracy drain timeout in seconds (None = wait indefinitely)",
-        ),
+        cyclopts.Parameter(alias="--timeout"),
     ] = Field(
         None,
         gt=0,
-        description="Accuracy drain timeout in seconds (None = wait indefinitely)",
-    )
-    metrics_drain_timeout_s: Annotated[
-        float,
-        cyclopts.Parameter(
-            alias="--metrics-drain-timeout",
-            help=(
-                "Wall-clock budget (seconds) for the metrics aggregator to finish "
-                "tokenizing buffered samples after the run ends. Set to 0 to wait "
-                "indefinitely. Increase for very large datasets where the end-of-run "
-                "tokenize batch is big."
-            ),
+        description=(
+            "Whole-run watchdog in seconds (None = off). Bounds the run from "
+            "service launch through every phase and drain; synchronous setup "
+            "(tokenizer probe, dataset load) counts against the budget but is "
+            "only checked at its boundary — a hung setup call itself is not "
+            "interrupted. Firing aborts the run, marks the report "
+            "INTERRUPTED, and exits non-zero. Never derives per-stage deadlines."
         ),
-    ] = Field(
-        0.0,
+    )
+    interrupted_teardown_grace_s: float | None = Field(
+        30.0,
+        ge=0,
+        description=(
+            "Seconds after an abort (^C or a run_timeout_s fire) before a "
+            "still-running metrics drain is abandoned: the service children "
+            "are SIGTERMed (the aggregator writes a best-effort INTERRUPTED "
+            "snapshot) then SIGKILLed, so a wedged drain can never hang the "
+            "abort (None = never abandon; 0 = abandon immediately)."
+        ),
+    )
+    service_ready_timeout_s: float = Field(
+        30.0,
+        ge=0,
+        description="Seconds to wait for metrics-aggregator/event-logger services to become ready.",
+    )
+    warmup_drain_timeout_s: float | None = Field(
+        240.0,
+        ge=0,
+        description="Warmup drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
+    )
+    performance_drain_timeout_s: float | None = Field(
+        None,
+        ge=0,
+        description="Performance drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
+    )
+    accuracy_drain_timeout_s: float | None = Field(
+        None,
+        ge=0,
+        description=(
+            "Accuracy drain timeout in seconds (None = wait indefinitely; "
+            "0 = skip the drain; accuracy is unbounded by default because "
+            "every sample must complete)"
+        ),
+    )
+    metrics_drain_timeout_s: float | None = Field(
+        None,
         ge=0,
         description=(
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
-            "after ENDED (default: 0 = unlimited). An incomplete drain is "
-            "surfaced via n_pending_tasks > 0, never silently dropped."
-        ),
-    )
-    metrics_tokenizer_workers: Annotated[
-        int,
-        cyclopts.Parameter(
-            alias="--metrics-tokenizer-workers",
-            help=(
-                "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT in "
-                "the metrics aggregator. 0 defers all tokenization to the "
-                "end-of-run drain, which always uses the auto-sized sharded pool."
-            ),
-        ),
-    ] = Field(
-        4,
-        ge=0,
-        description=(
-            "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
-            "(default: 4; 0 = defer everything to the end-of-run drain)."
+            "after ENDED (None = wait indefinitely; 0 = give up immediately). "
+            "An incomplete drain fails "
+            "the run: artifacts are written with complete: false, then "
+            "run_benchmark exits non-zero."
         ),
     )
 
@@ -959,7 +969,7 @@ class EarlyStoppingConfig(BaseModel):
 
 
 @cyclopts.Parameter(name="*")
-class Settings(BaseModel):
+class Settings(WithUpdatesMixin, BaseModel):
     """Test settings."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -967,9 +977,9 @@ class Settings(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
-    drain: DrainConfig = Field(
-        default_factory=DrainConfig,
-        description="Per-phase in-flight response drain timeout configuration",
+    timeouts: Timeouts = Field(
+        default_factory=Timeouts,
+        description="All global waits and deadlines (see config/schema.py)",
     )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
     profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
@@ -977,17 +987,36 @@ class Settings(BaseModel):
         default_factory=EarlyStoppingConfig,
         description="MLPerf early-stopping percentile estimates (on by default; enabled: false opts out)",
     )
-    service_ready_timeout_s: Annotated[
-        float,
-        cyclopts.Parameter(
-            alias="--service-ready-timeout",
-            help="Seconds to wait for metrics/event-logger services to start",
-        ),
+    metrics_tokenizer_workers: Annotated[
+        int,
+        cyclopts.Parameter(alias="--metrics-tokenizer-workers"),
     ] = Field(
-        default=30.0,
+        4,
         ge=0,
-        description="Seconds to wait for metrics-aggregator/event-logger services to become ready.",
+        description=(
+            "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
+            "(default: 4; 0 = defer everything to the end-of-run drain)."
+        ),
     )
+
+    @model_validator(mode="after")
+    def _min_duration_requires_qps(self) -> Self:
+        # min_duration_ms sizes the run as target_qps × duration, so it is
+        # only meaningful when an explicit issue rate exists: poisson with
+        # target_qps. Offline bursts and fixed-concurrency runs have no rate
+        # to multiply by — no synthetic default is invented.
+        if self.runtime.min_duration_ms is not None and (
+            self.load_pattern.type != LoadPatternType.POISSON
+            or self.load_pattern.target_qps is None
+        ):
+            raise ValueError(
+                "runtime.min_duration_ms (--runtime.min-duration-ms) requires "
+                "a poisson load "
+                "pattern with an explicit target_qps; offline/max_throughput "
+                "and concurrency runs are sized by --num-samples or the "
+                "dataset size"
+            )
+        return self
 
 
 class OfflineSettings(Settings):
@@ -1078,10 +1107,6 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         Path | None,
         cyclopts.Parameter(alias="--report-dir", help="Report output directory"),
     ] = None
-    timeout: Annotated[
-        float | None,
-        cyclopts.Parameter(alias="--timeout", help="Global timeout in seconds"),
-    ] = None
     # verbose is handled by cyclopts meta app (-v flag), not here
     verbose: Annotated[bool, cyclopts.Parameter(show=False)] = Field(
         False, description="Enable verbose logging"
@@ -1120,7 +1145,6 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         Validation:
         - Workers must be -1 (auto) or >= 1
-        - max_duration_ms >= min_duration_ms >= 0
         - No duplicate dataset (name, type) pairs
         - Load pattern must match test type
         """

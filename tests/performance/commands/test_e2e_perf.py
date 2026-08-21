@@ -143,8 +143,6 @@ def test_concurrency_roofline(
             "concurrency",
             "--concurrency",
             str(concurrency),
-            "--duration",
-            "10s",
             "--runtime.max-duration-ms",
             "12000",
             # Headroom so wall time, not sample count, is the limit.
@@ -203,7 +201,7 @@ def test_poisson_binary_search_max_qps(
                 "poisson",
                 "--target-qps",
                 str(target),
-                "--duration",
+                "--runtime.min-duration-ms",
                 "10s",
                 "--runtime.max-duration-ms",
                 "12000",
@@ -286,9 +284,9 @@ def test_low_qps_no_network_errors(
             "poisson",
             "--target-qps",
             str(TARGET_QPS),
-            "--duration",
+            "--runtime.min-duration-ms",
             f"{DURATION_S}s",
-            # 2x Poisson expectation so wall time (--duration) always caps
+            # 2x Poisson expectation so wall time (min duration) always caps
             # the run; without headroom, variance in inter-arrivals can
             # finish the test early before the full idle-connection window.
             "--num-samples",

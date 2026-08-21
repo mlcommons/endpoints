@@ -82,20 +82,17 @@ class RuntimeSettings:
     and ruleset constraints. It should never be instantiated directly by users,
     but rather created through:
     - Ruleset.apply_user_config() for ruleset-constrained configs
-    - RuntimeSettings.from_config() factory method (to be added in Phase 3)
+    - RuntimeSettings.from_config() factory method
 
     All fields are immutable (frozen dataclass) to prevent accidental modification
     during benchmark execution.
     """
 
-    metric_target: metrics.Metric
+    metric_target: metrics.Metric | None
     """Primary metric to target (e.g., Throughput(100) for 100 QPS)"""
 
     reported_metrics: list[metrics.Metric]
     """List of metrics to collect and report"""
-
-    min_duration_ms: int
-    """Minimum benchmark duration in milliseconds"""
 
     max_duration_ms: int | None
     """Maximum benchmark duration in milliseconds (timeout). None means no wall-clock limit."""
@@ -117,6 +114,16 @@ class RuntimeSettings:
 
     load_pattern: LoadPattern | None
     """Load pattern configuration"""
+
+    min_duration_ms: int | None = field(default=None, kw_only=True)
+    """Sizing input for the performance phase — never a runtime timer.
+
+    When set, ``total_samples_to_issue()`` derives the sample count as
+    ``target_qps × min_duration_ms``; an explicit ``n_samples_to_issue``
+    wins. ``None`` — or ``0`` from programmatic ruleset callers — means no
+    sizing target: issue the dataset once. Populated from
+    ``settings.runtime.min_duration_ms`` (schema-validated: poisson with an
+    explicit ``target_qps`` only) or set directly by rulesets."""
 
     sample_order: SampleOrderSpec = field(default_factory=SampleOrderSpec, kw_only=True)
     """Sample-ordering strategy (default: without-replacement)."""
@@ -143,15 +150,13 @@ class RuntimeSettings:
         Returns:
             Immutable RuntimeSettings instance
 
-        Note: If a ruleset is provided, it would handle the conversion with competition-specific logic.
-        For now, we use default conversion. Full ruleset integration is deferred to Phase 4.
+        Note: the ``ruleset`` argument is accepted but NOT applied — wiring
+        ``BenchmarkSuiteRuleset.apply_user_config()`` (which would need a
+        ``UserConfig`` the CLI flow doesn't build yet) into this factory is
+        future work with no active tracking issue; until then every config
+        gets the default conversion below (rulesets still enforce their
+        schema-side constraints, e.g. pinned RNG seeds).
         """
-        if ruleset is not None:
-            # Ruleset handles conversion with competition-specific logic
-            # This would need UserConfig which we don't have in the current CLI flow
-            # For now, we use default conversion even if ruleset is provided
-            # Full ruleset integration is deferred to Phase 4
-            pass
 
         return cls._from_config_default(config, dataloader_num_samples, **overrides)
 
@@ -176,22 +181,21 @@ class RuntimeSettings:
         runtime_cfg = config.settings.runtime
         load_pattern_cfg = config.settings.load_pattern
 
-        # TODO: The default target_qps should be None in Offline mode, but we use 10.0 for now.
-        # This is a temporary solution to avoid breaking changes.
-        effective_qps = (
-            load_pattern_cfg.target_qps
-            if load_pattern_cfg.target_qps is not None
-            else 10.0
-        )
+        # No synthetic default: patterns without an explicit target_qps carry
+        # no throughput target (min_duration_ms sizing requires one — enforced
+        # at the schema layer).
+        target_qps = load_pattern_cfg.target_qps
 
         # Build kwargs from Pydantic models
         kwargs = {
-            "metric_target": metrics.Throughput(effective_qps),
-            "reported_metrics": [metrics.Throughput(effective_qps)],
+            "metric_target": (
+                metrics.Throughput(target_qps) if target_qps is not None else None
+            ),
+            "reported_metrics": (
+                [metrics.Throughput(target_qps)] if target_qps is not None else []
+            ),
             "min_duration_ms": runtime_cfg.min_duration_ms,
-            "max_duration_ms": None
-            if runtime_cfg.max_duration_ms == 0
-            else runtime_cfg.max_duration_ms,
+            "max_duration_ms": runtime_cfg.max_duration_ms,
             "n_samples_from_dataset": dataloader_num_samples,
             "n_samples_to_issue": runtime_cfg.n_samples_to_issue,  # From config (CLI --num-samples or YAML)
             "min_sample_count": 1,
@@ -213,8 +217,8 @@ class RuntimeSettings:
 
         Priority:
         1. If `n_samples_to_issue` is set, return it (explicit override)
-        2. If min_duration_ms=0, return all dataset samples (new CLI default)
-        3. Otherwise, calculate from metric target * duration
+        2. If no min_duration_ms target is set, return all dataset samples
+        3. Otherwise, derive the count as target_qps x min_duration_ms
 
         Args:
             padding_factor (float): Factor to multiply the expected number of samples by to account for variance.
@@ -251,15 +255,22 @@ class RuntimeSettings:
             )
             return self.n_samples_from_dataset
 
-        # If min_duration is 0, use all dataset samples (new CLI default behavior)
-        if self.min_duration_ms == 0:
+        # No min_duration_ms target (None from config, 0 from programmatic callers):
+        # issue the dataset once.
+        if not self.min_duration_ms:
             result = max(self.min_sample_count, self.n_samples_from_dataset)
             logger.debug(
-                f"Sample count: {result} (using all dataset samples, duration=0)"
+                f"Sample count: {result} (all dataset samples; no min_duration_ms target)"
             )
             return result
 
         # Calculate from duration and metric target
+        if self.metric_target is None:
+            # Schema validation rejects min_duration_ms without a poisson
+            # target_qps; guard the programmatic path too.
+            raise ValueError(
+                "min_duration_ms requires an explicit load_pattern.target_qps"
+            )
         if isinstance(self.metric_target, metrics.Throughput):
             expected_sps = self.metric_target.target
             expected_samples = expected_sps * (self.min_duration_ms / 1000)

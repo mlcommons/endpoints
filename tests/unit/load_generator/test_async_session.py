@@ -534,10 +534,59 @@ class TestBenchmarkSession:
         assert result.perf_results[0].issued_count < 100_000
 
     @pytest.mark.asyncio
+    async def test_stopped_session_publishes_interrupted_marker_before_ended(self):
+        """A stopped run (Ctrl-C, watchdog, transport closure) must announce
+        the abort on the events channel: INTERRUPTED goes out right before the
+        terminal ENDED so the metrics aggregator finalizes state=interrupted
+        instead of a normal COMPLETE snapshot."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        publisher = FakePublisher()
+
+        session = BenchmarkSession(issuer, publisher, loop)
+        loop.call_later(0.05, session.stop)
+
+        phases = [
+            PhaseConfig(
+                "perf",
+                _make_settings(n_samples=100_000, max_duration_ms=10_000),
+                FakeDataset(100),
+            ),
+        ]
+        await session.run(phases)
+
+        interrupted = publisher.events_of_type(SessionEventType.INTERRUPTED)
+        ended = publisher.events_of_type(SessionEventType.ENDED)
+        assert len(interrupted) == 1
+        assert len(ended) == 1
+        assert publisher.events.index(interrupted[0]) < publisher.events.index(
+            ended[0]
+        ), "INTERRUPTED must precede the terminal ENDED"
+
+    @pytest.mark.asyncio
+    async def test_clean_session_publishes_no_interrupted_marker(self):
+        """A run that completes normally must NOT carry the abort marker —
+        otherwise every clean run would finalize as interrupted."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        publisher = FakePublisher()
+
+        session = BenchmarkSession(issuer, publisher, loop)
+        phases = [
+            PhaseConfig("perf", _make_settings(n_samples=5), FakeDataset(5)),
+        ]
+        await session.run(phases)
+
+        assert publisher.events_of_type(SessionEventType.INTERRUPTED) == []
+        assert len(publisher.events_of_type(SessionEventType.ENDED)) == 1
+
+    @pytest.mark.asyncio
     async def test_stop_current_phase_advances_to_accuracy(self):
         """A perf-phase timeout must end only that phase, not skip accuracy.
 
-        Mirrors _PerfPhaseTimeout firing mid-perf: stop_current_phase cancels
+        Mirrors PerfPhaseTimeout firing mid-perf: stop_current_phase cancels
         the perf strategy without setting the session-wide stop flag, so the
         following accuracy phase still runs to completion.
         """
@@ -569,6 +618,28 @@ class TestBenchmarkSession:
         assert result.accuracy_results[0].issued_count == 3
         # The session-wide stop flag was never set.
         assert session._stop_requested is False
+
+    @pytest.mark.asyncio
+    async def test_phase_start_hook_runs_before_issuing(self):
+        """``on_phase_start`` runs to completion before the phase issues."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+
+        hook_done = False
+
+        def hook(phase: PhaseConfig) -> None:
+            nonlocal hook_done
+            assert issuer._issued == []
+            hook_done = True
+
+        phases = [PhaseConfig("perf", _make_settings(n_samples=3), FakeDataset(3))]
+        result = await session.run(phases, on_phase_start=hook)
+
+        assert hook_done
+        assert result.perf_results[0].issued_count == 3
 
     @pytest.mark.asyncio
     async def test_stop_current_phase_unblocks_unbounded_drain(self):

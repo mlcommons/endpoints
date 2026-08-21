@@ -33,17 +33,17 @@ uv run python compare_with_vllm.py --model "Qwen/Qwen2.5-0.5B-Instruct" --endpoi
 
 ### Options
 
-| Option                | Description                      | Default                 |
-| --------------------- | -------------------------------- | ----------------------- |
-| `--model`, `-m`       | Model name (required)            | -                       |
-| `--num-prompts`, `-n` | Number of prompts                | 100                     |
-| `--endpoint`          | Server URL                       | `http://localhost:8000` |
-| `--max-output-tokens` | Max output tokens                | 2000                    |
-| `--timeout`           | Timeout in seconds               | 900                     |
-| `--workers`           | Number of workers                | 1                       |
-| `--verbose`, `-v`     | Show full output from each run   | -                       |
-| `--dry`               | Print commands without executing | -                       |
-| `--vllm-venv-dir`     | Path to vLLM virtualenv          | `./vllm_venv`           |
+| Option                | Description                                                                      | Default                 |
+| --------------------- | -------------------------------------------------------------------------------- | ----------------------- |
+| `--model`, `-m`       | Model name (required)                                                            | -                       |
+| `--num-prompts`, `-n` | Number of prompts                                                                | 100                     |
+| `--endpoint`          | Server URL                                                                       | `http://localhost:8000` |
+| `--max-output-tokens` | Max output tokens                                                                | 2000                    |
+| `--timeout`           | Whole-run watchdog (seconds) passed to inference-endpoint; firing aborts the run | 900                     |
+| `--workers`           | Number of workers                                                                | 1                       |
+| `--verbose`, `-v`     | Show full output from each run                                                   | -                       |
+| `--dry`               | Print commands without executing                                                 | -                       |
+| `--vllm-venv-dir`     | Path to vLLM virtualenv                                                          | `./vllm_venv`           |
 
 ### Example
 
