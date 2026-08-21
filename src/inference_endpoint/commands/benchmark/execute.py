@@ -62,6 +62,7 @@ from inference_endpoint.commands.benchmark.profiling import (
     write_profiling_section,
 )
 from inference_endpoint.commands.benchmark.watchdog import (
+    PerfPhaseTimeout,
     RunWatchdog,
     SigintGovernor,
     sigint_policy,
@@ -684,40 +685,6 @@ def _build_phases(
     return phases
 
 
-class _PerfPhaseTimeout:
-    """Session-stop timer that bounds the PERFORMANCE phase only.
-
-    ``max_duration_ms`` is a safety cap on the performance phase. The timer is
-    armed when the performance phase starts and cancelled as soon as any later
-    phase starts, so it can never truncate a subsequent accuracy phase: a
-    combined perf+accuracy run must let accuracy finish regardless of how long
-    perf ran.
-    """
-
-    def __init__(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        max_duration_ms: int | None,
-        on_timeout: Callable[[], None],
-    ) -> None:
-        self._loop = loop
-        self._max_duration_ms = max_duration_ms
-        self._on_timeout = on_timeout
-        self._handle: asyncio.TimerHandle | None = None
-
-    def on_phase_start(self, phase_type: PhaseType) -> None:
-        self.cancel()
-        if phase_type == PhaseType.PERFORMANCE and self._max_duration_ms is not None:
-            self._handle = self._loop.call_later(
-                self._max_duration_ms / 1000.0, self._on_timeout
-            )
-
-    def cancel(self) -> None:
-        if self._handle is not None:
-            self._handle.cancel()
-            self._handle = None
-
-
 async def _create_issuer(
     ctx: BenchmarkContext, loop: asyncio.AbstractEventLoop
 ) -> tuple[HttpClientSampleIssuer, HTTPEndpointClient]:
@@ -921,7 +888,7 @@ async def _run_benchmark_async(
                         # perf cap.
                         session.stop_current_phase()
 
-                perf_timeout = _PerfPhaseTimeout(
+                perf_timeout = PerfPhaseTimeout(
                     loop, max_duration_ms, _on_perf_phase_timeout
                 )
 

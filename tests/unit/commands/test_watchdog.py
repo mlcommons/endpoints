@@ -22,8 +22,8 @@ import signal
 from unittest.mock import MagicMock
 
 import pytest
-from inference_endpoint.commands.benchmark.execute import _PerfPhaseTimeout
 from inference_endpoint.commands.benchmark.watchdog import (
+    PerfPhaseTimeout,
     SigintGovernor,
     sigint_policy,
 )
@@ -166,7 +166,7 @@ class TestPerfPhaseTimeout:
     @pytest.mark.asyncio
     async def test_cap_fires_after_max_duration(self):
         fired = asyncio.Event()
-        timeout = _PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
+        timeout = PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
 
         timeout.on_phase_start(PhaseType.PERFORMANCE)
 
@@ -175,7 +175,7 @@ class TestPerfPhaseTimeout:
     @pytest.mark.asyncio
     async def test_accuracy_phase_start_disarms_pending_perf_cap(self):
         fired = asyncio.Event()
-        timeout = _PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
+        timeout = PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
 
         timeout.on_phase_start(PhaseType.PERFORMANCE)
         timeout.on_phase_start(PhaseType.ACCURACY)
@@ -197,7 +197,7 @@ class TestPerfPhaseTimeout:
     )
     async def test_never_armed(self, max_duration_ms, phases):
         fired = asyncio.Event()
-        timeout = _PerfPhaseTimeout(
+        timeout = PerfPhaseTimeout(
             asyncio.get_running_loop(), max_duration_ms, fired.set
         )
 
@@ -210,7 +210,7 @@ class TestPerfPhaseTimeout:
     @pytest.mark.asyncio
     async def test_cancel_is_idempotent_and_disarms(self):
         fired = asyncio.Event()
-        timeout = _PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
+        timeout = PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
 
         timeout.cancel()  # no handle yet — must not raise
         timeout.on_phase_start(PhaseType.PERFORMANCE)
