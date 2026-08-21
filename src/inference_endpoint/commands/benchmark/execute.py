@@ -28,14 +28,17 @@ accuracy scoring (``accuracy``), and the ZMQ/metrics/event-logger service lifecy
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import random
 import shutil
+import signal
 import tempfile
 import time
+import types
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
@@ -60,12 +63,6 @@ from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
 from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
     write_profiling_section,
-)
-from inference_endpoint.commands.benchmark.watchdog import (
-    PerfPhaseTimeout,
-    RunWatchdog,
-    SigintGovernor,
-    sigint_policy,
 )
 from inference_endpoint.compliance import AuditRunSpec
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -685,6 +682,225 @@ def _build_phases(
     return phases
 
 
+class _PerfPhaseTimeout:
+    """Session-stop timer that bounds the PERFORMANCE phase only.
+
+    ``max_duration_ms`` is a safety cap on the performance phase. The timer is
+    armed when the performance phase starts and cancelled as soon as any later
+    phase starts, so it can never truncate a subsequent accuracy phase: a
+    combined perf+accuracy run must let accuracy finish regardless of how long
+    perf ran.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        max_duration_ms: int | None,
+        on_timeout: Callable[[], None],
+    ) -> None:
+        self._loop = loop
+        self._max_duration_ms = max_duration_ms
+        self._on_timeout = on_timeout
+        self._handle: asyncio.TimerHandle | None = None
+
+    def on_phase_start(self, phase_type: PhaseType) -> None:
+        self.cancel()
+        if phase_type == PhaseType.PERFORMANCE and self._max_duration_ms is not None:
+            self._handle = self._loop.call_later(
+                self._max_duration_ms / 1000.0, self._on_timeout
+            )
+
+    def cancel(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
+
+
+class SigintGovernor:
+    """The run's single SIGINT policy — installed ONCE per run.
+
+    One handler covers the whole run (setup, session, drain, finalize); the
+    window-scoped install/remove pairs it replaces were exactly where a ^C
+    could slip through as a raw KeyboardInterrupt mid-teardown. Behavior is
+    keystroke-count-independent (group-SIGINT forwarders like ``uv run`` need
+    no special handling): no live run -> raise KeyboardInterrupt (exit 130);
+    live run -> graceful ``session.stop()`` plus a teardown grace timer that
+    abandons a still-wedged metrics drain (SIGTERM -> SIGKILL); any repeat ^C
+    is a logged no-op.
+    """
+
+    def __init__(self, teardown_grace_s: float | None) -> None:
+        self.interrupted = False
+        self._teardown_grace_s = teardown_grace_s
+        self._session: BenchmarkSession | None = None
+        self._task: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._on_grace_expiry: Callable[[], None] | None = None
+        self._grace_handle: asyncio.TimerHandle | None = None
+
+    def bind_task(
+        self, task: asyncio.Task | None, loop: asyncio.AbstractEventLoop
+    ) -> None:
+        """Bind the run coroutine's task — the live-run gate for the graceful path."""
+        self._task = task
+        self._loop = loop
+
+    def bind_session(
+        self, session: BenchmarkSession, on_grace_expiry: Callable[[], None]
+    ) -> None:
+        self._session = session
+        self._on_grace_expiry = on_grace_expiry
+
+    def cancel_grace(self) -> None:
+        """Disarm the teardown grace timer (drain finished on its own)."""
+        if self._grace_handle is not None:
+            self._grace_handle.cancel()
+            self._grace_handle = None
+
+    def _stop_gracefully(self) -> None:
+        """Runs on the loop: stop the session and bound the teardown."""
+        assert self._session is not None and self._loop is not None
+        self._session.stop()
+        if (
+            self._on_grace_expiry is not None
+            and self._teardown_grace_s is not None
+            and self._grace_handle is None
+        ):
+
+            def _expire() -> None:
+                logger.warning(
+                    "Teardown did not finish within %.0fs of ^C — abandoning "
+                    "the metrics drain",
+                    self._teardown_grace_s,
+                )
+                assert self._on_grace_expiry is not None
+                self._on_grace_expiry()
+
+            self._grace_handle = self._loop.call_later(self._teardown_grace_s, _expire)
+
+    def __call__(self, signum: int, frame: types.FrameType | None) -> None:
+        if self.interrupted:
+            # Stop already in flight; the grace timer bounds the teardown.
+            logger.warning("SIGINT again: shutdown already in progress")
+            return
+        self.interrupted = True
+        if (
+            self._session is None
+            or self._task is None
+            or self._task.done()
+            or self._loop is None
+            or not self._loop.is_running()
+        ):
+            # No live run to stop gracefully; call_soon_threadsafe on a
+            # stopped loop would silently swallow the ^C.
+            raise KeyboardInterrupt
+        logger.warning("SIGINT received: stopping benchmark gracefully")
+        # Signal handlers run at arbitrary bytecode boundaries: hand the stop
+        # to the loop via its one signal-safe entry point.
+        self._loop.call_soon_threadsafe(self._stop_gracefully)
+
+
+@contextlib.contextmanager
+def sigint_policy(governor: SigintGovernor) -> Iterator[None]:
+    """Install ``governor`` as the SIGINT handler; restore the previous one.
+
+    Passive when ``getsignal`` returns ``None`` (a C-installed handler that
+    ``signal.signal`` refuses back) or off the main thread. Restores on exit,
+    after the caller's finally blocks, so a repeat ^C during cleanup still
+    hits the governor's no-op.
+    """
+    prev = signal.getsignal(signal.SIGINT)
+    if prev is None:
+        yield
+        return
+    try:
+        signal.signal(signal.SIGINT, governor)
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, prev)
+
+
+class RunWatchdog:
+    """Whole-run deadline timer for ``settings.timeouts.run_timeout_s``.
+
+    Armed before the pipeline starts and kept armed through the metrics
+    drain. On fire with a session: stop it (ENDED still flows, the event
+    logger flushes) and SIGTERM the aggregator, whose handler writes the
+    INTERRUPTED final snapshot; if the aggregator ignores the SIGTERM, the
+    teardown grace SIGTERM->SIGKILLs the children so the deadline stays a
+    hard bound. Before the session exists the orchestration task is
+    cancelled instead, and ``MetricsPipeline.__aexit__`` kills the services.
+    ``run_benchmark`` raises whenever ``fired`` is set.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        deadline: float | None,
+        pipe: MetricsPipeline,
+        teardown_grace_s: float | None,
+    ) -> None:
+        self.fired = False
+        self._session: BenchmarkSession | None = None
+        self._task: asyncio.Task | None = None
+        self._pipe = pipe
+        self._loop = loop
+        self._teardown_grace_s = teardown_grace_s
+        self._escalation: asyncio.TimerHandle | None = None
+        self._handle = (
+            loop.call_later(max(0.0, deadline - time.monotonic()), self._fire)
+            if deadline is not None
+            else None
+        )
+
+    def bind_task(self, task: asyncio.Task | None) -> None:
+        """Bind the orchestration task — the pre-session cancellation target."""
+        self._task = task
+
+    def bind_session(self, session: BenchmarkSession) -> None:
+        """Late-bind the session; a deadline that already fired stops it now.
+
+        The caller still runs the stopped session so STARTED/ENDED flow and
+        the INTERRUPTED artifacts get written.
+        """
+        self._session = session
+        if self.fired:
+            session.stop()
+
+    def _fire(self) -> None:
+        self.fired = True
+        logger.error(
+            "Run timeout reached; aborting run — report will be marked INTERRUPTED."
+        )
+        if self._session is None:
+            # Still in service launch / endpoint connect: cancel the task so
+            # those awaits unwind now; _run_benchmark_async translates the
+            # unwind into the run-timeout ExecutionError.
+            if self._task is not None:
+                self._task.cancel()
+            return
+        self._session.stop()
+        self._pipe.terminate_metrics_aggregator()
+        if self._teardown_grace_s is not None:
+            # A wedged aggregator ignores the SIGTERM; escalate so the
+            # deadline stays a hard bound (cancelled when the drain finishes).
+            self._escalation = self._loop.call_later(
+                self._teardown_grace_s, self._pipe.abandon_drain
+            )
+
+    def cancel(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
+        if self._escalation is not None:
+            self._escalation.cancel()
+            self._escalation = None
+
+
 async def _create_issuer(
     ctx: BenchmarkContext, loop: asyncio.AbstractEventLoop
 ) -> tuple[HttpClientSampleIssuer, HTTPEndpointClient]:
@@ -818,7 +1034,9 @@ async def _run_benchmark_async(
     # idempotent, so the clean-path shutdown below is a harmless second call.
     http_client: HTTPEndpointClient | None = None
 
-    watchdog = RunWatchdog(loop, deadline, pipe)
+    watchdog = RunWatchdog(
+        loop, deadline, pipe, config.settings.timeouts.teardown_grace_s
+    )
     watchdog.bind_task(asyncio.current_task())
     if sigint is not None:
         sigint.bind_task(asyncio.current_task(), loop)
@@ -861,11 +1079,8 @@ async def _run_benchmark_async(
                 )
                 watchdog.bind_session(session)
                 if sigint is not None:
-                    # On ^C the governor stops the session and arms a teardown
-                    # grace timer; expiry SIGTERMs the aggregator (its handler
-                    # writes a best-effort INTERRUPTED snapshot, terminate_all
-                    # escalates to SIGKILL) so a wedged drain can't hang the
-                    # abort.
+                    # ^C: graceful stop + grace timer; expiry abandons a
+                    # wedged drain (SIGTERM→SIGKILL via abandon_drain).
                     sigint.bind_session(session, pipe.abandon_drain)
                 phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
 
@@ -889,7 +1104,7 @@ async def _run_benchmark_async(
                         # perf cap.
                         session.stop_current_phase()
 
-                perf_timeout = PerfPhaseTimeout(
+                perf_timeout = _PerfPhaseTimeout(
                     loop, max_duration_ms, _on_perf_phase_timeout
                 )
 
@@ -943,20 +1158,12 @@ async def _run_benchmark_async(
                 finally:
                     _perf_cap_done = True
                     perf_timeout.cancel()
-                    # NOTE: no SIGINT bookkeeping here — the process-level
-                    # SigintGovernor (installed once by run_benchmark) covers
-                    # the metrics drain below too.
-                    # Fire /stop_profile for URLs whose /start_profile succeeded.
-                    # Unifies the clean phase-end path and the abort path — both
-                    # reach this block. A watchdog abort counts as an abort even
-                    # when session.run returned normally after session.stop().
+                    # Fire /stop_profile for starts that succeeded (clean and
+                    # abort paths both reach this block).
                     profiler.stop(session_completed_normally and not watchdog.fired)
-                    # Graceful drain runs on both the clean-finish and
-                    # session-failure paths (BenchmarkSession.run publishes
-                    # ENDED in its own finally, so a failed run still has a
-                    # terminal snapshot worth draining). Nulls pipe.publisher
-                    # so __aexit__ releases the ZMQ scope without killing the
-                    # services.
+                    # Drain runs on clean-finish and session-failure paths
+                    # alike (ENDED flows either way); nulls pipe.publisher so
+                    # __aexit__ doesn't kill the services.
                     try:
                         report = await pipe.drain_and_build_report()
                         if report is None:
@@ -964,15 +1171,10 @@ async def _run_benchmark_async(
                                 "Benchmark completed without a usable " "metrics report"
                             )
                     except Exception as e:  # noqa: BLE001
-                        # On a clean run a drain / report-build failure must
-                        # be loud: silently returning report=None would exit
-                        # 0 with no perf artifacts. On the session-failure
-                        # path the run is already raising, so swallow it
-                        # there rather than let a teardown error replace the
-                        # in-flight exception; run_benchmark still fails the
-                        # run on a missing report. A ^C'd run swallows it
-                        # too: the user's abort (exit 130) outranks a drain
-                        # error its own grace escalation may have caused.
+                        # Loud on a clean run (never exit 0 without a report);
+                        # swallowed when the run is already failing or ^C'd —
+                        # the abort (exit 130) outranks a drain error its own
+                        # grace escalation may have caused.
                         if session_completed_normally and not (
                             sigint is not None and sigint.interrupted
                         ):
@@ -1193,38 +1395,24 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     report = bench.report
     aborted = bench.run_timed_out or bench.user_interrupted
     if report is not None and aborted and report.state != "interrupted":
-        # Split-brain guard: an aborted run must never publish artifacts under
-        # any other state. "complete": the aggregator finalized before the
-        # watchdog's SIGTERM landed, or a ^C arrived after the session already
-        # published its terminal ENDED (drain window), so the INTERRUPTED
-        # marker never went out. "live": the teardown grace SIGKILLed a wedged
-        # aggregator, so the report was built from the subscriber's last live
-        # snapshot. Keyed on state (not the derived ``complete`` flag) so the
-        # drain-timeout subcase — state "complete" with pending tasks — is
-        # corrected too. Force both fields honest before writing; consumers
-        # keying on state=="complete" and not complete (the drain-timeout
-        # signature) then can't misattribute an abort to a slow drain.
+        # Split-brain guard: an aborted run must never publish artifacts
+        # under any other state — "complete" (aggregator finalized before the
+        # abort landed) or "live" (grace-killed drain, report built from the
+        # last live snapshot). Keyed on state, not the derived ``complete``
+        # flag, so the drain-timeout subcase is corrected too.
         report = msgspec.structs.replace(report, complete=False, state="interrupted")
-        # Write back so callers holding the BenchmarkResult (the audit runner
-        # checks bench.report.state after each phase) see the honest state,
-        # not the aggregator's stale COMPLETE.
+        # Write back: the audit runner checks bench.report.state per phase.
         bench.report = report
 
     # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
     # sample_idx_map.json + events.jsonl from here).
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
-    # Accuracy scoring (one entry per accuracy dataset). Scoring runs before the
-    # report is written so the accuracy headline can be attached, but the report
-    # is written in the `finally` below so a scoring failure (e.g. lcb-service
-    # unreachable, missing eval subproject, bad extras) still leaves the perf
-    # run's result_summary.json / report.txt on disk instead of discarding them —
-    # then the exception propagates as before. A ^C landing here (the governor
-    # raises KeyboardInterrupt once the run task is done) is different: a user
-    # abort makes the whole run invalid, so the report is rewritten
-    # interrupted/complete:false before the `finally` persists it — the metrics
-    # stay in the file as partial diagnostics — and the interrupt propagates
-    # for exit 130.
+    # Scoring runs before the report is written so the accuracy headline can
+    # attach; the report is written in the `finally` so a scoring failure
+    # still leaves the perf artifacts on disk. A ^C here makes the run
+    # invalid: the report is rewritten interrupted/complete:false before the
+    # `finally` persists it, then the interrupt propagates for exit 130.
     accuracy_scores: list[dict[str, Any]] = []
     try:
         if aborted:
@@ -1304,13 +1492,10 @@ def run_benchmark(
     # (tokenizer/dataset load) counts against run_timeout_s too.
     deadline = _run_deadline(config)
     run_timeout_s = config.settings.timeouts.run_timeout_s
-    # The run's ONE SIGINT handler — no window-scoped install/remove pairs
-    # anywhere else in the run, so there is no gap where a ^C aborts teardown
-    # as a raw KeyboardInterrupt. No session bound yet, so a ^C during setup
-    # keeps default abort behavior. sigint_policy restores the previous
-    # handler only after the finally below, so a repeat ^C during salvage
-    # still hits the governor's no-op.
-    sigint = SigintGovernor()
+    # The run's ONE SIGINT handler; sigint_policy restores the previous one
+    # only after the finally below, so a repeat ^C during salvage still hits
+    # the governor's no-op.
+    sigint = SigintGovernor(config.settings.timeouts.teardown_grace_s)
     bench: BenchmarkResult | None = None
     with sigint_policy(sigint):
         try:
@@ -1322,9 +1507,7 @@ def run_benchmark(
                     "no services were started"
                 )
             bench = run_benchmark_async(ctx, deadline=deadline, sigint=sigint)
-            # A ^C can land between the coroutine's flag snapshot and the loop
-            # returning — refresh so finalization never writes COMPLETE
-            # artifacts for a run that exits 130.
+            # ^C can land after the coroutine's own flag snapshot — refresh.
             bench.user_interrupted = bench.user_interrupted or sigint.interrupted
             finalize_benchmark(ctx, bench)
             if bench.user_interrupted or sigint.interrupted:

@@ -38,13 +38,14 @@ from ..config.schema import AuditConfig, BenchmarkConfig, DatasetType
 from ..exceptions import ExecutionError, SetupError
 from .benchmark.execute import (
     BenchmarkResult,
+    SigintGovernor,
     TestMode,
     _salvage_tmpfs,
     finalize_benchmark,
     run_benchmark_async,
     setup_benchmark,
+    sigint_policy,
 )
-from .benchmark.watchdog import SigintGovernor, sigint_policy
 
 logger = logging.getLogger(__name__)
 
@@ -77,13 +78,10 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
 
     specs = test.plan_runs(audit_cfg)
 
-    # One SIGINT policy for the whole audit — same governor pattern as
-    # run_benchmark (which restored the previous handler before run_audit
-    # started). First ^C stops the current phase gracefully; the phase then
-    # surfaces as report.state=="interrupted" below and aborts the audit.
-    # The flag persisting across phases is moot: an interrupted phase raises
-    # before the next phase starts.
-    sigint = SigintGovernor()
+    # One SIGINT policy for the whole audit (same pattern as run_benchmark):
+    # first ^C stops the current phase gracefully, which surfaces as
+    # report.state=="interrupted" and aborts the audit.
+    sigint = SigintGovernor(config.settings.timeouts.teardown_grace_s)
     with sigint_policy(sigint):
         artifacts = _run_phases(config, base_report_dir, test, audit_cfg, specs, sigint)
 

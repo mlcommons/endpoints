@@ -844,46 +844,33 @@ class Timeouts(WithUpdatesMixin, BaseModel):
             "INTERRUPTED, and exits non-zero. Never derives per-stage deadlines."
         ),
     )
-    service_ready_timeout_s: Annotated[
-        float,
-        cyclopts.Parameter(
-            alias="--service-ready-timeout",
-            help="Seconds to wait for metrics/event-logger services to start",
+    teardown_grace_s: float | None = Field(
+        30.0,
+        ge=0,
+        description=(
+            "Seconds after an abort (^C or a run_timeout_s fire) before a "
+            "still-running metrics drain is abandoned: the service children "
+            "are SIGTERMed (the aggregator writes a best-effort INTERRUPTED "
+            "snapshot) then SIGKILLed, so a wedged drain can never hang the "
+            "abort (None = never abandon; 0 = abandon immediately)."
         ),
-    ] = Field(
+    )
+    service_ready_timeout_s: float = Field(
         30.0,
         ge=0,
         description="Seconds to wait for metrics-aggregator/event-logger services to become ready.",
     )
-    warmup_drain_timeout_s: Annotated[
-        float | None,
-        cyclopts.Parameter(
-            alias="--warmup-drain-timeout",
-            help="Warmup drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
-        ),
-    ] = Field(
+    warmup_drain_timeout_s: float | None = Field(
         240.0,
         ge=0,
         description="Warmup drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
     )
-    performance_drain_timeout_s: Annotated[
-        float | None,
-        cyclopts.Parameter(
-            alias="--performance-drain-timeout",
-            help="Performance drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
-        ),
-    ] = Field(
+    performance_drain_timeout_s: float | None = Field(
         None,
         ge=0,
         description="Performance drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
     )
-    accuracy_drain_timeout_s: Annotated[
-        float | None,
-        cyclopts.Parameter(
-            alias="--accuracy-drain-timeout",
-            help="Accuracy drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
-        ),
-    ] = Field(
+    accuracy_drain_timeout_s: float | None = Field(
         None,
         ge=0,
         description=(
@@ -892,17 +879,7 @@ class Timeouts(WithUpdatesMixin, BaseModel):
             "every sample must complete)"
         ),
     )
-    metrics_drain_timeout_s: Annotated[
-        float | None,
-        cyclopts.Parameter(
-            alias="--metrics-drain-timeout",
-            help=(
-                "Wall-clock budget (seconds) for the metrics aggregator to finish "
-                "tokenizing buffered samples after the run ends "
-                "(None = wait indefinitely; 0 = give up immediately)"
-            ),
-        ),
-    ] = Field(
+    metrics_drain_timeout_s: float | None = Field(
         None,
         ge=0,
         description=(

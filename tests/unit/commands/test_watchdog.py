@@ -22,9 +22,9 @@ import signal
 from unittest.mock import MagicMock
 
 import pytest
-from inference_endpoint.commands.benchmark.watchdog import (
-    PerfPhaseTimeout,
+from inference_endpoint.commands.benchmark.execute import (
     SigintGovernor,
+    _PerfPhaseTimeout,
     sigint_policy,
 )
 from inference_endpoint.load_generator.session import PhaseType
@@ -37,7 +37,7 @@ def _fire(gov: SigintGovernor) -> None:
 @pytest.mark.unit
 class TestSigintGovernor:
     def test_unbound_sigint_raises_keyboard_interrupt(self):
-        gov = SigintGovernor()
+        gov = SigintGovernor(teardown_grace_s=30.0)
         with pytest.raises(KeyboardInterrupt):
             _fire(gov)
         assert gov.interrupted
@@ -49,7 +49,7 @@ class TestSigintGovernor:
         bound but the loop is stopped — ``call_soon_threadsafe`` would queue
         ``session.stop`` on it and never run it.
         """
-        gov = SigintGovernor()
+        gov = SigintGovernor(teardown_grace_s=30.0)
         session = MagicMock()
 
         async def run_phase() -> None:
@@ -65,7 +65,7 @@ class TestSigintGovernor:
 
     @pytest.mark.asyncio
     async def test_live_sigint_stops_session_and_arms_grace(self):
-        gov = SigintGovernor()
+        gov = SigintGovernor(teardown_grace_s=30.0)
         session = MagicMock()
         on_grace = MagicMock()
         gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
@@ -82,7 +82,7 @@ class TestSigintGovernor:
     @pytest.mark.asyncio
     async def test_repeat_sigint_is_a_noop(self):
         """Any repeat ^C (incl. a forwarded duplicate under `uv run`) is silent."""
-        gov = SigintGovernor()
+        gov = SigintGovernor(teardown_grace_s=30.0)
         session = MagicMock()
         gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
         gov.bind_session(session, MagicMock())
@@ -97,8 +97,7 @@ class TestSigintGovernor:
     @pytest.mark.asyncio
     async def test_grace_expiry_fires_callback_once(self):
         """The grace fires exactly once, even after repeat ^C deliveries."""
-        gov = SigintGovernor()
-        gov.TEARDOWN_GRACE_S = 0.02  # instance override; class default untouched
+        gov = SigintGovernor(teardown_grace_s=0.02)
         session = MagicMock()
         fired = asyncio.Event()
         on_grace = MagicMock(side_effect=fired.set)
@@ -114,8 +113,7 @@ class TestSigintGovernor:
 
     @pytest.mark.asyncio
     async def test_cancel_grace_disarms_pending_timer(self):
-        gov = SigintGovernor()
-        gov.TEARDOWN_GRACE_S = 0.02
+        gov = SigintGovernor(teardown_grace_s=0.02)
         session = MagicMock()
         on_grace = MagicMock()
         gov.bind_task(asyncio.current_task(), asyncio.get_running_loop())
@@ -132,14 +130,14 @@ class TestSigintGovernor:
 @pytest.mark.unit
 class TestSigintPolicy:
     def test_installs_and_restores_previous_handler(self):
-        gov = SigintGovernor()
+        gov = SigintGovernor(teardown_grace_s=30.0)
         prev = signal.getsignal(signal.SIGINT)
         with sigint_policy(gov):
             assert signal.getsignal(signal.SIGINT) is gov
         assert signal.getsignal(signal.SIGINT) is prev
 
     def test_restores_on_exception(self):
-        gov = SigintGovernor()
+        gov = SigintGovernor(teardown_grace_s=30.0)
         prev = signal.getsignal(signal.SIGINT)
         with pytest.raises(RuntimeError):
             with sigint_policy(gov):
@@ -148,7 +146,7 @@ class TestSigintPolicy:
 
     def test_unrepresentable_c_handler_stays_untouched(self, monkeypatch):
         """getsignal()->None (C-installed handler): install nothing at all."""
-        gov = SigintGovernor()
+        gov = SigintGovernor(teardown_grace_s=30.0)
         monkeypatch.setattr(signal, "getsignal", lambda signum: None)
         install_spy = MagicMock()
         monkeypatch.setattr(signal, "signal", install_spy)
@@ -168,7 +166,7 @@ class TestPerfPhaseTimeout:
     @pytest.mark.asyncio
     async def test_cap_fires_after_max_duration(self):
         fired = asyncio.Event()
-        timeout = PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
+        timeout = _PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
 
         timeout.on_phase_start(PhaseType.PERFORMANCE)
 
@@ -177,7 +175,7 @@ class TestPerfPhaseTimeout:
     @pytest.mark.asyncio
     async def test_accuracy_phase_start_disarms_pending_perf_cap(self):
         fired = asyncio.Event()
-        timeout = PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
+        timeout = _PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
 
         timeout.on_phase_start(PhaseType.PERFORMANCE)
         timeout.on_phase_start(PhaseType.ACCURACY)
@@ -199,7 +197,7 @@ class TestPerfPhaseTimeout:
     )
     async def test_never_armed(self, max_duration_ms, phases):
         fired = asyncio.Event()
-        timeout = PerfPhaseTimeout(
+        timeout = _PerfPhaseTimeout(
             asyncio.get_running_loop(), max_duration_ms, fired.set
         )
 
@@ -212,7 +210,7 @@ class TestPerfPhaseTimeout:
     @pytest.mark.asyncio
     async def test_cancel_is_idempotent_and_disarms(self):
         fired = asyncio.Event()
-        timeout = PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
+        timeout = _PerfPhaseTimeout(asyncio.get_running_loop(), 20, fired.set)
 
         timeout.cancel()  # no handle yet — must not raise
         timeout.on_phase_start(PhaseType.PERFORMANCE)
