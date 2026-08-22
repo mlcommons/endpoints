@@ -35,6 +35,7 @@ each producing an independent report.
 BenchmarkSession.run(phases)
     |
     +-- STARTED
+    +-- [optional no-progress watchdog]
     +-- [warmup]     strategy.execute() → drain_after=False (keep in-flight saturated)
     +-- [perf phase 1]   START_PERFORMANCE_TRACKING → strategy.execute() → drain → STOP_PERFORMANCE_TRACKING
     +-- [warmup]     strategy.execute() → drain_after=False (keep in-flight saturated)
@@ -173,7 +174,7 @@ class BenchmarkSession:
 **`run(phases)`** lifecycle:
 
 1. Publish `SessionEventType.STARTED`
-2. Start receiver coroutine (`_receive_responses`)
+2. Start receiver coroutine (`_receive_responses`). When the no-progress timeout is set, each active in-flight cohort arms a liveness watchdog; it exits as soon as the cohort drains. The watchdog fails the session only when an in-flight request has no streamed chunk or final result for the configured interval.
 3. For each phase:
    a. Create `SampleOrder` and `LoadStrategy` from phase settings
    b. Set `self._current_dataset` to phase dataset
@@ -296,12 +297,15 @@ async def _receive_responses(self):
                 self._strategy_task.cancel()
             break
         self._handle_response(resp)
+        self._record_response_activity()  # resets the optional liveness guard
 ```
 
 Uses `recv()` exclusively — no `poll()` spin. The ZMQ fd is registered with
 the event loop, so `recv()` wakes exactly when a response is available with
 zero CPU overhead. Each `recv()` call yields to the event loop, ensuring
 strategy coroutines (call_at callbacks, semaphore waiters) are never starved.
+
+The optional no-progress watchdog observes the same receiver path. It is not an additional per-request engine timeout: response chunks and final responses count as progress, and a silent in-flight request is what triggers failure. The receiver only refreshes a timestamp; the watchdog checks it periodically, so response chunks do not schedule watchdog work on the hot path. This catches a client-visible worker or transport stall.
 
 For `ConcurrencyStrategy`, `_handle_response` calls `strategy.on_query_complete()`
 which releases the semaphore. Since `recv()` returns as soon as the fd is readable

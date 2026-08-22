@@ -90,6 +90,24 @@ Dataset Manager ──> Load Generator ──> Endpoint Client ──> External 
 - **Online** (`poisson`): Fixed QPS with Poisson arrival distribution for latency profiling
 - **Concurrency**: Fixed concurrent request count
 
+### Endpoint liveness
+
+An in-flight request can stall without returning a response. Opt in to a no-progress deadline to end the benchmark rather than waiting for its overall wall-time limit:
+
+```yaml
+settings:
+  runtime:
+    # Choose a value above the longest expected interval without a response.
+    # For a non-streaming endpoint, that is the full request latency.
+    no_progress_timeout_s: 30
+```
+
+For direct `benchmark offline` or `benchmark online` invocations, use `--no-progress-timeout 30` (equivalently, `--runtime.no-progress-timeout-s 30`). `benchmark from-config` reads the setting from YAML.
+
+The deadline is armed only while requests are in flight. Each streamed response chunk or final response resets it, so normal long streaming generations are not failed. Setting the timeout is the explicit opt-in. This is a client-side liveness guard; it does not replace the inference engine's own request timeout or detect a server that hangs before it accepts requests.
+
+For TensorRT-LLM disaggregated serving, match this to the executor hang-detection timeout, not the KV cache-transfer timeout. TensorRT-LLM's default `hang_detection_timeout` is 300 seconds; start with `no_progress_timeout_s: 300` and raise it if a normal p99 interval without a response is longer than 300 seconds.
+
 ### Performance Design
 
 The hot path is optimized for minimal overhead:

@@ -648,6 +648,26 @@ class RuntimeConfig(BaseModel):
     ] = Field(None, gt=0)
     scheduler_random_seed: int = Field(42, description="Scheduler RNG seed")
     dataloader_random_seed: int = Field(42, description="Dataloader RNG seed")
+    no_progress_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--no-progress-timeout",
+            help=(
+                "Fail a run when in-flight requests make no "
+                "response progress for this many seconds"
+            ),
+        ),
+    ] = Field(
+        None,
+        gt=0,
+        description=(
+            "Fail a run when requests are in flight but no "
+            "response chunk or completion arrives for this many seconds. Disabled "
+            "by default; set above the longest expected interval between response "
+            "progress (full request latency for non-streaming endpoints) and, for "
+            "TensorRT-LLM disaggregated serving, match hang_detection_timeout."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_durations(self) -> Self:

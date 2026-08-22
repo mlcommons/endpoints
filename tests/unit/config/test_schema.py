@@ -388,6 +388,21 @@ class TestBenchmarkConfig:
             )
 
     @pytest.mark.unit
+    def test_no_progress_timeout_requires_positive_value(self):
+        base = {
+            "type": TestType.OFFLINE,
+            "model_params": {"name": "M"},
+            "endpoint_config": {"endpoints": ["http://x"]},
+            "datasets": [{"path": "D"}],
+        }
+        config = BenchmarkConfig(
+            **base, settings={"runtime": {"no_progress_timeout_s": 15}}
+        )
+        assert config.settings.runtime.no_progress_timeout_s == 15
+        with pytest.raises(ValueError, match="greater than 0"):
+            BenchmarkConfig(**base, settings={"runtime": {"no_progress_timeout_s": 0}})
+
+    @pytest.mark.unit
     def test_submission_bad_benchmark_mode(self):
         with pytest.raises(ValueError, match="benchmark_mode"):
             BenchmarkConfig(
