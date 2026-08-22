@@ -702,6 +702,32 @@ class TestCommandHandlers:
         assert lp.use_legacy_loadgen_qps_metrics is False
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--no-progress-timeout", "15"),
+            ("--runtime.no-progress-timeout-s", "20"),
+        ],
+    )
+    def test_no_progress_timeout_cli_spellings(self, flag, value):
+        _, bound, _ = benchmark_app.parse_args(
+            [
+                "offline",
+                "--endpoints",
+                "http://h:80",
+                "--model",
+                "m",
+                "--dataset",
+                "d.jsonl",
+                flag,
+                value,
+            ],
+            exit_on_error=False,
+        )
+        config = bound.arguments["config"]
+        assert config.settings.runtime.no_progress_timeout_s == float(value)
+
+    @pytest.mark.unit
     def test_warmup_salt_flag_default_and_negative(self):
         """warmup.salt defaults off; --warmup-salt enables it; --no-warmup-salt
         (the flag the salt-validation remediation message points to) disables

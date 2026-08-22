@@ -61,6 +61,8 @@ Both paths produce the **same subclass with the same defaults**. A YAML file wit
 
 3. **Datasets injected after construction.** `--dataset` strings are parsed by a `BeforeValidator` on the `datasets` field, then merged via `config.with_updates(datasets=...)`.
 
+Runtime fields receive their dotted path automatically. Fields that need a shorter operational spelling also declare a `cyclopts.Parameter(alias=...)`. For example, the no-progress deadline accepts either `--runtime.no-progress-timeout-s 30` or `--no-progress-timeout 30` in `benchmark offline` and `benchmark online`. For `benchmark from-config`, set `settings.runtime.no_progress_timeout_s` in YAML. Setting the deadline is the explicit opt-in.
+
 ### YAML path
 
 1. **`from_yaml_file(path)`** loads YAML, resolves `${VAR}` env vars on parsed values, then passes the dict to a Pydantic `TypeAdapter` with `Discriminator`.

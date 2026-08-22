@@ -45,13 +45,13 @@ the benchmark `type` and `endpoint_config`.
 
 Key nested models:
 
-| Model            | Purpose                                             |
-| ---------------- | --------------------------------------------------- |
-| `LoadPattern`    | Pattern type + parameters (target QPS, concurrency) |
-| `RuntimeConfig`  | Duration, sample count, RNG seeds                   |
-| `ClientSettings` | Worker count and HTTP client settings               |
-| `EndpointConfig` | Endpoint URLs, API key                              |
-| `Dataset`        | Dataset path, type (performance / accuracy)         |
+| Model            | Purpose                                              |
+| ---------------- | ---------------------------------------------------- |
+| `LoadPattern`    | Pattern type + parameters (target QPS, concurrency)  |
+| `RuntimeConfig`  | Duration, sample count, RNG seeds, no-progress guard |
+| `ClientSettings` | Worker count and HTTP client settings                |
+| `EndpointConfig` | Endpoint URLs, API key                               |
+| `Dataset`        | Dataset path, type (performance / accuracy)          |
 
 ### `RuntimeSettings` (frozen dataclass)
 
@@ -70,6 +70,12 @@ Immutable snapshot of all parameters needed to execute a run.
 | `rng_sample_index`   | `Random`       | seeded from `dataloader_random_seed`    |
 
 Once constructed, `RuntimeSettings` cannot be modified. All consumers receive the same instance.
+
+### No-progress deadline
+
+`settings.runtime.no_progress_timeout_s` is an opt-in client-side liveness deadline. Once a phase has an in-flight request, `BenchmarkSession` fails the run if no streamed chunk or final response arrives within this interval. Set it above the deployment's longest expected interval without a response (the full request latency for non-streaming endpoints); `None` disables it. Setting a deadline is the explicit opt-in. It does not apply before the server accepts a request, and it does not replace an inference engine's own KV-transfer deadline.
+
+For TensorRT-LLM disaggregated serving, match this to the executor `hang_detection_timeout`, not `cache_transceiver_config.kv_transfer_timeout_ms`. TensorRT-LLM's default executor hang-detection timeout is 300 seconds, so `no_progress_timeout_s: 300` is the recommended starting value, subject to increasing it above the normal p99 response gap.
 
 ### `BenchmarkSuiteRuleset` (abstract base)
 

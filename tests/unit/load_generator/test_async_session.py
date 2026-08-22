@@ -33,6 +33,7 @@ from inference_endpoint.core.types import ErrorData, Query, QueryResult, StreamC
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
+    NoProgressError,
     PhaseConfig,
     PhaseIssuer,
     PhaseResult,
@@ -161,6 +162,34 @@ class TestPhaseIssuer:
         assert issued_events[0].sample_uuid == result
         assert issued_events[0].conversation_id == ""
         assert issued_events[0].turn is None
+
+    def test_inflight_started_timestamp_tracks_outstanding_work(self):
+        phase_issuer = PhaseIssuer(
+            FakeDataset(2), FakeIssuer(), FakePublisher(), lambda: False
+        )
+
+        phase_issuer.issue(0)
+        started_ns = phase_issuer.inflight_started_ns
+        assert started_ns is not None
+
+        phase_issuer.issue(1)
+        assert phase_issuer.inflight_started_ns == started_ns
+
+        phase_issuer.mark_inflight_complete()
+        assert phase_issuer.inflight_started_ns == started_ns
+        phase_issuer.mark_inflight_complete()
+        assert phase_issuer.inflight_started_ns is None
+
+    def test_duplicate_completion_does_not_make_inflight_negative(self):
+        phase_issuer = PhaseIssuer(
+            FakeDataset(1), FakeIssuer(), FakePublisher(), lambda: False
+        )
+        phase_issuer.issue(0)
+        phase_issuer.mark_inflight_complete()
+        phase_issuer.mark_inflight_complete()
+
+        assert phase_issuer.inflight == 0
+        assert phase_issuer.inflight_started_ns is None
 
     def test_issue_preserves_structured_chat_input_for_isl(self):
         class ChatDataset(FakeDataset):
@@ -404,6 +433,122 @@ class TestPhaseIssuer:
 
 @pytest.mark.unit
 class TestBenchmarkSession:
+    @pytest.mark.asyncio
+    async def test_no_progress_watchdog_exits_when_inflight_cohort_drains(self):
+        """A normal completion must stop the watchdog before its deadline."""
+        loop = asyncio.get_running_loop()
+        session = BenchmarkSession(
+            FakeIssuer(), FakePublisher(), loop, no_progress_timeout_s=60
+        )
+        phase_issuer = PhaseIssuer(
+            FakeDataset(1),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: False,
+            on_inflight_started=session._on_inflight_started,
+            on_inflight_drained=session._on_inflight_drained,
+        )
+        session._current_phase_issuer = phase_issuer
+
+        phase_issuer.issue(0)
+        watchdog = session._progress_watchdog_task
+        assert watchdog is not None
+
+        phase_issuer.mark_inflight_complete()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(watchdog, timeout=0.1)
+        assert watchdog.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_no_progress_fails_instead_of_hanging(self):
+        """A silent server hang must not wait for an unbounded drain."""
+        loop = asyncio.get_running_loop()
+        previous_task_factory = loop.get_task_factory()
+        loop.set_task_factory(asyncio.eager_task_factory)
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        issuer._auto_respond = False
+        session = BenchmarkSession(
+            issuer, FakePublisher(), loop, no_progress_timeout_s=0.02
+        )
+        phases = [PhaseConfig("perf", _make_settings(n_samples=1), FakeDataset(1))]
+
+        try:
+            with pytest.raises(NoProgressError, match="no response progress"):
+                await asyncio.wait_for(session.run(phases), timeout=1.0)
+        finally:
+            loop.set_task_factory(previous_task_factory)
+
+    @pytest.mark.asyncio
+    async def test_no_progress_guard_accepts_streaming_progress(self):
+        """Chunks refresh the guard; only a silent in-flight request is fatal."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        issuer._auto_respond = False
+        session = BenchmarkSession(
+            issuer, FakePublisher(), loop, no_progress_timeout_s=0.03
+        )
+        phases = [PhaseConfig("perf", _make_settings(n_samples=1), FakeDataset(1))]
+
+        async def stream_response() -> None:
+            while not issuer._issued:
+                await asyncio.sleep(0.002)
+            query = issuer._issued[0]
+            for _ in range(3):
+                await asyncio.sleep(0.015)
+                issuer.inject_response(StreamChunk(id=query.id, response_chunk="x"))
+            issuer.inject_response(QueryResult(id=query.id, response_output="done"))
+
+        injector = asyncio.create_task(stream_response())
+        result = await asyncio.wait_for(session.run(phases), timeout=1.0)
+        await injector
+        assert result.perf_results[0].issued_count == 1
+
+    @pytest.mark.asyncio
+    async def test_no_progress_guard_rearms_after_an_idle_gap(self):
+        """A prior completion must not make the next request immediately stale."""
+
+        class GapStrategy:
+            async def execute(self, phase_issuer) -> None:
+                phase_issuer.issue(0)
+                await asyncio.sleep(0.04)
+                phase_issuer.issue(1)
+
+            def on_query_complete(self, query_id: str) -> None:
+                pass
+
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer(response_delay=0.001)
+        issuer._loop = loop
+        session = BenchmarkSession(
+            issuer, FakePublisher(), loop, no_progress_timeout_s=0.02
+        )
+        phases = [
+            PhaseConfig(
+                "perf",
+                _make_settings(n_samples=2),
+                FakeDataset(2),
+                strategy=GapStrategy(),
+            )
+        ]
+
+        result = await asyncio.wait_for(session.run(phases), timeout=1.0)
+        assert result.perf_results[0].issued_count == 2
+
+    @pytest.mark.asyncio
+    async def test_receiver_exception_fails_session_instead_of_hanging(self):
+        class FailingIssuer(FakeIssuer):
+            async def recv(self) -> QueryResult | StreamChunk | None:
+                raise OSError("connection reset")
+
+        loop = asyncio.get_running_loop()
+        session = BenchmarkSession(FailingIssuer(), FakePublisher(), loop)
+        phases = [PhaseConfig("perf", _make_settings(n_samples=1), FakeDataset(1))]
+
+        with pytest.raises(RuntimeError, match="Endpoint response receiver failed"):
+            await asyncio.wait_for(session.run(phases), timeout=1.0)
+
     @pytest.mark.asyncio
     async def test_single_perf_phase(self):
         loop = asyncio.get_running_loop()
@@ -882,7 +1027,7 @@ class TestBenchmarkSession:
         assert complete[0].finish_reason == "stop"
         assert complete[0].worker_id == 3
         assert "q-ok" not in phase_issuer.uuid_to_conv_info
-        assert "q-ok" not in phase_issuer.completed_uuids
+        assert "q-ok" in phase_issuer.completed_uuids
 
         # Error path: ERROR (emitted before COMPLETE) also carries conv info.
         phase_issuer.uuid_to_index["q-err"] = 1
@@ -900,7 +1045,7 @@ class TestBenchmarkSession:
         assert [(e.conversation_id, e.turn) for e in error_events] == [("conv-err", 2)]
         complete = publisher.events_of_type(SampleEventType.COMPLETE)
         assert (complete[-1].conversation_id, complete[-1].turn) == ("conv-err", 2)
-        assert "q-err" not in phase_issuer.completed_uuids
+        assert "q-err" in phase_issuer.completed_uuids
 
 
 @pytest.mark.unit

@@ -294,6 +294,10 @@ settings:
     n_samples_to_issue: null # Optional: explicit sample count (null = auto-calculate)
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
+    # Fail if an in-flight request has no streamed
+    # chunk or final response for this long. For non-streaming endpoints, set
+    # above the full request latency.
+    no_progress_timeout_s: 30
   load_pattern:
     type: "max_throughput"
     target_qps: 10.0
@@ -326,6 +330,24 @@ Note: For submission configs, `model_params.name` is optional when `submission_r
 - Supports `${VAR}` env var interpolation
 - Optional `--timeout` and `--mode` overrides
 - Example: `benchmark from-config -c file.yaml --timeout 600`
+
+### No-progress guard
+
+Set `settings.runtime.no_progress_timeout_s` in YAML, or use either direct-mode CLI spelling:
+
+```bash
+inference-endpoint benchmark online \
+  --endpoints http://your-endpoint:8000 \
+  --model Qwen/Qwen3-8B \
+  --dataset queries.jsonl \
+  --load-pattern concurrency \
+  --concurrency 32 \
+  --no-progress-timeout 30
+```
+
+`--runtime.no-progress-timeout-s 30` is the equivalent fully-qualified flag. The timer applies only after a request is issued and only while work is in flight. A streamed chunk or final response resets it. It is a liveness guard for a silent server or worker stall, not a replacement for an inference engine's own request timeout. Setting the timeout is the explicit opt-in.
+
+For TensorRT-LLM disaggregated serving, match this to the executor `hang_detection_timeout`, not `cache_transceiver_config.kv_transfer_timeout_ms`. TensorRT-LLM's default is 300 seconds; start with `--no-progress-timeout 300` and increase it if normal p99 response gaps exceed 300 seconds.
 
 ## Tips
 

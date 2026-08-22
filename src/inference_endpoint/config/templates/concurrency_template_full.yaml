@@ -56,6 +56,7 @@ settings:
     n_samples_to_issue: null  # Sample count override
     scheduler_random_seed: 42  # Scheduler RNG seed
     dataloader_random_seed: 42  # Dataloader RNG seed
+    no_progress_timeout_s: null  # Fail a run when requests are in flight but no response chunk or completion arrives for this many seconds. Disabled by default; set above the longest expected interval between response progress (full request latency for non-streaming endpoints) and, for TensorRT-LLM disaggregated serving, match hang_detection_timeout.
   load_pattern:
     type: concurrency  # Load pattern type | options: max_throughput, poisson, concurrency, agentic_inference, burst, step
     target_qps: null  # Target QPS

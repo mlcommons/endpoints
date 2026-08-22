@@ -46,6 +46,11 @@ from .strategy import LoadStrategy, create_load_strategy
 
 logger = logging.getLogger(__name__)
 
+
+class NoProgressError(RuntimeError):
+    """An endpoint stopped returning response progress while work was in flight."""
+
+
 # ---------------------------------------------------------------------------
 # Phase configuration
 # ---------------------------------------------------------------------------
@@ -154,6 +159,7 @@ class PhaseIssuer:
         "_dataset",
         "_issuer",
         "_on_inflight_drained",
+        "_on_inflight_started",
         "_performance_tracking_stopped",
         "_prompt_warning_reasons",
         "_publisher",
@@ -163,6 +169,7 @@ class PhaseIssuer:
         "uuid_to_conv_info",
         "completed_uuids",
         "inflight",
+        "inflight_started_ns",
         "issued_count",
     )
 
@@ -172,6 +179,7 @@ class PhaseIssuer:
         issuer: SampleIssuer,
         publisher: EventPublisher,
         stop_check: Callable[[], bool],
+        on_inflight_started: Callable[[], None] | None = None,
         on_inflight_drained: Callable[[], None] | None = None,
         routing_headers: tuple[str, ...] = (),
     ):
@@ -179,12 +187,17 @@ class PhaseIssuer:
         self._issuer = issuer
         self._publisher = publisher
         self._stop_check = stop_check
+        self._on_inflight_started = on_inflight_started or (lambda: None)
         self._on_inflight_drained = on_inflight_drained or (lambda: None)
         self._routing_headers = routing_headers
         self.uuid_to_index: dict[str, int] = {}
         self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.completed_uuids: set[str] = set()
         self.inflight: int = 0
+        # Set on the 0 -> 1 transition and cleared when the phase drains.
+        # The session's no-progress watchdog uses this to avoid a callback from
+        # the issuer back into its owner merely to arm the deadline.
+        self.inflight_started_ns: int | None = None
         self.issued_count: int = 0
         self._performance_tracking_stopped = False
         self._prompt_warning_reasons: set[str] = set()
@@ -197,8 +210,12 @@ class PhaseIssuer:
         logger.warning(message)
 
     def mark_inflight_complete(self) -> None:
-        self.inflight -= 1
         if self.inflight <= 0:
+            logger.warning("Ignoring completion with no in-flight request")
+            return
+        self.inflight -= 1
+        if self.inflight == 0:
+            self.inflight_started_ns = None
             self._on_inflight_drained()
 
     def stop_performance_tracking(self) -> None:
@@ -312,7 +329,14 @@ class PhaseIssuer:
             )
         )
         self._issuer.issue(query)
+        starting_inflight_cohort = self.inflight == 0
+        if starting_inflight_cohort:
+            self.inflight_started_ns = time.monotonic_ns()
         self.inflight += 1
+        # The callback may start an eager watchdog task, so it must observe the
+        # incremented counter rather than the prior zero-inflight state.
+        if starting_inflight_cohort:
+            self._on_inflight_started()
         self.issued_count += 1
         return query_id
 
@@ -362,12 +386,14 @@ class BenchmarkSession:
         loop: asyncio.AbstractEventLoop,
         on_sample_complete: Callable[[QueryResult], None] | None = None,
         session_id: str | None = None,
+        no_progress_timeout_s: float | None = None,
     ):
         self._issuer = issuer
         self._publisher = event_publisher
         self._loop = loop
         self._on_sample_complete = on_sample_complete
         self.session_id = session_id or uuid.uuid4().hex
+        self._no_progress_timeout_s = no_progress_timeout_s
 
         # Mutable state
         self._stop_requested = False
@@ -377,8 +403,11 @@ class BenchmarkSession:
         self._current_phase_type: PhaseType | None = None
         self._current_strategy: LoadStrategy | None = None
         self._recv_task: asyncio.Task | None = None
+        self._progress_watchdog_task: asyncio.Task | None = None
         self._strategy_task: asyncio.Task | None = None
         self._drain_event = asyncio.Event()
+        self._fatal_error: RuntimeError | None = None
+        self._last_response_progress_ns: int | None = None
 
     def stop(self) -> None:
         """Signal early termination. Safe to call from signal handler.
@@ -429,6 +458,8 @@ class BenchmarkSession:
 
         try:
             for phase in phases:
+                if self._fatal_error is not None:
+                    raise self._fatal_error
                 if self._stop_requested:
                     break
                 if on_phase_start is not None:
@@ -436,12 +467,20 @@ class BenchmarkSession:
                 result = await self._run_phase(phase)
                 if result is not None:
                     phase_results.append(result)
+                if self._fatal_error is not None:
+                    raise self._fatal_error
         finally:
             self._done = True
             if self._recv_task and not self._recv_task.done():
                 self._recv_task.cancel()
                 try:
                     await self._recv_task
+                except asyncio.CancelledError:
+                    pass
+            if self._progress_watchdog_task and not self._progress_watchdog_task.done():
+                self._progress_watchdog_task.cancel()
+                try:
+                    await self._progress_watchdog_task
                 except asyncio.CancelledError:
                     pass
             self._publish_session_event(SessionEventType.ENDED)
@@ -460,6 +499,9 @@ class BenchmarkSession:
         # Per-phase stop flag is scoped to this phase; clear any cap left set by
         # a previous phase so it can't short-circuit this one.
         self._current_phase_stopped = False
+        # A new phase must not inherit a response timestamp from the previous
+        # phase: its first in-flight request gets a full liveness interval.
+        self._last_response_progress_ns = None
 
         # Create per-phase state
         if phase.strategy is not None:
@@ -477,7 +519,8 @@ class BenchmarkSession:
             issuer=self._issuer,
             publisher=self._publisher,
             stop_check=self._make_stop_check(phase.runtime_settings, phase_start),
-            on_inflight_drained=self._drain_event.set,
+            on_inflight_started=self._on_inflight_started,
+            on_inflight_drained=self._on_inflight_drained,
             routing_headers=phase.routing_headers,
         )
 
@@ -563,20 +606,99 @@ class BenchmarkSession:
 
     async def _receive_responses(self) -> None:
         """Receive responses from the issuer. Runs as a concurrent task."""
+        try:
+            while not self._done:
+                resp = await self._issuer.recv()
+                if resp is None:
+                    # Transport closed unexpectedly — trigger stop so strategy
+                    # and drain don't hang waiting for responses that will never arrive.
+                    logger.warning("Issuer recv() returned None — transport closed")
+                    self._stop_requested = True
+                    self._drain_event.set()  # Unblock _drain_inflight
+                    # Cancel a strategy blocked awaiting a semaphore that will
+                    # never be released.
+                    if self._strategy_task and not self._strategy_task.done():
+                        self._strategy_task.cancel()
+                    break
+                self._handle_response(resp)
+                # This is a session-level liveness guard: any response proves
+                # the endpoint/transport is making progress. In particular,
+                # warmup responses may arrive after the performance phase starts.
+                self._record_response_activity()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = RuntimeError(f"Endpoint response receiver failed: {exc}")
+            error.__cause__ = exc
+            self._fatal_error = error
+            logger.exception("%s", error)
+            self.stop()
+
+    def _record_response_activity(self) -> None:
+        self._last_response_progress_ns = time.monotonic_ns()
+
+    def _on_inflight_started(self) -> None:
+        """Start a no-progress watchdog for a newly active request cohort."""
+        if self._no_progress_timeout_s is None:
+            return
+        if self._progress_watchdog_task and not self._progress_watchdog_task.done():
+            self._progress_watchdog_task.cancel()
+        self._progress_watchdog_task = asyncio.create_task(self._watch_no_progress())
+
+    def _on_inflight_drained(self) -> None:
+        """Cancel the watchdog as soon as the current cohort drains."""
+        self._drain_event.set()
+        if self._progress_watchdog_task and not self._progress_watchdog_task.done():
+            self._progress_watchdog_task.cancel()
+
+    async def _watch_no_progress(self) -> None:
+        """Fail an opt-in run when outstanding work makes no response progress.
+
+        This is transport- and engine-agnostic: a response chunk or final result
+        is progress. It deliberately does not try to classify TensorRT-LLM or
+        vLLM errors, so it also catches the silent worker hang where no HTTP
+        response is ever produced.
+        """
+        assert self._no_progress_timeout_s is not None
+        timeout_s = self._no_progress_timeout_s
+        phase_issuer = self._current_phase_issuer
+        if phase_issuer is None:
+            return
+        last_progress_ns = max(
+            timestamp
+            for timestamp in (
+                self._last_response_progress_ns,
+                phase_issuer.inflight_started_ns,
+            )
+            if timestamp is not None
+        )
         while not self._done:
-            resp = await self._issuer.recv()
-            if resp is None:
-                # Transport closed unexpectedly — trigger stop so strategy
-                # and drain don't hang waiting for responses that will never arrive.
-                logger.warning("Issuer recv() returned None — transport closed")
-                self._stop_requested = True
-                self._drain_event.set()  # Unblock _drain_inflight
-                # Cancel the strategy task if it's blocked (e.g., ConcurrencyStrategy
-                # awaiting sem.acquire() that will never be released).
-                if self._strategy_task and not self._strategy_task.done():
-                    self._strategy_task.cancel()
-                break
-            self._handle_response(resp)
+            await asyncio.sleep(timeout_s)
+            if self._done or self._stop_requested:
+                return
+            if (
+                self._current_phase_issuer is not phase_issuer
+                or phase_issuer.inflight <= 0
+            ):
+                return
+            current_progress_ns = max(
+                timestamp
+                for timestamp in (
+                    self._last_response_progress_ns,
+                    phase_issuer.inflight_started_ns,
+                )
+                if timestamp is not None
+            )
+            if current_progress_ns > last_progress_ns:
+                last_progress_ns = current_progress_ns
+                continue
+            self._fatal_error = NoProgressError(
+                "Endpoint made no response progress for "
+                f"{timeout_s:.1f}s with {phase_issuer.inflight} request(s) in flight"
+            )
+            logger.error("%s", self._fatal_error)
+            self.stop()
+            return
 
     def _handle_response(self, resp: QueryResult | StreamChunk) -> None:
         """Route a response to the appropriate handler.
@@ -651,6 +773,7 @@ class BenchmarkSession:
                 )
 
             if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
+                phase_issuer.completed_uuids.add(query_id)
                 phase_issuer.mark_inflight_complete()
                 if self._current_strategy:
                     self._current_strategy.on_query_complete(query_id)
