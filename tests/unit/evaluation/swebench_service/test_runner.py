@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import stat
 import subprocess
@@ -713,8 +714,9 @@ def test_pyxis_patch_config_selects_pyxis_environment(tmp_path):
     assert environment["cwd"] == "/testbed"
     assert environment["run_id"] == "run-1"
     assert "run_args" not in environment
-    assert "pull_timeout" not in environment
     assert "container_timeout" not in environment
+    # Carried over, not dropped: the Pyxis create step *is* the image pull.
+    assert environment["pull_timeout"] == 3600
 
 
 def test_pyxis_resolves_registry_image_from_instance_id():
@@ -1014,10 +1016,176 @@ def test_pyxis_environment_raises_when_srun_never_starts_command(monkeypatch, tm
         ),
     )
 
-    with pytest.raises(RunnerError, match="before the command completed"):
+    with pytest.raises(RunnerError, match=r"exceeded its 60s deadline"):
         environment.execute({"command": "pytest -q"})
 
     assert failure_path.exists()
+
+
+def test_pyxis_container_create_uses_the_pull_budget_not_the_command_budget(
+    monkeypatch, tmp_path
+):
+    """Creating the container is an image import, not a shell command.
+
+    Under Pyxis, `--container-image` triggers an enroot import of a multi-GB
+    SWE-bench image from a remote registry. Charging that against the
+    per-command `timeout` (300s in both templates) killed the create step as
+    soon as enough concurrent workers shared the registry -- 96 srun steps of
+    one 200-instance run were SIGKILLed at a uniform ~5m50s (= 300 + 30 grace),
+    which the service reported as an undiagnosable "failed to start Pyxis
+    container" and cost 17 of 20 units.
+    """
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    timeouts: list[float] = []
+
+    def fake_run(command, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        _finish_srun_step(command, 0)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    environment = PyxisEnvironment(
+        image=tmp_path / "task.sqsh",
+        run_id="run-1",
+        timeout=300,
+        pull_timeout=3600,
+    )
+    environment.execute({"command": "pytest -q"})
+
+    create_timeout, command_timeout = timeouts[0], timeouts[1]
+    assert create_timeout == 3600 + 30
+    assert command_timeout == 300 + 30
+    assert create_timeout > command_timeout, (
+        "container creation must not be bounded by the per-command timeout"
+    )
+    environment.cleanup()
+
+
+def test_pyxis_container_create_budget_defaults_without_a_template_value(
+    monkeypatch, tmp_path
+):
+    """A template that never mentions pull_timeout still gets a pull budget."""
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    timeouts: list[float] = []
+
+    def fake_run(command, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        _finish_srun_step(command, 0)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    environment = PyxisEnvironment(
+        image=tmp_path / "task.sqsh", run_id="run-1", timeout=300
+    )
+
+    assert timeouts[0] == 3600 + 30
+    environment.cleanup()
+
+
+def test_pyxis_records_create_timing_when_enabled(monkeypatch, tmp_path):
+    """Container-create cost must be measurable without re-deriving it.
+
+    Creation was only ever observable after the fact, as a uniform block of
+    SIGKILLed steps in `sacct` -- by which point the run was already lost.
+    """
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    timing = tmp_path / "creates.jsonl"
+    monkeypatch.setenv("SWEBENCH_PYXIS_CREATE_TIMING_PATH", str(timing))
+
+    def fake_run(command, **kwargs):
+        _finish_srun_step(command, 0)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+    environment.cleanup()
+
+    records = [json.loads(line) for line in timing.read_text().splitlines()]
+    assert len(records) == 1
+    assert records[0]["ok"] is True
+    assert records[0]["secs"] >= 0
+    assert records[0]["image"].endswith("task.sqsh")
+
+
+def test_pyxis_records_create_timing_for_a_failed_create(monkeypatch, tmp_path):
+    """A create that failed is the one whose duration matters most."""
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    timing = tmp_path / "creates.jsonl"
+    monkeypatch.setenv("SWEBENCH_PYXIS_CREATE_TIMING_PATH", str(timing))
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 1, stdout=""),
+    )
+
+    with pytest.raises(RunnerError):
+        PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+
+    records = [json.loads(line) for line in timing.read_text().splitlines()]
+    assert [r["ok"] for r in records] == [False]
+
+
+def test_pyxis_create_timing_is_off_by_default(monkeypatch, tmp_path):
+    """No env var, no writes, no behaviour change on a normal run."""
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    monkeypatch.delenv("SWEBENCH_PYXIS_CREATE_TIMING_PATH", raising=False)
+
+    def fake_run(command, **kwargs):
+        _finish_srun_step(command, 0)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+    environment.cleanup()
+
+    assert list(tmp_path.glob("*.jsonl")) == []
+
+
+def test_pyxis_create_timing_never_fails_the_run(monkeypatch, tmp_path):
+    """An unwritable sink degrades to nothing; it does not lose the container."""
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    monkeypatch.setenv(
+        "SWEBENCH_PYXIS_CREATE_TIMING_PATH", str(tmp_path / "nope" / "creates.jsonl")
+    )
+
+    def fake_run(command, **kwargs):
+        _finish_srun_step(command, 0)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+    environment.cleanup()
+
+
+def test_pyxis_failure_carries_srun_output(monkeypatch, tmp_path):
+    """srun's own words must survive into the error.
+
+    Without them every distinct infrastructure failure -- import failure, no
+    space left, a step that never got resources -- collapses into one
+    indistinguishable message and cannot be diagnosed from the artifacts.
+    """
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    def fake_run(command, **kwargs):
+        # Step never wrote its status file: srun died before the command ran.
+        return subprocess.CompletedProcess(
+            command, 1, stdout="slurmstepd: error: pyxis: no space left\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RunnerError, match="no space left") as exc_info:
+        PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+
+    assert "failed to start Pyxis container" in str(exc_info.value)
 
 
 def test_pyxis_environment_preserves_command_failure(monkeypatch, tmp_path):
