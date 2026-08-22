@@ -15,6 +15,8 @@
 
 """Custom exceptions for CLI error handling."""
 
+from enum import Enum
+
 
 class CLIError(Exception):
     """Base exception for CLI errors.
@@ -37,7 +39,55 @@ class InputValidationError(CLIError):
 
 
 class DatasetValidationError(InputValidationError):
-    """Invalid --dataset string or dataset configuration."""
+    """A loaded dataset sample fails salt validation.
+
+    The failure category is a ``Reason``; ``detail`` carries the specifics
+    (offending sample index, remediation hint).
+    """
+
+    class Reason(Enum):
+        """Why a sample cannot be salted."""
+
+        TYPE_MISMATCH = "sample is not a dict"
+        INPUT_TOKENS_SHADOWING = (
+            "sample has 'input_tokens'; salt cannot bust a pre-tokenized cache"
+        )
+        MESSAGES_SHADOWING = (
+            "sample has 'messages'; adapters send that verbatim and prefer it "
+            "over 'prompt', so a salted 'prompt' would never reach the server"
+        )
+        PROMPT_MISSING = "sample has no 'prompt' field"
+        PROMPT_TYPE_MISMATCH = "sample 'prompt' is not a str"
+        PROMPT_LIST_UNSUPPORTED = (
+            "sample 'prompt' is a list (OpenAI batch / token-IDs, or this "
+            "project's multimodal content parts); salt supports only a single "
+            "text 'prompt'"
+        )
+
+    def __init__(
+        self,
+        reason: "DatasetValidationError.Reason",
+        detail: str | None = None,
+    ) -> None:
+        self.reason = reason
+        self.detail = detail
+        # args mirrors the constructor signature, so CPython's default exception
+        # reducer round-trips copy/pickle (and __notes__) with no override.
+        super().__init__(reason, detail)
+
+    def __str__(self) -> str:
+        if self.detail is None:
+            return self.reason.value
+        return f"{self.reason.value}: {self.detail}"
+
+
+class DatasetParseError(InputValidationError):
+    """A --dataset CLI string could not be parsed into a dataset config.
+
+    Distinct from DatasetValidationError: the failure is in the user's input
+    string (bad format / key=value), before any dataset is loaded — so there is
+    no sample index or Reason, just the underlying parse message.
+    """
 
     pass
 

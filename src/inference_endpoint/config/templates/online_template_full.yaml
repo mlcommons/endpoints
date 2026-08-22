@@ -94,7 +94,7 @@ settings:
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
-    salt: true  # Prepend a unique random hex salt to each warmup prompt
+    salt: false  # Prepend a unique random hex salt to each warmup prompt. Requires text-'prompt' samples; enabling it on a pre-tokenized ('input_tokens') dataset is a hard error.
     drain: false  # Drain in-flight warmup requests before starting the performance phase
     warmup_random_seed: 42  # RNG seed for warmup scheduling and sample ordering
   profiling:
