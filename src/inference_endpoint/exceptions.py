@@ -71,17 +71,14 @@ class DatasetValidationError(InputValidationError):
     ) -> None:
         self.reason = reason
         self.detail = detail
-        message = reason.value if detail is None else f"{reason.value}: {detail}"
-        super().__init__(message)
+        # args mirrors the constructor signature, so CPython's default exception
+        # reducer round-trips copy/pickle (and __notes__) with no override.
+        super().__init__(reason, detail)
 
-    def __reduce__(
-        self,
-    ) -> tuple[type, tuple["DatasetValidationError.Reason", str | None], dict]:
-        # args holds the formatted message, but __init__ takes (reason, detail);
-        # reconstruct from the structured fields so copy/pickle round-trips. The
-        # third element mirrors CPython's default exception reducer: it restores
-        # __dict__ (and thus __notes__ / any caller-added attribute) as state.
-        return (type(self), (self.reason, self.detail), self.__dict__)
+    def __str__(self) -> str:
+        if self.detail is None:
+            return self.reason.value
+        return f"{self.reason.value}: {self.detail}"
 
 
 class DatasetParseError(InputValidationError):

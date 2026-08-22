@@ -86,9 +86,9 @@ class TestExceptionHierarchy:
 
 
 class TestDatasetValidationErrorRoundTrip:
-    """DatasetValidationError carries structured fields (reason + detail), so it
-    overrides __reduce__ to stay copy/pickle-safe: args holds only the formatted
-    message, which __init__ cannot consume as (reason, detail)."""
+    """DatasetValidationError carries structured fields (reason + detail). Its
+    args mirror the constructor signature, so copy/pickle round-trip via
+    CPython's default exception machinery without a custom reducer."""
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -105,7 +105,7 @@ class TestDatasetValidationErrorRoundTrip:
     )
     @pytest.mark.parametrize(
         # pickle round-trips a self-constructed exception (trusted, not external
-        # input) — this asserts __reduce__ reconstructs it from reason + detail.
+        # input) — this asserts it reconstructs from reason + detail.
         "clone_fn",
         [copy.copy, copy.deepcopy, lambda e: pickle.loads(pickle.dumps(e))],
         ids=["copy", "deepcopy", "pickle"],
@@ -123,9 +123,8 @@ class TestDatasetValidationErrorRoundTrip:
         ids=["copy", "deepcopy", "pickle"],
     )
     def test_round_trip_preserves_notes_and_extra_state(self, clone_fn):
-        # The 3-tuple __reduce__ restores __dict__ as state, so __notes__ (PEP
-        # 678) and any caller-added attribute survive — matching CPython's
-        # default exception reducer.
+        # CPython's default reducer restores __dict__ as state, so __notes__
+        # (PEP 678) and any caller-added attribute survive the round-trip.
         exc = DatasetValidationError(
             DatasetValidationError.Reason.MESSAGES_SHADOWING, "sample 7"
         )
@@ -134,3 +133,29 @@ class TestDatasetValidationErrorRoundTrip:
         clone = clone_fn(exc)
         assert getattr(clone, "__notes__", None) == ["diagnostic note"]
         assert clone.extra_attr == "kept"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "exc, expected",
+        [
+            (
+                DatasetValidationError(
+                    DatasetValidationError.Reason.INPUT_TOKENS_SHADOWING
+                ),
+                DatasetValidationError.Reason.INPUT_TOKENS_SHADOWING.value,
+            ),
+            (
+                DatasetValidationError(
+                    DatasetValidationError.Reason.PROMPT_LIST_UNSUPPORTED, "sample 3"
+                ),
+                f"{DatasetValidationError.Reason.PROMPT_LIST_UNSUPPORTED.value}: "
+                f"sample 3",
+            ),
+        ],
+        ids=["reason-only", "reason-and-detail"],
+    )
+    def test_str_pins_the_user_facing_message(self, exc, expected):
+        # __str__ is the sole producer of the message main.py logs via str(e);
+        # pin the absolute output so a regression in formatting can't pass on the
+        # round-trip test's str(clone) == str(exc) tautology alone.
+        assert str(exc) == expected
