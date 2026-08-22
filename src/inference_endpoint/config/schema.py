@@ -149,6 +149,7 @@ class ScorerMethod(str, Enum):
     BFCL_V4 = "bfcl_v4"
     LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
     SWE_BENCH = "swe_bench_scorer"
+    SWE_BENCH_FLEET = "swe_bench_fleet"
 
 
 class AuditTestId(str, Enum):
@@ -1156,6 +1157,9 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
 
+        # Only the single-service scorer is limited to one endpoint. The fleet
+        # scorer runs many service runs, each against one endpoint, so it has
+        # no such restriction.
         uses_swe_bench = any(
             dataset.accuracy_config is not None
             and dataset.accuracy_config.eval_method == ScorerMethod.SWE_BENCH
@@ -1301,7 +1305,8 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 acc = ds.accuracy_config
                 if (
                     acc is not None
-                    and acc.eval_method == ScorerMethod.SWE_BENCH
+                    and acc.eval_method
+                    in (ScorerMethod.SWE_BENCH, ScorerMethod.SWE_BENCH_FLEET)
                     and (acc.extras is None or acc.extras.get("workers") is None)
                 ):
                     new_extras = {**(acc.extras or {}), "workers": concurrency}
