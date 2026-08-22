@@ -127,6 +127,9 @@ dev = [
     # CVE-2026-22701 (filelock) and CVE-2026-22702 (virtualenv).
     "filelock>=3.20.3",
     "virtualenv>=20.36.1",
+    # pip is pulled in transitively (pip-audit -> pip-api -> pip); force past
+    # PYSEC-2026-3721 (fixed in 26.2), which otherwise fails `uv run pip-audit`.
+    "pip==26.2",
 ]
 test = [
     # Includes optional dependencies for full test coverage
