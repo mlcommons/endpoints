@@ -30,6 +30,7 @@ import time
 from decimal import Decimal
 from enum import Enum
 from io import StringIO
+from multiprocessing.sharedctypes import Synchronized
 
 # from pyext import RuntimeModule
 from types import ModuleType
@@ -475,7 +476,7 @@ def grade_stdio(
     return all_results, {"execution time": total_execution_time}
 
 
-def run_test(sample, test=None, timeout=6):
+def run_test(sample, test=None, timeout=6, started_flag: Synchronized | None = None):
     """
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
@@ -506,7 +507,16 @@ def run_test(sample, test=None, timeout=6):
     elif test is not None:
         results = []
 
+        if started_flag is not None:
+            # Judge-side setup (reliability_guard, suite parse) is done; the
+            # next thing that runs is the submission itself (grade_call_based
+            # / grade_stdio compile and exec `test`), so a death from here on
+            # is the submission's doing, not the judge's.
+            started_flag.value = True
+
         if which_type == CODE_TYPE.call_based:
+            # method_name is only None for CODE_TYPE.standard_input (above).
+            assert method_name is not None
             signal.alarm(timeout)
             try:
                 results, metadata = grade_call_based(
@@ -518,7 +528,11 @@ def run_test(sample, test=None, timeout=6):
                 )
                 return results, metadata
             except Exception as e:
+                # Reached only if the submission's code fails to compile or
+                # doesn't define the expected function -- grade_call_based's
+                # own per-test-case loop already handles runtime errors.
                 return [-4], {
+                    "error": repr(e),
                     "error_code": -4,
                     "error_message": f"Error during testing: {e}",
                 }
@@ -538,7 +552,10 @@ def run_test(sample, test=None, timeout=6):
                 )
                 return results, metadata
             except Exception as e:
+                # Same as the call_based branch above: a compile/definition
+                # failure in the submission's own code, not a judge bug.
                 return [-4], {
+                    "error": repr(e),
                     "error_code": -4,
                     "error_message": f"Error during testing: {e}",
                 }
