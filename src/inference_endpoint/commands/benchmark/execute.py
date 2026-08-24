@@ -38,7 +38,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
@@ -496,6 +496,7 @@ def setup_benchmark(
     # Report directory
     report_dir = resolve_report_dir(config)
     report_dir.mkdir(parents=True, exist_ok=True)
+    config = config.with_updates(run_date=datetime.now(UTC).isoformat())
     config.to_yaml_file(report_dir / "config.yaml", redact_secrets=True)
 
     # Tokenizer check (light API call, no download)

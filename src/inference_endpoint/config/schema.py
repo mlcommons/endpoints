@@ -1099,6 +1099,10 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         None,
         description="Compliance audit config (YAML only). When set, runs the audit after the main benchmark.",
     )
+    run_date: Annotated[str | None, cyclopts.Parameter(show=False)] = Field(
+        None,
+        description="UTC ISO-8601 timestamp of when this run started. Set automatically by setup_benchmark; not user-configurable.",
+    )
 
     @field_validator("datasets", mode="before")
     @classmethod
