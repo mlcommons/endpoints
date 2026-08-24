@@ -35,9 +35,8 @@ whole suite in one process, and some other module (see
 endpoint_client/worker.py's multiprocessing.set_start_method("spawn"),
 called at import time) may have already claimed the process-wide default
 before this file's tests run. Pinning fork here, locally, keeps the fault
-injection deterministic regardless of import order without deciding
-lcb_serve's own production start-method policy, which is being tracked in
-a follow-up PR.
+injection deterministic regardless of import order and independent of
+lcb_serve's own production start-method policy.
 """
 
 import multiprocessing
@@ -121,9 +120,8 @@ def test_death_before_run_test_is_infra_error(monkeypatch):
 def test_death_during_judge_setup_is_infra_error_not_submission(monkeypatch):
     """A death inside run_test's own setup (reliability_guard, suite parse)
     -- after run_test has started but before started_flag is set -- must
-    still be -6. This is the exact boundary the started_flag fix moved: it
-    used to flip True on wrapper entry, before this setup ran, which would
-    have misattributed this case as -8."""
+    still be -6, not -8: the flag only brackets the submission's own code,
+    not the judge's setup around it."""
     _force_fork_context(monkeypatch)
     orig_guard = run_lcb_tests.reliability_guard
 
@@ -154,6 +152,62 @@ def test_compile_error_in_submission_is_not_infra_but_is_logged():
     assert metadata["error_code"] == -4
     assert "error" in metadata
     assert metadata["error_code"] not in lcb_serve._LCB_INFRA_ERROR_CODES
+
+
+STDIO_SUITE = '{"inputs": ["1"], "outputs": ["1"]}'
+
+
+def test_stdio_compile_error_is_not_infra_but_is_logged():
+    """Same as test_compile_error_in_submission_is_not_infra_but_is_logged,
+    but through the standard_input branch (no fn_name), which none of the
+    other tests here exercise."""
+    bad_syntax = "print(1"  # missing closing paren
+    res, metadata = lcb_serve.run_code_subprocess(
+        STDIO_SUITE, bad_syntax, timeout_sec=TIMEOUT_SEC
+    )
+    assert metadata["error_code"] == -4
+    assert "error" in metadata
+    assert metadata["error_code"] not in lcb_serve._LCB_INFRA_ERROR_CODES
+
+
+MALFORMED_GROUND_TRUTH_SUITE = (
+    '{"fn_name": "solve", "inputs": ["1"], "outputs": ["not-valid-json"]}'
+)
+
+
+def test_malformed_ground_truth_is_infra_error_not_submission():
+    """A dataset bug (unparseable expected output) is the judge's fault,
+    same as a malformed suite envelope -- not the submission's, even
+    though both currently get discovered inside run_test's call_based
+    setup, right before the submission's own code runs."""
+    res, metadata = lcb_serve.run_code_subprocess(
+        MALFORMED_GROUND_TRUTH_SUITE, PASSING_CALL_BASED, timeout_sec=TIMEOUT_SEC
+    )
+    assert metadata["error_code"] == -5
+    assert metadata["error_code"] in lcb_serve._LCB_INFRA_ERROR_CODES
+
+
+def test_exception_during_judge_setup_is_test_runner_error(monkeypatch):
+    """Unlike test_death_during_judge_setup_is_infra_error_not_submission
+    above, a plain exception during judge setup doesn't kill the process --
+    it's caught in place and reported as -5 TestRunnerError, the other half
+    of the infra pair alongside -6."""
+    _force_fork_context(monkeypatch)
+    orig_guard = run_lcb_tests.reliability_guard
+
+    def _guard_then_raise(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    run_lcb_tests.reliability_guard = _guard_then_raise
+    try:
+        res, metadata = lcb_serve.run_code_subprocess(
+            CALL_BASED_SUITE, PASSING_CALL_BASED, timeout_sec=TIMEOUT_SEC
+        )
+    finally:
+        run_lcb_tests.reliability_guard = orig_guard
+
+    assert metadata["error_code"] == -5
+    assert metadata["error_code"] in lcb_serve._LCB_INFRA_ERROR_CODES
 
 
 def test_timeout_is_not_infra_error():
@@ -268,3 +322,29 @@ def test_all_judge_startup_death_batch_raises(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="infrastructure errors"):
         worker(["q1", "q2"], [[PASSING_CALL_BASED], [PASSING_CALL_BASED]])
+
+
+def test_mixed_batch_with_one_infra_error_does_not_raise(monkeypatch):
+    """infra_errors == len(futures) is all-or-nothing: one sample dying
+    before run_test (-6) alongside one that just fails on its own (-7)
+    must not trip the guard.
+    """
+    _force_fork_context(monkeypatch)
+    orig = lcb_serve.execute_code_single_suppressed_errors
+
+    def _die_only_for_passing_code(test_suite_json, code, *args, **kwargs):
+        if code == PASSING_CALL_BASED:
+            os._exit(1)
+        return orig(test_suite_json, code, *args, **kwargs)
+
+    monkeypatch.setattr(
+        lcb_serve, "execute_code_single_suppressed_errors", _die_only_for_passing_code
+    )
+
+    worker = lcb_serve._LCBWorker(
+        _DictTestLoader(q1=CALL_BASED_SUITE, q2=CALL_BASED_SUITE),
+        n_lcb_workers=2,
+        worker_timeout_sec=TIMEOUT_SEC,
+    )
+    results = worker(["q1", "q2"], [[PASSING_CALL_BASED], [CALL_SYSEXIT]])
+    assert results == {"q1": [False], "q2": [False]}

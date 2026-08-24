@@ -291,12 +291,6 @@ def grade_call_based(
     if method is None:
         return
 
-    all_inputs = [
-        [json.loads(line) for line in inputs.split("\n")] for inputs in all_inputs
-    ]
-
-    all_outputs = [json.loads(output) for output in all_outputs]
-
     total_execution = 0.0
     all_results = []
     for gt_inp, gt_out in zip(all_inputs, all_outputs, strict=False):
@@ -501,6 +495,15 @@ def run_test(sample, test=None, timeout=6, started_flag: Synchronized | None = N
         else:
             which_type = CODE_TYPE.call_based  # Call-based
             method_name = in_outs["fn_name"]
+            # Ground truth is itself JSON-encoded per test case. Parse it here,
+            # next to the suite parse above, so a malformed dataset is a
+            # judge-side failure instead of landing in grade_call_based's own
+            # except block as a submission-attributed one.
+            in_outs["inputs"] = [
+                [json.loads(line) for line in case.split("\n")]
+                for case in in_outs["inputs"]
+            ]
+            in_outs["outputs"] = [json.loads(output) for output in in_outs["outputs"]]
 
     if test is None:
         raise ValueError("should not happen: test code is none")

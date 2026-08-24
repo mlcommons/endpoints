@@ -160,8 +160,11 @@ def run_code_subprocess(
 
     with mp.Manager() as manager:
         resp_buffer = manager.list()
-        # typeshed types ctx.Value() as SynchronizedBase, which lacks .value
-        started_flag = cast(Synchronized, mp.Value(ctypes.c_bool, False))
+        # typeshed types ctx.Value() as SynchronizedBase, which lacks .value.
+        # lock=False: single writer (the child), single reader (the parent,
+        # after join), so no lock is needed and none of the semaphore risk
+        # that comes with one.
+        started_flag = cast(Synchronized, mp.Value(ctypes.c_bool, False, lock=False))
         p = mp.Process(
             target=execute_code_single_suppressed_errors,
             args=(
