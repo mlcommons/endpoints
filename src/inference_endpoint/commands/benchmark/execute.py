@@ -21,24 +21,21 @@ Phases:
     3. finalize_benchmark()     — accuracy scoring, results JSON
 
 Cohesive sub-concerns live in sibling modules: profiler triggers (``profiling``),
-accuracy scoring (``accuracy``), and the ZMQ/metrics/event-logger service lifecycle
-(``pipeline``).
+timeout/signal policy (``watchdog``), accuracy scoring (``accuracy``), and the
+ZMQ/metrics/event-logger service lifecycle (``pipeline``).
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import random
 import shutil
-import signal
 import tempfile
 import time
-import types
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
@@ -63,6 +60,12 @@ from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
 from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
     write_profiling_section,
+)
+from inference_endpoint.commands.benchmark.watchdog import (
+    RunWatchdog,
+    SigintGovernor,
+    _PerfPhaseTimeout,
+    sigint_policy,
 )
 from inference_endpoint.compliance import AuditRunSpec
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -694,130 +697,6 @@ def _build_phases(
         )
 
     return phases
-
-
-class _PerfPhaseTimeout:
-    def __init__(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        max_issue_duration_ms: int | None,
-        on_timeout: Callable[[], None],
-    ) -> None:
-        self._loop = loop
-        self._max_duration_ms = max_issue_duration_ms
-        self._on_timeout = on_timeout
-        self._handle: asyncio.TimerHandle | None = None
-
-    def on_phase_start(self, phase_type: PhaseType) -> None:
-        self.cancel()
-        if phase_type == PhaseType.PERFORMANCE and self._max_duration_ms is not None:
-            self._handle = self._loop.call_later(
-                self._max_duration_ms / 1000.0, self._on_timeout
-            )
-
-    def cancel(self) -> None:
-        if self._handle is not None:
-            self._handle.cancel()
-            self._handle = None
-
-
-class SigintGovernor:
-    def __init__(self) -> None:
-        self.interrupted = False
-        self._session: BenchmarkSession | None = None
-        self._task: asyncio.Task | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._abort_event: asyncio.Event | None = None
-
-    def bind_task(
-        self, task: asyncio.Task | None, loop: asyncio.AbstractEventLoop
-    ) -> None:
-        self._task = task
-        self._loop = loop
-        self._session = None
-        self._abort_event = None
-
-    def bind_session(
-        self, session: BenchmarkSession, abort_event: asyncio.Event
-    ) -> None:
-        self._session = session
-        self._abort_event = abort_event
-
-    def __call__(self, signum: int, frame: types.FrameType | None) -> None:
-        if self.interrupted:
-            return
-        self.interrupted = True
-        if (
-            self._task is None
-            or self._task.done()
-            or self._loop is None
-            or not self._loop.is_running()
-        ):
-            raise KeyboardInterrupt
-        if self._session is None:
-            self._loop.call_soon_threadsafe(self._task.cancel)
-            return
-        assert self._abort_event is not None
-        self._loop.call_soon_threadsafe(self._session.stop)
-        self._loop.call_soon_threadsafe(self._abort_event.set)
-
-
-@contextlib.contextmanager
-def sigint_policy(governor: SigintGovernor) -> Iterator[None]:
-    prev = signal.getsignal(signal.SIGINT)
-    if prev is None:
-        yield
-        return
-    try:
-        signal.signal(signal.SIGINT, governor)
-    except ValueError:
-        yield
-        return
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGINT, prev)
-
-
-class RunWatchdog:
-    def __init__(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        deadline: float | None,
-        abort_event: asyncio.Event,
-    ) -> None:
-        self.fired = False
-        self._session: BenchmarkSession | None = None
-        self._task: asyncio.Task | None = None
-        self._abort_event = abort_event
-        self._handle = (
-            loop.call_later(max(0.0, deadline - time.monotonic()), self._fire)
-            if deadline is not None
-            else None
-        )
-
-    def bind_task(self, task: asyncio.Task | None) -> None:
-        self._task = task
-
-    def bind_session(self, session: BenchmarkSession) -> None:
-        self._session = session
-        if self.fired:
-            session.stop()
-            self._abort_event.set()
-
-    def _fire(self) -> None:
-        self.fired = True
-        logger.error("Run timeout reached; aborting run")
-        if self._session is not None:
-            self._session.stop()
-            self._abort_event.set()
-        elif self._task is not None:
-            self._task.cancel()
-
-    def cancel(self) -> None:
-        if self._handle is not None:
-            self._handle.cancel()
-            self._handle = None
 
 
 async def _create_issuer(

@@ -23,7 +23,7 @@ import signal
 from unittest.mock import MagicMock
 
 import pytest
-from inference_endpoint.commands.benchmark.execute import (
+from inference_endpoint.commands.benchmark.watchdog import (
     SigintGovernor,
     _PerfPhaseTimeout,
     sigint_policy,

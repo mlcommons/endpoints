@@ -534,6 +534,7 @@ class TestBenchmarkConfigMethods:
             rt = RuntimeSettings.from_config(no_duration, dataloader_num_samples=100)
         assert rt.total_samples_to_issue() == 100
         assert "settings.runtime.n_samples_to_issue" in caplog.text
+        assert "Poisson" in caplog.text
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

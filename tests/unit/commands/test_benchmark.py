@@ -42,7 +42,6 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     BenchmarkResult,
     ResponseCollector,
-    SigintGovernor,
     _build_phases,
     _load_datasets,
     _run_benchmark_async,
@@ -56,6 +55,7 @@ from inference_endpoint.commands.benchmark.profiling import (
     _render_profile_status,
     write_profiling_section,
 )
+from inference_endpoint.commands.benchmark.watchdog import SigintGovernor
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     AgenticInferenceConfig,

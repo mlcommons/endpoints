@@ -197,7 +197,7 @@ class RoundRuleset(BenchmarkSuiteRuleset):
         assert (
             max_issue_duration_ms is not None
             and max_issue_duration_ms >= min_issue_duration_ms
-        ), "Max duration must be greater than or equal to min duration"
+        ), "Max issue duration must be greater than or equal to min issue duration"
 
         n_samples_from_dataset = model.dataset.size
         if user_config.ds_subset_size:

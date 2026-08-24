@@ -403,7 +403,12 @@ class BenchmarkSession:
         return self._stop_requested
 
     def stop_current_phase(self) -> None:
-        """Stop issuing in the current phase without aborting the session."""
+        """Stop issuing in the current phase without aborting the session.
+
+        Cancels a strategy blocked on an async primitive, but deliberately
+        leaves the drain event untouched: already-issued requests must still
+        complete or exhaust the phase drain timeout before the next phase.
+        """
         if self._strategy_task is None or self._strategy_task.done():
             return
         self._current_phase_stopped = True
@@ -534,8 +539,8 @@ class BenchmarkSession:
 
         Bounded by ``timeout`` seconds; on expiry the whole session is aborted
         because advancing with unresolved requests would mix phase accounting.
-        ``timeout=None`` waits indefinitely. A dropped transport still unblocks
-        the wait via the ``_receive_responses`` close path.
+        ``timeout=None`` intentionally permits long accuracy and offline drains.
+        A dropped transport still unblocks via the receive-loop close path.
         """
         if phase_issuer.inflight <= 0 or self._stop_requested:
             return

@@ -183,6 +183,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     git_sha: str | None
     test_started_at: int
     n_samples_issued: int
+    # Terminal responses; failed samples are a subset of this count.
     n_samples_completed: int
     n_samples_failed: int
     duration_ns: int | None
@@ -191,10 +192,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # without re-parsing the source dict, and so JSON round-trips don't
     # depend on Report importing the SessionState enum.
     state: str
-    # True iff state=="complete" AND n_pending_tasks==0. False signals
-    # partial async metrics — drain timed out (state=="complete",
-    # n_pending_tasks>0), the run was interrupted (state=="interrupted"),
-    # or no final snapshot was found and we fell back to a live tick.
+    # True iff the aggregator completed, no metrics work remains, and every
+    # issued sample reached a terminal outcome with valid counter ordering.
+    # False signals dropped samples, partial async metrics, an interrupted run,
+    # or a live-snapshot fallback.
     complete: bool
 
     # Per-metric rollup dicts (output of _series_to_metric_dict)

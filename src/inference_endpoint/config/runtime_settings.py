@@ -183,7 +183,8 @@ class RuntimeSettings:
         ):
             logger.warning(
                 "No sample count; issuing one dataset pass (%d). Set "
-                "settings.runtime.n_samples_to_issue or min_issue_duration_ms.",
+                "settings.runtime.n_samples_to_issue; Poisson runs may instead "
+                "set min_issue_duration_ms.",
                 dataloader_num_samples,
             )
 

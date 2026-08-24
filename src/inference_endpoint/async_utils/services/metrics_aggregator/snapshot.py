@@ -54,9 +54,9 @@ class SessionState(str, Enum):
                   written from the ``ENDED`` path. Percentiles and histograms
                   are exact (computed from raw values).
     INTERRUPTED → terminal interrupted state: the session's INTERRUPTED
-                  marker preceded ``ENDED``, or SIGTERM landed first (run
-                  watchdog / teardown grace). SIGINT itself is ignored — the
-                  parent's ENDED path is authoritative for ^C. Stats are
+                  marker preceded ``ENDED``, or the service received SIGTERM
+                  during abnormal pipeline teardown. SIGINT itself is ignored;
+                  the parent's ENDED path is authoritative for ^C. Stats are
                   best-effort partial captures.
 
     Transitions are forward-only:
