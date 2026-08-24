@@ -212,7 +212,7 @@ The core is a sequence of pure stages over the per-super-pass series.
   [ ingest -> per-super-pass series ]     issue-order bucketing
      |
      v
-  [ adaptive warmup crop ]                remove the ramp
+  [ adaptive warmup crop ]                remove the ramp (TPOT-driven band)
      |
      v
   [ guarded drain-tail cut ]              only if per-token-invariant
@@ -227,7 +227,21 @@ The core is a sequence of pure stages over the per-super-pass series.
   { steady_state metrics + status + anomaly }
 ```
 
-### The hairball (drain tail)
+### Adaptive warmup crop
+
+The ramp is removed by a data-driven crop rather than a fixed count. The steady level of
+a driver metric is estimated from the median of the per-super-pass series' back half, and
+leading super-passes whose driver value is more than a fractional `band` away from that
+level — in _either_ direction — are dropped, capped at half the run so it can never crop
+everything. The driver is **TPOT p50**: aggregated per super-pass it is a smooth, monotone
+signal (it ramps _up_ as the batch fills and per-token decode contends, then plateaus at
+saturation), which is exactly where the system reaches steady state. The band is symmetric
+because TPOT ramps up to steady (unlike TTFT, which decays down from an admission spike);
+TTFT is deliberately not the driver — its per-super-pass value is far too volatile under
+closed-loop admission (empirically CoV ~3 on a high-concurrency reasoning run vs ~0.15 for
+the same model under Poisson). The crop self-sizes to the workload: near-zero on
+fast-settling runs, but tens of super-passes on a long-output reasoning run whose decode
+ramp is genuinely long. A fixed crop count remains available as an override.
 
 The dataset is issued in full, without replacement, repeating across passes, so a
 tail of long-output requests accumulates toward the end of every run; only the
