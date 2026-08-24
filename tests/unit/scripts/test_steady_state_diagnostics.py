@@ -497,6 +497,31 @@ def test_build_steady_state_reports_first_plateau_and_anomaly():
     assert ss["anomaly"]["detected"] is True  # the 100->200 step is surfaced
 
 
+def test_adaptive_warmup_crops_tpot_ramp():
+    # TPOT ramps up to a flat 50 -> symmetric band drops the leading below-steady ramp.
+    series = _mk_series([(20, 50), (30, 50), (40, 50)] + [(50, 50)] * 7)
+    # steady (back-half median) = 50; band 0.05 -> keep from first SP within 5% (48 -> SP3)
+    assert mod.adaptive_warmup(series, driver="tpot_p50", band=0.05) == 3
+
+
+def test_adaptive_warmup_flat_run_returns_min():
+    series = _mk_series([(50, 50)] * 8)
+    assert mod.adaptive_warmup(series, driver="tpot_p50", band=0.05) == 1
+
+
+def test_adaptive_warmup_capped_at_max_frac():
+    # A never-settling monotonic ramp is capped so it can't crop the whole run.
+    series = _mk_series([(10 * (i + 1), 50) for i in range(10)])
+    assert mod.adaptive_warmup(series, driver="tpot_p50", band=0.05, max_frac=0.5) == 5
+
+
+def test_run_auto_warmup_resolves_to_int(tmp_path):
+    path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100.0)
+    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup="auto")
+    assert isinstance(result["warmup"], int)
+    assert result["warmup_mode"] == "auto"
+
+
 def test_build_steady_state_flags_global_drift_after_first_plateau():
     # First plateau is flat, but TPOT ramps up for the rest of the run (the C22528
     # pattern): a local plateau exists, yet the metric drifts up globally.

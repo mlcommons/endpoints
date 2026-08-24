@@ -38,7 +38,9 @@ uv run scripts/steady_state_diagnostics.py <run>/events.jsonl \
     --dataset-size <N> \
     [--superpass-size N]      # samples per super-pass (default: --dataset-size)
     [--window-sizes 4,6,8]    # diagnostic scan sizes, in super-passes (min useful: 4)
-    [--warmup 1]              # leading super-passes dropped before analysis
+    [--warmup auto]           # "auto" (data-driven crop) or a fixed super-pass count
+    [--warmup-band 0.05]      # auto: crop leading super-passes >5% off the steady level
+    [--warmup-driver tpot_p50] # auto: metric whose ramp defines the crop
     [--cov-bounds 0.03,0.05,0.08]
     [--trend-gate mk_hamed_rao]   # {mann_kendall,mk_hamed_rao,newey_west,theil_sen,slope_vs_scatter}
     [--alpha 0.05]
@@ -124,5 +126,10 @@ rolling scan) for deeper analysis.
   so the steady/drift **verdicts** are unaffected — only the absolute TPOT magnitude.
 - **Window sizes < 4** are useless for drift (the trend test needs ≥ 4 points); they
   still contribute to the CoV table.
-- Window indices are **post-warmup relative** (add `--warmup` for absolute super-pass
-  numbers).
+- Window indices are **post-warmup relative** (add the resolved warmup — shown as
+  `warmup N [auto|fixed]` in the header — for absolute super-pass numbers).
+- **Auto warmup** (default) crops leading super-passes still ramping toward the steady
+  TPOT level (band around the back-half median). On long-ramp runs (high-concurrency,
+  long-output) this can be large — e.g. ~24 super-passes on a DeepSeek-R1 c28k run —
+  which is correct: it moves the window off the ramp shoulder onto the true plateau. Use
+  a fixed `--warmup N` to override.

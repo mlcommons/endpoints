@@ -145,6 +145,7 @@ TRACKED_METRICS: tuple[TrackedMetric, ...] = (
 
 # Metrics that gate admissibility (p50/p95); p99 is diagnostic-only.
 GATED_METRICS: tuple[TrackedMetric, ...] = tuple(m for m in TRACKED_METRICS if m.gated)
+_METRIC_BY_KEY: dict[str, TrackedMetric] = {m.key: m for m in TRACKED_METRICS}
 
 
 # --------------------------------------------------------------------------- #
@@ -923,6 +924,34 @@ def global_trend(
     return out
 
 
+def adaptive_warmup(
+    series: Sequence[SuperPassRollup],
+    driver: str = "tpot_p50",
+    band: float = 0.05,
+    min_warmup: int = 1,
+    max_frac: float = 0.5,
+) -> int:
+    """Data-driven warmup crop: drop leading super-passes still off the steady level.
+
+    The driver's steady level is estimated from the median of the series' back half;
+    leading super-passes whose driver value is more than ``band`` (fractional) away from
+    it — in *either* direction — are cropped. Symmetric because the natural driver, TPOT,
+    ramps *up* to steady (unlike TTFT, which decays down). Capped at ``max_frac`` of the
+    run so it can never crop everything.
+    """
+    m = _METRIC_BY_KEY[driver]
+    vals = super_pass_percentile_series(series, m.source_attr, m.percentile)
+    n = len(vals)
+    if n < MIN_TREND_N:
+        return min_warmup
+    steady = median(vals[n // 2 :]) or ZERO_MEDIAN_FLOOR
+    cap = max(min_warmup, int(n * max_frac))
+    w = 0
+    while w < cap and abs(vals[w] - steady) / steady > band:
+        w += 1
+    return max(min_warmup, w)
+
+
 def build_steady_state(
     series: Sequence[SuperPassRollup],
     gate_algo: str = "mk_hamed_rao",
@@ -1028,7 +1057,8 @@ class DriftEntry(TypedDict):
 class DiagnosticsResult(TypedDict):
     n_super_passes: int
     superpass_size: int
-    warmup: int
+    warmup: int  # resolved super-pass crop count
+    warmup_mode: str  # "auto" (adaptive) or "fixed"
     n_post_warmup: int
     metrics: list[str]
     gated_metrics: list[str]
@@ -1074,23 +1104,33 @@ def run(
     superpass_size: int,
     count_tokens: Callable[[list[str]], list[int]],
     window_sizes: Sequence[int] = (4, 5),
-    warmup: int = 1,
+    warmup: int | str = "auto",
     cov_bounds: Sequence[float] = (0.03, 0.05, 0.08),
     alpha: float = 0.05,
     trend_gate: str = "mk_hamed_rao",
     tokenize_batch_size: int = TOKENIZE_BATCH_SIZE,
+    warmup_band: float = 0.05,
+    warmup_driver: str = "tpot_p50",
 ) -> DiagnosticsResult:
     """Build the full diagnostics result (the ``--json`` blob).
 
-    ``warmup``/``window_sizes`` are counts of super-passes; ``superpass_size`` is a
-    count of samples. ``trend_gate`` names the trend algorithm gating admissibility.
+    ``window_sizes`` are counts of super-passes; ``superpass_size`` is a count of samples.
+    ``warmup`` is either ``"auto"`` (data-driven crop via ``adaptive_warmup`` on the
+    ``warmup_driver`` metric) or a fixed super-pass count. ``trend_gate`` names the trend
+    algorithm gating admissibility.
     """
-    if warmup < 0:
+    if isinstance(warmup, int) and warmup < 0:
         raise ValueError(f"warmup must be >= 0, got {warmup}")
     series = build_super_pass_series(
         events_path, superpass_size, count_tokens, tokenize_batch_size
     )
-    post = series[warmup:] if warmup < len(series) else []
+    if warmup == "auto":
+        resolved_warmup = adaptive_warmup(series, warmup_driver, warmup_band)
+        warmup_mode = "auto"
+    else:
+        resolved_warmup = int(warmup)
+        warmup_mode = "fixed"
+    post = series[resolved_warmup:] if resolved_warmup < len(series) else []
     trajectories = {
         m.key: super_pass_percentile_series(post, m.source_attr, m.percentile)
         for m in TRACKED_METRICS
@@ -1099,7 +1139,8 @@ def run(
     result: DiagnosticsResult = {
         "n_super_passes": len(series),
         "superpass_size": superpass_size,
-        "warmup": warmup,
+        "warmup": resolved_warmup,
+        "warmup_mode": warmup_mode,
         "n_post_warmup": len(post),
         "metrics": [m.key for m in TRACKED_METRICS],
         "gated_metrics": [m.key for m in TRACKED_METRICS if m.gated],
@@ -1203,8 +1244,8 @@ def render_text(result: DiagnosticsResult, cov_bounds: Sequence[float]) -> str:
     lines: list[str] = []
     lines.append(
         f"super-passes: {result['n_super_passes']} "
-        f"(size {result['superpass_size']}, warmup {result['warmup']}, "
-        f"post-warmup {result['n_post_warmup']})"
+        f"(size {result['superpass_size']}, warmup {result['warmup']} "
+        f"[{result['warmup_mode']}], post-warmup {result['n_post_warmup']})"
     )
     lines.append("")
     lines.extend(_render_steady_state(result["steady_state"]))
@@ -1263,6 +1304,10 @@ def _parse_float_list(s: str) -> list[float]:
     return [float(x) for x in s.split(",") if x.strip()]
 
 
+def _warmup_arg(s: str) -> int | str:
+    return "auto" if s == "auto" else int(s)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("events", help="path to events.jsonl")
@@ -1286,9 +1331,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     ap.add_argument(
         "--warmup",
-        type=int,
-        default=1,
-        help="leading super-passes to drop before analysis",
+        type=_warmup_arg,
+        default="auto",
+        help="'auto' (data-driven crop) or a fixed super-pass count",
+    )
+    ap.add_argument(
+        "--warmup-band",
+        type=float,
+        default=0.05,
+        help="auto warmup: crop leading super-passes >this fraction off the steady level",
+    )
+    ap.add_argument(
+        "--warmup-driver",
+        default="tpot_p50",
+        choices=list(_METRIC_BY_KEY),
+        help="auto warmup: metric whose ramp defines the crop",
     )
     ap.add_argument("--cov-bounds", type=_parse_float_list, default=[0.03, 0.05, 0.08])
     ap.add_argument("--alpha", type=float, default=0.05)
@@ -1321,6 +1378,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         alpha=args.alpha,
         trend_gate=args.trend_gate,
         tokenize_batch_size=args.tokenize_batch_size,
+        warmup_band=args.warmup_band,
+        warmup_driver=args.warmup_driver,
     )
     print(render_text(result, args.cov_bounds))
     if args.json_out:
