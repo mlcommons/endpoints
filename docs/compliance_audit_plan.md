@@ -140,7 +140,7 @@ benchmark from-config
 ### Program flow (output-caching audit / MLPerf TEST04, two phases)
 
 Every decision gate is shown, with the exit code it produces. Exit codes:
-`0` PASS · `1` FAIL · `3` SetupError · `4` ExecutionError · `130` interrupted
+`0` PASS · `1` FAIL · `2` InputValidationError · `3` SetupError · `4` ExecutionError · `130` interrupted
 (during the main run: the audit never starts; during the audit: the perf
 report is already written).
 
@@ -397,13 +397,15 @@ The generic loop never names a specific test:
    or re-scores them) and has `audit=None` to prevent re-entry into `run_audit`. A phase can
    override this per-`AuditRunSpec` via `test_mode` (`ACC`/`BOTH` keeps its accuracy datasets);
    the orchestrator reads `spec.test_mode` rather than hardcoding perf-only. This override is
-   supported but currently unused — every registered audit (TEST04) runs perf-only. If any phase raises
-   (`SetupError` / `ExecutionError`), `run_audit` aborts **without verifying** — a crashed
-   phase must never produce a result. A phase that returns but whose `Report.complete` is
-   `False` (metrics drain timed out, or the run was interrupted → partial stats) is likewise
-   rejected with `ExecutionError` — a result is never certified on partial data. Errors
-   propagate to the standard CLI handler (`main.py`), which maps `SetupError` → exit `3` and
-   `ExecutionError` → exit `4`.
+   supported but currently unused — every registered audit (TEST04) runs perf-only. If any phase
+   raises a typed CLI error (`InputValidationError` / `SetupError` / `ExecutionError`), `run_audit`
+   aborts **without verifying** — a crashed phase must never produce a result. In particular a
+   phase's `setup_benchmark` can raise `InputValidationError` (e.g. `DatasetValidationError` for an
+   unsaltable warmup dataset); it propagates verbatim rather than being recast as `ExecutionError`.
+   A phase that returns but whose `Report.complete` is `False` (metrics drain timed out, or the run
+   was interrupted → partial stats) is likewise rejected with `ExecutionError` — a result is never
+   certified on partial data. Errors propagate to the standard CLI handler (`main.py`), which maps
+   `InputValidationError` → exit `2`, `SetupError` → exit `3`, and `ExecutionError` → exit `4`.
 5. `result = test.verify(runs, cfg)`
 6. Atomically write the result (`tmp → fsync → rename → fsync(parent)`).
 7. Return the typed `AuditResult`. Because `run_benchmark` currently returns `None` and

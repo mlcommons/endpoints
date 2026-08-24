@@ -93,6 +93,7 @@ from inference_endpoint.evaluation.scoring import (
     SWEBenchScorer,
 )
 from inference_endpoint.exceptions import (
+    DatasetValidationError,
     ExecutionError,
     InputValidationError,
     SetupError,
@@ -406,6 +407,210 @@ class TestDatasetParsing:
             assert ds.accuracy_config is not None
             assert ds.accuracy_config.eval_method == acc_eval_method
 
+    @pytest.mark.unit
+    def test_malformed_dataset_string_raises_parse_error(self):
+        """A malformed --dataset string surfaces as DatasetParseError, not a
+        DatasetValidationError with a vestigial Reason. 'badoption' (no '=')
+        raises inside the field validator, which pydantic wraps — exercising the
+        `except ValidationError` arm of _run."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.exceptions import DatasetParseError
+
+        config = OfflineConfig(**_OFFLINE_KWARGS | {"datasets": []})
+        with pytest.raises(DatasetParseError, match="Invalid --dataset"):
+            cli._run(config, ["data.csv,badoption"], TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_dataset_string_raw_valueerror_raises_parse_error(self):
+        """A bare ValueError from with_updates (not wrapped by pydantic) also
+        surfaces as DatasetParseError — covering _run's second `except` arm."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.exceptions import DatasetParseError
+
+        config = MagicMock()
+        config.datasets = []
+        config.with_updates.side_effect = ValueError("raw parse failure")
+        with pytest.raises(DatasetParseError, match="Invalid --dataset"):
+            cli._run(config, ["x.jsonl"], TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_scalar_then_dotted_key_collision_raises_parse_error(self):
+        """A scalar option shadowed by a dotted one (parser=x,parser.prompt=y)
+        must surface as DatasetParseError, not an uncaught TypeError → exit-1
+        traceback. parse_dataset_string raises ValueError, which _run wraps."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.exceptions import DatasetParseError
+
+        config = OfflineConfig(**_OFFLINE_KWARGS | {"datasets": []})
+        with pytest.raises(DatasetParseError, match="Invalid --dataset"):
+            cli._run(config, ["d.jsonl,parser=x,parser.prompt=y"], TestMode.PERF)
+
+
+@pytest.mark.unit
+class TestRunAuditErrorPropagation:
+    """run_audit must not mask a phase's typed CLI error as a generic
+    ExecutionError. An unsaltable warmup makes setup_benchmark raise
+    DatasetValidationError (InputValidationError → exit 2); in the audit.only
+    path that must propagate, not become ExecutionError (exit 4)."""
+
+    def test_phase_input_validation_error_propagates(self, monkeypatch, tmp_path):
+        from inference_endpoint.commands import audit as audit_mod
+        from inference_endpoint.config.schema import DatasetType
+        from inference_endpoint.exceptions import DatasetValidationError
+
+        spec = MagicMock(label="reference", test_mode=TestMode.PERF)
+        fake_test = MagicMock()
+        fake_test.plan_runs.return_value = [spec]
+        monkeypatch.setattr(audit_mod, "get_audit_test", lambda _test: fake_test)
+
+        def _raise_validation(*args, **kwargs):
+            raise DatasetValidationError(
+                DatasetValidationError.Reason.INPUT_TOKENS_SHADOWING, "sample 0"
+            )
+
+        monkeypatch.setattr(audit_mod, "setup_benchmark", _raise_validation)
+
+        config = MagicMock()
+        config.audit = MagicMock()
+        config.datasets = [MagicMock(type=DatasetType.PERFORMANCE)]
+        config.with_updates.return_value = MagicMock()
+
+        # Not recast to ExecutionError — the typed validation error propagates.
+        with pytest.raises(DatasetValidationError):
+            audit_mod.run_audit(config, tmp_path)
+
+
+@pytest.mark.unit
+class TestLoadDatasetsSaltValidation:
+    """_load_datasets validates salt-compatibility at dataset-load time — before
+    any worker/aggregator subprocess is spawned — when warmup salt is enabled.
+    """
+
+    def _config(self, tmp_path: Path, warmup: WarmupConfig) -> OfflineConfig:
+        ds = tmp_path / "perf.jsonl"
+        ds.write_text('{"prompt": "hello world"}\n{"prompt": "second prompt"}\n')
+        return OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"path": str(ds)}],
+            settings=OfflineSettings(
+                client=HTTPClientConfig(
+                    num_workers=1, warmup_connections=0, max_connections=10
+                ),
+                warmup=warmup,
+            ),
+        )
+
+    @patch.object(Dataset, "validate_saltable")
+    def test_validates_when_warmup_salt_enabled(self, mock_validate, tmp_path):
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=True))
+        _load_datasets(config, tmp_path, TestMode.PERF)
+        mock_validate.assert_called_once()
+
+    @patch.object(Dataset, "validate_saltable")
+    def test_skips_validation_when_warmup_disabled(self, mock_validate, tmp_path):
+        config = self._config(tmp_path, WarmupConfig(enabled=False, salt=True))
+        _load_datasets(config, tmp_path, TestMode.PERF)
+        mock_validate.assert_not_called()
+
+    @patch.object(Dataset, "validate_saltable")
+    def test_skips_validation_when_salt_off(self, mock_validate, tmp_path):
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=False))
+        _load_datasets(config, tmp_path, TestMode.PERF)
+        mock_validate.assert_not_called()
+
+    def test_warns_when_warmup_enabled_without_salt(self, tmp_path, caplog):
+        """Warmup without salt primes the server cache with verbatim prompts,
+        risking an understated measured phase — surface it as a warning."""
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=False))
+        with caplog.at_level(logging.WARNING):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+        assert any(
+            "warmup is enabled without salt" in r.message.lower()
+            for r in caplog.records
+        )
+
+    def test_no_warning_when_warmup_salt_enabled(self, tmp_path, caplog):
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=True))
+        with caplog.at_level(logging.WARNING):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+        assert not any(
+            "warmup is enabled without salt" in r.message.lower()
+            for r in caplog.records
+        )
+
+    def test_unsaltable_perf_dataset_raises_before_spawn(self, tmp_path):
+        """Real validation (unpatched) rejects a non-saltable perf dataset at
+        load time — an int 'prompt' cannot be salted."""
+        ds = tmp_path / "perf.jsonl"
+        ds.write_text('{"prompt": 1}\n{"prompt": 2}\n')
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"path": str(ds)}],
+            settings=OfflineSettings(
+                client=HTTPClientConfig(
+                    num_workers=1, warmup_connections=0, max_connections=10
+                ),
+                warmup=WarmupConfig(enabled=True, salt=True),
+            ),
+        )
+        with pytest.raises(DatasetValidationError, match=r"sample 0\b"):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+
+    def test_online_unsaltable_perf_dataset_raises(self, tmp_path):
+        """The salt check is load-pattern agnostic — online runs validate too."""
+        ds = tmp_path / "perf.jsonl"
+        ds.write_text('{"prompt": 1}\n')
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"path": str(ds)}],
+            settings=OnlineSettings(
+                load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=10),
+                client=HTTPClientConfig(
+                    num_workers=1, warmup_connections=0, max_connections=10
+                ),
+                warmup=WarmupConfig(enabled=True, salt=True),
+            ),
+        )
+        with pytest.raises(DatasetValidationError, match=r"sample 0\b"):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+
+    def test_accuracy_only_skips_salt_validation(self, tmp_path):
+        """TestMode.ACC never loads the perf dataset, so an unsaltable perf
+        dataset with warmup salt on must NOT be validated (dataloader is None).
+        Guards against a refactor validating a None dataloader."""
+        perf = tmp_path / "perf.jsonl"
+        perf.write_text('{"prompt": 1}\n')  # unsaltable — would raise if validated
+        fake_acc_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {"type": "performance", "path": str(perf)},
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+            settings=OfflineSettings(
+                client=HTTPClientConfig(
+                    num_workers=1, warmup_connections=0, max_connections=10
+                ),
+                warmup=WarmupConfig(enabled=True, salt=True),
+            ),
+        )
+        with (
+            patch.object(SWEBenchScorer, "preflight"),
+            patch.object(SWEBench, "generate", return_value=fake_acc_df),
+        ):
+            perf_loader, _ = _load_datasets(config, tmp_path, TestMode.ACC)
+        assert perf_loader is None
+
 
 class TestCommandHandlers:
     """Test offline/online/from_config handlers (mock run_benchmark)."""
@@ -495,6 +700,33 @@ class TestCommandHandlers:
         )
         lp = bound.arguments["config"].settings.load_pattern
         assert lp.use_legacy_loadgen_qps_metrics is False
+
+    @pytest.mark.unit
+    def test_warmup_salt_flag_default_and_negative(self):
+        """warmup.salt defaults off; --warmup-salt enables it; --no-warmup-salt
+        (the flag the salt-validation remediation message points to) disables
+        it."""
+        base = [
+            "offline",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+        ]
+        _, bound, _ = benchmark_app.parse_args(base, exit_on_error=False)
+        assert bound.arguments["config"].settings.warmup.salt is False
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--warmup-salt"], exit_on_error=False
+        )
+        assert bound.arguments["config"].settings.warmup.salt is True
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--no-warmup-salt"], exit_on_error=False
+        )
+        assert bound.arguments["config"].settings.warmup.salt is False
 
     @pytest.mark.unit
     def test_loadgen_flag_serialized_only_for_poisson(self):
@@ -966,7 +1198,7 @@ class TestWarmupConfig:
         cfg = WarmupConfig()
         assert cfg.enabled is False
         assert cfg.n_requests is None
-        assert cfg.salt is True
+        assert cfg.salt is False
         assert cfg.drain is False
 
     @pytest.mark.unit
@@ -1776,7 +2008,7 @@ class TestBuildPhases:
         assert phases[0].runtime_settings.n_samples_to_issue is None
 
     @pytest.mark.unit
-    def test_warmup_defaults_uses_salt(self, base_rt_settings, simple_dataset):
+    def test_warmup_defaults_no_salt(self, base_rt_settings, simple_dataset):
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
@@ -1784,7 +2016,8 @@ class TestBuildPhases:
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
         phases = _build_phases(ctx)
 
-        assert phases[0].dataset._salt_rng is not None
+        assert phases[0].dataset._salt_rng is None
+        assert phases[0].dataset is simple_dataset
 
     @pytest.mark.unit
     def test_warmup_without_salt_uses_raw_dataloader(

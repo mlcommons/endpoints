@@ -1,15 +1,14 @@
-name: "kimi-agentic-benchmark"
+name: "kimi-k3-agentic-benchmark"
 version: "1.0"
 type: "online"
 
 model_params:
-  name: "/model"
+  name: "/models/Kimi-K3"
+  tokenizer_name: "${MODEL_DIR}"
   temperature: 1.0
-  top_p: 0.95
+  top_p: 1.0
   max_new_tokens: 8192
-  chat_template_kwargs:
-    thinking: true
-    preserve_thinking: true
+  streaming: "on"
 
 datasets:
   - name: agentic_combined
@@ -17,9 +16,11 @@ datasets:
     path: /path/to/agentic_combined.jsonl
     accuracy_config:
       eval_method: agentic_inference_inline # required benchmark default.
+      num_repeats: 1
     agentic_inference:
+      turn_timeout_s: 86400.0
       enable_salt: true # required benchmark default.
-      inject_tool_delay: true # required benchmark default.
+      inject_tool_delay: true
       num_trajectories_to_issue: 613 # Should be integer multiple of 613.
       # Required benchmark default; set to true only for faster optimization/debug runs.
       stop_issuing_on_first_user_complete: false
@@ -30,12 +31,16 @@ datasets:
       num_repeats: 1
       extras:
         swebench_service_url: "http://localhost:18080"
+        swebench_service_auth_token: "${SWEBENCH_SERVICE_AUTH_TOKEN}"
         num_instances: 200
-        # workers: 8 # parallel agent workers; defaults to target_concurrency if unset.
+        workers: 100
 
 settings:
   runtime:
     min_duration_ms: 0
+    max_duration_ms: 0
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
 
   load_pattern:
     type: agentic_inference
@@ -50,4 +55,4 @@ endpoint_config:
     - "http://localhost:8000"
   api_type: openai
 
-report_dir: logs/kimi_agentic
+report_dir: logs/kimi_k3_agentic
