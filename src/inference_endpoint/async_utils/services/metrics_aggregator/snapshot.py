@@ -47,8 +47,8 @@ class SessionState(str, Enum):
                   is tokenizing the buffered samples (bounded by the
                   ``--drain-timeout`` budget, i.e.
                   ``settings.timeouts.metrics_drain_timeout_s``: None or an
-                  omitted flag = unlimited, 0 = give up immediately). Tick task
-                  continues at this stage, still HDR-derived; no new events
+                  omitted flag = unlimited). The tick task continues at this
+                  stage, still HDR-derived; no new events
                   will arrive.
     COMPLETE    → terminal clean state. The ``publish_final()`` snapshot
                   written from the ``ENDED`` path. Percentiles and histograms

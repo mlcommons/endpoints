@@ -39,6 +39,13 @@ from .token_metrics import BatchTokenizer, TokenBatchQueue
 logger = logging.getLogger(__name__)
 
 
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
 def _make_sigterm_handler(
     *,
     loop: asyncio.AbstractEventLoop,
@@ -139,14 +146,14 @@ async def main() -> None:
     )
     parser.add_argument(
         "--drain-timeout",
-        type=float,
+        type=_positive_float,
         default=None,
         help=(
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
             "after ENDED before the aggregator emits the final snapshot with "
-            "n_pending_tasks > 0. Omit to wait indefinitely (the default); "
-            "0 gives up immediately. Mirrors "
-            "settings.timeouts.metrics_drain_timeout_s (see config/schema.py). "
+            "n_pending_tasks > 0. Omit to wait indefinitely (the default). "
+            "Mirrors settings.timeouts.metrics_drain_timeout_s (see "
+            "config/schema.py). "
             "Increase for very large datasets where the end-of-run tokenize "
             "batch is big."
         ),

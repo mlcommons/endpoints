@@ -24,6 +24,7 @@ losing the INTERRUPTED delivery the handler exists to provide.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import gc
 import weakref
@@ -155,3 +156,15 @@ async def test_sigterm_handler_refreshes_tracked_duration():
         "n_pending_tasks": 3,
         "interrupted": True,
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_drain_timeout_must_be_positive(value):
+    with pytest.raises(argparse.ArgumentTypeError, match="greater than zero"):
+        agg_main._positive_float(value)
+
+
+@pytest.mark.unit
+def test_positive_drain_timeout_parses():
+    assert agg_main._positive_float("0.25") == 0.25

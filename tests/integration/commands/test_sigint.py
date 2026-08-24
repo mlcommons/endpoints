@@ -201,10 +201,12 @@ def test_group_sigint_exits_gracefully(mock_http_echo_server, tmp_path):
     """A group ^C and duplicate delivery exit 130 without leaking children."""
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"
+    log_file = tmp_path / "run.log"
     _write_config(report_dir, mock_http_echo_server.url, config_path)
 
     with _benchmark_proc(
-        [_cli(), "benchmark", "from-config", "-c", str(config_path)]
+        [_cli(), "benchmark", "from-config", "-c", str(config_path)],
+        log_file,
     ) as proc:
         _wait_services_ready(proc, report_dir)
         time.sleep(3.0)
@@ -218,6 +220,9 @@ def test_group_sigint_exits_gracefully(mock_http_echo_server, tmp_path):
     _assert_interrupted_artifacts(report_dir)
     assert (report_dir / "events.jsonl").exists()
     _assert_no_leftover_children(report_dir, "run")
+    log_text = log_file.read_text()
+    assert "event logger received SIGINT — waiting for parent ENDED" in log_text
+    assert "KeyboardInterrupt" not in log_text
 
 
 @pytest.mark.integration

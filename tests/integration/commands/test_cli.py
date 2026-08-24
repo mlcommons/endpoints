@@ -229,6 +229,26 @@ def test_early_stopping_flag_binds_independently_of_warmup():
     assert cfg.settings.early_stopping.enabled is True  # ES default, untouched
 
 
+@pytest.mark.integration
+def test_warmup_drain_requires_prefixed_flag(capsys):
+    base = [
+        "benchmark",
+        "offline",
+        "--endpoints",
+        "http://localhost:9",
+        "--model",
+        "m",
+        "--dataset",
+        "tests/assets/datasets/dummy_1k.jsonl,parser.prompt=text_input",
+    ]
+    with pytest.raises(SystemExit) as exc_info:
+        _parsed_config(base + ["--drain"])
+    assert exc_info.value.code == 1
+    assert 'Unknown option: "--drain"' in capsys.readouterr().err
+    cfg = _parsed_config(base + ["--warmup-drain"])
+    assert cfg.settings.warmup.drain is True
+
+
 # ---------------------------------------------------------------------------
 # E2E: CLI tokens → echo server → performance/result_summary.json
 # One test per execution mode: offline, poisson, concurrency.

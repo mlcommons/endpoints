@@ -109,16 +109,16 @@ COMPLETE event ─► trigger.fire ─► queue.enqueue(text, on_count)        [
 
 ## CLI
 
-| Flag                             | Default  | Purpose                                             |
-| -------------------------------- | -------- | --------------------------------------------------- |
-| `--socket-dir` / `--socket-name` | required | EventRecord SUB socket                              |
-| `--metrics-socket`               | required | Snapshot PUB socket name                            |
-| `--metrics-output-dir`           | required | Directory for `final_snapshot.json`                 |
-| `--publish-interval`             | 0.25     | Live snapshot cadence (seconds)                     |
-| `--drain-timeout`                | `None`   | End-of-run tokenize budget (`0` = immediate expiry) |
-| `--tokenizer`                    | none     | HF name or local path; unset disables token metrics |
-| `--tokenizer-workers`            | `4`      | Live in-process threads (`0` = defer all to drain)  |
-| `--streaming`                    | off      | Register TTFT/chunk-delta/TPOT triggers             |
+| Flag                             | Default  | Purpose                                              |
+| -------------------------------- | -------- | ---------------------------------------------------- |
+| `--socket-dir` / `--socket-name` | required | EventRecord SUB socket                               |
+| `--metrics-socket`               | required | Snapshot PUB socket name                             |
+| `--metrics-output-dir`           | required | Directory for `final_snapshot.json`                  |
+| `--publish-interval`             | 0.25     | Live snapshot cadence (seconds)                      |
+| `--drain-timeout`                | `None`   | Positive tokenize budget; omitted waits indefinitely |
+| `--tokenizer`                    | none     | HF name or local path; unset disables token metrics  |
+| `--tokenizer-workers`            | `4`      | Live in-process threads (`0` = defer all to drain)   |
+| `--streaming`                    | off      | Register TTFT/chunk-delta/TPOT triggers              |
 
 ## References
 

@@ -61,6 +61,7 @@ from transformers.utils import logging as transformers_logging
 # across processes pinned to disjoint 8-core blocks is how the whole machine is
 # used. Measured on GB200: ~16k texts/s at 18 blocks vs ~1.5k single-process.
 CORES_PER_WORKER = 8
+DRAIN_RESERVED_CPUS = 2
 
 # Budget for the parallel shard warmup (spawn + transformers import +
 # tokenizer load per worker). A hung load (e.g. a stuck network filesystem)
@@ -320,12 +321,13 @@ class BatchTokenizer:
         """Spawn one pinned single-worker process per core block.
 
         ``n_workers == 0`` explicitly selects in-process tokenization. Auto
-        (``< 0``) fits one shard per ``cores_per_worker`` block of this
-        process's affinity mask (or the online CPU count when the platform
-        has no affinity API — shards then run unpinned), always at least one;
-        an explicit count is clamped to that capacity. A tokenizer without a
-        fast text backend skips shard creation; structured chat tokenization
-        remains available. A shard warmup failure or timeout raises at startup.
+        (``< 0``) fits one shard per ``cores_per_worker`` block after reserving
+        two CPUs from this process's affinity mask (or the online CPU count
+        when the platform has no affinity API — shards then run unpinned).
+        The final block may be partial; at least one CPU remains usable. An
+        explicit count is clamped to that capacity. A tokenizer without a fast
+        text backend skips shard creation; structured chat tokenization remains
+        available. A shard warmup failure or timeout raises at startup.
         """
         if cores_per_worker <= 0 or n_workers == 0:
             logger.info("BatchTokenizer: in-process tokenization (explicit)")
@@ -337,12 +339,11 @@ class BatchTokenizer:
                 self._tokenizer_name,
             )
             return
-        # The full allowed CPU universe (cgroup-clamped) drives the shard block
-        # math. cgroup_clamped_cpus owns the probe-and-restore of this process's
-        # mask, so the aggregator's event loop, publisher, and live tokenizer
-        # threads stay exactly where the parent placed them (the loadgen mask on
-        # a pinned Linux run); only the drain-phase shard processes, each pinned
-        # to its own block, span the machine.
+        # The cgroup-clamped CPU universe drives the shard block math. Keep two
+        # CPUs out of the drain pool for the parent, aggregator event loop, and
+        # system responsiveness. cgroup_clamped_cpus owns the probe-and-restore
+        # of this process's mask; only the drain-phase shard processes span the
+        # usable CPUs.
         available = cgroup_clamped_cpus()
         if available is None:
             # No affinity API (e.g. macOS): shard unpinned — the OS scheduler
@@ -350,14 +351,18 @@ class BatchTokenizer:
             # their rayon pools to the block size instead (_init_worker).
             available = list(range(os.cpu_count() or 1))
             logger.info("BatchTokenizer: CPU affinity unavailable; sharding unpinned")
-        capacity = max(1, len(available) // cores_per_worker)
+        usable = available[: max(1, len(available) - DRAIN_RESERVED_CPUS)]
+        blocks = [
+            usable[start : start + cores_per_worker]
+            for start in range(0, len(usable), cores_per_worker)
+        ]
+        capacity = len(blocks)
         n = capacity if n_workers < 0 else min(n_workers, capacity)
         t0 = time.perf_counter()
         ctx = multiprocessing.get_context("spawn")
         procs: list[ProcessPoolExecutor] = []
         try:
-            for i in range(n):
-                block = available[i * cores_per_worker : (i + 1) * cores_per_worker]
+            for block in blocks[:n]:
                 ex = ProcessPoolExecutor(
                     max_workers=1,
                     mp_context=ctx,
@@ -383,9 +388,9 @@ class BatchTokenizer:
             ) from exc
         self._procs = procs
         logger.info(
-            "BatchTokenizer: %d shards x %d cores (setup %.1fs)",
+            "BatchTokenizer: %d shards across %d CPUs (setup %.1fs)",
             len(procs),
-            cores_per_worker,
+            sum(len(block) for block in blocks[:n]),
             time.perf_counter() - t0,
         )
 

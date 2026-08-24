@@ -389,8 +389,9 @@ class MetricsPipeline:
         """Best-effort service termination owned by the pipeline ExitStack.
 
         Sends SIGTERM first so the metrics aggregator can flush an INTERRUPTED
-        final_snapshot.json via its signal handler. Escalates to SIGKILL after
-        a short timeout for any process that does not exit cleanly.
+        final_snapshot.json and the event logger can flush its writers.
+        Escalates to SIGKILL after a short timeout for any process that does
+        not exit cleanly.
         """
         if self._launcher is None:
             return

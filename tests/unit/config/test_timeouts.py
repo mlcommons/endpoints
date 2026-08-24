@@ -60,33 +60,24 @@ class TestTimeoutsValidation:
         [
             ("run_timeout_s", 0),
             ("run_timeout_s", -1.0),
+            ("service_ready_timeout_s", 0),
             ("service_ready_timeout_s", -1.0),
+            ("warmup_drain_timeout_s", 0),
             ("warmup_drain_timeout_s", -1.0),
+            ("interrupted_teardown_grace_s", 0),
             ("interrupted_teardown_grace_s", -1.0),
             ("interrupted_teardown_grace_s", None),
+            ("performance_drain_timeout_s", 0),
             ("performance_drain_timeout_s", -1.0),
+            ("accuracy_drain_timeout_s", 0),
             ("accuracy_drain_timeout_s", -1.0),
+            ("metrics_drain_timeout_s", 0),
             ("metrics_drain_timeout_s", -1.0),
         ],
     )
     def test_invalid_field_values_are_rejected(self, field, value):
         with pytest.raises(ValidationError, match=field):
             Timeouts(**{field: value})
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "field",
-        [
-            "service_ready_timeout_s",
-            "warmup_drain_timeout_s",
-            "performance_drain_timeout_s",
-            "accuracy_drain_timeout_s",
-            "metrics_drain_timeout_s",
-            "interrupted_teardown_grace_s",
-        ],
-    )
-    def test_zero_budget_is_valid(self, field):
-        assert getattr(Timeouts(**{field: 0}), field) == 0
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

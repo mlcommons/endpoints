@@ -770,7 +770,7 @@ class WarmupConfig(BaseModel):
     drain: Annotated[
         bool,
         cyclopts.Parameter(
-            alias="--warmup-drain",
+            name="--warmup-drain",
             help="Drain in-flight warmup requests before starting the performance phase",
         ),
     ] = Field(
@@ -799,33 +799,33 @@ class Timeouts(WithUpdatesMixin, BaseModel):
     )
     interrupted_teardown_grace_s: float = Field(
         30.0,
-        ge=0,
+        gt=0,
         description="Abort drain grace before remaining services are killed.",
     )
     service_ready_timeout_s: float = Field(
         30.0,
-        ge=0,
+        gt=0,
         description="Service startup wait in seconds.",
     )
     warmup_drain_timeout_s: float | None = Field(
         240.0,
-        ge=0,
-        description="Warmup drain seconds (None = unlimited; 0 = immediate).",
+        gt=0,
+        description="Warmup drain seconds (None = unlimited).",
     )
     performance_drain_timeout_s: float | None = Field(
         None,
-        ge=0,
-        description="Performance drain seconds (None = unlimited; 0 = immediate).",
+        gt=0,
+        description="Performance drain seconds (None = unlimited).",
     )
     accuracy_drain_timeout_s: float | None = Field(
         None,
-        ge=0,
-        description="Accuracy drain seconds (None = unlimited; 0 = immediate).",
+        gt=0,
+        description="Accuracy drain seconds (None = unlimited).",
     )
     metrics_drain_timeout_s: float | None = Field(
         None,
-        ge=0,
-        description="Metrics drain seconds (None = unlimited; 0 = immediate).",
+        gt=0,
+        description="Metrics drain seconds (None = unlimited).",
     )
 
 

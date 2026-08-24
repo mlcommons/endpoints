@@ -24,7 +24,9 @@ Currently supported:
 import argparse
 import asyncio
 import importlib.util
+import logging
 import os
+import signal
 from pathlib import Path
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
@@ -42,6 +44,8 @@ from .file_writer import JSONLWriter
 from .writer import RecordWriter
 
 _HAS_SQLALCHEMY = importlib.util.find_spec("sqlalchemy") is not None
+logger = logging.getLogger(__name__)
+
 
 # CLI writer names to writer classes (for --writers flag)
 _WRITER_REGISTRY: dict[str, type[RecordWriter]] = {
@@ -131,6 +135,20 @@ class EventLoggerService(ZmqMessageSubscriber[EventRecord]):
         super().close()
 
 
+def _install_signal_handlers(
+    loop: asyncio.AbstractEventLoop, service: EventLoggerService
+) -> None:
+    def on_sigterm() -> None:
+        logger.warning("event logger received SIGTERM — flushing writers")
+        service._request_stop()
+
+    loop.add_signal_handler(signal.SIGTERM, on_sigterm)
+    loop.add_signal_handler(
+        signal.SIGINT,
+        lambda: logger.info("event logger received SIGINT — waiting for parent ENDED"),
+    )
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Event logger service")
     parser.add_argument("--log-dir", type=Path, required=True, help="Log directory")
@@ -187,6 +205,7 @@ async def main() -> None:
             writer_classes=writer_classes,
             shutdown_event=shutdown_event,
         )
+        _install_signal_handlers(loop, service)
 
         service.start()
 

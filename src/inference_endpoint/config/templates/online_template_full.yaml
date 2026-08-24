@@ -89,10 +89,10 @@ settings:
     run_timeout_s: null  # Whole-run watchdog seconds (None = off).
     interrupted_teardown_grace_s: 30.0  # Abort drain grace before remaining services are killed.
     service_ready_timeout_s: 30.0  # Service startup wait in seconds.
-    warmup_drain_timeout_s: 240.0  # Warmup drain seconds (None = unlimited; 0 = immediate).
-    performance_drain_timeout_s: null  # Performance drain seconds (None = unlimited; 0 = immediate).
-    accuracy_drain_timeout_s: null  # Accuracy drain seconds (None = unlimited; 0 = immediate).
-    metrics_drain_timeout_s: null  # Metrics drain seconds (None = unlimited; 0 = immediate).
+    warmup_drain_timeout_s: 240.0  # Warmup drain seconds (None = unlimited).
+    performance_drain_timeout_s: null  # Performance drain seconds (None = unlimited).
+    accuracy_drain_timeout_s: null  # Accuracy drain seconds (None = unlimited).
+    metrics_drain_timeout_s: null  # Metrics drain seconds (None = unlimited).
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
