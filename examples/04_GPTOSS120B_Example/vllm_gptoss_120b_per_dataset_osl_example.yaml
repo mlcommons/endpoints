@@ -63,7 +63,7 @@ datasets:
 
 settings:
   runtime:
-    max_duration_ms: 14400000 # 4h cap on the performance phase only
+    max_issue_duration_ms: 14400000 # 4h cap on the performance phase only
     scheduler_random_seed: 42
     dataloader_random_seed: 42
     n_samples_to_issue: 2000 # PERF phase only; accuracy phases issue their own sample counts

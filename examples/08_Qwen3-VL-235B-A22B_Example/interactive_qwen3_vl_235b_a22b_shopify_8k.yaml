@@ -22,7 +22,7 @@ datasets:
 
 settings:
   runtime:
-    # Sample count: dataset issued once (the default) — replaces the old min_duration_ms-derived count, which rounded up to one dataset pass.
+    n_samples_to_issue: 8000 # One performance dataset pass
     scheduler_random_seed: 42
     dataloader_random_seed: 42
 

@@ -67,9 +67,7 @@ Both paths produce the **same subclass with the same defaults**. A YAML file wit
 
 2. **Auto-selects subclass.** `type: "offline"` → `OfflineBenchmarkConfig`, `type: "online"` → `OnlineBenchmarkConfig`, others → base `BenchmarkConfig`.
 
-3. **Optional CLI overrides.** `--timeout` maps into `settings.timeouts.run_timeout_s` via `with_updates(...)` (re-runs validators); `--mode` selects the `TestMode` passed to the runner and never touches the config object.
-
-> CLI `--timeout` overrides YAML `settings.timeouts.run_timeout_s`.
+3. **Optional CLI overrides.** `--timeout` and `--mode` applied via `config.with_updates(...)` which re-runs validators.
 
 ### Why subclasses?
 
@@ -133,6 +131,7 @@ Validation is layered, executing in order:
  1. cyclopts        → required args? unknown flags?
  2. Pydantic fields → type coercion, ge/le constraints
  3. Sub-model validators:
+    ├── RuntimeConfig._validate_durations    → max >= min duration
     ├── LoadPattern._validate_completeness   → poisson needs qps, concurrency needs target
     └── HTTPClientConfig._workers_not_zero   → num_workers != 0
  4. BenchmarkConfig._resolve_and_validate:
@@ -205,5 +204,5 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 `BenchmarkConfig` is frozen. Use `with_updates()` to produce new instances with re-validation:
 
 ```python
-config = config.with_updates(report_dir="results/run1", datasets=["new_data.jsonl"])
+config = config.with_updates(timeout=300, datasets=["new_data.jsonl"])
 ```

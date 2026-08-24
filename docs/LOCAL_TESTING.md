@@ -74,7 +74,8 @@ Waiting for 5 responses...
 uv run inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/assets/datasets/dummy_1k.jsonl
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
+  --num-samples 1000
 
 # Production test with custom params and report generation
 uv run inference-endpoint -v benchmark offline \
@@ -96,7 +97,7 @@ Loading: dummy_1k.jsonl
 Loaded 1000 samples
 Mode: TestMode.PERF, QPS: 10.0, Responses: False
 Streaming: disabled (auto, offline mode)
-Expected samples: 1000
+Min Duration: 0.0s, Expected samples: 1000
 Scheduler: MaxThroughputScheduler (pattern: max_throughput)
 Connecting: http://localhost:8765
 Running...
@@ -114,6 +115,7 @@ uv run inference-endpoint -v benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/assets/datasets/dummy_1k.jsonl \
+  --num-samples 1000 \
   --load-pattern poisson \
   --target-qps 100 \
   --report-dir online_benchmark_report
@@ -126,7 +128,7 @@ Loading: dummy_1k.jsonl
 Loaded 1000 samples
 Mode: TestMode.PERF, QPS: 100.0, Responses: False
 Streaming: enabled (auto, online mode)
-Expected samples: 1000
+Min Duration: 0.0s, Expected samples: 1000
 Scheduler: PoissonDistributionScheduler (pattern: poisson)
 Connecting: http://localhost:8765
 Running...
@@ -309,8 +311,9 @@ uv run inference-endpoint benchmark online \
 
 **Sample Count Control:**
 
-- By default (no `--num-samples`) a run stops after issuing the dataset once
-- Use `--num-samples` for an explicit sample count
+- Use `--num-samples` for a fixed local workload size.
+- Sample priority: `--num-samples` > Poisson QPS × min issue duration > dataset size.
+- With neither sample count nor min issue duration, the dataset is issued once.
 
 **Testing & Debugging:**
 

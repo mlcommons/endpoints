@@ -19,8 +19,8 @@ datasets:
 
 settings:
   runtime:
-    max_duration_ms: 180000 # 3 minute cap on the performance phase
-    n_samples_to_issue: 1000 # ≈ ceil(10 QPS × 60 s × 1.1) = 660 rounded up to the 1000-sample dataset (replaces the min_duration_ms-derived count)
+    max_issue_duration_ms: 180000 # 3 minute cap on the performance phase
+    n_samples_to_issue: 1000 # One performance dataset pass
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
 

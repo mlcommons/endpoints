@@ -593,32 +593,23 @@ class AccuracyConfig(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    """Runtime configuration.
+    """Workload sizing, issue-duration cap, and random seeds.
 
-    Sample count priority (in RuntimeSettings.total_samples_to_issue()):
-    1. n_samples_to_issue (if specified) — explicit override
-    2. Calculated from target_qps × min_duration_ms — when a min duration is set
-    3. All dataset samples — issue the dataset once (the default)
-
-    ``min_duration_ms``/``max_duration_ms`` are workload durations (part of the
-    benchmark definition), not give-up deadlines — those live in
-    ``settings.timeouts``.
+    ``n_samples_to_issue`` wins over ``min_issue_duration_ms``; with neither,
+    the dataset is issued once. Give-up deadlines live in ``settings.timeouts``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    min_duration_ms: int | None = Field(
+    min_issue_duration_ms: int | None = Field(
         None,
         gt=0,
         description=(
-            "Sizing input, not a timer (poisson only; requires explicit "
-            "target_qps): derives the sample count as target_qps × "
-            "min_duration_ms. Overridden by an explicit n_samples_to_issue; "
-            "None = no min_duration_ms "
-            "target (issue the dataset once)"
+            "Poisson sample-count sizing input: target_qps × duration. Explicit "
+            "n_samples_to_issue wins; None issues the dataset once."
         ),
     )
-    max_duration_ms: int | None = Field(
+    max_issue_duration_ms: int | None = Field(
         None,
         gt=0,
         description=(
@@ -627,7 +618,7 @@ class RuntimeConfig(BaseModel):
         ),
     )
 
-    @field_validator("min_duration_ms", "max_duration_ms", mode="before")
+    @field_validator("min_issue_duration_ms", "max_issue_duration_ms", mode="before")
     @classmethod
     def _parse_duration_suffix(cls, v: object) -> object:
         """Accept duration with unit suffix: 600s, 10m, 600000ms, or plain int (ms)."""
@@ -651,13 +642,13 @@ class RuntimeConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_durations(self) -> Self:
         if (
-            self.max_duration_ms is not None
-            and self.min_duration_ms is not None
-            and self.max_duration_ms < self.min_duration_ms
+            self.max_issue_duration_ms is not None
+            and self.min_issue_duration_ms is not None
+            and self.max_issue_duration_ms < self.min_issue_duration_ms
         ):
             raise ValueError(
-                f"max_duration_ms ({self.max_duration_ms}) must be >= "
-                f"min_duration_ms ({self.min_duration_ms})"
+                f"max_issue_duration_ms ({self.max_issue_duration_ms}) must be >= "
+                f"min_issue_duration_ms ({self.min_issue_duration_ms})"
             )
         return self
 
@@ -772,7 +763,7 @@ class WarmupConfig(BaseModel):
             help="Prepend a unique random hex salt to each warmup prompt",
         ),
     ] = Field(
-        True, description="Prepend a unique random hex salt to each warmup prompt"
+        False, description="Prepend a unique random hex salt to each warmup prompt"
     )
     drain: Annotated[
         bool,
@@ -794,25 +785,6 @@ class WarmupConfig(BaseModel):
 
 
 class Timeouts(WithUpdatesMixin, BaseModel):
-    """All global waits and deadlines.
-
-    Two value conventions, stated once here:
-
-    - Drain bounds (``*_drain_timeout_s``): ``None`` = wait indefinitely,
-      ``0`` = zero budget. ``service_ready_timeout_s`` is a finite
-      non-negative bound (never ``None``) (give up / skip
-      immediately).
-    - The watchdog (``run_timeout_s``): ``None`` = off; ``0`` is rejected
-      (``gt=0``) because a zero-length run is never meaningful — there is no
-      "skip" semantics for the run itself.
-
-    Reaching an optional deadline means something is stuck; ``run_timeout_s``
-    is the whole-run watchdog — when it fires the run is aborted and the
-    report is marked INTERRUPTED. It never derives or caps the other
-    deadlines. Workload durations (``runtime.max_duration_ms``) are NOT
-    timeouts and do not live here.
-    """
-
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     run_timeout_s: Annotated[
@@ -821,60 +793,37 @@ class Timeouts(WithUpdatesMixin, BaseModel):
     ] = Field(
         None,
         gt=0,
-        description=(
-            "Whole-run watchdog in seconds (None = off). Bounds the run from "
-            "service launch through every phase and drain; synchronous setup "
-            "(tokenizer probe, dataset load) counts against the budget but is "
-            "only checked at its boundary — a hung setup call itself is not "
-            "interrupted. Firing aborts the run, marks the report "
-            "INTERRUPTED, and exits non-zero. Never derives per-stage deadlines."
-        ),
+        description="Whole-run watchdog seconds (None = off).",
     )
-    interrupted_teardown_grace_s: float | None = Field(
+    interrupted_teardown_grace_s: float = Field(
         30.0,
         ge=0,
-        description=(
-            "Seconds after an abort (^C or a run_timeout_s fire) before a "
-            "still-running metrics drain is abandoned: the service children "
-            "are SIGTERMed (the aggregator writes a best-effort INTERRUPTED "
-            "snapshot) then SIGKILLed, so a wedged drain can never hang the "
-            "abort (None = never abandon; 0 = abandon immediately)."
-        ),
+        description="Abort drain grace before remaining services are killed.",
     )
     service_ready_timeout_s: float = Field(
         30.0,
         ge=0,
-        description="Seconds to wait for metrics-aggregator/event-logger services to become ready.",
+        description="Service startup wait in seconds.",
     )
     warmup_drain_timeout_s: float | None = Field(
         240.0,
         ge=0,
-        description="Warmup drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
+        description="Warmup drain seconds (None = unlimited; 0 = immediate).",
     )
     performance_drain_timeout_s: float | None = Field(
         None,
         ge=0,
-        description="Performance drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)",
+        description="Performance drain seconds (None = unlimited; 0 = immediate).",
     )
     accuracy_drain_timeout_s: float | None = Field(
         None,
         ge=0,
-        description=(
-            "Accuracy drain timeout in seconds (None = wait indefinitely; "
-            "0 = skip the drain; accuracy is unbounded by default because "
-            "every sample must complete)"
-        ),
+        description="Accuracy drain seconds (None = unlimited; 0 = immediate).",
     )
     metrics_drain_timeout_s: float | None = Field(
         None,
         ge=0,
-        description=(
-            "Wall-clock budget (seconds) to finish tokenizing buffered samples "
-            "after ENDED (None = wait indefinitely; 0 = give up immediately). "
-            "An incomplete drain fails "
-            "the run: artifacts are written with complete: false, then "
-            "run_benchmark exits non-zero."
-        ),
+        description="Metrics drain seconds (None = unlimited; 0 = immediate).",
     )
 
 
@@ -1000,21 +949,14 @@ class Settings(WithUpdatesMixin, BaseModel):
     )
 
     @model_validator(mode="after")
-    def _min_duration_requires_qps(self) -> Self:
-        # min_duration_ms sizes the run as target_qps × duration, so it is
-        # only meaningful when an explicit issue rate exists: poisson with
-        # target_qps. Offline bursts and fixed-concurrency runs have no rate
-        # to multiply by — no synthetic default is invented.
-        if self.runtime.min_duration_ms is not None and (
+    def _min_issue_duration_requires_qps(self) -> Self:
+        if self.runtime.min_issue_duration_ms is not None and (
             self.load_pattern.type != LoadPatternType.POISSON
             or self.load_pattern.target_qps is None
         ):
             raise ValueError(
-                "runtime.min_duration_ms (--runtime.min-duration-ms) requires "
-                "a poisson load "
-                "pattern with an explicit target_qps; offline/max_throughput "
-                "and concurrency runs are sized by --num-samples or the "
-                "dataset size"
+                "runtime.min_issue_duration_ms requires poisson with explicit "
+                "target_qps; use --num-samples for other load patterns"
             )
         return self
 

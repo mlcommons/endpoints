@@ -410,7 +410,9 @@ def _audit_config(sample_index=0) -> MagicMock:
     perf_ds = MagicMock()
     perf_ds.type = DatasetType.PERFORMANCE
     config.datasets = [perf_ds]
-    config.with_updates.return_value = MagicMock()
+    phase_config = MagicMock()
+    phase_config.settings.timeouts.run_timeout_s = None
+    config.with_updates.return_value = phase_config
     return config
 
 
@@ -425,14 +427,16 @@ def _patch_phase(monkeypatch, *, num_samples, bench):
         "inference_endpoint.commands.audit.setup_benchmark",
         lambda *a, **k: ctx,
     )
+    run_phase = MagicMock(return_value=bench)
     monkeypatch.setattr(
         "inference_endpoint.commands.audit.run_benchmark_async",
-        lambda ctx, **kwargs: bench,
+        run_phase,
     )
     monkeypatch.setattr(
         "inference_endpoint.commands.audit.finalize_benchmark",
         lambda ctx, b: None,
     )
+    return run_phase
 
 
 class TestRunAuditGuards:
@@ -509,16 +513,19 @@ class TestRunAuditGuards:
         an audit phase must surface as ExecutionError naming the timeout, not
         as the Ctrl-C KeyboardInterrupt path."""
         config = self._audit_config()
+        config.with_updates.return_value.settings.timeouts.run_timeout_s = 30.0
         interrupted = MagicMock()
         interrupted.state = "interrupted"
         interrupted.complete = False
         bench = MagicMock()
         bench.run_timed_out = True
         bench.report = interrupted
-        self._patch_phase(monkeypatch, num_samples=100, bench=bench)
+        run_phase = self._patch_phase(monkeypatch, num_samples=100, bench=bench)
 
         with pytest.raises(ExecutionError, match="run_timeout_s"):
             run_audit(config, tmp_path)
+
+        assert run_phase.call_args.kwargs["deadline"] is not None
 
     @pytest.mark.unit
     def test_keyboard_interrupt_propagates(self, tmp_path, monkeypatch):

@@ -82,6 +82,8 @@ Both conditions must hold:
 A phase that does not complete cleanly (metrics drain timeout or interrupt) aborts the
 audit with an error — partial data never produces a valid/invalid result.
 
+Audit phases apply `run_timeout_s` from setup through service drain, then `performance_drain_timeout_s`, `metrics_drain_timeout_s`, and `interrupted_teardown_grace_s`.
+
 The reference phase always runs before the fixed-sample audit phase, so any second-run
 speedup unrelated to caching (warm connection pools, server JIT/allocator warmup) biases
 toward a false FAIL; `threshold` absorbs this (`0.20` for single-stream vs `0.10` for

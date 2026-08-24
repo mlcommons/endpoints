@@ -51,6 +51,8 @@ from typing import IO
 
 import pytest
 
+from tests.test_helpers import write_large_prompt_dataset
+
 _TESTS_DIR = Path(__file__).resolve().parents[2]
 _CHAR_TOKENIZER_DIR = _TESTS_DIR / "assets/tokenizers/char"
 _DS_DATASET = _TESTS_DIR / "assets/datasets/ds_samples.jsonl"
@@ -195,9 +197,8 @@ def _pid_of_child(needle: str, extra: str) -> int | None:
 
 
 @pytest.mark.integration
-def test_sigint_mid_run_exits_130_with_interrupted_artifacts(
-    mock_http_echo_server, tmp_path
-):
+def test_group_sigint_exits_gracefully(mock_http_echo_server, tmp_path):
+    """A group ^C and duplicate delivery exit 130 without leaking children."""
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"
     _write_config(report_dir, mock_http_echo_server.url, config_path)
@@ -206,16 +207,16 @@ def test_sigint_mid_run_exits_130_with_interrupted_artifacts(
         [_cli(), "benchmark", "from-config", "-c", str(config_path)]
     ) as proc:
         _wait_services_ready(proc, report_dir)
-        time.sleep(3.0)  # comfortably inside the ~120 s performance phase
+        time.sleep(3.0)
         os.killpg(proc.pid, signal.SIGINT)
+        time.sleep(0.2)
+        if proc.poll() is None:
+            os.kill(proc.pid, signal.SIGINT)
         rc = proc.wait(timeout=60.0)
 
     assert rc == 130, f"user abort must exit 130, got {rc}"
     _assert_interrupted_artifacts(report_dir)
-    # The event logger must survive the group SIGINT and flush on ENDED.
-    assert (
-        report_dir / "events.jsonl"
-    ).exists(), "events.jsonl missing — event logger died on ^C instead of flushing"
+    assert (report_dir / "events.jsonl").exists()
     _assert_no_leftover_children(report_dir, "run")
 
 
@@ -226,10 +227,10 @@ def test_sigint_grace_expiry_abandons_wedged_drain(mock_http_echo_server, tmp_pa
     The aggregator child is SIGSTOPped to simulate a wedged drain — the exact
     hang the teardown grace exists for. One SIGINT to the MAIN process only
     (``os.kill``, not the group): the graceful stop parks on the wedged
-    drain; grace expiry must SIGTERM→SIGKILL the children so the drain's
-    wait-for-exit unblocks and the run exits 130 without a second keystroke.
-    The grace is shrunk to 3s (settings.timeouts.interrupted_teardown_grace_s; default
-    30) so the test stays fast.
+    drain; grace expiry must SIGKILL the children so the drain's wait-for-exit
+    unblocks and the run exits 130 without a second keystroke. The grace is
+    shrunk to 3s (settings.timeouts.interrupted_teardown_grace_s; default 30)
+    so the test stays fast.
     """
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"
@@ -266,8 +267,8 @@ def test_sigint_grace_expiry_abandons_wedged_drain(mock_http_echo_server, tmp_pa
     assert rc == 130, f"^C must exit 130, got {rc}"
     assert abort_latency > 2.0, "exited before the grace — drain was not wedged"
     assert (
-        abort_latency < 20.0
-    ), f"abort took {abort_latency:.1f}s — grace escalation did not fire"
+        abort_latency < 6.0
+    ), f"abort took {abort_latency:.1f}s — teardown used more than one grace budget"
     # The SIGKILLed aggregator never wrote a terminal snapshot, so the report
     # was built from the last live pub/sub frame — the split-brain guard must
     # still land the summary as interrupted, never state:"live".
@@ -302,44 +303,6 @@ def test_sigint_before_session_exits_130(mock_http_echo_server, tmp_path):
 
 
 @pytest.mark.integration
-def test_single_group_sigint_under_uv_run_is_graceful(mock_http_echo_server, tmp_path):
-    """One keystroke under `uv run` stays graceful.
-
-    `uv run` forwards the terminal's group SIGINT to its child, so a single
-    ^C is delivered twice (~200 ms apart, past kernel coalescing). The
-    duplicate is a harmless no-op (the stop is already in flight): the run
-    takes the graceful path — report written, exit 130.
-    """
-    uv = shutil.which("uv")
-    if uv is None:
-        pytest.skip("uv not available")
-
-    report_dir = tmp_path / "report"
-    config_path = tmp_path / "bench.yaml"
-    _write_config(report_dir, mock_http_echo_server.url, config_path)
-
-    with _benchmark_proc(
-        [
-            uv,
-            "run",
-            "inference-endpoint",
-            "benchmark",
-            "from-config",
-            "-c",
-            str(config_path),
-        ]
-    ) as proc:
-        _wait_services_ready(proc, report_dir, timeout_s=90.0)
-        time.sleep(3.0)
-        os.killpg(proc.pid, signal.SIGINT)  # one keystroke: group + uv forward
-        rc = proc.wait(timeout=60.0)
-
-    assert rc == 130, f"user abort must exit 130, got {rc}"
-    # The graceful path writes the report before exiting.
-    _assert_interrupted_artifacts(report_dir)
-
-
-@pytest.mark.integration
 def test_sigint_in_drain_window_keeps_summary_authoritative(
     mock_http_echo_server, tmp_path
 ):
@@ -354,11 +317,7 @@ def test_sigint_in_drain_window_keeps_summary_authoritative(
     state=interrupted, complete=false. Pins the artifact-precedence contract
     (docs/CLI_QUICK_REFERENCE.md "Ctrl-C (SIGINT)").
     """
-    dataset_path = tmp_path / "big_prompts.jsonl"
-    prompt = "lorem ipsum " * 21_000  # ~250 KB per sample
-    with dataset_path.open("w") as f:
-        for i in range(30):
-            f.write(json.dumps({"prompt": f"{i} {prompt}"}) + "\n")
+    dataset_path = write_large_prompt_dataset(tmp_path, 30)
 
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"

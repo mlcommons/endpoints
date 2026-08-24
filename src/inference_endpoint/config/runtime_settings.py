@@ -94,7 +94,7 @@ class RuntimeSettings:
     reported_metrics: list[metrics.Metric]
     """List of metrics to collect and report"""
 
-    max_duration_ms: int | None
+    max_issue_duration_ms: int | None
     """Maximum benchmark duration in milliseconds (timeout). None means no wall-clock limit."""
 
     n_samples_from_dataset: int
@@ -115,15 +115,7 @@ class RuntimeSettings:
     load_pattern: LoadPattern | None
     """Load pattern configuration"""
 
-    min_duration_ms: int | None = field(default=None, kw_only=True)
-    """Sizing input for the performance phase — never a runtime timer.
-
-    When set, ``total_samples_to_issue()`` derives the sample count as
-    ``target_qps × min_duration_ms``; an explicit ``n_samples_to_issue``
-    wins. ``None`` — or ``0`` from programmatic ruleset callers — means no
-    sizing target: issue the dataset once. Populated from
-    ``settings.runtime.min_duration_ms`` (schema-validated: poisson with an
-    explicit ``target_qps`` only) or set directly by rulesets."""
+    min_issue_duration_ms: int | None = field(default=None, kw_only=True)
 
     sample_order: SampleOrderSpec = field(default_factory=SampleOrderSpec, kw_only=True)
     """Sample-ordering strategy (default: without-replacement)."""
@@ -136,27 +128,7 @@ class RuntimeSettings:
         ruleset: BenchmarkSuiteRuleset | None = None,
         **overrides,
     ) -> RuntimeSettings:
-        """Create RuntimeSettings from BenchmarkConfig.
-
-        This is the primary factory method for creating RuntimeSettings from
-        a validated BenchmarkConfig (Pydantic model).
-
-        Args:
-            config: Validated BenchmarkConfig
-            dataloader_num_samples: Number of samples loaded from dataset
-            ruleset: Optional ruleset to apply constraints (delegates to ruleset's apply_user_config)
-            **overrides: Additional fields to override (e.g., for testing)
-
-        Returns:
-            Immutable RuntimeSettings instance
-
-        Note: the ``ruleset`` argument is accepted but NOT applied — wiring
-        ``BenchmarkSuiteRuleset.apply_user_config()`` (which would need a
-        ``UserConfig`` the CLI flow doesn't build yet) into this factory is
-        future work with no active tracking issue; until then every config
-        gets the default conversion below (rulesets still enforce their
-        schema-side constraints, e.g. pinned RNG seeds).
-        """
+        """Create immutable runtime settings from a validated config."""
 
         return cls._from_config_default(config, dataloader_num_samples, **overrides)
 
@@ -181,9 +153,6 @@ class RuntimeSettings:
         runtime_cfg = config.settings.runtime
         load_pattern_cfg = config.settings.load_pattern
 
-        # No synthetic default: patterns without an explicit target_qps carry
-        # no throughput target (min_duration_ms sizing requires one — enforced
-        # at the schema layer).
         target_qps = load_pattern_cfg.target_qps
 
         # Build kwargs from Pydantic models
@@ -194,8 +163,8 @@ class RuntimeSettings:
             "reported_metrics": (
                 [metrics.Throughput(target_qps)] if target_qps is not None else []
             ),
-            "min_duration_ms": runtime_cfg.min_duration_ms,
-            "max_duration_ms": runtime_cfg.max_duration_ms,
+            "min_issue_duration_ms": runtime_cfg.min_issue_duration_ms,
+            "max_issue_duration_ms": runtime_cfg.max_issue_duration_ms,
             "n_samples_from_dataset": dataloader_num_samples,
             "n_samples_to_issue": runtime_cfg.n_samples_to_issue,  # From config (CLI --num-samples or YAML)
             "min_sample_count": 1,
@@ -207,6 +176,16 @@ class RuntimeSettings:
 
         # Apply overrides
         kwargs.update(overrides)
+        if (
+            load_pattern_cfg.type != LoadPatternType.AGENTIC_INFERENCE
+            and kwargs["n_samples_to_issue"] is None
+            and not kwargs["min_issue_duration_ms"]
+        ):
+            logger.warning(
+                "No sample count; issuing one dataset pass (%d). Set "
+                "settings.runtime.n_samples_to_issue or min_issue_duration_ms.",
+                dataloader_num_samples,
+            )
 
         return cls(**kwargs)  # type: ignore[arg-type]
 
@@ -217,8 +196,8 @@ class RuntimeSettings:
 
         Priority:
         1. If `n_samples_to_issue` is set, return it (explicit override)
-        2. If no min_duration_ms target is set, return all dataset samples
-        3. Otherwise, derive the count as target_qps x min_duration_ms
+        2. If no min_issue_duration_ms target is set, return all dataset samples
+        3. Otherwise, derive the count as target_qps x min_issue_duration_ms
 
         Args:
             padding_factor (float): Factor to multiply the expected number of samples by to account for variance.
@@ -255,27 +234,24 @@ class RuntimeSettings:
             )
             return self.n_samples_from_dataset
 
-        # No min_duration_ms target (None from config, 0 from programmatic callers):
-        # issue the dataset once.
-        if not self.min_duration_ms:
+        # None from config and 0 from programmatic callers both mean dataset once.
+        if not self.min_issue_duration_ms:
             result = max(self.min_sample_count, self.n_samples_from_dataset)
             logger.debug(
-                f"Sample count: {result} (all dataset samples; no min_duration_ms target)"
+                f"Sample count: {result} (all dataset samples; no min_issue_duration_ms target)"
             )
             return result
 
         # Calculate from duration and metric target
         if self.metric_target is None:
-            # Schema validation rejects min_duration_ms without a poisson
-            # target_qps; guard the programmatic path too.
             raise ValueError(
-                "min_duration_ms requires an explicit load_pattern.target_qps"
+                "min_issue_duration_ms requires an explicit load_pattern.target_qps"
             )
         if isinstance(self.metric_target, metrics.Throughput):
             expected_sps = self.metric_target.target
-            expected_samples = expected_sps * (self.min_duration_ms / 1000)
+            expected_samples = expected_sps * (self.min_issue_duration_ms / 1000)
         elif isinstance(self.metric_target, metrics.QueryLatency):
-            expected_samples = self.min_duration_ms / self.metric_target.target
+            expected_samples = self.min_issue_duration_ms / self.metric_target.target
         else:
             raise NotImplementedError(
                 f"Cannot infer n_samples_to_issue from metric target type: {type(self.metric_target)}"
@@ -285,7 +261,7 @@ class RuntimeSettings:
             self.min_sample_count, math.ceil(expected_samples * padding_factor)
         )
         logger.debug(
-            f"Sample count: {result} (calculated from duration={self.min_duration_ms}ms × target_qps={self.metric_target.target} × padding={padding_factor})"
+            f"Sample count: {result} (calculated from duration={self.min_issue_duration_ms}ms × target_qps={self.metric_target.target} × padding={padding_factor})"
         )
 
         # Pad to multiples of dataset size

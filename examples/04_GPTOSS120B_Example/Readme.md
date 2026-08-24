@@ -49,7 +49,8 @@ docker run --runtime nvidia --gpus all \
 
 ```bash
 uv run inference-endpoint benchmark from-config \
-  -c examples/04_GPTOSS120B_Example/vllm_gptoss_120b_example.yaml
+  -c examples/04_GPTOSS120B_Example/vllm_gptoss_120b_example.yaml \
+  --timeout 60
 ```
 
 The config uses `api_type: openai_completions`, which routes to `/v1/completions` with pre-tokenized
@@ -170,7 +171,8 @@ LiveCodeBench accuracy at concurrency 512:
 
 ```bash
 uv run inference-endpoint benchmark from-config \
-  -c examples/04_GPTOSS120B_Example/sglang_gptoss_120b_example.yaml
+  -c examples/04_GPTOSS120B_Example/sglang_gptoss_120b_example.yaml \
+  --timeout 60
 ```
 
 For a performance-only run, use [`gptoss_120b_example.yaml`](gptoss_120b_example.yaml). It is

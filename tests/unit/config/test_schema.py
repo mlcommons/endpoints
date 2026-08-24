@@ -491,7 +491,7 @@ class TestBenchmarkConfigMethods:
         assert redacted["description"] == value["description"]
 
     @pytest.mark.unit
-    def test_max_duration_defaults_to_none_in_runtime_settings(self):
+    def test_max_issue_duration_defaults_to_none_in_runtime_settings(self):
         from inference_endpoint.config.runtime_settings import RuntimeSettings
 
         config = BenchmarkConfig(
@@ -501,11 +501,11 @@ class TestBenchmarkConfigMethods:
             datasets=[{"path": "D"}],
         )
         rt = RuntimeSettings.from_config(config, dataloader_num_samples=100)
-        assert rt.max_duration_ms is None
+        assert rt.max_issue_duration_ms is None
 
     @pytest.mark.unit
-    def test_min_duration_sizes_the_run(self):
-        """runtime.min_duration_ms drives target_qps × duration
+    def test_min_issue_duration_sizes_the_run(self, caplog):
+        """runtime.min_issue_duration_ms drives target_qps × duration
         sample-count derivation, with suffix parsing; None = dataset once."""
         from inference_endpoint.config.runtime_settings import RuntimeSettings
 
@@ -516,10 +516,10 @@ class TestBenchmarkConfigMethods:
             datasets=[{"path": "D"}],
             settings={
                 "load_pattern": {"type": "poisson", "target_qps": 10},
-                "runtime": {"min_duration_ms": "600s"},
+                "runtime": {"min_issue_duration_ms": "600s"},
             },
         )
-        assert config.settings.runtime.min_duration_ms == 600_000
+        assert config.settings.runtime.min_issue_duration_ms == 600_000
         rt = RuntimeSettings.from_config(config, dataloader_num_samples=100)
         # 10 QPS × 600 s × 1.1 padding = 6600, ceil'd past the float artifact
         # (6600.0000…01 → 6601) then padded up to the next dataset multiple.
@@ -527,11 +527,13 @@ class TestBenchmarkConfigMethods:
 
         no_duration = config.with_updates(
             settings=config.settings.model_copy(
-                update={"runtime": RuntimeConfig(min_duration_ms=None)}
+                update={"runtime": RuntimeConfig(min_issue_duration_ms=None)}
             )
         )
-        rt = RuntimeSettings.from_config(no_duration, dataloader_num_samples=100)
+        with caplog.at_level("WARNING"):
+            rt = RuntimeSettings.from_config(no_duration, dataloader_num_samples=100)
         assert rt.total_samples_to_issue() == 100
+        assert "settings.runtime.n_samples_to_issue" in caplog.text
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -541,10 +543,10 @@ class TestBenchmarkConfigMethods:
             {"type": "concurrency", "target_concurrency": 8},
         ],
     )
-    def test_min_duration_requires_poisson_target_qps(self, load_pattern):
+    def test_min_issue_duration_requires_poisson_target_qps(self, load_pattern):
         """Duration sizing has no rate to multiply by outside poisson —
         rejected instead of inventing a synthetic default QPS."""
-        with pytest.raises(ValidationError, match="min_duration_ms .* requires"):
+        with pytest.raises(ValidationError, match="min_issue_duration_ms requires"):
             BenchmarkConfig(
                 type=TestType.ONLINE
                 if load_pattern["type"] == "concurrency"
@@ -554,7 +556,7 @@ class TestBenchmarkConfigMethods:
                 datasets=[{"path": "D"}],
                 settings={
                     "load_pattern": load_pattern,
-                    "runtime": {"min_duration_ms": "600s"},
+                    "runtime": {"min_issue_duration_ms": "600s"},
                 },
             )
 
@@ -939,8 +941,8 @@ class TestAgenticInferenceTotalSamples:
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
             reported_metrics=[metrics.Throughput(10.0)],
-            min_duration_ms=600000,
-            max_duration_ms=None,
+            min_issue_duration_ms=600000,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=5,
             n_samples_to_issue=None,
             min_sample_count=100,
@@ -956,8 +958,8 @@ class TestAgenticInferenceTotalSamples:
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
             reported_metrics=[metrics.Throughput(10.0)],
-            min_duration_ms=600000,
-            max_duration_ms=None,
+            min_issue_duration_ms=600000,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=4316,
             n_samples_to_issue=200,
             min_sample_count=1,

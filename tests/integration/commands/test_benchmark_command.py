@@ -38,6 +38,7 @@ from inference_endpoint.config.schema import (
     StreamingMode,
     TestMode,
     TestType,
+    Timeouts,
 )
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 
@@ -142,14 +143,20 @@ class TestBenchmarkCommandIntegration:
         self, mock_http_echo_server, ds_dataset_path, tmp_path
     ):
         """result_summary.json carries qps/tps without needing any sidecar."""
-        run_benchmark(
-            _config(mock_http_echo_server.url, ds_dataset_path, report_dir=tmp_path),
-            TestMode.PERF,
+        config = _config(
+            mock_http_echo_server.url,
+            ds_dataset_path,
+            report_dir=tmp_path,
+            settings=_TEST_SETTINGS.model_copy(
+                update={"timeouts": Timeouts(run_timeout_s=300.0)}
+            ),
         )
+        run_benchmark(config, TestMode.PERF)
 
         summary = json.loads(
             (tmp_path / "performance" / "result_summary.json").read_text()
         )
+        assert summary["complete"] is True
         assert summary["qps"] > 0
         assert "tps" in summary
         # report.txt is the human-readable companion — kept alongside the JSON.

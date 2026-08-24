@@ -96,15 +96,19 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--model-params.max-new-tokens --max-output-tokens` - Max output tokens (default: 1024)
 - `--model-params.osl-distribution.min --min-output-tokens` - Min output tokens (default: 1)
 - `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default: auto)
-- `--runtime.n-samples-to-issue --num-samples` - Explicit sample count (omit to issue the dataset once — the default)
+- `--runtime.min-issue-duration-ms` - Poisson sample-count sizing from QPS × duration (unset = dataset once)
+- `--runtime.max-issue-duration-ms` - Performance issuing cap; in-flight responses still drain
+- `--runtime.n-samples-to-issue --num-samples` - Explicit sample count override
 - `--client.num-workers --workers` - HTTP workers (-1=auto, default: -1)
 - `--client.max-connections --max-connections` - Max TCP connections (-1=unlimited)
 - `--endpoint-config.api-key --api-key` - API authentication
 - `--endpoint-config.api-type --api-type` - API type: openai/sglang (default: openai)
 - `--report-dir` - Report output directory
-  Note: `benchmark from-config` also accepts `--report-dir` as an override of the YAML value;
-  when neither is set a default report directory is used.
-- `--timeout` - Whole-run watchdog in seconds (off by default). If it fires, the run is aborted, the report is marked INTERRUPTED, and the process exits non-zero.
+  Note: applies to CLI-driven `benchmark offline` / `benchmark online`; `benchmark from-config`
+  does not expose a CLI override for `report_dir`. Set it in the YAML only if you need to control
+  the output location; otherwise a default report directory is used.
+- `--timeout` - Whole-run watchdog (`settings.timeouts.run_timeout_s`; unset = off)
+- Other timeout flags: `--timeouts.service-ready-timeout-s`, `--timeouts.warmup-drain-timeout-s`, `--timeouts.performance-drain-timeout-s`, `--timeouts.accuracy-drain-timeout-s`, `--timeouts.metrics-drain-timeout-s`, `--timeouts.interrupted-teardown-grace-s`
 - `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
 - `--no-early-stopping` - opt out of the MLPerf early-stopping percentile estimates in `result_summary.json` (default: on; see [early_stopping.md](early_stopping.md))
 
@@ -115,114 +119,6 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--load-pattern.target-concurrency --concurrency` - Concurrent requests (required for concurrency)
 
 **All other schema fields** are accessible via dotted paths (e.g., `--model-params.temperature`, `--model-params.top-k`, `--runtime.scheduler-random-seed`). Run `--help` to see the full list.
-
-## Time Knobs
-
-All give-up deadlines live under `settings.timeouts`; the only runtime workload cap is
-`settings.runtime.max_duration_ms` (`min_duration_ms` is a sizing input, not a timer); endpoint-client worker lifecycle timeouts are client
-internals under `settings.client`. `null`/unset means "wait indefinitely" (or "off") everywhere.
-
-Where every knob acts over the life of a run:
-
-```text
-run_benchmark ── run_timeout_s deadline captured here ─────────────────────────────┐
-│                                                                                  │
-├─ setup: dataset + tokenizer load          (counts against run_timeout_s)         │
-├─ launch metrics/event-logger services     ── service_ready_timeout_s             │
-├─ start endpoint-client workers            ── client.worker_initialization_timeout│
-│                                                                                  │
-├─ WARMUP       issue ──────────┤ drain ─┤  ── warmup_drain_timeout_s              │
-│                                                                                  │
-├─ PERFORMANCE  issue ──────────┤ drain ─┤                                         │
-│               │               │        └─ performance_drain_timeout_s            │
-│               └───────────────┴─ max_duration_ms caps ISSUING only; reaching it  │
-│                                  ends the phase NORMALLY (valid report) and      │
-│                                  SKIPS the drain — both knobs may be set; the    │
-│                                  drain timeout applies only when issuance        │
-│                                  finishes before the cap                         │
-│                                                                                  │
-├─ ACCURACY     issue ──────────┤ drain ─┤  ── accuracy_drain_timeout_s            │
-│                                                                                  │
-├─ metrics drain (tokenize buffered ISL/OSL)── metrics_drain_timeout_s             │
-│                                              (expiry FAILS the run:              │
-│                                              complete: false + non-zero exit)    │
-├─ worker shutdown                          ── client.worker_graceful_shutdown_wait│
-│                                              then client.worker_force_kill_timeout
-│                                                                                  │
- run_timeout_s (whole-run watchdog) ───────────────────────────────────────────────┘
- firing at ANY point above aborts the run: report marked INTERRUPTED, non-zero exit
-└─ finalize: score accuracy, write artifacts   (OUTSIDE the watchdog: a timed-out
-                                                run SKIPS scoring, writes its
-                                                INTERRUPTED artifacts, exits
-                                                non-zero; scoring of a run that
-                                                finished within budget is not
-                                                deadline-bounded)
-```
-
-| YAML path                                        | CLI flag                                           | Semantics                                                                                                                                                                                                                     |
-| ------------------------------------------------ | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `settings.runtime.min_duration_ms`               | `--runtime.min-duration-ms`                        | Poisson only (requires explicit `target_qps`). Sizes the run by time: issue `target_qps` × duration samples (ms, or suffix: `600s`, `10m`). Explicit `--num-samples` wins; both unset = issue the dataset once                |
-| `settings.runtime.max_duration_ms`               | `--runtime.max-duration-ms`                        | Caps performance-phase issuing (ms, or suffix: `600s`, `10m`); reaching it ends the phase NORMALLY — the report stays valid — and skips the performance drain                                                                 |
-| `settings.timeouts.run_timeout_s`                | `--timeout`                                        | Whole-run watchdog from setup through worker shutdown; firing aborts the run — report marked INTERRUPTED, non-zero exit. Finalization (accuracy scoring, artifact writes) runs after the watchdog and is not deadline-bounded |
-| `settings.timeouts.service_ready_timeout_s`      | `--settings.timeouts.service-ready-timeout-s`      | Wait for the metrics-aggregator/event-logger services to become ready (default 30)                                                                                                                                            |
-| `settings.timeouts.warmup_drain_timeout_s`       | `--settings.timeouts.warmup-drain-timeout-s`       | Bound on in-flight warmup requests after the warmup phase ends (default 240)                                                                                                                                                  |
-| `settings.timeouts.performance_drain_timeout_s`  | `--settings.timeouts.performance-drain-timeout-s`  | Bound on in-flight performance requests after the phase stops issuing (default: wait indefinitely)                                                                                                                            |
-| `settings.timeouts.accuracy_drain_timeout_s`     | `--settings.timeouts.accuracy-drain-timeout-s`     | Bound on in-flight accuracy requests after the phase ends (default: wait indefinitely)                                                                                                                                        |
-| `settings.timeouts.metrics_drain_timeout_s`      | `--settings.timeouts.metrics-drain-timeout-s`      | Budget for the metrics aggregator to finish tokenizing buffered samples after the run ends (default: wait indefinitely); expiring fails the run with `complete: false` artifacts                                              |
-| `settings.timeouts.interrupted_teardown_grace_s` | `--settings.timeouts.interrupted-teardown-grace-s` | Grace after an abort (^C or `run_timeout_s`) before a still-running metrics drain is abandoned, SIGTERM→SIGKILL (default 30; null = never abandon)                                                                            |
-| `settings.client.worker_initialization_timeout`  | `--client.worker-initialization-timeout`           | Wait for endpoint-client worker processes to start (default 60)                                                                                                                                                               |
-| `settings.client.worker_graceful_shutdown_wait`  | `--client.worker-graceful-shutdown-wait`           | Post-run wait for workers to exit gracefully (default 0.5)                                                                                                                                                                    |
-| `settings.client.worker_force_kill_timeout`      | `--client.worker-force-kill-timeout`               | Wait after the graceful window before force-killing workers (default 0.5)                                                                                                                                                     |
-
-How the knobs compose:
-
-1. **`--num-samples` / `min_duration_ms` / dataset-once defines the work.** An explicit
-   `runtime.n_samples_to_issue` sets the sample count; otherwise `runtime.min_duration_ms`
-   (poisson only) derives it as target_qps x min_duration_ms; with neither set, the performance dataset is
-   issued once.
-   Offline (`max_throughput`) and `concurrency` runs are purely count-driven: `min_duration_ms`
-   with those patterns is a config error (`max_duration_ms` still caps issuing for every pattern).
-2. **`runtime.max_duration_ms` caps performance-phase issuing** and ends the phase normally —
-   remaining samples are not issued, in-flight requests are abandoned (no drain), the report is
-   valid. It does not bound the drain: issuing and draining are consecutive, never concurrent.
-3. **Per-phase drain timeouts bound the post-phase wait** for requests still in flight after a
-   phase stops issuing on its own.
-4. **`timeouts.run_timeout_s` is the only total-wall-time bound** (setup, every phase, every
-   drain) — firing aborts the run, marks the report INTERRUPTED, and exits non-zero.
-
-### Ctrl-C (SIGINT)
-
-One handler owns SIGINT for the whole run, with one behavior:
-
-- **^C during a run**: graceful abort. The session stops issuing, in-flight
-  drains are released, buffered samples still reach the metrics aggregator,
-  and the artifacts land honest — `result_summary.json` `state: interrupted`,
-  `complete: false`, `events.jsonl` flushed. Exit 130. Teardown is bounded:
-  if the metrics drain has not finished within `timeouts.interrupted_teardown_grace_s`
-  (default 30 s; null = never abandon) of the ^C, the service
-  children are SIGTERMed (the aggregator writes a best-effort INTERRUPTED
-  snapshot) then SIGKILLed — a wedged drain can never hang the abort.
-- **Repeat ^C**: logged no-op — the stop is already in flight and the grace
-  bounds the teardown. Runners that forward the terminal's group SIGINT to
-  their child (`uv run` does) deliver a single ^C twice; the duplicate is
-  equally harmless.
-- **^C during setup** (dataset/tokenizer load, before services): immediate
-  abort, exit 130, no artifacts.
-
-A ^C'd run never exits 0 and its `result_summary.json` is never
-`complete: true` — a ^C landing during post-measurement finalization
-(accuracy scoring) of an already-completed run also rewrites the report to
-`state: interrupted` before it is persisted. **Precedence**:
-`result_summary.json` + the exit code are the run-level truth;
-`metrics/final_snapshot.json` records what the aggregator itself observed
-and can legitimately read `state: complete` when the ^C lands after the
-session already published its terminal ENDED (the metrics-drain window) —
-the aggregator saw a run that ended normally.
-
-An interrupted (or timed-out) run is an **invalid run** — not a usable
-result. Its artifacts exist only to expose whatever partial metrics were
-available at abort time (diagnostics, triage), never to stand as a
-benchmark outcome; the non-zero exit code is the machine-readable verdict.
 
 ## Environment Variables
 
@@ -330,13 +226,14 @@ inference-endpoint benchmark online \
   --report-dir production_report \
   -v
 
-# Without --num-samples, the dataset is issued once (the default)
+# Or size a Poisson run from target_qps × issue duration
 inference-endpoint benchmark online \
   --endpoints https://api.production.com \
   --model Qwen/Qwen3-8B \
   --dataset prod_queries.jsonl \
   --load-pattern poisson \
   --target-qps 100 \
+  --runtime.min-issue-duration-ms 5m \
   --workers 16 \
   --report-dir production_report \
   -v
@@ -353,8 +250,8 @@ inference-endpoint init submission
 # 3. Run (YAML mode)
 inference-endpoint benchmark from-config \
   --config submission_template.yaml
-# from-config accepts --config, --timeout, --mode, --accuracy-only, and
-# --report-dir; everything else comes from the YAML.
+# Note: from-config only accepts --config, --timeout, and --mode via CLI.
+# Set report_dir in the YAML if you need a specific output location.
 ```
 
 ### Validate First
@@ -395,9 +292,14 @@ datasets:
 
 settings:
   runtime:
-    n_samples_to_issue: null # Optional: explicit sample count (null = issue the dataset once)
+    min_issue_duration_ms: null # Poisson sample-count sizing
+    max_issue_duration_ms: null # Performance issuing cap
+    n_samples_to_issue: null # Explicit count; null with no min duration = dataset once
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
+  timeouts:
+    run_timeout_s: null # Whole-run watchdog; null = off
+    performance_drain_timeout_s: null # null = unlimited
   load_pattern:
     type: "max_throughput"
     target_qps: 10.0
@@ -435,8 +337,8 @@ Note: For submission configs, `model_params.name` is optional when `submission_r
 
 **Sample Count Control:**
 
-- `--num-samples` sets an explicit sample count; without it the dataset is issued once
-- Behavior change: bare configs (no `--num-samples`) now run the dataset once instead of deriving 10 minutes' worth of samples from the target QPS
+- Priority: `--num-samples` > Poisson QPS × min issue duration > dataset size
+- No sample count or min issue duration means one dataset pass.
 
 **Mode Requirements:**
 

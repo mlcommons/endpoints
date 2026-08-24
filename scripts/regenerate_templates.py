@@ -371,6 +371,8 @@ def _build_minimal(test_type: TestType, overrides: dict) -> dict:
         "datasets": [PERF_DATASET],
         "settings": {
             "runtime": {
+                "min_issue_duration_ms": None,
+                "max_issue_duration_ms": None,
                 "n_samples_to_issue": None,
             },
         },

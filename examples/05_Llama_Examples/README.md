@@ -44,13 +44,13 @@ docker run --runtime nvidia --gpus all \
 ### Offline mode
 
 ```bash
-uv run inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml
+uv run inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --timeout 600
 ```
 
 ### Online mode
 
 ```bash
-uv run inference-endpoint benchmark from-config -c online_llama3_8b_cnn.yaml
+uv run inference-endpoint benchmark from-config -c online_llama3_8b_cnn.yaml --timeout 600
 ```
 
 These configs run in performance-only mode by default. To also evaluate summarization quality, add `--mode both` and install the accuracy dependencies listed in the [Llama-2-70b accuracy setup](#accuracy-evaluation-setup-optional) section below.
@@ -104,5 +104,5 @@ docker run --runtime nvidia --gpus all \
 ### Online mode
 
 ```bash
-uv run inference-endpoint benchmark from-config -c online_llama2_70b_orca.yaml
+uv run inference-endpoint benchmark from-config -c online_llama2_70b_orca.yaml --timeout 600
 ```

@@ -111,7 +111,7 @@ def run_benchmark_session(
     rt_settings = RuntimeSettings(
         metric_target=metrics.Throughput(6),
         reported_metrics=[],
-        max_duration_ms=args.max_duration * 1000,
+        max_issue_duration_ms=args.max_duration * 1000,
         n_samples_from_dataset=0,
         n_samples_to_issue=0,
         min_sample_count=0,

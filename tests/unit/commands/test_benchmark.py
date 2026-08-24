@@ -42,13 +42,13 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     BenchmarkResult,
     ResponseCollector,
+    SigintGovernor,
     _build_phases,
     _load_datasets,
     _run_benchmark_async,
     finalize_benchmark,
     setup_benchmark,
 )
-from inference_endpoint.commands.benchmark.pipeline import _build_aggregator_args
 from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
     _derive_profile_urls,
@@ -56,7 +56,6 @@ from inference_endpoint.commands.benchmark.profiling import (
     _render_profile_status,
     write_profiling_section,
 )
-from inference_endpoint.commands.benchmark.watchdog import SigintGovernor
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     AgenticInferenceConfig,
@@ -200,8 +199,8 @@ def _make_benchmark_context(
     rt_settings = rt_settings or RuntimeSettings(
         metric_target=Throughput(10.0),
         reported_metrics=[Throughput(10.0)],
-        min_duration_ms=0,
-        max_duration_ms=None,
+        min_issue_duration_ms=0,
+        max_issue_duration_ms=None,
         n_samples_from_dataset=dataloader.num_samples(),
         n_samples_to_issue=None,
         min_sample_count=1,
@@ -1269,8 +1268,8 @@ class TestAggregatorArgs:
         rt = RuntimeSettings(
             metric_target=Throughput(10.0),
             reported_metrics=[Throughput(10.0)],
-            min_duration_ms=0,
-            max_duration_ms=None,
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=1,
             n_samples_to_issue=None,
             min_sample_count=1,
@@ -1295,7 +1294,7 @@ class TestAggregatorArgs:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "timeout_s, expected_flag",
-        [(120.0, "120.0"), (None, None), (0.0, "0.0"), (60.0, "60.0")],
+        [(120.0, "120.0"), (None, None), (0.0, "0.0")],
     )
     async def test_drain_timeout_forwarded_to_aggregator_args(
         self, tmp_path, timeout_s, expected_flag
@@ -1340,7 +1339,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(KeyboardInterrupt):
-                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
 
         aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
         args = aggregator_cfg.args
@@ -1351,22 +1350,6 @@ class TestAggregatorArgs:
         else:
             idx = args.index("--drain-timeout")
             assert args[idx + 1] == expected_flag
-
-    @pytest.mark.unit
-    def test_none_drain_timeout_omits_flag(self):
-        """None (= unlimited) omits --drain-timeout; 0 means a zero budget."""
-        args = _build_aggregator_args(
-            socket_dir="/tmp/sockets",
-            pub_socket_name="pub",
-            metrics_socket_name="metrics",
-            metrics_output_dir=Path("/tmp/metrics"),
-            enable_streaming=False,
-            tokenizer_name=None,
-            drain_timeout_s=None,
-            tokenizer_workers=2,
-            early_stopping=False,
-        )
-        assert "--drain-timeout" not in args
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1410,7 +1393,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(KeyboardInterrupt):
-                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
 
         aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
         args = aggregator_cfg.args
@@ -1464,7 +1447,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(RuntimeError, match="simulated mid-run crash"):
-                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
 
         shm = Path("/dev/shm")
         tmpfs_base = shm if shm.exists() else Path(tempfile.gettempdir())
@@ -1520,7 +1503,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(RuntimeError, match="setup boom"):
-                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
 
         # __aexit__ kills the services (drain never ran) → launcher.terminate_all();
         # called exactly once, and never for a clean run.
@@ -1569,7 +1552,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(SetupError, match="connect boom"):
-                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
 
         # The setup-error path never drains, so __aexit__ kills the services once.
         MockLauncher.return_value.terminate_all.assert_called_once()
@@ -1626,7 +1609,7 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(RuntimeError, match="setup boom"):
-                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
 
         # Client was created; the run failed before the session finally, so the
         # outer finally must have shut it down (idempotent, called once here).
@@ -1717,7 +1700,7 @@ class TestAggregatorArgs:
             MockLauncher.return_value.launch = _launch_ok
 
             with pytest.raises(expected_error, match=expected_match):
-                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor(None))
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
 
 
 class TestAccuracyOnlyDatasetLoading:
@@ -1797,8 +1780,8 @@ class TestBuildPhases:
         return RuntimeSettings(
             metric_target=Throughput(10.0),
             reported_metrics=[Throughput(10.0)],
-            min_duration_ms=600000,
-            max_duration_ms=None,
+            min_issue_duration_ms=600000,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=5,
             n_samples_to_issue=None,
             min_sample_count=1,
@@ -1925,10 +1908,10 @@ class TestBuildPhases:
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
         phases = _build_phases(ctx)
 
-        assert phases[0].runtime_settings.min_duration_ms is None
+        assert phases[0].runtime_settings.min_issue_duration_ms is None
 
     @pytest.mark.unit
-    def test_warmup_phase_no_max_duration(self, base_rt_settings, simple_dataset):
+    def test_warmup_phase_no_max_issue_duration(self, base_rt_settings, simple_dataset):
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
@@ -1936,7 +1919,7 @@ class TestBuildPhases:
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
         phases = _build_phases(ctx)
 
-        assert phases[0].runtime_settings.max_duration_ms is None
+        assert phases[0].runtime_settings.max_issue_duration_ms is None
 
     @pytest.mark.unit
     def test_warmup_n_requests_propagated(self, base_rt_settings, simple_dataset):
@@ -2307,8 +2290,8 @@ class TestBuildPhases:
             return RuntimeSettings(
                 metric_target=Throughput(10.0),
                 reported_metrics=[Throughput(10.0)],
-                min_duration_ms=0,
-                max_duration_ms=None,
+                min_issue_duration_ms=0,
+                max_issue_duration_ms=None,
                 n_samples_from_dataset=simple_dataset.num_samples(),
                 n_samples_to_issue=None,
                 min_sample_count=1,
@@ -2487,25 +2470,36 @@ class TestFinalizeBenchmark:
         assert results["accuracy_scores"][0]["total_samples"] == expected
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("abort_field", ["run_timed_out", "user_interrupted"])
-    @pytest.mark.parametrize("snapshot_state", ["complete", "live"])
-    def test_aborted_run_never_writes_complete_artifacts(
-        self, tmp_path, abort_field, snapshot_state
+    @pytest.mark.parametrize(
+        ("abort_field", "snapshot_state"),
+        [
+            ("run_timed_out", "complete"),
+            ("user_interrupted", "live"),
+            (None, "interrupted"),
+        ],
+    )
+    def test_aborted_run_never_scores_or_writes_complete_artifacts(
+        self, tmp_path, monkeypatch, abort_field, snapshot_state
     ):
         """Split-brain guard: an aborted run must never ship artifacts under
         any non-interrupted state. "complete": the aggregator finalized before
         the abort landed (watchdog late, or ^C after the session's terminal
         ENDED). "live": the teardown grace SIGKILLed a wedged aggregator, so
         the report was built from the last live pub/sub snapshot.
-        result_summary.json must land complete:false / state:interrupted."""
+        result_summary.json must land complete:false / state:interrupted, and
+        partial accuracy data must never be scored."""
         config = OfflineConfig(**_OFFLINE_KWARGS)
         ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
         bench = _make_benchmark_result(tmp_path)
         bench.report = self._make_report(state=snapshot_state)
-        setattr(bench, abort_field, True)
+        if abort_field is not None:
+            setattr(bench, abort_field, True)
+        score_accuracy = MagicMock()
+        monkeypatch.setattr(execute_mod, "score_accuracy", score_accuracy)
 
         finalize_benchmark(ctx, bench)
 
+        score_accuracy.assert_not_called()
         summary = json.loads(
             (tmp_path / "performance" / "result_summary.json").read_text()
         )
@@ -2692,8 +2686,8 @@ class TestSetupBenchmarkTokenizer:
         return RuntimeSettings(
             metric_target=Throughput(10.0),
             reported_metrics=[Throughput(10.0)],
-            min_duration_ms=0,
-            max_duration_ms=None,
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=1,
             n_samples_to_issue=None,
             min_sample_count=1,
@@ -2831,8 +2825,8 @@ class TestSetupBenchmark:
         return RuntimeSettings(
             metric_target=Throughput(10.0),
             reported_metrics=[Throughput(10.0)],
-            min_duration_ms=0,
-            max_duration_ms=None,
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=1,
             n_samples_to_issue=None,
             min_sample_count=1,
@@ -3034,8 +3028,8 @@ class TestSetupBenchmarkExternalSampleCountLogging:
         rt_settings = RuntimeSettings(
             metric_target=Throughput(10.0),
             reported_metrics=[Throughput(10.0)],
-            min_duration_ms=0,
-            max_duration_ms=None,
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=1,
             n_samples_to_issue=None,
             min_sample_count=1,

@@ -187,15 +187,16 @@ class RoundRuleset(BenchmarkSuiteRuleset):
                     f"Invalid metric type: {mtype} for ruleset type {ruleset.__class__.__name__}"
                 )
 
-        min_duration_ms = ruleset.min_duration_ms_valid
-        if user_config.min_duration_ms is not None:
-            min_duration_ms = user_config.min_duration_ms
+        min_issue_duration_ms = ruleset.min_duration_ms_valid
+        if user_config.min_issue_duration_ms is not None:
+            min_issue_duration_ms = user_config.min_issue_duration_ms
 
-        max_duration_ms = ruleset.max_duration_ms_valid
-        if user_config.max_duration_ms is not None:
-            max_duration_ms = user_config.max_duration_ms
+        max_issue_duration_ms = ruleset.max_duration_ms_valid
+        if user_config.max_issue_duration_ms is not None:
+            max_issue_duration_ms = user_config.max_issue_duration_ms
         assert (
-            max_duration_ms is not None and max_duration_ms >= min_duration_ms
+            max_issue_duration_ms is not None
+            and max_issue_duration_ms >= min_issue_duration_ms
         ), "Max duration must be greater than or equal to min duration"
 
         n_samples_from_dataset = model.dataset.size
@@ -215,8 +216,8 @@ class RoundRuleset(BenchmarkSuiteRuleset):
             if metric_target is not None
             else metrics.Throughput(0.0),
             reported_metrics=reported_metrics,
-            min_duration_ms=min_duration_ms,
-            max_duration_ms=max_duration_ms,
+            min_issue_duration_ms=min_issue_duration_ms,
+            max_issue_duration_ms=max_issue_duration_ms,
             n_samples_from_dataset=n_samples_from_dataset,
             n_samples_to_issue=total_sample_count,
             min_sample_count=min_sample_count if min_sample_count is not None else 1,

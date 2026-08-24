@@ -32,7 +32,7 @@ from inference_endpoint.config.user_config import UserConfig
 
 @pytest.mark.unit
 def test_apply_user_config():
-    user_config = UserConfig(1234.5, max_duration_ms=42 * 60 * 1000)
+    user_config = UserConfig(1234.5, max_issue_duration_ms=42 * 60 * 1000)
     rt_settings = CURRENT.apply_user_config(
         model=models.Llama3_1_8b,
         user_config=user_config,
@@ -56,8 +56,8 @@ def test_apply_user_config():
     assert isinstance(rt_settings.reported_metrics[2], metrics.TPOT)
     assert rt_settings.reported_metrics[2].target == 30
 
-    assert rt_settings.min_duration_ms == 10 * 60 * 1000
-    assert rt_settings.max_duration_ms == 42 * 60 * 1000
+    assert rt_settings.min_issue_duration_ms == 10 * 60 * 1000
+    assert rt_settings.max_issue_duration_ms == 42 * 60 * 1000
     assert rt_settings.n_samples_from_dataset == 13368
     assert rt_settings.n_samples_to_issue is None
     assert rt_settings.min_sample_count == 270336
@@ -86,7 +86,7 @@ def test_apply_user_config():
 
 @pytest.mark.unit
 def test_apply_user_config_insufficient_qps():
-    user_config = UserConfig(2, max_duration_ms=42 * 60 * 1000)
+    user_config = UserConfig(2, max_issue_duration_ms=42 * 60 * 1000)
     rt_settings = CURRENT.apply_user_config(
         model=models.Llama3_1_8b,
         user_config=user_config,
@@ -105,7 +105,9 @@ def test_apply_user_config_insufficient_qps():
 
 @pytest.mark.unit
 def test_apply_user_config_min_sample_count_override():
-    user_config = UserConfig(2, max_duration_ms=42 * 60 * 1000, min_sample_count=1)
+    user_config = UserConfig(
+        2, max_issue_duration_ms=42 * 60 * 1000, min_sample_count=1
+    )
     rt_settings = CURRENT.apply_user_config(
         model=models.Llama3_1_8b,
         user_config=user_config,
@@ -228,6 +230,6 @@ def test_edge_ruleset_apply_user_config():
     assert rt_settings.model is models.Qwen3_6_27B
     assert isinstance(rt_settings.metric_target, metrics.Throughput)
     assert rt_settings.metric_target.target == pytest.approx(11.8)
-    assert rt_settings.min_duration_ms == 0
-    assert rt_settings.max_duration_ms == 4 * 60 * 60 * 1000
+    assert rt_settings.min_issue_duration_ms == 0
+    assert rt_settings.max_issue_duration_ms == 4 * 60 * 60 * 1000
     assert rt_settings.n_samples_from_dataset == 995

@@ -51,8 +51,8 @@ datasets:  # Dataset configs
   generation_config_override: null  # Per-dataset overrides for the top-level model_params (sparse — only the fields you want to override). Merged on top of BenchmarkConfig.model_params at dataset-load time. Useful for MLPerf-style runs where accuracy and performance use different output budgets in the same fleet, e.g. generation_config_override: {max_new_tokens: 32768, temperature: 0.0}. NOTE: per-run/identity keys (`name`, `streaming`, `tokenizer_name`) are rejected here — set them on top-level model_params.
 settings:
   runtime:
-    min_duration_ms: null  # Sizing input, not a timer (poisson only; requires explicit target_qps): derives the sample count as target_qps × min_duration_ms. Overridden by an explicit n_samples_to_issue; None = no min_duration_ms target (issue the dataset once)
-    max_duration_ms: null  # Cap on performance-phase issuing in ms; reaching it ends the phase normally (None = no cap)
+    min_issue_duration_ms: null  # Poisson sample-count sizing input: target_qps × duration. Explicit n_samples_to_issue wins; None issues the dataset once.
+    max_issue_duration_ms: null  # Cap on performance-phase issuing in ms; reaching it ends the phase normally (None = no cap)
     n_samples_to_issue: null  # Sample count override
     scheduler_random_seed: 42  # Scheduler RNG seed
     dataloader_random_seed: 42  # Dataloader RNG seed
@@ -86,17 +86,17 @@ settings:
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
   timeouts:  # All global waits and deadlines (see config/schema.py)
-    run_timeout_s: null  # Whole-run watchdog in seconds (None = off). Bounds the run from service launch through every phase and drain; synchronous setup (tokenizer probe, dataset load) counts against the budget but is only checked at its boundary — a hung setup call itself is not interrupted. Firing aborts the run, marks the report INTERRUPTED, and exits non-zero. Never derives per-stage deadlines.
-    interrupted_teardown_grace_s: 30.0  # Seconds after an abort (^C or a run_timeout_s fire) before a still-running metrics drain is abandoned: the service children are SIGTERMed (the aggregator writes a best-effort INTERRUPTED snapshot) then SIGKILLed, so a wedged drain can never hang the abort (None = never abandon; 0 = abandon immediately).
-    service_ready_timeout_s: 30.0  # Seconds to wait for metrics-aggregator/event-logger services to become ready.
-    warmup_drain_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)
-    performance_drain_timeout_s: null  # Performance drain timeout in seconds (None = wait indefinitely; 0 = skip the drain)
-    accuracy_drain_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely; 0 = skip the drain; accuracy is unbounded by default because every sample must complete)
-    metrics_drain_timeout_s: null  # Wall-clock budget (seconds) to finish tokenizing buffered samples after ENDED (None = wait indefinitely; 0 = give up immediately). An incomplete drain fails the run: artifacts are written with complete: false, then run_benchmark exits non-zero.
+    run_timeout_s: null  # Whole-run watchdog seconds (None = off).
+    interrupted_teardown_grace_s: 30.0  # Abort drain grace before remaining services are killed.
+    service_ready_timeout_s: 30.0  # Service startup wait in seconds.
+    warmup_drain_timeout_s: 240.0  # Warmup drain seconds (None = unlimited; 0 = immediate).
+    performance_drain_timeout_s: null  # Performance drain seconds (None = unlimited; 0 = immediate).
+    accuracy_drain_timeout_s: null  # Accuracy drain seconds (None = unlimited; 0 = immediate).
+    metrics_drain_timeout_s: null  # Metrics drain seconds (None = unlimited; 0 = immediate).
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
-    salt: false  # Prepend a unique random hex salt to each warmup prompt. Requires text-'prompt' samples; enabling it on a pre-tokenized ('input_tokens') dataset is a hard error.
+    salt: false  # Prepend a unique random hex salt to each warmup prompt
     drain: false  # Drain in-flight warmup requests before starting the performance phase
     warmup_random_seed: 42  # RNG seed for warmup scheduling and sample ordering
   profiling:

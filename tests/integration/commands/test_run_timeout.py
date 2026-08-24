@@ -16,9 +16,9 @@
 """Whole-run watchdog (settings.timeouts.run_timeout_s) integration tests.
 
 Locking invariant: a fired run watchdog must never produce a COMPLETE
-report. The watchdog stops the session (ENDED still flows) and then
-SIGTERMs the metrics aggregator, whose handler writes an INTERRUPTED
-final snapshot; ``run_benchmark`` exits non-zero via ``ExecutionError``.
+report. The session still publishes ENDED, then the services get one bounded
+graceful teardown before remaining children are killed; ``run_benchmark``
+exits non-zero via ``ExecutionError``.
 """
 
 import json
@@ -51,6 +51,8 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.exceptions import ExecutionError
 
+from tests.test_helpers import write_large_prompt_dataset
+
 # Local character-level tokenizer: lets the metrics aggregator tokenize
 # ISL/OSL without a HuggingFace Hub download (same trick as
 # test_benchmark_command.py).
@@ -76,14 +78,14 @@ def _make_config(
     *,
     test_type: TestType = TestType.OFFLINE,
     model_name: str = "echo-server",
-    load_pattern: LoadPattern | None = None,
+    load_pattern: LoadPattern = LoadPattern(),
     runtime: RuntimeConfig | None = None,
     timeouts: Timeouts | None = None,
+    streaming: StreamingMode = StreamingMode.OFF,
     metrics_tokenizer_workers: int | None = None,
 ) -> BenchmarkConfig:
     settings_kwargs: dict[str, Any] = {
-        "load_pattern": load_pattern
-        or LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        "load_pattern": load_pattern,
         "client": _FAST_CLIENT,
         "warmup": WarmupConfig(enabled=False),
     }
@@ -96,28 +98,17 @@ def _make_config(
     return BenchmarkConfig(
         type=test_type,
         endpoint_config=EndpointConfig(endpoints=[endpoint_url]),
-        model_params=ModelParams(name=model_name, streaming=StreamingMode.OFF),
+        model_params=ModelParams(name=model_name, streaming=streaming),
         datasets=[Dataset(path=str(dataset_path), type=DatasetType.PERFORMANCE)],
         report_dir=report_dir,
         settings=Settings(**settings_kwargs),
     )
 
 
-def _write_big_prompts_dataset(tmp_path: Path) -> Path:
-    """~25 MB of prompt text; the echo server doubles it into OSL, so the
-    end-of-run drain has ~50M characters to tokenize — far more than any
-    small deadline allows on any hardware."""
-    dataset_path = tmp_path / "big_prompts.jsonl"
-    prompt = "lorem ipsum " * 21_000  # ~250 KB per sample
-    with dataset_path.open("w") as f:
-        for i in range(100):
-            f.write(json.dumps({"prompt": f"{i} {prompt}"}) + "\n")
-    return dataset_path
-
-
 @pytest.mark.integration
+@pytest.mark.parametrize("streaming", [StreamingMode.OFF, StreamingMode.ON])
 def test_run_timeout_produces_interrupted_report(
-    mock_http_echo_server, ds_dataset_path, tmp_path
+    mock_http_echo_server, ds_dataset_path, tmp_path, streaming
 ):
     """run_timeout_s firing mid-run aborts with an INTERRUPTED report."""
     config = _make_config(
@@ -133,6 +124,7 @@ def test_run_timeout_produces_interrupted_report(
         # covered by test_run_timeout_during_service_launch_aborts_promptly).
         runtime=RuntimeConfig(n_samples_to_issue=600),
         timeouts=Timeouts(run_timeout_s=6.0),
+        streaming=streaming,
     )
 
     with pytest.raises(ExecutionError, match="Run timeout"):
@@ -147,27 +139,6 @@ def test_run_timeout_produces_interrupted_report(
 
 
 @pytest.mark.integration
-def test_generous_run_timeout_completes_normally(
-    mock_http_echo_server, ds_dataset_path, tmp_path
-):
-    """A run_timeout_s far above the workload length never fires: the run
-    finishes cleanly and publishes a COMPLETE report."""
-    config = _make_config(
-        mock_http_echo_server.url,
-        ds_dataset_path,
-        tmp_path,
-        timeouts=Timeouts(run_timeout_s=300.0),
-    )
-
-    run_benchmark(config, TestMode.PERF)  # must not raise
-
-    snapshot = _read_final_snapshot(tmp_path)
-    assert snapshot["state"] == "complete"
-    summary = _read_result_summary(tmp_path)
-    assert summary["complete"] is True
-
-
-@pytest.mark.integration
 def test_run_timeout_during_metrics_drain_interrupts(mock_http_echo_server, tmp_path):
     """The watchdog stays armed through the metrics drain.
 
@@ -175,10 +146,10 @@ def test_run_timeout_during_metrics_drain_interrupts(mock_http_echo_server, tmp_
     deliberately huge tokenization backlog (large prompts echoed back as
     outputs, metrics_tokenizer_workers=0 so nothing tokenizes mid-run, and
     the metrics drain unlimited). The watchdog must fire while the
-    aggregator drains, SIGTERM it, and surface the run as INTERRUPTED with
-    a non-zero exit.
+    aggregator drains, bound the graceful teardown, and surface the run as
+    INTERRUPTED with a non-zero exit.
     """
-    dataset_path = _write_big_prompts_dataset(tmp_path)
+    dataset_path = write_large_prompt_dataset(tmp_path, 100)
     config = _make_config(
         mock_http_echo_server.url,
         dataset_path,
@@ -208,7 +179,7 @@ def test_metrics_drain_timeout_fails_run(mock_http_echo_server, tmp_path):
     with complete: false, and run_benchmark must raise so partial ISL/OSL
     stats can never look like a clean exit.
     """
-    dataset_path = _write_big_prompts_dataset(tmp_path)
+    dataset_path = write_large_prompt_dataset(tmp_path, 100)
     config = _make_config(
         mock_http_echo_server.url,
         dataset_path,

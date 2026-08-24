@@ -235,6 +235,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # scorers, a BFCL-shaped breakdown. Display-only.
     accuracy: list[dict[str, Any]] = msgspec.field(default_factory=list)
 
+    @property
+    def n_samples_succeeded(self) -> int:
+        return max(0, self.n_samples_completed - self.n_samples_failed)
+
+    @property
+    def n_samples_dropped(self) -> int:
+        return max(0, self.n_samples_issued - self.n_samples_completed)
+
     @classmethod
     def from_snapshot(
         cls,
@@ -298,6 +306,8 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         version_info = get_version_info()
         raw_duration_ns = _counter("tracked_duration_ns")
         duration_ns = raw_duration_ns if raw_duration_ns > 0 else None
+        n_issued = _counter("tracked_samples_issued")
+        n_failed = _counter("tracked_samples_failed")
         n_completed = _counter("tracked_samples_completed")
         isl = _series_dict("isl")
         osl = _series_dict("osl")
@@ -350,16 +360,22 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             for reason in _FINISH_REASON_COUNTERS
         }
 
+        accounting_valid = 0 <= n_failed <= n_completed <= n_issued
         return cls(
             version=str(version_info.get("version", "unknown")),
             git_sha=version_info.get("git_sha"),
             test_started_at=0,  # TODO: surface session_started_ns via snapshot
-            n_samples_issued=_counter("tracked_samples_issued"),
+            n_samples_issued=n_issued,
             n_samples_completed=n_completed,
-            n_samples_failed=_counter("tracked_samples_failed"),
+            n_samples_failed=n_failed,
             duration_ns=duration_ns,
             state=state,
-            complete=(state == "complete" and n_pending_tasks == 0),
+            complete=(
+                state == "complete"
+                and n_pending_tasks == 0
+                and accounting_valid
+                and n_completed == n_issued
+            ),
             **{
                 field: _series_dict(series)
                 for series, field in SERIES_TO_SUMMARY_FIELD.items()
@@ -378,9 +394,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         # the dedicated accuracy report (accuracy/accuracy_results.json). The
         # accuracy field stays on the struct so report.txt / the console summary
         # still render it; it is just dropped from this serialized perf summary.
-        payload = {
-            k: v for k, v in msgspec.structs.asdict(self).items() if k != "accuracy"
-        }
+        payload = msgspec.structs.asdict(self)
+        payload["n_samples_succeeded"] = self.n_samples_succeeded
+        payload["n_samples_dropped"] = self.n_samples_dropped
+        payload.pop("accuracy")
         json_bytes = msgspec.json.format(msgspec.json.encode(payload), indent=2)
         if save_to is not None:
             with Path(save_to).open("wb") as f:
@@ -419,8 +436,9 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             approx = monotime_to_datetime(self.test_started_at)
             fn(f"Test started at: {approx.strftime('%Y-%m-%d %H:%M:%S')}{newline}")
         fn(f"Total samples issued: {self.n_samples_issued}{newline}")
-        fn(f"Total samples completed: {self.n_samples_completed}{newline}")
+        fn(f"Total samples succeeded: {self.n_samples_succeeded}{newline}")
         fn(f"Total samples failed: {self.n_samples_failed}{newline}")
+        fn(f"Total samples dropped: {self.n_samples_dropped}{newline}")
         if self.duration_ns is not None:
             fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds{newline}")
         else:
