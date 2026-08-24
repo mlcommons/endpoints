@@ -435,9 +435,19 @@ def _mk_series(levels, samples=40):
         sp.out_tokens = samples * 10
         sp.n_issued = samples
         sp.first_issue_ns = i * 1000
-        sp.last_event_ns = i * 1000 + 900
+        sp.last_issue_ns = i * 1000 + 100  # issue span within the super-pass
+        sp.last_event_ns = i * 1000 + 900  # completions land later (drain)
         series.append(sp)
     return series
+
+
+def test_window_issue_span_excludes_the_drain():
+    series = _mk_series([(100, 50)] * 3)
+    # issue span: last_issue(SP2)=2100 - first_issue(SP0)=0 = 2100
+    assert mod.window_issue_span_ns(series, 0, 3) == 2100
+    # completion span is larger (includes the drain): last_event(SP2)=2900 - 0
+    assert mod.window_elapsed_ns(series, 0, 3) == 2900
+    assert mod.window_issue_span_ns(series, 0, 3) < mod.window_elapsed_ns(series, 0, 3)
 
 
 GATE = "mk_hamed_rao"

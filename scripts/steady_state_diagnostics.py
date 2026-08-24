@@ -190,8 +190,9 @@ def text_after_first_chunk(data: object) -> str:
 class SuperPassRollup:
     index: int
     n_issued: int = 0  # per-super-pass sample count (coverage / bucketing invariant)
-    first_issue_ns: int = -1  # earliest issue ts (window wall-clock start)
-    last_event_ns: int = -1  # latest event ts of this super-pass (wall-clock end)
+    first_issue_ns: int = -1  # earliest issue ts (offered-load span start)
+    last_issue_ns: int = -1  # latest issue ts (offered-load span end; throughput denom)
+    last_event_ns: int = -1  # latest event ts incl. completions (drain-inclusive end)
     ttft_ns: list[float] = field(default_factory=list)
     tpot_ns: list[float] = field(default_factory=list)
     out_tokens: int = 0
@@ -267,6 +268,9 @@ def build_super_pass_series(
                 existing = rows.get(uuid)
                 if existing is not None:
                     existing.issue_ns = ts  # retry: refresh issue ts only
+                    sp = series[existing.sp_index]
+                    sp.last_issue_ns = max(sp.last_issue_ns, ts)
+                    sp.last_event_ns = max(sp.last_event_ns, ts)
                     continue
                 sp_idx = issue_counter // superpass_size
                 issue_counter += 1
@@ -275,6 +279,7 @@ def build_super_pass_series(
                 sp.n_issued += 1
                 if sp.first_issue_ns < 0:
                     sp.first_issue_ns = ts
+                sp.last_issue_ns = max(sp.last_issue_ns, ts)
                 sp.last_event_ns = max(sp.last_event_ns, ts)
             elif et == EV_RECV_FIRST:
                 row = rows.get(rec.get("sample_uuid"))
@@ -362,10 +367,25 @@ def pooled_out_tokens(series: Sequence[SuperPassRollup], lo: int, hi: int) -> in
 
 
 def window_elapsed_ns(series: Sequence[SuperPassRollup], lo: int, hi: int) -> int:
-    """Wall-clock span of ``[lo, hi)``: earliest issue to latest event."""
+    """Completion span of ``[lo, hi)``: earliest issue to latest event (drain-inclusive)."""
     window = series[lo:hi]
     firsts = [sp.first_issue_ns for sp in window if sp.first_issue_ns >= 0]
     lasts = [sp.last_event_ns for sp in window if sp.last_event_ns >= 0]
+    if not firsts or not lasts:
+        return 0
+    return max(lasts) - min(firsts)
+
+
+def window_issue_span_ns(series: Sequence[SuperPassRollup], lo: int, hi: int) -> int:
+    """Offered-load span of ``[lo, hi)``: earliest to latest *issue*.
+
+    This is the throughput denominator (§5.1): the drain lives after the last issue, so
+    counting to the last completion would inflate the denominator and deflate TPS —
+    badly so for high-tail workloads (long TTFT + decode).
+    """
+    window = series[lo:hi]
+    firsts = [sp.first_issue_ns for sp in window if sp.first_issue_ns >= 0]
+    lasts = [sp.last_issue_ns for sp in window if sp.last_issue_ns >= 0]
     if not firsts or not lasts:
         return 0
     return max(lasts) - min(firsts)
@@ -943,17 +963,18 @@ def build_steady_state(
     )
     # per-user TPS = 1e9/TPOT is monotone-decreasing, so invert the CI bounds.
     per_user_ci = [per_user_tps(tpot_ci[1]), per_user_tps(tpot_ci[0])]
-    # Point estimate is the true aggregate (tokens / total wall-clock, gaps included).
-    # Its CI is a batch-means half-width from per-super-pass throughput, centered on the
-    # point so the reported value is always inside — per-super-pass spans exclude the
-    # inter-super-pass gaps, so their mean would not equal the aggregate.
+    # Aggregate tokens / offered-load (issue) span (§5.1) — NOT the completion span, which
+    # would inflate the denominator with the drain and deflate TPS on high-tail workloads.
+    # The CI is a batch-means half-width from per-super-pass throughput, centered on the
+    # point (per-super-pass issue spans exclude inter-super-pass gaps, so their mean would
+    # not equal the aggregate).
     system = system_tps(
-        pooled_out_tokens(series, lo, hi), window_elapsed_ns(series, lo, hi)
+        pooled_out_tokens(series, lo, hi), window_issue_span_ns(series, lo, hi)
     )
     sp_system = [
-        system_tps(sp.out_tokens, sp.last_event_ns - sp.first_issue_ns)
+        system_tps(sp.out_tokens, sp.last_issue_ns - sp.first_issue_ns)
         for sp in series[lo:hi]
-        if sp.last_event_ns > sp.first_issue_ns >= 0
+        if sp.last_issue_ns > sp.first_issue_ns >= 0
     ]
     if len(sp_system) >= 2:
         clo, chi = batch_means_ci(sp_system)
@@ -1017,11 +1038,35 @@ class DiagnosticsResult(TypedDict):
     cov: dict[str, dict[str, CovCell]]  # window size (str) -> metric key -> cell
     drift: dict[str, dict[str, DriftEntry]]  # window size (str) -> metric key -> entry
     steady_state: SteadyState  # the headline: first steady plateau + TPS + anomaly
+    per_super_pass: list[dict]  # raw post-warmup per-super-pass rollups (for plotting)
     alpha: float
 
 
 def _drift_verdicts(trajectory: Sequence[float]) -> dict[str, Verdict]:
     return {name: fn(trajectory).verdict for name, fn in ALGORITHMS.items()}
+
+
+def per_super_pass_diagnostics(series: Sequence[SuperPassRollup]) -> list[dict]:
+    """Raw per-super-pass rollups (timestamps, tokens, percentiles) for plotting."""
+    out: list[dict] = []
+    for i, sp in enumerate(series):
+        tt = sorted(sp.ttft_ns)
+        tp = sorted(sp.tpot_ns)
+        out.append(
+            {
+                "i": i,
+                "n_issued": sp.n_issued,
+                "out_tokens": sp.out_tokens,
+                "first_issue_ns": sp.first_issue_ns,
+                "last_issue_ns": sp.last_issue_ns,
+                "last_event_ns": sp.last_event_ns,
+                "ttft_p50": percentile_lower(tt, 0.50) if tt else None,
+                "ttft_p95": percentile_lower(tt, 0.95) if tt else None,
+                "tpot_p50": percentile_lower(tp, 0.50) if tp else None,
+                "tpot_p95": percentile_lower(tp, 0.95) if tp else None,
+            }
+        )
+    return out
 
 
 def run(
@@ -1062,6 +1107,7 @@ def run(
         "cov": {},
         "drift": {},
         "steady_state": build_steady_state(post, trend_gate, cov_bounds),
+        "per_super_pass": per_super_pass_diagnostics(post),
         "alpha": alpha,
     }
 
