@@ -111,11 +111,13 @@ class WorkerManager:
             ),
             daemon=True,
         )
-        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # Blocking is thread-safe and survives spawn; worker_main installs its
+        # disposition before unblocking in the child.
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
         try:
             process.start()
         finally:
-            signal.signal(signal.SIGINT, previous_sigint)
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         return process
 
     def _pin_workers(self) -> None:

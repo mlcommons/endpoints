@@ -22,8 +22,8 @@ from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 
 
 @pytest.mark.unit
-def test_spawned_worker_inherits_sigint_ignored(monkeypatch):
-    dispositions = []
+def test_spawned_worker_inherits_sigint_blocked(monkeypatch):
+    blocked = []
 
     class FakeProcess:
         pid = 1
@@ -32,14 +32,15 @@ def test_spawned_worker_inherits_sigint_ignored(monkeypatch):
             pass
 
         def start(self):
-            dispositions.append(signal.getsignal(signal.SIGINT))
+            current_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+            blocked.append(signal.SIGINT in current_mask)
 
     monkeypatch.setattr(worker_manager_module, "Process", FakeProcess)
     manager = object.__new__(WorkerManager)
     manager.http_config = MagicMock()
-    previous = signal.getsignal(signal.SIGINT)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
 
     manager._spawn_worker(0, MagicMock())
 
-    assert dispositions == [signal.SIG_IGN]
-    assert signal.getsignal(signal.SIGINT) is previous
+    assert blocked == [True]
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == previous_mask
