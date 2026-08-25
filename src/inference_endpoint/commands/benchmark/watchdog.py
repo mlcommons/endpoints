@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import signal
 import time
 import types
@@ -28,6 +29,10 @@ from collections.abc import Callable, Iterator
 from inference_endpoint.load_generator.session import BenchmarkSession, PhaseType
 
 logger = logging.getLogger(__name__)
+
+
+def _force_exit_process_group() -> None:
+    os.killpg(os.getpgrp(), signal.SIGKILL)
 
 
 class _PerfPhaseTimeout:
@@ -79,6 +84,7 @@ class SigintGovernor:
 
     def __call__(self, signum: int, frame: types.FrameType | None) -> None:
         if self.interrupted:
+            _force_exit_process_group()
             return
         self.interrupted = True
         if (

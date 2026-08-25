@@ -17,6 +17,7 @@
 
 import asyncio
 import logging
+import signal
 import time
 from multiprocessing import Process
 
@@ -110,7 +111,11 @@ class WorkerManager:
             ),
             daemon=True,
         )
-        process.start()
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            process.start()
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
         return process
 
     def _pin_workers(self) -> None:

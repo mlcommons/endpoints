@@ -82,7 +82,12 @@ class TestSigintGovernor:
         session.stop.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_live_and_repeat_sigint_stop_once_and_signal_drain(self):
+    async def test_second_sigint_force_exits(self, monkeypatch):
+        force_exit = MagicMock()
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.watchdog._force_exit_process_group",
+            force_exit,
+        )
         gov = SigintGovernor()
         session = MagicMock()
         abort_event = asyncio.Event()
@@ -90,13 +95,14 @@ class TestSigintGovernor:
         gov.bind_session(session, abort_event)
 
         _fire(gov)
-        _fire(gov)
-        _fire(gov)
         await asyncio.sleep(0)
 
-        assert gov.interrupted
         session.stop.assert_called_once()
         assert abort_event.is_set()
+        force_exit.assert_not_called()
+
+        _fire(gov)
+        force_exit.assert_called_once()
 
 
 @pytest.mark.unit

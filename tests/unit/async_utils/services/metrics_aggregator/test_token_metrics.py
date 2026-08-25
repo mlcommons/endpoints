@@ -17,6 +17,7 @@
 
 import asyncio
 import multiprocessing
+import signal
 import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -545,6 +546,22 @@ class TestSetupShardsDecisions:
         with self._make(monkeypatch, 16, -1) as tok:
             blocks = [set(ex.initargs[1]) for ex in tok._procs]
             assert blocks == [set(range(0, 8)), set(range(8, 14))]
+
+    def test_worker_spawn_ignores_sigint_and_restores_parent_handler(self, monkeypatch):
+        dispositions = []
+
+        class _SignalCapturingExecutor(_SpawnlessExecutor):
+            def submit(self, fn, *args):
+                dispositions.append(signal.getsignal(signal.SIGINT))
+                return super().submit(fn, *args)
+
+        previous = signal.getsignal(signal.SIGINT)
+        with self._make(monkeypatch, 16, -1, executor=_SignalCapturingExecutor):
+            pass
+
+        assert dispositions
+        assert all(handler is signal.SIG_IGN for handler in dispositions)
+        assert signal.getsignal(signal.SIGINT) is previous
 
     def test_structured_tokenization_does_not_require_a_text_backend(self, monkeypatch):
         monkeypatch.setattr(

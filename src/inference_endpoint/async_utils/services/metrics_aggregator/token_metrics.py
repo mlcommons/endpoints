@@ -361,6 +361,7 @@ class BatchTokenizer:
         t0 = time.perf_counter()
         ctx = multiprocessing.get_context("spawn")
         procs: list[ProcessPoolExecutor] = []
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             for block in blocks[:n]:
                 ex = ProcessPoolExecutor(
@@ -386,6 +387,8 @@ class BatchTokenizer:
                 "slow path that cannot keep up with completions. Fix the "
                 "environment (see the chained error)."
             ) from exc
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
         self._procs = procs
         logger.info(
             "BatchTokenizer: %d shards across %d CPUs (setup %.1fs)",

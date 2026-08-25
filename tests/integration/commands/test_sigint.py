@@ -196,9 +196,21 @@ def _pid_of_child(needle: str, extra: str) -> int | None:
     return None
 
 
+def _child_pids(parent_pid: int) -> set[int]:
+    children = set()
+    for pid, _ in _iter_proc_cmdlines():
+        try:
+            status = Path(f"/proc/{pid}/status").read_text()
+        except OSError:
+            continue
+        if f"PPid:\t{parent_pid}\n" in status:
+            children.add(pid)
+    return children
+
+
 @pytest.mark.integration
 def test_group_sigint_exits_gracefully(mock_http_echo_server, tmp_path):
-    """A group ^C and duplicate delivery exit 130 without leaking children."""
+    """A group ^C exits 130 without leaking children or tracebacks."""
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"
     log_file = tmp_path / "run.log"
@@ -211,9 +223,6 @@ def test_group_sigint_exits_gracefully(mock_http_echo_server, tmp_path):
         _wait_services_ready(proc, report_dir)
         time.sleep(3.0)
         os.killpg(proc.pid, signal.SIGINT)
-        time.sleep(0.2)
-        if proc.poll() is None:
-            os.kill(proc.pid, signal.SIGINT)
         rc = proc.wait(timeout=60.0)
 
     assert rc == 130, f"user abort must exit 130, got {rc}"
@@ -223,6 +232,34 @@ def test_group_sigint_exits_gracefully(mock_http_echo_server, tmp_path):
     log_text = log_file.read_text()
     assert "event logger received SIGINT — waiting for parent ENDED" in log_text
     assert "KeyboardInterrupt" not in log_text
+
+
+@pytest.mark.integration
+def test_second_sigint_force_quits_without_artifacts(mock_http_echo_server, tmp_path):
+    report_dir = tmp_path / "report"
+    config_path = tmp_path / "bench.yaml"
+    _write_config(report_dir, mock_http_echo_server.url, config_path)
+
+    with _benchmark_proc(
+        [_cli(), "benchmark", "from-config", "-c", str(config_path)]
+    ) as proc:
+        _wait_services_ready(proc, report_dir)
+        agg_pid = _pid_of_child("metrics_aggregator", str(report_dir))
+        assert agg_pid is not None
+        os.kill(agg_pid, signal.SIGSTOP)
+        time.sleep(0.1)
+        os.kill(proc.pid, signal.SIGINT)
+        time.sleep(0.4)
+        started = time.monotonic()
+        os.kill(proc.pid, signal.SIGINT)
+        rc = proc.wait(timeout=5.0)
+        force_latency = time.monotonic() - started
+
+    assert rc == -signal.SIGKILL
+    assert force_latency < 2.0
+    assert not (report_dir / "performance/result_summary.json").exists()
+    assert not (report_dir / "events.jsonl").exists()
+    _assert_no_leftover_children(report_dir, "forced abort")
 
 
 @pytest.mark.integration
@@ -286,25 +323,40 @@ def test_sigint_grace_expiry_abandons_wedged_drain(mock_http_echo_server, tmp_pa
 
 
 @pytest.mark.integration
-def test_sigint_before_session_exits_130(mock_http_echo_server, tmp_path):
-    """A ^C before the session exists (setup/service launch) exits 130.
-
-    No session is bound yet, so the governor falls back to an immediate
-    KeyboardInterrupt — the run must not hang or exit 0.
-    """
+@pytest.mark.parametrize("interrupt_point", ["service_startup", "worker_startup"])
+def test_sigint_during_startup_has_no_child_traceback(
+    mock_http_echo_server, tmp_path, interrupt_point
+):
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"
+    log_path = tmp_path / "run.log"
     _write_config(report_dir, mock_http_echo_server.url, config_path)
 
     with _benchmark_proc(
-        [_cli(), "benchmark", "from-config", "-c", str(config_path)]
+        [_cli(), "benchmark", "from-config", "-c", str(config_path)],
+        log_path,
     ) as proc:
-        time.sleep(1.5)  # interpreter up, setup underway; services not ready
+        deadline = time.monotonic() + 30.0
+        while True:
+            if interrupt_point == "service_startup":
+                reached = (
+                    _pid_of_child("metrics_aggregator", str(report_dir)) is not None
+                )
+            else:
+                reached = len(_child_pids(proc.pid)) > 2
+            if reached:
+                break
+            assert proc.poll() is None, "benchmark exited before startup boundary"
+            assert time.monotonic() < deadline, f"{interrupt_point} did not start"
+            time.sleep(0.01)
         os.killpg(proc.pid, signal.SIGINT)
         rc = proc.wait(timeout=30.0)
 
-    assert rc == 130, f"pre-session ^C must exit 130, got {rc}"
-    _assert_no_leftover_children(report_dir, "aborted run")
+    log_text = log_path.read_text(errors="replace")
+    assert rc == 130
+    assert "multiprocessing/spawn.py" not in log_text
+    assert "KeyboardInterrupt" not in log_text
+    _assert_no_leftover_children(report_dir, "startup abort")
 
 
 @pytest.mark.integration
