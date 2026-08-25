@@ -174,18 +174,13 @@ def from_config(
     except (yaml.YAMLError, ValidationError, ValueError, FileNotFoundError) as e:
         raise InputValidationError(f"Config error: {e}") from e
     if timeout is not None:
-        try:
-            resolved = resolved.with_updates(
-                settings=resolved.settings.with_updates(
-                    timeouts=resolved.settings.timeouts.with_updates(
-                        run_timeout_s=timeout
-                    )
-                )
+        if not timeout > 0:
+            raise InputValidationError("--timeout must be greater than zero")
+        resolved = resolved.with_updates(
+            settings=resolved.settings.with_updates(
+                timeouts=resolved.settings.timeouts.with_updates(run_timeout_s=timeout)
             )
-        except ValidationError as e:
-            # with_updates re-validates every layer (Timeouts is gt=0), so a
-            # bad --timeout must exit 2 like every other invalid input.
-            raise InputValidationError(f"Invalid --timeout: {e}") from e
+        )
     if report_dir is not None:
         resolved = resolved.with_updates(report_dir=report_dir)
     test_mode = mode or (

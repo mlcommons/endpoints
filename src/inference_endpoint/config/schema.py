@@ -145,9 +145,7 @@ class ScorerMethod(str, Enum):
     SWE_BENCH = "swe_bench_scorer"
 
 
-# --------------------------------------------------------------------- audit
-# The root-level ``audit:`` block: per-test config models and their id enum.
-# The runnable test registry lives in ``compliance/``.
+# Audit configuration; runnable test registry lives in compliance/.
 class AuditTestId(str, Enum):
     """Registered compliance audit test identifiers."""
 
@@ -787,6 +785,12 @@ class WarmupConfig(BaseModel):
 
 
 class Timeouts(WithUpdatesMixin, BaseModel):
+    """Global benchmark deadlines and drain budgets.
+
+    Workload issue-duration caps remain in ``RuntimeConfig``; client worker
+    lifecycle timeouts remain in the client configuration.
+    """
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     run_timeout_s: Annotated[

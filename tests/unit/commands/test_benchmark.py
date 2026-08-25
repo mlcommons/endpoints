@@ -754,7 +754,7 @@ datasets:
         config_file.write_text(yaml_content)
         # Timeouts.run_timeout_s is gt=0; a bad --timeout must be a clean
         # input error (exit 2), not a raw pydantic traceback.
-        with pytest.raises(InputValidationError, match="Invalid --timeout"):
+        with pytest.raises(InputValidationError, match="must be greater than zero"):
             from_config(config=config_file, timeout=0.0)
 
     @pytest.mark.unit

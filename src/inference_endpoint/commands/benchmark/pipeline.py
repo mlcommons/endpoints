@@ -323,6 +323,12 @@ class MetricsPipeline:
         abort_event: asyncio.Event | None = None,
         interrupted_teardown_grace_s: float = 30.0,
     ) -> Report | None:
+        """Drain services and build a report from their final snapshot.
+
+        An abort bounds the service drain by ``interrupted_teardown_grace_s``.
+        Prefer the aggregator's on-disk final snapshot; fall back to the latest
+        live snapshot only when termination prevented the final write.
+        """
         assert self.publisher is not None
         assert self._launcher is not None
         logger.info(

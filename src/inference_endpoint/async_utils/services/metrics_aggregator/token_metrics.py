@@ -56,23 +56,19 @@ from inference_endpoint.endpoint_client.cpu_affinity import (
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
-# A single rayon pool peaks at ~8 cores for BPE (memory-bound; more threads
-# oversubscribe and, on multi-socket Grace, cross the NUMA boundary). Sharding
-# across processes pinned to disjoint CORES_PER_WORKER-sized blocks uses the
-# whole machine. Measured on GB200: ~16k texts/s at 18 blocks vs ~1.5k
-# single-process.
+# CORES_PER_WORKER bounds each Rayon BPE pool: larger pools oversubscribe this
+# memory-bound workload and can cross NUMA boundaries. Multiple processes pinned
+# to disjoint CORES_PER_WORKER-sized blocks scale across the allowed CPU set.
 CORES_PER_WORKER = 8
 
-# Reserve some CPUs for system in metrics-drain phase
-# we dont use all CPUs for metrics-drain since it overloads the system,
-# making it unresponsive for the duration of drain.
+# DRAIN_RESERVED_CPUS keeps part of the CPU set out of the metrics-drain shard
+# pool so the parent, aggregator event loop, and host remain responsive.
 DRAIN_RESERVED_CPUS = 2
 
-# Budget for the parallel shard warmup (spawn + transformers import +
-# tokenizer load per worker). A hung load (e.g. a stuck network filesystem)
-# must become a bounded startup error, not wedge service startup — and the
-# error must fire before the parent's 30 s service-launch budget kills the
-# subprocess, so the diagnostic wins the race.
+# _SHARD_WARMUP_TIMEOUT_S bounds parallel shard setup (spawn, imports, and
+# tokenizer load) so a hung worker cannot wedge this service indefinitely.
+# The parent's configurable service_ready_timeout_s independently bounds the
+# overall service launch and may expire first.
 _SHARD_WARMUP_TIMEOUT_S = 25.0
 
 # Per-flush ceiling for the LIVE lane. Bounds three things at once: how long

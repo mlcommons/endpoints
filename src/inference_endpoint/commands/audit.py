@@ -126,6 +126,9 @@ def _run_phases(
 
     artifacts: list[AuditRunArtifacts] = []
     dataset_size: int | None = None
+    # Validate once after the first phase setup loads the dataset. setup_benchmark
+    # spawns no workers, so invalid plans fail after one load and before any
+    # phase issues work.
     for spec in specs:
         if sigint.interrupted:
             raise KeyboardInterrupt(f"Audit interrupted before phase '{spec.label}'")
@@ -162,10 +165,13 @@ def _run_phases(
             bench = run_benchmark_async(ctx, deadline=deadline, sigint=sigint)
             finalize_benchmark(ctx, bench)
         except CLIError:
+            # Preserve typed CLI failures (including DatasetValidationError) so
+            # the top-level handler retains their input/setup/execution exit codes.
             raise
         except Exception as exc:
             raise ExecutionError(f"Audit phase '{spec.label}' failed: {exc}") from exc
         finally:
+            # This direct phase runner bypasses run_benchmark()'s cleanup.
             if bench is not None and bench.tmpfs_dir.exists():
                 _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
                 shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
@@ -178,14 +184,18 @@ def _run_phases(
                 f"Audit phase '{spec.label}' hit the run timeout "
                 "(settings.timeouts.run_timeout_s); report marked INTERRUPTED"
             )
+        # Preserve the CLI's interrupted exit path instead of recasting it as a
+        # generic phase failure.
         if report.state == "interrupted":
             raise KeyboardInterrupt(f"Audit phase '{spec.label}' interrupted")
+        # Compliance must never certify a result built from partial metrics.
         if not report.complete:
             raise ExecutionError(
                 f"Audit phase '{spec.label}' did not complete cleanly "
                 "(metrics drain timed out); "
                 "refusing to certify a result from partial data"
             )
+        # Without a fixed spec count, record what this phase actually issued.
         n_requested = (
             spec.n_samples if spec.n_samples is not None else report.n_samples_issued
         )

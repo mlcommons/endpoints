@@ -64,7 +64,6 @@ from inference_endpoint.commands.benchmark.profiling import (
 from inference_endpoint.commands.benchmark.watchdog import (
     RunWatchdog,
     SigintGovernor,
-    _PerfPhaseTimeout,
     sigint_policy,
 )
 from inference_endpoint.compliance import AuditRunSpec
@@ -699,6 +698,37 @@ def _build_phases(
     return phases
 
 
+class _PerfPhaseTimeout:
+    """Bound PERFORMANCE issuing without aborting later phases.
+
+    The timer is cancelled when any later phase starts, so the issue-duration
+    cap cannot truncate an accuracy phase.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        max_issue_duration_ms: int | None,
+        on_timeout: Callable[[], None],
+    ) -> None:
+        self._loop = loop
+        self._max_duration_ms = max_issue_duration_ms
+        self._on_timeout = on_timeout
+        self._handle: asyncio.TimerHandle | None = None
+
+    def on_phase_start(self, phase_type: PhaseType) -> None:
+        self.cancel()
+        if phase_type == PhaseType.PERFORMANCE and self._max_duration_ms is not None:
+            self._handle = self._loop.call_later(
+                self._max_duration_ms / 1000.0, self._on_timeout
+            )
+
+    def cancel(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
+
+
 async def _create_issuer(
     ctx: BenchmarkContext, loop: asyncio.AbstractEventLoop
 ) -> tuple[HttpClientSampleIssuer, HTTPEndpointClient]:
@@ -912,14 +942,11 @@ async def _run_benchmark_async(
                     perf_timeout.on_phase_start(phase.phase_type)
 
                 try:
-                    fired_before_run = watchdog.fired
                     result = await session.run(
                         phases,
-                        on_phase_start=None if fired_before_run else _on_phase_start,
+                        on_phase_start=_on_phase_start,
                     )
-                    session_completed_normally = not (
-                        fired_before_run or session.stop_requested
-                    )
+                    session_completed_normally = not session.stop_requested
                 except Exception as e:
                     if watchdog.fired:
                         logger.exception(
@@ -954,6 +981,9 @@ async def _run_benchmark_async(
                                 "Benchmark completed without a usable metrics report"
                             )
                     except Exception as e:  # noqa: BLE001
+                        # Surface drain/report failures on a clean run. Once the
+                        # run is already failing, preserve the original error
+                        # instead of replacing it with a teardown failure.
                         if session_completed_normally and not sigint.interrupted:
                             raise
                         logger.warning(
@@ -1024,6 +1054,7 @@ def run_benchmark_async(
     deadline: float | None = None,
     sigint: SigintGovernor | None = None,
 ) -> BenchmarkResult:
+    """Drive the async benchmark through the process's managed event loop."""
     if sigint is None:
         sigint = SigintGovernor()
     if deadline is None:
