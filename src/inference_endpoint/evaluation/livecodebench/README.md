@@ -196,7 +196,8 @@ The resolved remote reference is `${LCB_IMAGE_REGISTRY}/${LCB_IMAGE_NAME}:${LCB_
 Requires `docker login dhi.io` (base images) and `docker login` to your target registry first.
 
 ```bash
-# Build (using HF_TOKEN as a build secret) and push:
+# Build (using HF_TOKEN as a build secret) and push a MULTI-ARCH manifest
+# (linux/amd64,linux/arm64) by default:
 LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<your HuggingFace Token> \
   ./push_image.sh
 
@@ -204,32 +205,35 @@ LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<your HuggingFace Token> \
 LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./push_image.sh --no-build
 ```
 
+Every build goes through `docker buildx` and pushes **straight to the registry**: buildx forces gzip layers so the
+image is extractable by enroot/pyxis on SLURM (see [#467](https://github.com/mlcommons/endpoints/issues/467)), and a
+multi-arch image cannot be loaded into the local docker store anyway. The script auto-creates a `docker-container`
+buildx builder. `--no-build` is the one exception — it tag+pushes a pre-built local image for the host arch only.
+
 Each build publishes an immutable `:<sha>` tag, so **re-pushing an existing `:<sha>` is refused** to protect it. Pass `--force` to overwrite deliberately (e.g. re-running a partially failed push):
 
 ```bash
 LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<token> ./push_image.sh --force
 ```
 
-**Cross-architecture builds.** To build for an architecture other than the host's (e.g. build `arm64` on an
-`x86_64` node, or a multi-arch manifest), pass `--platform`:
+**Single-arch / cross-arch builds.** Pass `--platform` to override the multi-arch default — e.g. a single arch (much
+faster, no emulation) or a specific target:
 
 ```bash
 LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<token> ./push_image.sh --platform linux/arm64
 LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<token> ./push_image.sh --platform linux/amd64,linux/arm64
 ```
 
-Platform builds use `docker buildx` and push the image **straight to the registry** (a non-native image cannot be
-loaded into the local docker store, so there is no `--no-build` for this path). The script auto-creates a
-`docker-container` buildx builder. The target architecture must have **QEMU emulation registered on the host**,
-a one-time step that needs `--privileged`:
+Building an architecture other than the host's needs **QEMU emulation registered on the host**, a one-time step that
+needs `--privileged`:
 
 ```bash
 docker run --privileged --rm tonistiigi/binfmt --install all
 ```
 
-> ⚠️ The dataset-generation step runs under emulation when cross-building, which is **much slower** than a native
-> build (and still needs the same ~21 GiB peak). Prefer building natively on a host of the target architecture
-> when one is available.
+> ⚠️ The dataset-generation step runs under emulation for any non-host arch, which is **much slower** than native
+> (and still needs the same ~21 GiB peak). Since multi-arch is the default, expect the non-host arch to build under
+> emulation; pass `--platform <host-arch>` for a quick single-arch image when that is enough.
 
 #### Pull (consumer / eval side)
 

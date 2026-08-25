@@ -14,22 +14,23 @@
 #
 # Usage:
 #   LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=hf_xxx ./push_image.sh
-#   LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./push_image.sh --no-build   # push existing local image
-#   ... --force                                                         # overwrite an existing :<sha> tag (default: refuse)
+#       Builds and pushes a MULTI-ARCH manifest (linux/amd64,linux/arm64) by default.
+#   ... --platform linux/arm64                      # single arch (fast; no QEMU emulation)
+#   ... --platform linux/amd64,linux/arm64          # explicit multi-arch (the default)
+#   LCB_IMAGE_REGISTRY=... LCB_IMAGE_TAG=<sha> ./push_image.sh --no-build   # push existing local image
+#   ... --force                                     # overwrite an existing :<sha> tag (default: refuse)
 #
-# Cross-architecture build (e.g. build arm64 on an x86 node, or a multi-arch manifest):
-#   LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=hf_xxx ./push_image.sh --platform linux/arm64
-#   ... --platform linux/amd64,linux/arm64           # multi-arch manifest in one push
-#   (or set LCB_IMAGE_PLATFORM instead of the flag.)
-#   Platform builds use 'docker buildx' and push the image straight to the registry
-#   (a non-native image cannot be loaded into the local docker store). They require
-#   QEMU emulation registered on the host for the target arch, one time:
-#       docker run --privileged --rm tonistiigi/binfmt --install arm64
-#   The dataset-generation step runs under emulation and is MUCH slower than native.
+# All builds go through 'docker buildx' and push straight to the registry: buildx forces
+# gzip layers so the image is enroot/pyxis-extractable (mlcommons/endpoints#467), and a
+# multi-arch image cannot be loaded into the local docker store anyway. Building an arch
+# other than the host's needs QEMU emulation registered once (needs --privileged):
+#       docker run --privileged --rm tonistiigi/binfmt --install all
+#   The dataset-generation step runs under emulation and is MUCH slower than native, so
+#   prefer --platform <host-arch> when a single-arch image is enough.
 #
 # Environment variables: see _image_env.sh (LCB_IMAGE_REGISTRY required).
 #   HF_TOKEN            required unless --no-build (passed as a BuildKit secret directly from the environment).
-#   LCB_IMAGE_PLATFORM  optional target platform(s), e.g. linux/arm64 (default: host native).
+#   LCB_IMAGE_PLATFORM  target platform(s), e.g. linux/arm64 (default: linux/amd64,linux/arm64).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,7 +60,11 @@ platform_supported() { [[ -z "$(unsupported_platforms "$1" "$2")" ]]; }
 
 NO_BUILD=0
 FORCE=0
-PLATFORM="${LCB_IMAGE_PLATFORM:-}"
+# Multi-arch by default: one publish runs on amd64 and arm64, and the buildx path forces
+# gzip layers so the image is enroot/pyxis-extractable (mlcommons/endpoints#467). Override
+# with --platform <spec> for a single arch (e.g. --platform linux/arm64 skips the slow QEMU
+# emulation of the non-host arch).
+PLATFORM="${LCB_IMAGE_PLATFORM:-linux/amd64,linux/arm64}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-build) NO_BUILD=1 ;;
@@ -154,26 +159,32 @@ if [[ "$FORCE" -eq 0 ]]; then
 fi
 
 # ----------------------------------------------------------------------------
-# Cross-architecture path: build with buildx and push directly to the registry.
-# A non-native image cannot be `docker load`-ed into the local store, so buildx
-# builds and pushes in a single step (no separate tag/push).
+# --no-build pushes a pre-built local image (host arch only) via a plain tag+push.
+# Every other invocation builds with buildx and pushes straight to the registry: buildx
+# forces gzip layers (enroot/pyxis-safe, #467) and a multi-arch image cannot be
+# `docker load`-ed into the local store anyway, so there is no separate build/tag step.
 # ----------------------------------------------------------------------------
-if [[ -n "$PLATFORM" ]]; then
-    if [[ "$NO_BUILD" -eq 1 ]]; then
-        echo "error: --platform builds the image, so it cannot be combined with --no-build." >&2
-        exit 1
-    fi
+if [[ "$NO_BUILD" -eq 1 ]]; then
+    echo ">> Tagging ${LCB_LOCAL_TAG} -> ${LCB_IMAGE_REF}"
+    docker tag "$LCB_LOCAL_TAG" "$LCB_IMAGE_REF"
+
+    echo ">> Pushing ${LCB_IMAGE_REF}"
+    docker push "$LCB_IMAGE_REF"
+    # A pre-built local image can carry zstd base layers under the containerd image store;
+    # block a publish enroot/pyxis cannot extract (#467).
+    assert_gzip_layers "$LCB_IMAGE_REF" || exit 1
+else
     if [[ -z "${HF_TOKEN:-}" ]]; then
-        echo "error: HF_TOKEN is required to build the image." >&2
+        echo "error: HF_TOKEN is required to build the image (or pass --no-build to push an existing one)." >&2
         exit 1
     fi
     if ! docker buildx version >/dev/null 2>&1; then
-        echo "error: 'docker buildx' is required for --platform builds but is not available." >&2
+        echo "error: 'docker buildx' is required but is not available." >&2
         exit 1
     fi
 
-    # Ensure a docker-container builder exists (the default 'docker' driver cannot
-    # build non-native platforms). Creating it is safe and unprivileged.
+    # Ensure a docker-container builder exists (the default 'docker' driver can neither
+    # push nor build a non-host platform). Creating it is safe and unprivileged.
     if ! docker buildx inspect "$BUILDX_BUILDER" >/dev/null 2>&1; then
         echo ">> Creating buildx builder '${BUILDX_BUILDER}' (docker-container driver)"
         docker buildx create --name "$BUILDX_BUILDER" --driver docker-container >/dev/null
@@ -194,6 +205,7 @@ if [[ -n "$PLATFORM" ]]; then
         echo "error: builder '${BUILDX_BUILDER}' cannot build: ${missing_platforms} — QEMU emulation for it is not registered on the host." >&2
         echo "       Register it once (needs --privileged), then re-run:" >&2
         echo "         docker run --privileged --rm tonistiigi/binfmt --install all" >&2
+        echo "       Or build a single arch to skip emulation: --platform linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" >&2
         exit 1
     fi
 
@@ -208,33 +220,6 @@ if [[ -n "$PLATFORM" ]]; then
         --provenance=false \
         --output "type=image,push=true,compression=gzip,force-compression=true,oci-mediatypes=false" \
         "$SCRIPT_DIR"
-    assert_gzip_layers "$LCB_IMAGE_REF" || exit 1
-else
-    # ------------------------------------------------------------------------
-    # Native path: plain docker build for the host arch, then tag and push.
-    # ------------------------------------------------------------------------
-    if [[ "$NO_BUILD" -eq 0 ]]; then
-        if [[ -z "${HF_TOKEN:-}" ]]; then
-            echo "error: HF_TOKEN is required to build the image (or pass --no-build to push an existing one)." >&2
-            exit 1
-        fi
-
-        echo ">> Building ${LCB_LOCAL_TAG} (endpoints ${ENDPOINTS_SHA}) ..."
-        docker build \
-            -f "${SCRIPT_DIR}/lcb_serve.dockerfile" \
-            --secret id=HF_TOKEN,env=HF_TOKEN \
-            --build-arg "ENDPOINTS_SHA=${ENDPOINTS_SHA}" \
-            -t "$LCB_LOCAL_TAG" \
-            "$SCRIPT_DIR"
-    fi
-
-    echo ">> Tagging ${LCB_LOCAL_TAG} -> ${LCB_IMAGE_REF}"
-    docker tag "$LCB_LOCAL_TAG" "$LCB_IMAGE_REF"
-
-    echo ">> Pushing ${LCB_IMAGE_REF}"
-    docker push "$LCB_IMAGE_REF"
-    # The native docker push can preserve zstd base layers under the containerd image
-    # store; block a publish enroot/pyxis cannot extract (#467).
     assert_gzip_layers "$LCB_IMAGE_REF" || exit 1
 fi
 
