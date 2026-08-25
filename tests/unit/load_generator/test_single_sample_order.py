@@ -43,8 +43,8 @@ def _settings(spec: SampleOrderSpec, n: int = 10) -> RuntimeSettings:
     return RuntimeSettings(
         metric_target=Throughput(1.0),
         reported_metrics=[],
-        min_duration_ms=0,
-        max_duration_ms=None,
+        min_issue_duration_ms=0,
+        max_issue_duration_ms=None,
         n_samples_from_dataset=n,
         n_samples_to_issue=None,
         min_sample_count=1,

@@ -392,25 +392,27 @@ class BenchmarkSession:
         if self._strategy_task and not self._strategy_task.done():
             self._strategy_task.cancel()
 
-    def stop_current_phase(self) -> None:
-        """End the in-progress phase without aborting the session.
+    @property
+    def stop_requested(self) -> bool:
+        """True once stop() ran — Ctrl-C, transport closure, or watchdog.
 
-        Sets a per-phase stop flag the strategy's stop-check observes (so a
-        polling strategy stops issuing) and cancels the current strategy task
-        (so a strategy blocked awaiting a slow response is interrupted). Unlike
-        ``stop``, this does NOT set the session-wide ``_stop_requested`` flag —
-        a combined run whose performance phase hits its ``max_duration`` cap
-        still proceeds to the accuracy phase.
-
-        Also sets the drain event: if the cap fires while the phase is already
-        inside its ``_drain_inflight`` wait (strategy task finished), cancelling
-        the task is a no-op, so an unbounded (``performance_timeout_s: null``)
-        drain would otherwise hang forever on a stuck in-flight response.
+        Distinguishes a session whose run() returned after an abort from one
+        that completed normally; the per-phase cap (stop_current_phase) does
+        NOT set it, since reaching max_issue_duration_ms is a normal phase end.
         """
+        return self._stop_requested
+
+    def stop_current_phase(self) -> None:
+        """Stop issuing in the current phase without aborting the session.
+
+        Cancels a strategy blocked on an async primitive, but deliberately
+        leaves the drain event untouched: already-issued requests must still
+        complete or exhaust the phase drain timeout before the next phase.
+        """
+        if self._strategy_task is None or self._strategy_task.done():
+            return
         self._current_phase_stopped = True
-        self._drain_event.set()
-        if self._strategy_task and not self._strategy_task.done():
-            self._strategy_task.cancel()
+        self._strategy_task.cancel()
 
     async def run(
         self,
@@ -444,6 +446,12 @@ class BenchmarkSession:
                     await self._recv_task
                 except asyncio.CancelledError:
                     pass
+            if self._stop_requested:
+                # Aborted run (Ctrl-C, transport closure, run watchdog): mark
+                # it BEFORE the terminal ENDED so the aggregator's ENDED-driven
+                # finalize — which still drains buffered samples first — writes
+                # state=interrupted rather than a normal COMPLETE snapshot.
+                self._publish_session_event(SessionEventType.INTERRUPTED)
             self._publish_session_event(SessionEventType.ENDED)
 
         return SessionResult(
@@ -529,24 +537,18 @@ class BenchmarkSession:
     ) -> None:
         """Wait for all in-flight responses from this phase to complete.
 
-        Bounded by ``timeout`` seconds; on expiry logs an error and returns so
-        the next phase starts regardless of stuck requests. ``timeout=None``
-        waits indefinitely — accuracy phases use this because every sample must
-        complete and an offline burst over few connections legitimately exceeds
-        any fixed bound. A dropped transport still unblocks the wait via the
-        ``_receive_responses`` close path."""
-        if (
-            phase_issuer.inflight <= 0
-            or self._stop_requested
-            or self._current_phase_stopped
-        ):
+        Bounded by ``timeout`` seconds; on expiry the whole session is aborted
+        because advancing with unresolved requests would mix phase accounting.
+        ``timeout=None`` intentionally permits long accuracy and offline drains.
+        A dropped transport still unblocks via the receive-loop close path.
+        """
+        if phase_issuer.inflight <= 0 or self._stop_requested:
             return
         logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
         self._drain_event.clear()
-        # Re-check after clear: a completion (or a per-phase cap firing) may have
-        # set the event between the initial inflight check and clear(), which
-        # would otherwise be lost, hanging an unbounded drain forever.
-        if phase_issuer.inflight <= 0 or self._current_phase_stopped:
+        # Re-check after clear: a completion may have set the event between the
+        # initial inflight check and clear().
+        if phase_issuer.inflight <= 0 or self._stop_requested:
             return
         if timeout is None:
             await self._drain_event.wait()
@@ -556,10 +558,11 @@ class BenchmarkSession:
         except TimeoutError:
             logger.error(
                 "Drain timed out after %.0f s with %d responses still in flight; "
-                "proceeding to next phase.",
+                "aborting the session.",
                 timeout,
                 phase_issuer.inflight,
             )
+            self.stop()
 
     async def _receive_responses(self) -> None:
         """Receive responses from the issuer. Runs as a concurrent task."""
@@ -692,8 +695,8 @@ class BenchmarkSession:
         strategy is executing. This is guaranteed by sequential phase execution.
         """
         max_duration_ns = (
-            settings.max_duration_ms * 1_000_000
-            if settings.max_duration_ms is not None
+            settings.max_issue_duration_ms * 1_000_000
+            if settings.max_issue_duration_ms is not None
             else 0
         )
         total_samples = settings.total_samples_to_issue()

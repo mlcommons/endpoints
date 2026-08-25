@@ -45,19 +45,19 @@ class SessionState(str, Enum):
     LIVE        → run in progress; tick task publishing live HDR-derived stats.
     DRAINING    → ``SessionEventType.ENDED`` has been received; the aggregator
                   is tokenizing the buffered samples (bounded by the
-                  ``--drain-timeout`` budget — schema default 0 = unlimited). Tick task
-                  continues at this stage, still HDR-derived; no new events
+                  ``--drain-timeout`` budget, i.e.
+                  ``settings.timeouts.metrics_drain_timeout_s``: None or an
+                  omitted flag = unlimited). The tick task continues at this
+                  stage, still HDR-derived; no new events
                   will arrive.
     COMPLETE    → terminal clean state. The ``publish_final()`` snapshot
                   written from the ``ENDED`` path. Percentiles and histograms
                   are exact (computed from raw values).
-    INTERRUPTED → terminal interrupted state. The ``publish_final()`` snapshot
-                  written from a signal handler (SIGTERM / SIGINT) before
-                  ``ENDED`` arrived. Stats are best-effort partial captures of
-                  whatever the aggregator had at signal time — drain didn't
-                  complete and raw values may be missing late samples.
-                  Distinguishes "user killed the run" from "clean shutdown";
-                  Report renders this with a clear interrupted indicator.
+    INTERRUPTED → terminal interrupted state: the session's INTERRUPTED
+                  marker preceded ``ENDED``, or the service received SIGTERM
+                  during abnormal pipeline teardown. SIGINT itself is ignored;
+                  the parent's ENDED path is authoritative for ^C. Stats are
+                  best-effort partial captures.
 
     Transitions are forward-only:
         INITIALIZE → LIVE → DRAINING → {COMPLETE | INTERRUPTED}

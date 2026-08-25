@@ -100,7 +100,7 @@ def _build_aggregator_args(
     metrics_output_dir: Path,
     enable_streaming: bool,
     tokenizer_name: str | None,
-    drain_timeout_s: float,
+    drain_timeout_s: float | None,
     tokenizer_workers: int,
     early_stopping: bool,
 ) -> list[str]:
@@ -121,7 +121,8 @@ def _build_aggregator_args(
         args.append("--early-stopping")
     if tokenizer_name is not None:
         args.extend(["--tokenizer", tokenizer_name])
-    args.extend(["--drain-timeout", str(drain_timeout_s)])
+    if drain_timeout_s is not None:
+        args.extend(["--drain-timeout", str(drain_timeout_s)])
     args.extend(["--tokenizer-workers", str(tokenizer_workers)])
     return args
 
@@ -236,18 +237,21 @@ class MetricsPipeline:
 
         ``drain_and_build_report`` nulls ``self.publisher`` at drain initiation; a
         still-set publisher means the drain was never initiated (setup / connect /
-        session error before it),
-        so the service subprocesses are killed rather than left on the aggregator's
-        unlimited drain-timeout. The ``ExitStack`` then releases publisher, subscriber
-        and the ZMQ scope — running every step even under ``BaseException``.
+        session error before it), so the service subprocesses are killed rather
+        than left on the aggregator's unlimited drain-timeout. An in-flight
+        exception also terminates any surviving services. The ``ExitStack`` then
+        releases publisher, subscriber and the ZMQ scope — running every step even
+        under ``BaseException``.
         """
         if self._stack is None:
             return None
         stack, self._stack = self._stack, None
-        if self.publisher is not None and self._launcher is not None:
+        if self._launcher is not None and (
+            self.publisher is not None or exc_type is not None
+        ):
             # Register this last so it runs first. ExitStack still executes the
             # publisher/subscriber/ZMQ callbacks if terminate_all raises BaseException
-            # (for example, a second Ctrl-C during teardown).
+            # (for example, cancellation during teardown).
             stack.callback(self._kill_services)
         return stack.__exit__(exc_type, exc, tb)
 
@@ -280,7 +284,7 @@ class MetricsPipeline:
             stack.callback(self._close_subscriber)
 
             self._launcher = ServiceLauncher(zmq_ctx)
-            drain = self._config.settings.drain
+            timeouts = self._config.settings.timeouts
             aggregator_args = _build_aggregator_args(
                 socket_dir=zmq_ctx.socket_dir,
                 pub_socket_name=pub_socket_name,
@@ -288,8 +292,8 @@ class MetricsPipeline:
                 metrics_output_dir=self._metrics_output_dir,
                 enable_streaming=self._enable_streaming,
                 tokenizer_name=self._tokenizer_name,
-                drain_timeout_s=drain.metrics_drain_timeout_s,
-                tokenizer_workers=drain.metrics_tokenizer_workers,
+                drain_timeout_s=timeouts.metrics_drain_timeout_s,
+                tokenizer_workers=self._config.settings.metrics_tokenizer_workers,
                 early_stopping=self._config.settings.early_stopping.enabled,
             )
             event_logger_args = _build_event_logger_args(
@@ -302,7 +306,7 @@ class MetricsPipeline:
                     ServiceConfig(module=_AGGREGATOR_MODULE, args=aggregator_args),
                     ServiceConfig(module=_EVENT_LOGGER_MODULE, args=event_logger_args),
                 ],
-                timeout=self._config.settings.service_ready_timeout_s,
+                timeout=timeouts.service_ready_timeout_s,
             )
         except BaseException as e:
             if self._launcher is not None:  # launch may have spawned children
@@ -313,14 +317,17 @@ class MetricsPipeline:
             raise
         self._stack = stack
 
-    async def drain_and_build_report(self) -> Report | None:
-        """Graceful drain: close publisher, wait for services, build the Report.
+    async def drain_and_build_report(
+        self,
+        *,
+        abort_event: asyncio.Event | None = None,
+        interrupted_teardown_grace_s: float = 30.0,
+    ) -> Report | None:
+        """Drain services and build a report from their final snapshot.
 
-        Runs on both the clean-finish and session-failure paths. Sources the
-        snapshot from the aggregator's on-disk ``final_snapshot.json`` when present,
-        else falls back to the last live pub/sub snapshot (only reached when the
-        aggregator was killed before it could write). Report construction is
-        best-effort — a build failure yields ``None`` rather than aborting.
+        An abort bounds the service drain by ``interrupted_teardown_grace_s``.
+        Prefer the aggregator's on-disk final snapshot; fall back to the latest
+        live snapshot only when termination prevented the final write.
         """
         assert self.publisher is not None
         assert self._launcher is not None
@@ -330,14 +337,38 @@ class MetricsPipeline:
             self.publisher.pending_count,
         )
         # Null the publisher before closing it so __aexit__ sees "drain initiated"
-        # regardless of whether the subsequent await completes or is cancelled
-        # (e.g. second Ctrl-C). If we close first and then CancelledError fires
-        # before the null assignment, __aexit__ would call terminate_all() on an
-        # aggregator that is already draining and writing final_snapshot.json.
+        # regardless of whether the subsequent await completes or is cancelled.
         publisher, self.publisher = self.publisher, None
         publisher.close()
         logger.info("Waiting for services to finish processing...")
-        await asyncio.to_thread(self._launcher.wait_for_exit, None)
+        wait_for_services = asyncio.create_task(
+            asyncio.to_thread(self._launcher.wait_for_exit, None)
+        )
+        abort_wait: asyncio.Task[bool] | None = None
+        try:
+            if abort_event is not None:
+                abort_wait = asyncio.create_task(abort_event.wait())
+                await asyncio.wait(
+                    (wait_for_services, abort_wait),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if abort_wait.done() and not wait_for_services.done():
+                    try:
+                        async with asyncio.timeout(interrupted_teardown_grace_s):
+                            await asyncio.shield(wait_for_services)
+                    except TimeoutError:
+                        logger.warning(
+                            "Interrupted teardown exceeded %.1fs; killing "
+                            "remaining service processes",
+                            interrupted_teardown_grace_s,
+                        )
+                        self._launcher.kill_all()
+            await wait_for_services
+        finally:
+            if abort_wait is not None:
+                abort_wait.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await abort_wait
 
         snap_dict = _load_final_snapshot_from_disk(
             self._metrics_output_dir / "final_snapshot.json"
@@ -364,15 +395,16 @@ class MetricsPipeline:
         """Best-effort service termination owned by the pipeline ExitStack.
 
         Sends SIGTERM first so the metrics aggregator can flush an INTERRUPTED
-        final_snapshot.json via its signal handler. Escalates to SIGKILL after
-        a short timeout for any process that does not exit cleanly.
+        final_snapshot.json and the event logger can flush its writers.
+        Escalates to SIGKILL after a short timeout for any process that does
+        not exit cleanly.
         """
         if self._launcher is None:
             return
         try:
             self._launcher.terminate_all()
         except Exception as e:  # noqa: BLE001 — teardown best-effort
-            logger.warning("Service terminate_all error: %s", e)
+            logger.warning("Service termination error: %s", e)
 
     def _close_publisher(self) -> None:
         """Best-effort publisher close (ExitStack callback)."""

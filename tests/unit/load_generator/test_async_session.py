@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from types import SimpleNamespace
 
 import pytest
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -115,13 +116,13 @@ class FakePublisher:
 def _make_settings(
     load_pattern: LoadPattern | None = None,
     n_samples: int = 10,
-    max_duration_ms: int | None = None,
+    max_issue_duration_ms: int | None = None,
 ) -> RuntimeSettings:
     return RuntimeSettings(
         metric_target=Throughput(100),
         reported_metrics=[],
-        min_duration_ms=0,
-        max_duration_ms=max_duration_ms,
+        min_issue_duration_ms=0,
+        max_issue_duration_ms=max_issue_duration_ms,
         n_samples_from_dataset=n_samples,
         n_samples_to_issue=n_samples,
         min_sample_count=n_samples,
@@ -435,6 +436,7 @@ class TestBenchmarkSession:
         assert len(ended) == 1
         assert len(start_track) == 1
         assert len(stop_track) == 1
+        assert publisher.events_of_type(SessionEventType.INTERRUPTED) == []
 
     @pytest.mark.asyncio
     async def test_accuracy_phase(self):
@@ -525,19 +527,24 @@ class TestBenchmarkSession:
         phases = [
             PhaseConfig(
                 "perf",
-                _make_settings(n_samples=100_000, max_duration_ms=10_000),
+                _make_settings(n_samples=100_000, max_issue_duration_ms=10_000),
                 FakeDataset(100),
             ),
         ]
         result = await session.run(phases)
         # Should have stopped early, not issued all 100k
         assert result.perf_results[0].issued_count < 100_000
+        interrupted = publisher.events_of_type(SessionEventType.INTERRUPTED)
+        ended = publisher.events_of_type(SessionEventType.ENDED)
+        assert len(interrupted) == 1
+        assert len(ended) == 1
+        assert publisher.events.index(interrupted[0]) < publisher.events.index(ended[0])
 
     @pytest.mark.asyncio
     async def test_stop_current_phase_advances_to_accuracy(self):
         """A perf-phase timeout must end only that phase, not skip accuracy.
 
-        Mirrors _PerfPhaseTimeout firing mid-perf: stop_current_phase cancels
+        Mirrors PerfPhaseTimeout firing mid-perf: stop_current_phase cancels
         the perf strategy without setting the session-wide stop flag, so the
         following accuracy phase still runs to completion.
         """
@@ -552,7 +559,7 @@ class TestBenchmarkSession:
         phases = [
             PhaseConfig(
                 "perf",
-                _make_settings(n_samples=100_000, max_duration_ms=10_000),
+                _make_settings(n_samples=100_000, max_issue_duration_ms=10_000),
                 FakeDataset(100),
                 PhaseType.PERFORMANCE,
             ),
@@ -571,25 +578,50 @@ class TestBenchmarkSession:
         assert session._stop_requested is False
 
     @pytest.mark.asyncio
-    async def test_stop_current_phase_unblocks_unbounded_drain(self):
-        """The per-phase cap must break an in-progress unbounded drain wait.
+    async def test_phase_start_hook_runs_before_issuing(self):
+        """``on_phase_start`` runs to completion before the phase issues."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
 
-        If the cap fires while the phase is already inside ``_drain_inflight``
-        (strategy task finished, so cancelling it is a no-op) with a stuck
-        in-flight response and ``timeout=None``, the drain would hang forever
-        unless ``stop_current_phase`` also sets the drain event.
-        """
+        hook_done = False
+
+        def hook(phase: PhaseConfig) -> None:
+            nonlocal hook_done
+            assert issuer._issued == []
+            hook_done = True
+
+        phases = [PhaseConfig("perf", _make_settings(n_samples=3), FakeDataset(3))]
+        result = await session.run(phases, on_phase_start=hook)
+
+        assert hook_done
+        assert result.perf_results[0].issued_count == 3
+
+    @pytest.mark.asyncio
+    async def test_stop_current_phase_does_not_abandon_inflight_drain(self):
         loop = asyncio.get_running_loop()
         session = BenchmarkSession(FakeIssuer(), FakePublisher(), loop)
+        stuck = SimpleNamespace(inflight=3)
+        drain = asyncio.create_task(session._drain_inflight(stuck, timeout=None))
+        await asyncio.sleep(0)
+        session.stop_current_phase()
+        await asyncio.sleep(0.02)
 
-        class _StuckIssuer:
-            inflight = 3  # never drains
+        assert not drain.done()
+        session._drain_event.set()
+        await drain
 
-        loop.call_later(0.02, session.stop_current_phase)
-        await asyncio.wait_for(
-            session._drain_inflight(_StuckIssuer(), timeout=None), timeout=2.0
+    @pytest.mark.asyncio
+    async def test_drain_timeout_aborts_session(self):
+        session = BenchmarkSession(
+            FakeIssuer(), FakePublisher(), asyncio.get_running_loop()
         )
-        assert session._current_phase_stopped is True
+        stuck = SimpleNamespace(inflight=3)
+        await session._drain_inflight(stuck, timeout=0)
+
+        assert session.stop_requested is True
 
     @pytest.mark.asyncio
     async def test_on_sample_complete_callback(self):
@@ -938,7 +970,7 @@ class TestBenchmarkSessionPoissonIntegration:
         poisson_settings = _make_settings(
             load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=100.0),
             n_samples=100_000,
-            max_duration_ms=60_000,
+            max_issue_duration_ms=60_000,
         )
         phases = [
             PhaseConfig("perf", poisson_settings, FakeDataset(100)),
@@ -950,10 +982,10 @@ class TestBenchmarkSessionPoissonIntegration:
 
 @pytest.mark.unit
 class TestBenchmarkSessionMaxDuration:
-    """max_duration_ms timeout: phase stops after duration even with samples remaining."""
+    """max_issue_duration_ms timeout: phase stops after duration even with samples remaining."""
 
     @pytest.mark.asyncio
-    async def test_max_duration_stops_phase(self):
+    async def test_max_issue_duration_stops_phase(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         issuer._loop = loop
@@ -964,7 +996,7 @@ class TestBenchmarkSessionMaxDuration:
         settings = _make_settings(
             load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=10.0),
             n_samples=100_000,
-            max_duration_ms=50,
+            max_issue_duration_ms=50,
         )
         phases = [PhaseConfig("perf", settings, FakeDataset(100))]
         result = await asyncio.wait_for(session.run(phases), timeout=10.0)
@@ -973,14 +1005,14 @@ class TestBenchmarkSessionMaxDuration:
         assert result.perf_results[0].issued_count < 100_000
 
     @pytest.mark.asyncio
-    async def test_max_duration_with_burst(self):
+    async def test_max_issue_duration_with_burst(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         issuer._loop = loop
         publisher = FakePublisher()
 
         session = BenchmarkSession(issuer, publisher, loop)
-        settings = _make_settings(n_samples=1_000_000, max_duration_ms=20)
+        settings = _make_settings(n_samples=1_000_000, max_issue_duration_ms=20)
         phases = [PhaseConfig("perf", settings, FakeDataset(100))]
         result = await asyncio.wait_for(session.run(phases), timeout=10.0)
 

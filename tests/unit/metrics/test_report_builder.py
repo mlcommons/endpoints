@@ -279,17 +279,27 @@ class TestFromSnapshot:
             Report.from_snapshot(snap, run_config=run_config).run_config == run_config
         )
 
-    def test_failed_uses_tracked_counter(self):
-        """``n_samples_failed`` reads from ``tracked_samples_failed``, not
-        ``total_samples_failed``. The two diverge when an ERROR fires for
-        an untracked sample (warmup window) — only the tracked count
-        flows into the Report.
-        """
+    def test_additive_accounting_uses_tracked_failures_and_rejects_drops(self):
         registry = _make_registry(n_samples=10)
         registry.increment(MetricCounterKey.TOTAL_SAMPLES_FAILED.value, 3)
-        registry.increment(MetricCounterKey.TRACKED_SAMPLES_FAILED.value, 1)
-        report = _build_report(registry)
-        assert report.n_samples_failed == 1
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_FAILED.value, 2)
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value, 2)
+
+        report = _build_report(registry, state=SessionState.COMPLETE, n_pending_tasks=0)
+
+        assert (
+            report.n_samples_succeeded,
+            report.n_samples_failed,
+            report.n_samples_dropped,
+        ) == (8, 2, 2)
+        assert report.n_samples_issued == (
+            report.n_samples_succeeded
+            + report.n_samples_failed
+            + report.n_samples_dropped
+        )
+        assert report.complete is False
+        payload = json.loads(report.to_json())
+        assert (payload["n_samples_succeeded"], payload["n_samples_dropped"]) == (8, 2)
 
     def test_finish_reason_counts_include_zeros(self):
         registry = _make_registry(n_samples=2)

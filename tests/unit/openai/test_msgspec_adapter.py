@@ -359,3 +359,27 @@ def test_dataset_transforms_preserve_chat_template_kwargs_dict():
     request = OpenAIMsgspecAdapter.to_endpoint_request(Query(id="q5", data=row))
     payload = json.loads(msgspec.json.encode(request))
     assert payload["chat_template_kwargs"] == chat_template_kwargs
+
+
+@pytest.mark.unit
+def test_messages_shadow_prompt_in_request():
+    """'messages' takes precedence over 'prompt' in the emitted request.
+
+    A sample carrying both fields sends only 'messages'; the 'prompt' is dropped
+    entirely. This is why _check_unsaltable() rejects such samples — salting the
+    ignored 'prompt' would not change the payload and would silently fail to bust
+    the KV cache.
+    """
+    query = Query(
+        id="q6",
+        data={
+            "model": "m",
+            "messages": [{"role": "user", "content": "authoritative"}],
+            "prompt": "[deadbeefdeadbeef] shadowed",
+        },
+    )
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    payload = json.loads(msgspec.json.encode(request))
+
+    assert [m["content"] for m in payload["messages"]] == ["authoritative"]
+    assert "shadowed" not in json.dumps(payload)
