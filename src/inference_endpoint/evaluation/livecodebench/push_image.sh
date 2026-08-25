@@ -129,6 +129,8 @@ export LCB_IMAGE_TAG="${LCB_IMAGE_TAG:-$ENDPOINTS_SHA}"
 
 # shellcheck source=_image_env.sh
 source "${SCRIPT_DIR}/_image_env.sh"
+# shellcheck source=/dev/null
+source "$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)/scripts/lib_registry.sh"
 
 # Refuse to overwrite an existing remote tag unless --force: the SHA tag is meant to
 # be immutable, so a second push to the same ref would silently replace a published
@@ -206,6 +208,7 @@ if [[ -n "$PLATFORM" ]]; then
         --provenance=false \
         --output "type=image,push=true,compression=gzip,force-compression=true,oci-mediatypes=false" \
         "$SCRIPT_DIR"
+    assert_gzip_layers "$LCB_IMAGE_REF" || exit 1
 else
     # ------------------------------------------------------------------------
     # Native path: plain docker build for the host arch, then tag and push.
@@ -230,6 +233,9 @@ else
 
     echo ">> Pushing ${LCB_IMAGE_REF}"
     docker push "$LCB_IMAGE_REF"
+    # The native docker push can preserve zstd base layers under the containerd image
+    # store; block a publish enroot/pyxis cannot extract (#467).
+    assert_gzip_layers "$LCB_IMAGE_REF" || exit 1
 fi
 
 echo

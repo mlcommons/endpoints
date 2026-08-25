@@ -43,6 +43,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILDX_BUILDER="endpoints-buildx"
 
+# shellcheck source=lib_registry.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib_registry.sh"
+
 usage() {
     sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; /^set -euo/d'
 }
@@ -192,7 +195,14 @@ BUILD_ARGS+=(--provenance=false)
 
 # With --no-push we build to cache and discard (validation only). A multi-platform
 # result cannot be --load-ed into the local store, so no output flag is added.
-[[ "$PUSH" == "1" ]] && BUILD_ARGS+=(--push)
+#
+# On push, force EVERY layer (including inherited base-image layers) to gzip so the
+# artifact is extractable by enroot/pyxis on SLURM. Without force-compression, BuildKit
+# copies base layers in their original codec (zstd for some bases) and enroot import
+# fails with "tar: This does not look like a tar archive" (mlcommons/endpoints#467).
+# type=image,push=true is the long form of --push (the two conflict); oci-mediatypes is
+# left at its default so the --annotation provenance below still applies.
+[[ "$PUSH" == "1" ]] && BUILD_ARGS+=(--output "type=image,push=true,compression=gzip,force-compression=true")
 
 # OCI annotations for the GHCR package page (description + repo/commit provenance).
 # --annotation requires the build to actually produce the component named by the
@@ -225,6 +235,9 @@ docker buildx build \
     -t "${IMAGE}:${REF_TAG}" \
     ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
     .
+
+# Guard against silently publishing an image enroot/pyxis cannot extract (#467).
+[[ "$PUSH" == "1" ]] && { assert_gzip_layers "${IMAGE}:${SHORT_SHA}" || exit 1; }
 
 echo
 if [[ "$PUSH" == "1" ]]; then
