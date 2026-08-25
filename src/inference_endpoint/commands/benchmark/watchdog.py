@@ -24,15 +24,46 @@ import os
 import signal
 import time
 import types
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
-from inference_endpoint.load_generator.session import BenchmarkSession
+from inference_endpoint.load_generator.session import BenchmarkSession, PhaseType
 
 logger = logging.getLogger(__name__)
 
 
 def _force_exit_process_group() -> None:
     os.killpg(os.getpgrp(), signal.SIGKILL)
+
+
+class _PerfPhaseTimeout:
+    """Bound PERFORMANCE issuing without aborting later phases.
+
+    The timer is cancelled when any later phase starts, so the issue-duration
+    cap cannot truncate an accuracy phase.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        max_issue_duration_ms: int | None,
+        on_timeout: Callable[[], None],
+    ) -> None:
+        self._loop = loop
+        self._max_duration_ms = max_issue_duration_ms
+        self._on_timeout = on_timeout
+        self._handle: asyncio.TimerHandle | None = None
+
+    def on_phase_start(self, phase_type: PhaseType) -> None:
+        self.cancel()
+        if phase_type == PhaseType.PERFORMANCE and self._max_duration_ms is not None:
+            self._handle = self._loop.call_later(
+                self._max_duration_ms / 1000.0, self._on_timeout
+            )
+
+    def cancel(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
 
 
 class SigintGovernor:
