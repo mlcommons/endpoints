@@ -58,9 +58,14 @@ from transformers.utils import logging as transformers_logging
 
 # A single rayon pool peaks at ~8 cores for BPE (memory-bound; more threads
 # oversubscribe and, on multi-socket Grace, cross the NUMA boundary). Sharding
-# across processes pinned to disjoint 8-core blocks is how the whole machine is
-# used. Measured on GB200: ~16k texts/s at 18 blocks vs ~1.5k single-process.
+# across processes pinned to disjoint CORES_PER_WORKER-sized blocks uses the
+# whole machine. Measured on GB200: ~16k texts/s at 18 blocks vs ~1.5k
+# single-process.
 CORES_PER_WORKER = 8
+
+# Reserve some CPUs for system in metrics-drain phase
+# we dont use all CPUs for metrics-drain since it overloads the system,
+# making it unresponsive for the duration of drain.
 DRAIN_RESERVED_CPUS = 2
 
 # Budget for the parallel shard warmup (spawn + transformers import +
@@ -322,8 +327,8 @@ class BatchTokenizer:
 
         ``n_workers == 0`` explicitly selects in-process tokenization. Auto
         (``< 0``) fits one shard per ``cores_per_worker`` block after reserving
-        two CPUs from this process's affinity mask (or the online CPU count
-        when the platform has no affinity API — shards then run unpinned).
+        ``DRAIN_RESERVED_CPUS`` from this process's affinity mask (or the online
+        CPU count when the platform has no affinity API — shards then run unpinned).
         The final block may be partial; at least one CPU remains usable. An
         explicit count is clamped to that capacity. A tokenizer without a fast
         text backend skips shard creation; structured chat tokenization remains
@@ -339,11 +344,10 @@ class BatchTokenizer:
                 self._tokenizer_name,
             )
             return
-        # The cgroup-clamped CPU universe drives the shard block math. Keep two
-        # CPUs out of the drain pool for the parent, aggregator event loop, and
-        # system responsiveness. cgroup_clamped_cpus owns the probe-and-restore
-        # of this process's mask; only the drain-phase shard processes span the
-        # usable CPUs.
+        # Reserve DRAIN_RESERVED_CPUS from the cgroup-clamped CPU universe for
+        # the parent, aggregator event loop, and system responsiveness.
+        # cgroup_clamped_cpus owns the probe-and-restore of this process's mask;
+        # only drain-phase shard processes span the usable CPUs.
         available = cgroup_clamped_cpus()
         if available is None:
             # No affinity API (e.g. macOS): shard unpinned — the OS scheduler
