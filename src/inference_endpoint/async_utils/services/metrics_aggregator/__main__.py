@@ -321,7 +321,7 @@ async def main() -> None:
             # and let the parent's ENDED-driven path drive shutdown.
             loop.add_signal_handler(
                 signal.SIGINT,
-                lambda: logger.info(
+                lambda: logger.warning(
                     "metrics aggregator received SIGINT — ignoring "
                     "(parent's ENDED path is authoritative)"
                 ),
