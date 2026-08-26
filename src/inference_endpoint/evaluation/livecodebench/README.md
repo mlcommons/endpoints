@@ -224,9 +224,9 @@ LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./push_image.sh --no-
 Every build goes through `docker buildx` and pushes **straight to the registry**: buildx forces gzip layers so the
 image is extractable by enroot/pyxis on SLURM (see [#467](https://github.com/mlcommons/endpoints/issues/467)), and a
 multi-arch image cannot be loaded into the local docker store anyway. The script auto-creates a `docker-container`
-buildx builder. `--no-build` is the one exception — it tag+pushes a pre-built local image for the host arch only.
+buildx builder. `--no-build` is the one exception: it publishes a pre-built local `lcb-service:latest` (**host arch only**) by pushing it to a transient `staging-…` tag, verifying its layers, then promoting onto the pinned tag on success. Because a plain push cannot force gzip, a local image carrying zstd layers (containerd image store) is **rejected, not repaired** — rebuild via the buildx path (drop `--no-build`) to get gzip layers. `--no-build` also ignores `--platform`.
 
-Each build publishes an immutable `:<sha>` tag, so **re-pushing an existing `:<sha>` is refused** to protect it. Pass `--force` to overwrite deliberately (e.g. re-running a partially failed push):
+Each build publishes an immutable `:<sha>-livecodebench` tag, so **re-pushing an existing `:<sha>-livecodebench` is refused** to protect it. Pass `--force` to overwrite deliberately (e.g. re-running a partially failed push):
 
 ```bash
 LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<token> ./push_image.sh --force
@@ -259,6 +259,11 @@ locally as `lcb-service:latest`, so the [hardened run command](#hardened-run-com
 
 ```bash
 LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh
+
+# Official image published by maintainers (matches the push recipe above). LCB_IMAGE_NAME
+# must be set to `endpoints`, otherwise this resolves to ghcr.io/mlcommons/lcb-service (a
+# different repo). Pass the SHA; the `-livecodebench` suffix is added for you.
+LCB_IMAGE_REGISTRY=ghcr.io/mlcommons LCB_IMAGE_NAME=endpoints LCB_IMAGE_TAG=<sha> ./pull_image.sh
 ```
 
 ### (Only if using enroot) Generating a .sqsh file for enroot

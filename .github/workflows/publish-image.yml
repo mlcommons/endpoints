@@ -37,6 +37,14 @@ on:
         options:
           - "true"
           - "false"
+      force:
+        description: "Overwrite an existing :<sha> tag. platform/DSR1/cache are NOT part of the tag, so the first successful publish of a SHA wins; use force to re-publish a SHA (e.g. a different arch, or a failed run)."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 # GITHUB_TOKEN needs packages:write to push to the org's GHCR package.
 permissions:
@@ -79,4 +87,6 @@ jobs:
           PLATFORM: ${{ inputs.platforms }}
           PROVISION_DSR1: ${{ inputs.provision_dsr1 }}
           NO_CACHE: ${{ inputs.no_cache == 'true' && '1' || '0' }}
-        run: ./scripts/push_docker_image.sh
+          # Fixed flag or empty — the input value itself is never interpolated into the command.
+          FORCE_FLAG: ${{ inputs.force == 'true' && '--force' || '' }}
+        run: ./scripts/push_docker_image.sh $FORCE_FLAG

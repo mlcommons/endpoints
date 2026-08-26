@@ -61,11 +61,16 @@ ref_exists_in_registry() {
     if out="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
         return 0
     fi
-    # A missing binary / credential-helper / permission failure also contains "not found"
-    # ("docker-credential-xxx: executable file not found") but is NOT an absent manifest —
-    # classifying it as absent would let a push overwrite an immutable tag. Screen these to
-    # indeterminate FIRST so the not-found match below can't fire on them (fail CLOSED).
-    if grep -qiE 'executable file not found|command not found|no such file or directory|permission denied|credential' <<<"$out"; then
+    # Two error classes contain not-found-ish phrasing but are NOT an absent manifest, and
+    # classifying either as absent would let a push overwrite an immutable tag:
+    #   - tooling failures: "docker-credential-xxx: executable file not found"
+    #   - authorization hidden as absence: many registries (e.g. Docker Hub) answer an
+    #     unauthorized/private repo with "repository does not exist or may require 'docker
+    #     login': denied", which also matches "does not exist" below.
+    # Screen both to indeterminate FIRST so the not-found match can't fire on them (fail
+    # CLOSED). A truly-absent public tag (GHCR "<ref>: not found", ECR "name unknown") has
+    # none of these phrases and still resolves to rc=1.
+    if grep -qiE 'executable file not found|command not found|no such file or directory|permission denied|credential|denied|unauthorized|forbidden|requires? .*(login|auth)|may require|401|403|authentication' <<<"$out"; then
         printf '%s\n' "$out" >&2
         return 2
     fi

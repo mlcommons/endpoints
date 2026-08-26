@@ -177,8 +177,10 @@ fi
 # stable pin (consumers `docker pull …:<sha>`), and SHORT_SHA is not a function of the
 # build inputs the workflow varies (platform, PROVISION_DSR1, cache), so a second push
 # of the same commit would silently replace a published image. Reads registry metadata
-# only; fail CLOSED (an indeterminate probe blocks too). The moving :<ref_name> tag is
-# intentionally not guarded — it is meant to move.
+# only; fail CLOSED (an indeterminate probe blocks too). This gate covers the whole build:
+# if :<sha> exists, BOTH it and the moving :<ref_name> tag are refused until --force, so
+# refreshing :<ref_name> for an already-published commit needs --force (the CI workflow
+# exposes a `force` input for exactly this).
 # ---------------------------------------------------------------------------
 if [[ "$PUSH" == "1" && "$FORCE" != "1" ]]; then
     rc=0; ref_exists_in_registry "${IMAGE}:${SHORT_SHA}" || rc=$?
@@ -260,7 +262,13 @@ docker buildx build \
     ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
     .
 
-# Guard against silently publishing an image enroot/pyxis cannot extract (#467).
+# Guard against silently publishing an image enroot/pyxis cannot extract (#467). This runs
+# AFTER --push, but the build above forces every layer to gzip (compression=gzip,
+# force-compression=true), so the pushed image is enroot-safe by construction — this is a
+# post-publish confirmation, not a gate. Known caveat: a transient registry-inspect flake
+# here fails the job after the tag is already live; the immutable-tag guard then blocks a
+# plain retry, so re-run with --force to republish. (Verify-before-publish would need the
+# staging→promote dance the LCB --no-build path uses; not worth it when gzip is forced.)
 [[ "$PUSH" == "1" ]] && { assert_gzip_layers "${IMAGE}:${SHORT_SHA}" || exit 1; }
 
 echo

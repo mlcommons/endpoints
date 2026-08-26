@@ -232,6 +232,10 @@ else
         --provenance=false \
         --output "type=image,push=true,compression=gzip,force-compression=true,oci-mediatypes=false" \
         "$SCRIPT_DIR"
+    # Post-publish confirmation, not a gate: the build forces gzip layers so the pushed
+    # image is enroot-safe by construction (#467). Known caveat: a transient inspect flake
+    # here fails the job after the tag is live; re-run with --force to republish. (Only the
+    # --no-build path needs the staging→verify→promote dance, since it can't force gzip.)
     assert_gzip_layers "$LCB_IMAGE_REF" || exit 1
 fi
 
