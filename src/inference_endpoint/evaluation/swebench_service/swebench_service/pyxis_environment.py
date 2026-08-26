@@ -43,6 +43,12 @@ _SAFE_SRUN_ENV = (
     "NO_PROXY",
     # srun locates its own configuration through SLURM_CONF.
     "SLURM_CONF",
+    # Enroot reads these when Pyxis creates the container, which happens inside
+    # the step. Dropping them silently discards the operator's override, so the
+    # ~2.5 GB create-time temp lands back on whichever device holds the unpacked
+    # rootfs -- exactly the device the override existed to protect.
+    "ENROOT_TEMP_PATH",
+    "ENROOT_CONFIG_PATH",
 )
 _STEP_STATUS = "/tmp/.mlperf_srun_status"
 _STEP_SCRIPT = r"""set +e

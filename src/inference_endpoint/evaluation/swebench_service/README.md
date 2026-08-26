@@ -56,13 +56,17 @@ active one-node Slurm allocation. The runtime requires `SLURM_JOB_ID` and
 
 Each `srun` step is given an explicit allow-list of environment variables rather
 than the service's whole environment, so that inherited `SLURM_JOB_ID` /
-`SLURM_STEP_ID` cannot corrupt a nested `srun`. Two entries on that list are load
-bearing on real clusters: `SLURM_CONF`, without which the child `srun` falls back
-to `/etc/slurm/slurm.conf` and aborts on a configless or multi-cluster site; and
-the proxy variables (`http_proxy`, `https_proxy`, `no_proxy` and their uppercase
-forms), which Enroot needs because it performs the registry pull inside the step.
+`SLURM_STEP_ID` cannot corrupt a nested `srun`. Several entries on that list are
+load bearing on real clusters:
+
+| Variable | Why it must reach the step |
+| --- | --- |
+| `SLURM_CONF` | Without it the child `srun` falls back to `/etc/slurm/slurm.conf` and aborts on a configless or multi-cluster site. |
+| `http_proxy`, `https_proxy`, `no_proxy` (+ uppercase) | Enroot performs the registry pull inside the step and needs the caller's proxy policy. |
+| `ENROOT_TEMP_PATH`, `ENROOT_CONFIG_PATH` | Enroot creates the container inside the step. Dropping these discards the operator's override, so the multi-gigabyte create-time temp lands back on the device holding the unpacked rootfs. |
+
 Credentials such as `OPENAI_API_KEY`, `HF_TOKEN` and the service auth token are
-never forwarded.
+never forwarded, and no other `SLURM_*` variable is.
 
 During generation, the service still uses mini-swe-agent for the agent loop and
 model requests, but replaces its Docker environment with `PyxisEnvironment`. Every

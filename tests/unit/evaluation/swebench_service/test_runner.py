@@ -852,6 +852,9 @@ def test_pyxis_srun_environment_does_not_forward_credentials(monkeypatch):
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
+        # enroot creates the container inside the step and reads these there.
+        "ENROOT_TEMP_PATH",
+        "ENROOT_CONFIG_PATH",
     ],
 )
 def test_pyxis_srun_environment_forwards_config_and_proxy_policy(monkeypatch, name):
