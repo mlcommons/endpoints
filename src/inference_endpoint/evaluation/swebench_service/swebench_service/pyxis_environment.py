@@ -173,7 +173,7 @@ def build_srun_command(
     return command
 
 
-def run_srun_step(
+def _run_srun_step_once(
     *,
     argv: list[str],
     status_path: Path,
@@ -316,6 +316,111 @@ def _srun_evidence(output: str | bytes | None, limit: int = 2000) -> str:
     if len(text) > limit:
         text = "..." + text[-limit:]
     return f"\n--- srun output ---\n{text}"
+
+
+#: Bounded re-attempts for a step that provably never launched. Set to 1 to
+#: disable. A retry here is only ever reached when the step script did not run
+#: its first line, so it cannot double-apply work -- see run_srun_step.
+_STEP_RETRIES_ENV = "SWEBENCH_PYXIS_STEP_RETRIES"
+_DEFAULT_STEP_RETRIES = 3
+#: Optional JSONL sink recording every retry and its outcome. The schema matches
+#: `swe_bench_distributed.infra_retry.RetryRecord`, which reads it back to
+#: publish infra_retries_total / instances_saved_by_retry / run_quality. The two
+#: sides cannot share code: this is an isolated subproject that must not import
+#: the benchmark client, so they share a file format instead.
+_STEP_RETRY_LOG_ENV = "SWEBENCH_PYXIS_INFRA_RETRY_LOG"
+_RETRY_LOG_LOCK = threading.Lock()
+
+
+def _step_retry_attempts() -> int:
+    raw = os.environ.get(_STEP_RETRIES_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_STEP_RETRIES
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("ignoring non-numeric %s=%r", _STEP_RETRIES_ENV, raw)
+        return _DEFAULT_STEP_RETRIES
+
+
+def _record_step_retry(
+    *, target: str, attempt: int, outcome: str, detail: str | None = None
+) -> None:
+    path = os.environ.get(_STEP_RETRY_LOG_ENV)
+    if not path:
+        return
+    record = {
+        "target": target,
+        "attempt": attempt,
+        "outcome": outcome,
+        "detail": detail,
+        "at": time.time(),
+    }
+    try:
+        # Accounting must never be able to take a run down.
+        with _RETRY_LOG_LOCK, open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+    except OSError:
+        logger.debug("could not append to the infra retry log", exc_info=True)
+
+
+def run_srun_step(**kwargs: Any) -> subprocess.CompletedProcess[str]:
+    """Run one `srun` step, re-attempting only a *provable* non-launch.
+
+    Retrying is a correctness decision, not a convenience: re-running a command
+    that may already have run can apply an edit twice, delete twice, or double a
+    test run, and none of those announce themselves. So the only failure retried
+    here is :class:`StepNotLaunched` with ``provable_non_execution`` -- the status
+    file still ``pending`` and no in-band sentinel, meaning the step script did
+    not execute even its first line. Every other failure, including a
+    ``StepNotLaunched`` that reached ``started``, is raised immediately.
+
+    Measured signature, from an isolated probe with no model and no GPU (20
+    nodes, 200 workers, 6273 ordinary shell steps): 63 steps failed and in all 63
+    the status file still read ``pending``.
+
+    Every attempt and outcome is appended to ``SWEBENCH_PYXIS_INFRA_RETRY_LOG``
+    when set. A retry loop that quietly absorbs the defect it compensates for
+    turns a broken cluster into an invisible one.
+    """
+    attempts = _step_retry_attempts()
+    target = str(kwargs.get("name") or kwargs.get("image") or "pyxis-step")
+    for attempt in range(1, attempts + 1):
+        try:
+            result = _run_srun_step_once(**kwargs)
+        except StepNotLaunched as exc:
+            if not exc.provable_non_execution:
+                # The command may have run. Another attempt could double it.
+                _record_step_retry(
+                    target=target,
+                    attempt=attempt,
+                    outcome="not_retryable",
+                    detail=f"srun_rc={exc.srun_rc} status={exc.status!r}",
+                )
+                raise
+            outcome = "exhausted" if attempt == attempts else "retrying"
+            _record_step_retry(
+                target=target,
+                attempt=attempt,
+                outcome=outcome,
+                detail=f"srun_rc={exc.srun_rc} status={exc.status!r}",
+            )
+            if attempt == attempts:
+                raise
+            logger.warning(
+                "Pyxis step provably never launched (attempt %d/%d, srun rc=%s, "
+                "status=%r); retrying",
+                attempt,
+                attempts,
+                exc.srun_rc,
+                exc.status,
+            )
+            time.sleep(min(30.0, 2.0 * attempt))
+            continue
+        if attempt > 1:
+            _record_step_retry(target=target, attempt=attempt, outcome="recovered")
+        return result
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def resolve_image(image_registry: str, instance_id: str) -> str:

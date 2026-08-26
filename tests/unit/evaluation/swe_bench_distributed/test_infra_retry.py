@@ -241,3 +241,52 @@ class TestRunQuality:
             )
 
         assert ledger.run_quality() is RunQuality.DEGRADED
+
+
+class TestReadingBackAWrittenLedger:
+    """The SWE-bench service writes this shape from another process.
+
+    It is an isolated subproject and cannot import this package, so the two
+    halves share a file format. If that agreement breaks, per-step retries stop
+    reaching the run-level `run_quality` and the run looks clean.
+    """
+
+    def test_a_written_ledger_round_trips(self, tmp_path):
+        path = tmp_path / "infra_retries.jsonl"
+        source = InfraRetryLedger(path)
+        source.record(target="unit-1", attempt=1, outcome=RetryOutcome.RETRYING)
+        source.record(target="unit-1", attempt=2, outcome=RetryOutcome.RECOVERED)
+
+        loaded = InfraRetryLedger.from_jsonl(path)
+
+        assert [r.outcome for r in loaded.records] == [
+            RetryOutcome.RETRYING,
+            RetryOutcome.RECOVERED,
+        ]
+        assert loaded.summary()["instances_saved_by_retry"] == 1
+
+    def test_a_truncated_final_line_does_not_lose_the_history(self, tmp_path):
+        path = tmp_path / "infra_retries.jsonl"
+        path.write_text(
+            '{"target": "u", "attempt": 1, "outcome": "retrying", "at": 1.0}\n'
+            '{"target": "u", "attempt": 2, "outcome": "recov'
+        )
+
+        loaded = InfraRetryLedger.from_jsonl(path)
+
+        assert len(loaded.records) == 1
+
+    def test_a_missing_ledger_is_an_empty_clean_one(self, tmp_path):
+        loaded = InfraRetryLedger.from_jsonl(tmp_path / "never-written.jsonl")
+
+        assert loaded.records == []
+        assert loaded.run_quality() is RunQuality.CLEAN
+
+    def test_an_exhaustion_written_elsewhere_still_degrades_the_run(self, tmp_path):
+        path = tmp_path / "infra_retries.jsonl"
+        path.write_text(
+            '{"target": "u", "attempt": 1, "outcome": "retrying", "at": 1.0}\n'
+            '{"target": "u", "attempt": 2, "outcome": "exhausted", "at": 2.0}\n'
+        )
+
+        assert InfraRetryLedger.from_jsonl(path).run_quality() is RunQuality.DEGRADED

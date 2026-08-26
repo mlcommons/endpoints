@@ -152,6 +152,47 @@ class InfraRetryLedger:
                         "could not append to the infra retry ledger", exc_info=True
                     )
 
+    @classmethod
+    def from_jsonl(cls, path: Path) -> InfraRetryLedger:
+        """Load a ledger written by another process.
+
+        The SWE-bench service is an isolated subproject that must not import the
+        benchmark client, so its Pyxis step runner writes this same record shape
+        directly. Sharing a file format rather than a module is the only way the
+        two halves can agree, and reading it here is what turns per-step retries
+        into a run-level `run_quality`.
+
+        Unparseable lines are skipped: a truncated final line from a run that
+        died is expected, and losing the whole history to it would be worse.
+        """
+        ledger = cls(path)
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return ledger
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                raw = json.loads(line)
+                record = RetryRecord(
+                    target=str(raw["target"]),
+                    attempt=int(raw["attempt"]),
+                    outcome=RetryOutcome(raw["outcome"]),
+                    detail=raw.get("detail"),
+                    at=float(raw.get("at") or 0.0),
+                )
+            except (ValueError, KeyError, TypeError):
+                logger.warning("skipping unreadable infra retry record")
+                continue
+            ledger._records.append(record)
+        # Every first attempt that needed a retry represents one operation; a
+        # writer that only logs failures cannot report the clean denominator, so
+        # it is reported as unknown rather than guessed.
+        ledger._operations = sum(1 for r in ledger._records if r.attempt == 1)
+        return ledger
+
     def summary(self) -> dict[str, Any]:
         """Counters a report can publish without re-deriving anything."""
         records = self.records
