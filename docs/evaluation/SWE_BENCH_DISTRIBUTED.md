@@ -179,10 +179,90 @@ no partial-credit path, and **no `merge_all`**: `run_id` is required, and mergin
 "everything that looks finished" once combined hundreds of banked results from
 unrelated configurations into one number.
 
+### What a refusal still publishes
+
+A refusal that carries no numbers is not the end of the story -- somebody still
+has to report *something*, and with the gate silent they compute it by hand. That
+is how a run which lost 106 of its 200 instances to infrastructure came to be
+reported as **47.0%** and compared against a complete-run reference of 70.67%. It
+was read as a model regression. It was attrition.
+
+`assess_run(queue, run_id)` performs the same arithmetic without deciding
+anything and returns a `CompletenessReport`, which is attached to both
+`MergeResult` and `MergeRefusal` and written to the run's merge artifacts.
+
+| Field | Always present | Meaning |
+| --- | --- | --- |
+| `resolved_rate` | yes, may be `null` | The headline. `null` unless the run is structurally complete **and** lost nothing to infrastructure. |
+| `conditional_resolved_rate` | yes | Resolved over the instances that actually completed. Honest about what it measures; **not** comparable to a complete-run reference. |
+| `resolved_rate_lower_bound` | yes | Resolved over everything planned. Infrastructure losses can only ever *add* resolutions, so this bounds the truth from below. |
+| `incomplete_instance_ids` | yes | Exactly which instances never reached a terminal state. |
+| `infra_lost_instances`, `infra_lost_unit_ids` | yes | What the harness lost, as distinct from what the model failed. |
+| `resolved_rate_withheld_reason` | yes, may be `null` | Which of the two conditions failed, and by how much. |
+
+The two conditions are deliberately separate and conflating them gets both
+wrong. An instance the model attempted and failed is a legitimate score; one the
+harness dropped never had the chance. A run short of instances has the wrong
+denominator; a complete run that leaned on the infrastructure has the wrong
+provenance. A model that resolved nothing at all is a score, not a casualty, and
+publishes `0.0` rather than withholding.
+
+Ported from `wq_merge.sh:7-9` in the banked campaign: "shard_merge.py refuses to
+print an accuracy unless all 20 shards account for exactly their own 10 ids, and
+that refusal is the single most important property in this campaign." What is
+added here is that the refusal shows its working.
+
 `verify_inventory()` cross-checks three independently produced views — the plan,
 the claim directory and the result directory — and treats disagreement as an
 error. Checking one view against itself is how a verification pass agrees with a
 broken system.
+
+## Infrastructure retry
+
+`retry_on_provable_non_execution()` retries an operation **only** when the
+failure proves the work never happened, and never merely because an error
+occurred. Re-running something that may already have run can apply an edit
+twice, delete twice, or double a test run, and none of those announce
+themselves.
+
+The evidence is the exception's `provable_non_execution` attribute, read as an
+attribute rather than an isinstance check so producer and consumer stay
+decoupled. For a Pyxis step it means the status file still read `pending` **and**
+no in-band sentinel arrived -- the step script did not run even its first line.
+Anything that does not make that claim is re-raised immediately and does not
+consume the attempt budget, which makes every exception type this module has
+never heard of safe by default.
+
+Measured signature, from an isolated probe with no model and no GPU (20 nodes,
+200 workers, 6273 ordinary shell steps): 63 steps failed and all 63 were still
+`pending`.
+
+Retries are bounded and, more importantly, counted. `InfraRetryLedger` appends
+one JSON line per event so a run that dies still leaves its retry history, and
+`summary()` publishes:
+
+| Field | Meaning |
+| --- | --- |
+| `infra_retries_total` | Every retry event. |
+| `instances_saved_by_retry` | Targets that recovered and did not later exhaust. |
+| `infra_retries_exhausted` | Targets the budget could not rescue. |
+| `infra_retry_succeeded_on_attempt` | Which attempt each recovery landed on. |
+| `run_quality` | `CLEAN` / `OK_WITH_RETRIES` / `DEGRADED`. |
+
+`run_quality` is `DEGRADED` on any exhaustion or not-retryable failure, and also
+when more than 2% of operations needed a retry **even if every one of them
+eventually succeeded**. The banked campaign retried environment faults without
+limit and without counting them (`wq_worker.sh:41` `WQ_MAX_ATTEMPTS=5`, `:256`
+"ENVIRONMENT FAULTS DO NOT CONSUME THE UNIT'S ATTEMPT BUDGET"), which is exactly
+why nobody knew how many there had been. Measured effect of adding this loop:
+`RunnerError` 59 -> 7 and resolve 47.0% -> 70.0% against a banked 70.67% on the
+identical 200 instances. A rescue on that scale is not a clean run, and
+`run_quality` says so at 200/200.
+
+Cluster guidance, deliberately not in the package: on a busy controller these
+non-launches cluster around slurmctld RPC rate limiting (`Job credential
+expired`). Pacing step creation below the controller's `rl_refill_rate` prevents
+them; the retry loop only recovers from them.
 
 ## Resource guards
 

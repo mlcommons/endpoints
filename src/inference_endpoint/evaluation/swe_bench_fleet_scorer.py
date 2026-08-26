@@ -295,6 +295,12 @@ class SWEBenchFleetScorer(Scorer, scorer_id="swe_bench_fleet"):
             merged = merge_run(queue, plan.run_id)
         except MergeRefusal as exc:
             payload["refused"] = exc.reasons
+            # A refusal is not an absence of information. Publishing the
+            # conditional rate, the lower bound and the ids that went missing
+            # is what stops somebody recomputing a headline by hand from the
+            # artifacts and reporting attrition as accuracy.
+            if exc.report is not None:
+                payload["completeness"] = exc.report.to_dict()
             write_merge_artifacts(self.report_dir, payload)
             logger.error("swe_bench_fleet: %s", exc)
             self.complete = False

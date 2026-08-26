@@ -92,6 +92,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"REFUSED to score run {exc.run_id}:")
         for reason in exc.reasons:
             print(f"  - {reason}")
+        if exc.report is not None:
+            # The honest numbers, so nobody has to recompute a headline by hand.
+            print(json.dumps(exc.report.to_dict(), indent=2))
         return 1
     print(json.dumps(result.to_dict(), indent=2))
     return 0
