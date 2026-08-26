@@ -63,13 +63,16 @@ COPY _server.py /app/server.py
 # Make lcb_serve.py available as a module
 ENV PYTHONPATH="/app"
 
-# Provenance: the endpoints repo commit this image was built from, supplied by
-# push_image.sh via --build-arg. Recorded as a config LABEL (not a manifest
-# annotation) so it survives the oci-mediatypes=false push and is visible in
-# `docker inspect`. Declared after the COPYs so a new SHA only rebuilds this
-# metadata layer, never the expensive dataset-generation stage above.
+# OCI image metadata: a static title/description that self-identifies this image (the
+# LiveCodeBench evaluator service, distinct from the endpoints client image), plus
+# provenance (source, and the endpoints repo commit via the ENDPOINTS_SHA build-arg).
+# Recorded as config LABELs (not manifest annotations) so they survive the
+# oci-mediatypes=false push and show in `docker inspect`. Declared after the COPYs so a new
+# SHA only rebuilds this metadata layer, never the expensive dataset-generation stage above.
 ARG ENDPOINTS_SHA=unknown
-LABEL org.opencontainers.image.source="https://github.com/mlcommons/endpoints" \
+LABEL org.opencontainers.image.title="lcb-service" \
+      org.opencontainers.image.description="LiveCodeBench evaluation service: a WebSocket judge (port 13835) that runs model-generated code against the LiveCodeBench dataset (release_v6, baked in). Used by the endpoints client's code_bench_scorer." \
+      org.opencontainers.image.source="https://github.com/mlcommons/endpoints" \
       org.opencontainers.image.revision="${ENDPOINTS_SHA}"
 
 # Launch the WebSocket server with long-running connection support

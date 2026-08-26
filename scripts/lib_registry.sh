@@ -47,3 +47,33 @@ if bad:
 print(f">> Verified: all {len(types)} layers of {ref} are gzip (enroot-safe).")
 PY
 }
+
+# ref_exists_in_registry REF — probe whether REF is already published, reading registry
+# metadata only (no blob pull) via `docker buildx imagetools inspect`. Return codes:
+#   0  present
+#   1  definitely absent (registry reported not-found)
+#   2  indeterminate (auth / network / tooling error) — output echoed to stderr
+# Callers enforcing an immutable tag MUST treat 2 as "block" (fail CLOSED): never
+# overwrite when existence can't be verified, or the guard silently no-ops on exactly
+# the hosts/creds where it can't check.
+ref_exists_in_registry() {
+    local ref="$1" out
+    if out="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
+        return 0
+    fi
+    # A missing binary / credential-helper / permission failure also contains "not found"
+    # ("docker-credential-xxx: executable file not found") but is NOT an absent manifest —
+    # classifying it as absent would let a push overwrite an immutable tag. Screen these to
+    # indeterminate FIRST so the not-found match below can't fire on them (fail CLOSED).
+    if grep -qiE 'executable file not found|command not found|no such file or directory|permission denied|credential' <<<"$out"; then
+        printf '%s\n' "$out" >&2
+        return 2
+    fi
+    # Registry "absent" phrasings: GHCR (`<ref>: not found`), OCI/Docker distribution
+    # (`manifest unknown`, `name unknown`), and ECR (`name unknown … does not exist`).
+    if grep -qiE 'not found|manifest unknown|manifest_unknown|name[ _]unknown|no such manifest|does not exist' <<<"$out"; then
+        return 1
+    fi
+    printf '%s\n' "$out" >&2
+    return 2
+}

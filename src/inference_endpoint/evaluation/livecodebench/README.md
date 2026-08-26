@@ -182,18 +182,34 @@ consumer can **pull and run it with no `HF_TOKEN` and no rebuild**.
 Two scripts in this directory wrap the docker build/tag/push/pull steps. Both resolve the image reference from environment variables
 (shared via `_image_env.sh`):
 
-| Variable             | Required             | Default              | Meaning                                                                                                                     |
-| -------------------- | -------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `LCB_IMAGE_REGISTRY` | yes                  | —                    | registry + namespace, e.g. `myregistry.com/team`                                                                            |
-| `LCB_IMAGE_NAME`     | no                   | `lcb-service`        | image repo name                                                                                                             |
-| `LCB_IMAGE_TAG`      | push: no · pull: yes | endpoints short SHA  | image tag; `push_image.sh` defaults it to the endpoints commit SHA (one immutable tag per build). Pull must name the build. |
-| `LCB_LOCAL_TAG`      | no                   | `lcb-service:latest` | local tag the run command / scorer expect                                                                                   |
+| Variable             | Required             | Default                               | Meaning                                                                                                                                                                                                                                                          |
+| -------------------- | -------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LCB_IMAGE_REGISTRY` | yes                  | —                                     | registry + namespace, e.g. `myregistry.com/team`                                                                                                                                                                                                                 |
+| `LCB_IMAGE_NAME`     | no                   | `lcb-service`                         | image repo name                                                                                                                                                                                                                                                  |
+| `LCB_IMAGE_TAG`      | push: no · pull: yes | `<endpoints short SHA>-livecodebench` | image tag; `push_image.sh` defaults the SHA part to the endpoints commit SHA and `_image_env.sh` always appends a `-livecodebench` suffix (one immutable, self-identifying tag per build). Pull must name the build — pass the SHA; the suffix is added for you. |
+| `LCB_LOCAL_TAG`      | no                   | `lcb-service:latest`                  | local tag the run command / scorer expect                                                                                                                                                                                                                        |
 
-The resolved remote reference is `${LCB_IMAGE_REGISTRY}/${LCB_IMAGE_NAME}:${LCB_IMAGE_TAG}`. `push_image.sh` sets `LCB_IMAGE_TAG` to the endpoints commit short SHA by default, so each build publishes an immutable `…/lcb-service:<sha>` — there is no moving `latest`/`release_v6` tag. The same SHA is also baked into the image as the `org.opencontainers.image.revision` label.
+The resolved remote reference is `${LCB_IMAGE_REGISTRY}/${LCB_IMAGE_NAME}:${LCB_IMAGE_TAG}`, where `_image_env.sh` always appends a `-livecodebench` suffix to `LCB_IMAGE_TAG` so the LCB image is self-identifying and never collides with the client image's bare `:<sha>` tag in a shared package. `push_image.sh` defaults the SHA part to the endpoints commit short SHA, so each build publishes an immutable `…/lcb-service:<sha>-livecodebench` — there is no moving `latest`/`release_v6` tag. The same SHA is also baked into the image as the `org.opencontainers.image.revision` label.
 
 #### Push (maintainer)
 
 Requires `docker login dhi.io` (base images) and `docker login` to your target registry first.
+
+##### Updating the official repo image (`ghcr.io/mlcommons/endpoints`)
+
+Maintainers with `write:packages` on the **mlcommons** org publish the canonical image from the repo root. Authenticate to GHCR (a PAT / `GITHUB_TOKEN` with `write:packages`) and to `dhi.io` (hardened base images) first, then run the push script with the official registry + name:
+
+```bash
+echo <YOUR_GHCR_TOKEN> | docker login ghcr.io -u <github-username> --password-stdin
+docker login dhi.io
+
+LCB_IMAGE_REGISTRY=ghcr.io/mlcommons LCB_IMAGE_NAME=endpoints HF_TOKEN=<YOUR_TOKEN> \
+  ./src/inference_endpoint/evaluation/livecodebench/push_image.sh
+```
+
+This builds a multi-arch manifest and publishes `ghcr.io/mlcommons/endpoints:<endpoints short SHA>-livecodebench`. The `-livecodebench` suffix keeps it distinct from the client image's bare `:<sha>` tag in the same package, and the tag is immutable — re-pushing the same commit is refused unless you add `--force`.
+
+##### Publishing to your own registry
 
 ```bash
 # Build (using HF_TOKEN as a build secret) and push a MULTI-ARCH manifest

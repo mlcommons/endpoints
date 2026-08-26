@@ -21,6 +21,7 @@
 #   ./scripts/push_docker_image.sh --cache                # allow layer cache (default: --no-cache)
 #   ./scripts/push_docker_image.sh --multi-arch --no-push # dry build (validate both arches, publish nothing)
 #   ./scripts/push_docker_image.sh --allow-dirty          # build HEAD despite uncommitted tracked changes
+#   ./scripts/push_docker_image.sh --force                # overwrite an existing :<sha> tag (default: refuse)
 #
 # Multi-arch note: --multi-arch (or --platform with a comma) pushes a manifest
 # list usable on BOTH x86 and arm hosts; Docker pulls the matching arch. The
@@ -57,6 +58,7 @@ DOCKERFILE="${DOCKERFILE:-scripts/Dockerfile.dev}"
 NO_CACHE="${NO_CACHE:-1}"
 ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
 PUSH=1
+FORCE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -77,6 +79,7 @@ while [[ $# -gt 0 ]]; do
         --cache) NO_CACHE=0 ;;
         --no-push) PUSH=0 ;;
         --allow-dirty) ALLOW_DIRTY=1 ;;
+        --force) FORCE=1 ;;
         --dockerfile)
             [[ -n "${2:-}" && "$2" != --* ]] || { echo "error: --dockerfile requires a value" >&2; exit 1; }
             DOCKERFILE="$2"; shift ;;
@@ -167,6 +170,27 @@ if [[ -z "${DID_CHECKOUT:-}" && "$ALLOW_DIRTY" != "1" ]] && tree_has_tracked_cha
         exit 1
     fi
     echo ">> warning: ${dirty_msg} (dry run; nothing pushed)." >&2
+fi
+
+# ---------------------------------------------------------------------------
+# Refuse to overwrite an already-published :<sha> tag unless --force. The SHA tag is a
+# stable pin (consumers `docker pull …:<sha>`), and SHORT_SHA is not a function of the
+# build inputs the workflow varies (platform, PROVISION_DSR1, cache), so a second push
+# of the same commit would silently replace a published image. Reads registry metadata
+# only; fail CLOSED (an indeterminate probe blocks too). The moving :<ref_name> tag is
+# intentionally not guarded — it is meant to move.
+# ---------------------------------------------------------------------------
+if [[ "$PUSH" == "1" && "$FORCE" != "1" ]]; then
+    rc=0; ref_exists_in_registry "${IMAGE}:${SHORT_SHA}" || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+        echo "error: ${IMAGE}:${SHORT_SHA} already exists in the registry." >&2
+        echo "       The SHA tag is a stable pin; re-run with --force to overwrite it." >&2
+        exit 1
+    elif [[ "$rc" -ne 1 ]]; then
+        echo "error: could not verify whether ${IMAGE}:${SHORT_SHA} already exists (see above)." >&2
+        echo "       Fix registry access/login, or re-run with --force to skip this check." >&2
+        exit 1
+    fi
 fi
 
 # ---------------------------------------------------------------------------

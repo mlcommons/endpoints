@@ -5,8 +5,10 @@
 # build time. Pushing the built image lets consumers pull-and-run with no HF_TOKEN
 # and no rebuild (see pull_image.sh).
 #
-# The image is tagged by the endpoints commit short SHA — one immutable tag per
-# build. LCB_IMAGE_TAG overrides it. There is no moving channel tag.
+# The image is tagged <endpoints short SHA>-livecodebench — one immutable, self-identifying
+# tag per build. The "-livecodebench" suffix is appended by _image_env.sh so the tag never
+# collides with the client image's bare :<sha> in a shared registry package. LCB_IMAGE_TAG
+# overrides the SHA part (the suffix is still appended). There is no moving channel tag.
 #
 # Prerequisites:
 #   - docker login dhi.io            (base images are Docker Hardened Images)
@@ -137,42 +139,52 @@ source "${SCRIPT_DIR}/_image_env.sh"
 # shellcheck source=/dev/null
 source "$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)/scripts/lib_registry.sh"
 
-# Refuse to overwrite an existing remote tag unless --force: the SHA tag is meant to
-# be immutable, so a second push to the same ref would silently replace a published
-# image. `imagetools inspect` queries the registry (no layer pull). Fail CLOSED: a
-# clean exit means the tag exists (block); a non-zero exit is trusted as "absent" ONLY
-# when the output confirms not-found. Any other failure (buildx plugin missing, auth
-# denied, registry/network error) blocks too — otherwise the guard silently no-ops on
-# exactly the hosts/creds where it can't verify, and immutability goes unenforced.
-# --force skips the check entirely.
+# Refuse to overwrite an existing remote tag unless --force: the SHA tag is meant to be
+# immutable, so a second push would silently replace a published image. Delegates to the
+# shared ref_exists_in_registry (fail CLOSED — anything other than a confirmed "absent"
+# blocks). --force skips the check entirely.
 if [[ "$FORCE" -eq 0 ]]; then
-    if inspect_out="$(docker buildx imagetools inspect "$LCB_IMAGE_REF" 2>&1)"; then
+    rc=0; ref_exists_in_registry "$LCB_IMAGE_REF" || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
         echo "error: ${LCB_IMAGE_REF} already exists in the registry." >&2
         echo "       The SHA tag is meant to be immutable; re-run with --force to overwrite it." >&2
         exit 1
-    elif ! grep -qiE 'not found|manifest unknown|manifest_unknown|name_unknown|no such manifest' <<<"$inspect_out"; then
-        echo "error: could not verify whether ${LCB_IMAGE_REF} already exists:" >&2
-        printf '       %s\n' "$inspect_out" >&2
+    elif [[ "$rc" -ne 1 ]]; then
+        echo "error: could not verify whether ${LCB_IMAGE_REF} already exists (see above)." >&2
         echo "       Fix registry access (or install docker buildx), or re-run with --force to skip this check." >&2
         exit 1
     fi
 fi
 
 # ----------------------------------------------------------------------------
-# --no-build pushes a pre-built local image (host arch only) via a plain tag+push.
+# --no-build publishes a pre-built local image (host arch only): push to a staging tag,
+# verify, then promote onto the pinned tag (a plain push can't be force-compressed, so
+# the immutable :<sha> is only made reachable after the gzip check passes).
 # Every other invocation builds with buildx and pushes straight to the registry: buildx
 # forces gzip layers (enroot/pyxis-safe, #467) and a multi-arch image cannot be
 # `docker load`-ed into the local store anyway, so there is no separate build/tag step.
 # ----------------------------------------------------------------------------
 if [[ "$NO_BUILD" -eq 1 ]]; then
-    echo ">> Tagging ${LCB_LOCAL_TAG} -> ${LCB_IMAGE_REF}"
-    docker tag "$LCB_LOCAL_TAG" "$LCB_IMAGE_REF"
+    # A pre-built local image can carry zstd base layers (containerd image store) that
+    # enroot/pyxis cannot extract (#467), and this plain `docker push` applies no
+    # force-compression. Verify BEFORE the pinned :<sha> tag becomes reachable: push to a
+    # transient staging tag, assert its layers, then promote onto $LCB_IMAGE_REF only on
+    # success — so a failed verify never poisons the immutable tag (which the guard above
+    # then refuses to overwrite without --force). `imagetools create` copies layers by
+    # digest (no blob re-upload); --prefer-index=false makes the pin the SAME manifest
+    # digest that was verified (not a fresh 1-entry index), and it is re-asserted below.
+    STAGING_REF="${LCB_IMAGE_REF%:*}:staging-${LCB_IMAGE_TAG}"
+    echo ">> Tagging ${LCB_LOCAL_TAG} -> ${STAGING_REF} (staging)"
+    docker tag "$LCB_LOCAL_TAG" "$STAGING_REF"
 
-    echo ">> Pushing ${LCB_IMAGE_REF}"
-    docker push "$LCB_IMAGE_REF"
-    # A pre-built local image can carry zstd base layers under the containerd image store;
-    # block a publish enroot/pyxis cannot extract (#467).
+    echo ">> Pushing ${STAGING_REF} for verification"
+    docker push "$STAGING_REF"
+    assert_gzip_layers "$STAGING_REF" || exit 1
+
+    echo ">> Verified; promoting ${STAGING_REF} -> ${LCB_IMAGE_REF}"
+    docker buildx imagetools create --prefer-index=false --tag "$LCB_IMAGE_REF" "$STAGING_REF"
     assert_gzip_layers "$LCB_IMAGE_REF" || exit 1
+    echo "   (transient ${STAGING_REF##*:} tag left in the registry; delete via your registry UI/API if desired.)"
 else
     if [[ -z "${HF_TOKEN:-}" ]]; then
         echo "error: HF_TOKEN is required to build the image (or pass --no-build to push an existing one)." >&2
