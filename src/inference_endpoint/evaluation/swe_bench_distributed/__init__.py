@@ -12,6 +12,14 @@ exactly once.
 """
 
 from .guards import HealthTerm, HealthVerdict, MemoryGuard, combine_terms, kill_by_pid
+from .infra_retry import (
+    InfraRetryLedger,
+    RetryOutcome,
+    RetryRecord,
+    RunQuality,
+    is_provable_non_execution,
+    retry_on_provable_non_execution,
+)
 from .merge import (
     CompletenessReport,
     MergeRefusal,
@@ -34,11 +42,15 @@ __all__ = [
     "CompletenessReport",
     "HealthTerm",
     "HealthVerdict",
+    "InfraRetryLedger",
     "LocalProcessLiveness",
     "MemoryGuard",
     "MergeRefusal",
     "MergeResult",
     "OwnerLiveness",
+    "RetryOutcome",
+    "RetryRecord",
+    "RunQuality",
     "SlurmStepLiveness",
     "Unit",
     "UnitOutcome",
@@ -47,9 +59,11 @@ __all__ = [
     "WorkQueue",
     "assess_run",
     "combine_terms",
+    "is_provable_non_execution",
     "kill_by_pid",
     "merge_run",
     "plan_units",
     "reap",
+    "retry_on_provable_non_execution",
     "verify_inventory",
 ]
