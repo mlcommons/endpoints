@@ -2176,3 +2176,176 @@ def test_pyxis_worker_propagates_evaluation_infrastructure_failure(
                 "repo__repo-1",
             ]
         )
+
+
+def _stub_swebench_eval(monkeypatch, predictions, *, make_run_report):
+    """Stand in for the SWE-bench harness modules the eval worker imports."""
+    swebench = types.ModuleType("swebench")
+    harness = types.ModuleType("swebench.harness")
+    reporting = types.ModuleType("swebench.harness.reporting")
+    reporting.make_run_report = make_run_report
+    test_spec = types.ModuleType("swebench.harness.test_spec")
+    test_spec_module = types.ModuleType("swebench.harness.test_spec.test_spec")
+    test_spec_module.make_test_spec = lambda row, arch: types.SimpleNamespace(
+        instance_id=row["instance_id"], eval_script="pytest -q"
+    )
+    utils = types.ModuleType("swebench.harness.utils")
+    utils.get_predictions_from_file = lambda *args: predictions.values()
+    utils.load_swebench_dataset = lambda *args: [
+        {"instance_id": instance_id} for instance_id in predictions
+    ]
+    for name, module in (
+        ("swebench", swebench),
+        ("swebench.harness", harness),
+        ("swebench.harness.reporting", reporting),
+        ("swebench.harness.test_spec", test_spec),
+        ("swebench.harness.test_spec.test_spec", test_spec_module),
+        ("swebench.harness.utils", utils),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def _eval_argv(output_dir: Path, instance_ids: list[str]) -> list[str]:
+    return [
+        "eval",
+        "--dataset-name",
+        "princeton-nlp/SWE-bench_Verified",
+        "--split",
+        "test",
+        "--predictions-path",
+        str(output_dir / "preds.json"),
+        "--max-workers",
+        "2",
+        "--run-id",
+        "endpoints_test",
+        "--image-registry",
+        _PYXIS_IMAGE_REGISTRY,
+        "--output-dir",
+        str(output_dir),
+        "--instance-ids",
+        *instance_ids,
+    ]
+
+
+def _predictions(*instance_ids: str) -> dict[str, dict[str, str]]:
+    return {
+        instance_id: {
+            "model_name_or_path": "test-model",
+            "instance_id": instance_id,
+            "model_patch": "diff --git a/a b/a",
+        }
+        for instance_id in instance_ids
+    }
+
+
+def test_pyxis_worker_reports_the_instances_one_bad_container_did_not_kill(
+    monkeypatch, tmp_path
+):
+    """One failed eval container must not discard every other instance's grade.
+
+    The per-instance failures were collected and then raised *before*
+    `make_run_report`, so a single wedged evaluation container threw away the
+    whole report -- the same defect as the agent phase, one phase later.
+    """
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    predictions = _predictions("repo__repo-1", "repo__repo-2", "repo__repo-3")
+    reported: list[tuple] = []
+
+    def fake_make_run_report(predictions, dataset, run_id, client):
+        reported.append((predictions, dataset, run_id, client))
+
+    _stub_swebench_eval(monkeypatch, predictions, make_run_report=fake_make_run_report)
+
+    def flaky(**kwargs):
+        if kwargs["test_spec"].instance_id == "repo__repo-2":
+            raise RunnerError("Pyxis infrastructure failure")
+
+    monkeypatch.setattr(worker_mod, "_evaluate_instance", flaky)
+
+    worker_mod.main(_eval_argv(output_dir, list(predictions)))
+
+    assert len(reported) == 1, "the report was never produced"
+    failures = (output_dir / "eval_infra_failures.txt").read_text()
+    assert "repo__repo-2" in failures
+    assert "RunnerError" in failures
+    assert "repo__repo-1" not in failures
+
+
+def test_pyxis_worker_still_fails_when_no_instance_could_be_evaluated(
+    monkeypatch, tmp_path
+):
+    """Tolerating losses must not turn a total loss into a pass."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    predictions = _predictions("repo__repo-1", "repo__repo-2")
+    reported: list[tuple] = []
+
+    _stub_swebench_eval(
+        monkeypatch,
+        predictions,
+        make_run_report=lambda *args, **kwargs: reported.append(args),
+    )
+    monkeypatch.setattr(
+        worker_mod,
+        "_evaluate_instance",
+        lambda **kwargs: (_ for _ in ()).throw(RunnerError("no space left")),
+    )
+
+    with pytest.raises(RunnerError, match="every instance"):
+        worker_mod.main(_eval_argv(output_dir, list(predictions)))
+
+    # The report is still written first, so the run can be diagnosed.
+    assert len(reported) == 1
+
+
+def test_pyxis_worker_records_no_failure_file_for_a_clean_eval(monkeypatch, tmp_path):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    predictions = _predictions("repo__repo-1")
+
+    _stub_swebench_eval(
+        monkeypatch, predictions, make_run_report=lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(worker_mod, "_evaluate_instance", lambda **kwargs: None)
+
+    worker_mod.main(_eval_argv(output_dir, list(predictions)))
+
+    assert not (output_dir / "eval_infra_failures.txt").exists()
+
+
+def test_eval_infra_failures_are_published_beside_the_results(monkeypatch, tmp_path):
+    """The losses have to reach the caller, not just the service host's disk."""
+    runner = PyxisSweBenchRunner(
+        project_root=tmp_path,
+        subprocess_timeout_s=30,
+        image_registry=_PYXIS_IMAGE_REGISTRY,
+    )
+    run_dir = tmp_path / "run-1"
+
+    def fake_run_agent(
+        request, patched_config, output_dir, run_dir, secret_values, cancel_token=None
+    ):
+        (output_dir / "preds.json").write_text('{"repo__repo-1":"patch"}')
+
+    def fake_run_eval(
+        request, preds_path, output_dir, run_dir, secret_values, cancel_token=None
+    ):
+        (output_dir / "eval_infra_failures.txt").write_text(
+            "repo__repo-1\tRunnerError: no space left\n"
+        )
+        result_path = output_dir / "result.json"
+        result_path.write_text("{}")
+        return result_path
+
+    monkeypatch.setattr(runner, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(runner, "_run_eval", fake_run_eval)
+    monkeypatch.setattr(runner, "_cleanup_containers", lambda *a, **k: None)
+
+    runner.run(_request(["http://endpoint:30000"]), run_dir)
+
+    assert "no space left" in (run_dir / "eval_infra_failures.txt").read_text()
+
+
+def test_eval_infra_failures_is_a_retrievable_artifact():
+    assert "eval_infra_failures.txt" in artifacts_mod.SAFE_ARTIFACT_NAMES

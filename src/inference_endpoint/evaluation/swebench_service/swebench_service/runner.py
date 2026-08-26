@@ -86,6 +86,8 @@ _LOG_TAIL_MAX_LINES = 50
 _RUN_LABEL = "com.mlcommons.endpoints.swebench-run"
 #: Written when the agent phase failed but predictions were still scored.
 AGENT_PHASE_ERROR_FILE = "agent_phase_error.txt"
+#: Written when some instances could not be evaluated but the rest were scored.
+EVAL_INFRA_FAILURES_FILE = "eval_infra_failures.txt"
 _PROCESS_TERMINATE_TIMEOUT_S = 10
 _SWEBENCH_DATASETS = {
     "verified": "princeton-nlp/SWE-bench_Verified",
@@ -321,6 +323,13 @@ class SweBenchRunner:
         result_path = self._run_eval(
             request, preds_path, output_dir, run_dir, secret_values, cancel_token
         )
+        eval_failures = output_dir / EVAL_INFRA_FAILURES_FILE
+        if eval_failures.exists():
+            # Instances the harness lost during eval. Published beside the
+            # results so a consumer can tell them apart from instances the model
+            # genuinely failed; without it a degraded run is indistinguishable
+            # from a bad one.
+            shutil.copy2(eval_failures, run_dir / EVAL_INFRA_FAILURES_FILE)
         shutil.copy2(result_path, run_dir / "swe_bench_results.json")
         return msgspec.json.decode(result_path.read_bytes(), type=dict)
 

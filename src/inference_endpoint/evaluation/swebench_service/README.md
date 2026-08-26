@@ -97,8 +97,9 @@ compute node. It mounts the patch, SWE-bench evaluation script, and output file 
 the task image. It preserves SWE-bench 4.1.0's patch-application order, test timeout,
 captured output, and `get_eval_report` grading. A patch failure or test timeout is an
 unresolved task; an `srun`, Enroot, or container-start failure is an infrastructure
-error that fails the run. The service then aggregates the per-instance reports and
-removes its named Pyxis containers.
+loss, recorded per instance and reported rather than allowed to fail the whole run
+(see *Eval-phase failures*). The service then aggregates the per-instance reports
+and removes its named Pyxis containers.
 
 Pyxis namespaces a named container by its allocation: `--container-name=X` inside
 job `N` is the Enroot container `pyxis_N_X`. `PyxisEnvironment.cleanup()` removes
@@ -122,8 +123,26 @@ A run whose agent phase produced no predictions at all still fails, with the age
 error chained as the cause. Cancellation is never tolerated this way: it
 propagates immediately and no eval phase runs.
 
-Consumers that need to know a run was degraded should fetch `agent_phase_error.txt`;
-its presence means some instances may be missing from `swe_bench_results.json`.
+### Eval-phase failures
+
+The same rule applies one phase later. The eval phase grades each prediction in
+its own container, concurrently. If some of those containers fail, the rest are
+still graded and the run report is still produced: an instance with no
+`report.json` is counted as an error by the harness, which is the correct and
+visible outcome. The instances that were lost are listed in the
+`eval_infra_failures.txt` artifact, one `instance_id<TAB>error` per line.
+
+A run in which *no* instance could be evaluated still fails — but only after the
+report has been written, so the run can be diagnosed from its own artifacts.
+
+### Telling a degraded run apart from a bad one
+
+Both artifacts are machine-readable on purpose. `agent_phase_error.txt` means
+some instances may be missing from `swe_bench_results.json`; `eval_infra_failures.txt`
+names the instances the harness lost during grading. Instances lost this way are
+*infrastructure* losses, not model failures, and a consumer that cannot separate
+the two will read attrition as an accuracy regression. Neither file exists on a
+clean run.
 
 The benchmark client submits a run to this service only in `ACC` or `BOTH`
 mode; the default `PERF` mode skips external evaluation.
