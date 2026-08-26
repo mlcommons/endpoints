@@ -84,6 +84,15 @@ unresolved task; an `srun`, Enroot, or container-start failure is an infrastruct
 error that fails the run. The service then aggregates the per-instance reports and
 removes its named Pyxis containers.
 
+Pyxis namespaces a named container by its allocation: `--container-name=X` inside
+job `N` is the Enroot container `pyxis_N_X`. `PyxisEnvironment.cleanup()` removes
+that name and logs a warning if the removal does not succeed. Each trajectory's
+rootfs is on the order of gigabytes and is only reclaimed by this call, so a
+removal that quietly fails fills the node's Enroot data path for the rest of the
+allocation. `scancel` does not reclaim them either -- ending the job does not
+remove Enroot containers -- which is why the removal has to be both correctly
+named and audible.
+
 The benchmark client submits a run to this service only in `ACC` or `BOTH`
 mode; the default `PERF` mode skips external evaluation.
 
