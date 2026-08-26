@@ -51,16 +51,73 @@ _SAFE_SRUN_ENV = (
     "ENROOT_CONFIG_PATH",
 )
 _STEP_STATUS = "/tmp/.mlperf_srun_status"
+#: In-band marker the step script prints alongside its own return code. It is
+#: the primary result channel: it travels back on srun's stdout and so needs no
+#: readable shared filesystem. The status file remains the fallback.
+_STEP_SENTINEL = "__MLPERF_STEP_RC__"
+#: The status file contents before the step script runs its very first line.
+_STEP_STATUS_PENDING = "pending"
 _STEP_SCRIPT = r"""set +e
 status_path=$1
 timeout_s=$2
-shift 2
-printf 'started\n' > "$status_path"
+nonce=$3
+shift 3
+printf 'started\n' > "$status_path" 2>/dev/null
 unshare --pid --fork --mount-proc timeout "$timeout_s" "$@"
 returncode=$?
-printf 'finished:%s\n' "$returncode" > "$status_path"
+printf 'finished:%s\n' "$returncode" > "$status_path" 2>/dev/null
+printf '\n__MLPERF_STEP_RC__ %s %s\n' "$nonce" "$returncode"
 exit "$returncode"
 """
+
+
+class StepNotLaunched(RunnerError):
+    """An `srun` step that reported through neither result channel.
+
+    Subclasses :class:`RunnerError` so every existing ``except RunnerError``
+    keeps working, and records the facts a caller needs to reason about the
+    failure rather than only read about it:
+
+    ``srun_rc``
+        `srun`'s own exit status.
+    ``status``
+        The bytes actually observed in the step status file.
+    ``provable_non_execution``
+        True only when the status file was still ``pending`` and no in-band
+        sentinel arrived -- the step script did not run even its first line, so
+        the command definitely did not execute. Anything else leaves open that
+        it did, which is the distinction anyone deciding whether a re-run is
+        safe has to make.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provable_non_execution: bool,
+        srun_rc: int | None,
+        status: str,
+    ) -> None:
+        super().__init__(message)
+        self.provable_non_execution = provable_non_execution
+        self.srun_rc = srun_rc
+        self.status = status
+
+
+def read_step_sentinel(text: str, nonce: str) -> tuple[int | None, str]:
+    """Return ``(returncode, output_without_the_sentinel)`` if the step reported.
+
+    ``(None, text)`` when the step did not report in band. The nonce makes the
+    marker unforgeable by the command's own output.
+    """
+    tag = f"{_STEP_SENTINEL} {nonce} "
+    for line in reversed((text or "").splitlines()):
+        if not line.startswith(tag):
+            continue
+        value = line[len(tag) :].strip()
+        if value.lstrip("-").isdigit():
+            return int(value), text[: text.rindex(line)].rstrip("\n")
+    return None, text
 
 
 def safe_srun_env() -> dict[str, str]:
@@ -128,7 +185,8 @@ def run_srun_step(
     workdir: str | None = None,
     stderr: int = subprocess.STDOUT,
 ) -> subprocess.CompletedProcess[str]:
-    status_path.write_text("pending\n")
+    nonce = uuid.uuid4().hex
+    status_path.write_text(f"{_STEP_STATUS_PENDING}\n")
     status_path.chmod(0o666)
     command = build_srun_command(
         image=image,
@@ -142,6 +200,7 @@ def run_srun_step(
             "pyxis-step",
             _STEP_STATUS,
             str(timeout_s),
+            nonce,
             *argv,
         ],
     )
@@ -170,14 +229,32 @@ def run_srun_step(
             "Pyxis infrastructure failure before the command completed: "
             f"{type(exc).__name__}: {exc}"
         ) from exc
-    if status_path.read_text().strip() != f"finished:{result.returncode}":
-        if failure_path is not None:
-            failure_path.touch()
-        raise RunnerError(
-            "Pyxis infrastructure failure before the command completed "
-            f"(srun exited {result.returncode})" + _srun_evidence(result.stdout)
-        )
-    return result
+
+    # Primary channel: the step reported its own return code in band.
+    reported, cleaned = read_step_sentinel(result.stdout, nonce)
+    if reported is not None:
+        result.stdout = cleaned
+        result.returncode = reported
+        return result
+
+    # Fallback channel: the status file the step script wrote into the mount.
+    try:
+        status = status_path.read_text().strip()
+    except OSError as exc:
+        status = f"<unreadable: {exc}>"
+    if status == f"finished:{result.returncode}":
+        return result
+
+    if failure_path is not None:
+        failure_path.touch()
+    raise StepNotLaunched(
+        "Pyxis infrastructure failure before the command completed "
+        f"(srun exited {result.returncode}, status={status!r})"
+        + _srun_evidence(result.stdout),
+        provable_non_execution=status == _STEP_STATUS_PENDING,
+        srun_rc=result.returncode,
+        status=status,
+    )
 
 
 def enroot_container_name(job_id: str, container_name: str) -> str:

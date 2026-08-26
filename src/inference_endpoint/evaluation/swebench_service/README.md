@@ -75,6 +75,22 @@ overlapping `srun` step in that container, preserving filesystem changes across
 turns. Tool commands run in private PID namespaces so one trajectory cannot signal
 processes belonging to another trajectory.
 
+Each step reports its outcome through two channels. The primary one is in band: the
+step script prints `__MLPERF_STEP_RC__ <nonce> <rc>` on `srun`'s stdout, which needs
+no readable shared filesystem and is stripped from the command output before it is
+returned. The fallback is the status file written into the container's `/tmp` mount.
+
+When a step reports through neither, `StepNotLaunched` (a `RunnerError`) is raised.
+Besides `srun`'s own output it carries `srun_rc`, the observed `status` bytes, and
+`provable_non_execution` -- true only when the status file is still `pending` and no
+sentinel arrived, meaning the step script did not run even its first line and the
+command definitely did not execute. Anything else leaves open that it did. Callers
+deciding whether re-running is safe must use that flag rather than the message text.
+
+Cluster note: on a busy controller these failures cluster around slurmctld RPC rate
+limiting (`Job credential expired`). Pacing step creation below the controller's
+`rl_refill_rate` is a deployment concern rather than a property of this package.
+
 After generation, the Pyxis worker evaluates each prediction in a fresh `srun`
 container step because the Docker-based SWE-bench evaluator cannot run on the
 compute node. It mounts the patch, SWE-bench evaluation script, and output file into

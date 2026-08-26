@@ -22,8 +22,10 @@ from inference_endpoint.evaluation.swebench_service.swebench_service import (
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service.pyxis_environment import (
     PyxisEnvironment,
+    StepNotLaunched,
     build_srun_command,
     enroot_container_name,
+    read_step_sentinel,
     resolve_image,
     safe_srun_env,
 )
@@ -1224,6 +1226,120 @@ def test_pyxis_failure_carries_srun_output(monkeypatch, tmp_path):
         PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
 
     assert "failed to start Pyxis container" in str(exc_info.value)
+
+
+def _bare_environment(tmp_path, failure_path=None):
+    environment = object.__new__(PyxisEnvironment)
+    environment.config = types.SimpleNamespace(
+        cwd="/testbed",
+        env={},
+        timeout_s=30,
+        interpreter=["bash", "-c"],
+        infrastructure_failure_path=failure_path,
+    )
+    environment.name = "mswe_run-1_abcd1234"
+    environment._tmp_dir = tmp_path
+    return environment
+
+
+@pytest.mark.parametrize(
+    ("status", "provable"),
+    [
+        # The step script never ran its first line: the command provably did
+        # not execute, so re-running it cannot double-apply anything.
+        ("pending\n", True),
+        # The step script started; the command may well have executed.
+        ("started\n", False),
+        # A report for some other return code: the command ran.
+        ("finished:0\n", False),
+    ],
+)
+def test_step_failure_reports_whether_non_execution_is_provable(
+    monkeypatch, tmp_path, status, provable
+):
+    """srun's text says *what* broke; this says whether a re-run is safe.
+
+    Attaching srun's output made these failures readable. It does not make them
+    machine-actionable: nothing in the text distinguishes "the step never
+    launched" from "the command ran and its report was lost", and only the first
+    can be retried without risking double execution.
+    """
+    environment = _bare_environment(tmp_path)
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    def fake_run(command, **kwargs):
+        (tmp_path / Path("/tmp/.mlperf_srun_status").name).write_text(status)
+        return subprocess.CompletedProcess(command, 7, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(StepNotLaunched) as exc_info:
+        environment.execute({"command": "pytest -q"})
+
+    failure = exc_info.value
+    assert failure.provable_non_execution is provable
+    assert failure.status == status.strip()
+    assert failure.srun_rc == 7
+    assert repr(status.strip()) in str(failure)
+
+
+def test_step_not_launched_is_a_runner_error():
+    """Existing ``except RunnerError`` handlers must keep working unchanged."""
+    assert issubclass(StepNotLaunched, RunnerError)
+
+
+def test_step_reports_its_return_code_in_band(monkeypatch, tmp_path):
+    """The sentinel is authoritative and is stripped from the output.
+
+    It removes the shared-filesystem dependency from the success path: a step
+    can report its result even where the status file is unreadable, which on a
+    distributed filesystem is a real failure mode of its own.
+    """
+    environment = _bare_environment(tmp_path)
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    def fake_run(command, **kwargs):
+        nonce = command[command.index("pyxis-step") + 3]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"real output\n\n__MLPERF_STEP_RC__ {nonce} 3\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    output = environment.execute({"command": "false"})
+
+    assert output["returncode"] == 3
+    assert output["output"] == "real output"
+
+
+def test_step_sentinel_cannot_be_forged_by_command_output(monkeypatch, tmp_path):
+    environment = _bare_environment(tmp_path)
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command, 1, stdout="__MLPERF_STEP_RC__ deadbeef 0\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(StepNotLaunched):
+        environment.execute({"command": "echo spoof"})
+
+
+def test_read_step_sentinel_ignores_unrelated_output():
+    assert read_step_sentinel("no marker here\n", "abc") == (None, "no marker here\n")
+    assert read_step_sentinel("out\n__MLPERF_STEP_RC__ abc x\n", "abc") == (
+        None,
+        "out\n__MLPERF_STEP_RC__ abc x\n",
+    )
+    assert read_step_sentinel("out\n__MLPERF_STEP_RC__ abc -1\n", "abc") == (-1, "out")
 
 
 def test_pyxis_environment_preserves_command_failure(monkeypatch, tmp_path):
