@@ -11,7 +11,14 @@ emit an accuracy number unless every planned instance id is accounted for
 exactly once.
 """
 
-from .merge import MergeRefusal, MergeResult, merge_run, verify_inventory
+from .merge import (
+    CompletenessReport,
+    MergeRefusal,
+    MergeResult,
+    assess_run,
+    merge_run,
+    verify_inventory,
+)
 from .queue import (
     ClaimError,
     UnitOutcome,
@@ -22,6 +29,7 @@ from .units import Unit, UnitPlan, plan_units
 
 __all__ = [
     "ClaimError",
+    "CompletenessReport",
     "MergeRefusal",
     "MergeResult",
     "Unit",
@@ -29,6 +37,7 @@ __all__ = [
     "UnitPlan",
     "UnitResult",
     "WorkQueue",
+    "assess_run",
     "merge_run",
     "plan_units",
     "verify_inventory",

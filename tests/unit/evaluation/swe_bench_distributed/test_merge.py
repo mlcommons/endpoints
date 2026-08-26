@@ -11,6 +11,7 @@ import pytest
 
 from inference_endpoint.evaluation.swe_bench_distributed.merge import (
     MergeRefusal,
+    assess_run,
     merge_run,
     verify_inventory,
 )
@@ -187,3 +188,137 @@ class TestInventory:
     def test_claims_without_results_are_reported(self, queue):
         queue.claim("run-a.s00")
         assert verify_inventory(queue).claims_without_results == ["run-a.s00"]
+
+
+class TestCompletenessGate:
+    """`resolved_rate` is published only for a complete, uncontaminated run.
+
+    A run that lost 106 of its 200 instances to infrastructure once printed
+    47.0% as though it were accuracy, and that was then compared against a
+    complete-run reference of 70.67% and read as a model regression. It was
+    attrition. The gate refuses the headline; the conditional rate and the
+    lower bound are published either way so nobody has to recompute them by
+    hand from the artifacts.
+    """
+
+    def test_a_complete_run_publishes_the_headline(self, queue):
+        publish_all(queue)
+
+        report = assess_run(queue, "run-a")
+
+        assert report.complete
+        assert report.publishable
+        assert report.resolved_rate == pytest.approx(0.3)
+        assert report.withheld_reason is None
+
+    def test_an_incomplete_run_withholds_the_headline(self, queue):
+        publish(queue, "run-a.s00")
+
+        report = assess_run(queue, "run-a")
+
+        assert not report.complete
+        assert report.resolved_rate is None
+        assert "NO PUBLISHABLE ACCURACY" in report.withheld_reason
+
+    def test_an_incomplete_run_names_the_instances_it_lost(self, queue):
+        publish(queue, "run-a.s00")
+
+        report = assess_run(queue, "run-a")
+
+        assert list(report.incomplete_instance_ids) == sorted(IDS[10:])
+        assert report.accounted_instances == 10
+
+    def test_the_conditional_rate_is_published_even_when_refused(self, queue):
+        publish(queue, "run-a.s00")
+
+        report = assess_run(queue, "run-a")
+
+        # 3 resolved of the 10 that actually ran.
+        assert report.conditional_resolved_rate == pytest.approx(0.3)
+        # 3 resolved of the 20 that were planned: infrastructure losses can
+        # only ever add resolutions, so this bounds the truth from below.
+        assert report.resolved_rate_lower_bound == pytest.approx(0.15)
+
+    def test_infra_loss_withholds_the_headline_on_a_structurally_complete_run(
+        self, queue
+    ):
+        """Complete is not enough. The losses have to be the model's."""
+        publish(queue, "run-a.s00")
+        publish(queue, "run-a.s01", infra_error_count=2)
+
+        report = assess_run(queue, "run-a")
+
+        assert report.infra_lost_instances == 2
+        assert list(report.infra_lost_unit_ids) == ["run-a.s01"]
+        assert report.resolved_rate is None
+        assert "lost to" in report.withheld_reason
+
+    def test_a_genuinely_empty_result_is_not_infra_loss(self, queue):
+        """A model that resolved nothing is a score, not a casualty."""
+        publish(queue, "run-a.s00", resolved_instance_ids=())
+        publish(queue, "run-a.s01", resolved_instance_ids=())
+
+        report = assess_run(queue, "run-a")
+
+        assert report.complete
+        assert report.infra_lost_instances == 0
+        assert report.publishable
+        assert report.resolved_rate == pytest.approx(0.0)
+
+    def test_an_abandoned_unit_is_counted_as_infrastructure_loss(self, queue):
+        publish(queue, "run-a.s00")
+        publish(queue, "run-a.s01", abandoned=True, attempt=3)
+
+        report = assess_run(queue, "run-a")
+
+        assert report.infra_lost_instances == 10
+        assert report.resolved_rate is None
+
+    def test_a_refusal_still_carries_the_report(self, queue):
+        publish(queue, "run-a.s00")
+
+        with pytest.raises(MergeRefusal) as excinfo:
+            merge_run(queue, "run-a")
+
+        report = excinfo.value.report
+        assert report is not None
+        assert report.resolved_rate is None
+        assert report.conditional_resolved_rate == pytest.approx(0.3)
+        assert report.incomplete_instance_ids
+
+    def test_a_published_result_carries_the_report_too(self, queue):
+        publish_all(queue)
+
+        result = merge_run(queue, "run-a")
+
+        assert result.report is not None
+        assert result.report.publishable
+        assert result.to_dict()["resolved_rate_withheld_reason"] is None
+
+    def test_the_serialized_report_names_every_published_field(self, queue):
+        publish(queue, "run-a.s00")
+
+        payload = assess_run(queue, "run-a").to_dict()
+
+        assert payload["resolved_rate"] is None
+        assert payload["conditional_resolved_rate"] == pytest.approx(0.3)
+        assert payload["resolved_rate_lower_bound"] == pytest.approx(0.15)
+        assert payload["incomplete_instance_ids"]
+        assert payload["resolved_rate_withheld_reason"]
+        assert payload["complete"] is False
+
+    def test_a_run_with_nothing_published_has_no_rate_at_all(self, queue):
+        report = assess_run(queue, "run-a")
+
+        assert report.conditional_resolved_rate is None
+        assert report.resolved_rate is None
+        assert report.resolved_rate_lower_bound == pytest.approx(0.0)
+
+    def test_assess_run_does_not_raise_on_a_broken_run(self, queue):
+        """The arithmetic must survive the run it is describing."""
+        publish(queue, "run-a.s00", accounted_instance_ids=(IDS[0], IDS[0]))
+
+        report = assess_run(queue, "run-a")
+
+        assert not report.publishable
+        assert report.reasons
