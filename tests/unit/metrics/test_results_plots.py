@@ -135,12 +135,29 @@ def test_extract_accuracy_non_bfcl_breakdown_falls_back_to_overall():
 @pytest.mark.unit
 def test_extract_accuracy_scalar_fallback_when_no_breakdown():
     """gpt-oss runs three single-metric datasets with no breakdown; without the
-    scalar fallback the plot is empty. One bar per dataset, overall = mean."""
+    scalar fallback the plot is empty. One bar per dataset; overall is the
+    unit_samples-weighted mean (matching accuracy_results.json average_accuracy),
+    NOT a flat mean and NOT weighted by total_samples (issued attempts)."""
     results = {
         "accuracy_scores": [
-            {"dataset_name": "aime25::gptoss", "score": 0.8, "total_samples": 30},
-            {"dataset_name": "gpqa::gptoss", "score": 0.9, "total_samples": 198},
-            {"dataset_name": "lcb::gptoss", "score": 0.7, "total_samples": 100},
+            {
+                "dataset_name": "aime25::gptoss",
+                "score": 0.8,
+                "unit_samples": 30,
+                "total_samples": 240,
+            },
+            {
+                "dataset_name": "gpqa::gptoss",
+                "score": 0.9,
+                "unit_samples": 198,
+                "total_samples": 990,
+            },
+            {
+                "dataset_name": "lcb::gptoss",
+                "score": 0.7,
+                "unit_samples": 100,
+                "total_samples": 300,
+            },
             {
                 "dataset_name": "perf",
                 "score": 0.0,
@@ -156,8 +173,34 @@ def test_extract_accuracy_scalar_fallback_when_no_breakdown():
         "gpqa::gptoss": pytest.approx(90.0),
         "lcb::gptoss": pytest.approx(70.0),
     }
-    assert b.overall == pytest.approx((80.0 + 90.0 + 70.0) / 3)
-    assert b.total_samples == 328  # perf entry excluded
+    # Weighted by unit_samples (30/198/100) -> ~82.99, distinct from the flat mean
+    # (80.0) and from a total_samples weighting (~84.5).
+    weighted = (0.8 * 30 + 0.9 * 198 + 0.7 * 100) / (30 + 198 + 100) * 100
+    assert b.overall == pytest.approx(weighted)
+    assert b.overall != pytest.approx((80.0 + 90.0 + 70.0) / 3)
+    assert b.total_samples == 1530  # sum of total_samples; perf entry excluded
+
+
+@pytest.mark.unit
+def test_extract_accuracy_scalar_fallback_bar_and_overall_stay_consistent():
+    """A rendered bar must always be included in the weighted overall — a
+    present-but-corrupt unit_samples contributes weight 1.0, never gets dropped
+    from the headline (which would make bars and overall disagree)."""
+    results = {
+        "accuracy_scores": [
+            {"dataset_name": "aime", "score": 0.8, "unit_samples": 30},
+            # Corrupt weight: still a valid score, so it renders a bar and must
+            # count toward overall at weight 1.0.
+            {"dataset_name": "bad", "score": 0.6, "unit_samples": "oops"},
+        ]
+    }
+    b = extract_accuracy(results)
+    assert b is not None
+    # Both datasets appear as bars...
+    assert set(b.subset_scores) == {"aime", "bad"}
+    # ...and both contribute to overall (30-weighted + 1.0-weighted), so it is not
+    # just the well-weighted bar (80.0) nor a flat mean (70.0).
+    assert b.overall == pytest.approx((80.0 * 30 + 60.0 * 1.0) / (30 + 1.0))
 
 
 @pytest.mark.unit

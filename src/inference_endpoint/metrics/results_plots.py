@@ -106,13 +106,17 @@ def _breakdown_from_scalars(results: dict[str, Any]) -> AccuracyBreakdown | None
     gpt-oss runs three single-metric datasets (``aime25``/``gpqa``/``lcb``) scored
     by ``PassAt1Scorer``/``LiveCodeBenchScorer``, which don't emit a
     ``score_breakdown``. Without this, ``extract_accuracy`` returns ``None`` and
-    the accuracy plot is empty. One bar per accuracy dataset; overall is their mean.
+    the accuracy plot is empty. One bar per accuracy dataset; overall is their
+    unit_samples-weighted mean — the same weighting as the ``average_accuracy``
+    JSON artifact key — kept consistent with the bars below.
     """
     scores = results.get("accuracy_scores")
     if not isinstance(scores, list):
         return None
     subset: dict[str, float] = {}
     total = 0
+    weighted_sum = 0.0
+    weight_total = 0.0
     for e in scores:
         if (
             not isinstance(e, dict)
@@ -124,11 +128,25 @@ def _breakdown_from_scalars(results: dict[str, Any]) -> AccuracyBreakdown | None
             # Scalar scorers (PassAt1Scorer/LiveCodeBenchScorer) return fractions
             # in [0, 1], but plot_accuracy renders on a 0-100 axis and gates in
             # percent — scale fractions up so gpt-oss bars read 80, not 0.8.
-            subset[str(e.get("dataset_name", "?"))] = s * 100 if s <= 1 else s
+            pct = s * 100 if s <= 1 else s
+            subset[str(e.get("dataset_name", "?"))] = pct
             total += int(e.get("total_samples", 0) or 0)
+            # Weight each bar by its dataset sample count so ``overall`` is the same
+            # unit_samples-weighted mean as accuracy_results.json average_accuracy,
+            # yet derived from the exact values shown as bars — so a rendered bar can
+            # never be silently dropped from the headline. An absent/invalid count
+            # contributes weight 1.0 (every bar counts).
+            w = e.get("unit_samples")
+            weight = (
+                float(w)
+                if isinstance(w, int | float) and not isinstance(w, bool) and w > 0
+                else 1.0
+            )
+            weighted_sum += pct * weight
+            weight_total += weight
     if not subset:
         return None
-    overall = sum(subset.values()) / len(subset)
+    overall = weighted_sum / weight_total
     return AccuracyBreakdown(
         overall=overall,
         normalized=overall,
