@@ -273,7 +273,36 @@ def test_base_env_supplies_api_key_only_to_agent_subprocess(monkeypatch, tmp_pat
 
     monkeypatch.setenv("OPENAI_API_KEY", "ambient-secret")
     unauthenticated = _request(["http://endpoint:30000"])
-    assert "OPENAI_API_KEY" not in runner._base_env(unauthenticated)
+    assert runner._base_env(unauthenticated)["OPENAI_API_KEY"] == "EMPTY"
+    assert runner._base_env(authenticated)["OPENAI_API_KEY"] == "real-secret"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://localhost:30000",
+        "http://127.0.0.1:30000",
+        "http://[::1]:30000",
+        "http://swebench-host:30000",
+        "https://engine.example.com:8443",
+    ],
+)
+def test_base_env_always_supplies_a_credential_placeholder(
+    monkeypatch, tmp_path, endpoint
+):
+    """A keyless run must never leave OPENAI_API_KEY unset.
+
+    litellm raises ``Missing credentials`` before issuing anything and the agent
+    retries it forever, so a remote endpoint with no key made zero progress
+    while the run looked healthy. The placeholder must not depend on whether the
+    endpoint happens to be loopback.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-secret")
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+
+    env = runner._base_env(_request([endpoint]))
+
+    assert env["OPENAI_API_KEY"] == "EMPTY"
 
 
 def test_run_agent_filters_exact_instance_ids(monkeypatch, tmp_path):
