@@ -16,6 +16,9 @@ import msgspec.json
 import pytest
 import yaml
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
+    artifacts as artifacts_mod,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service import (
     pyxis_worker as worker_mod,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
@@ -434,15 +437,18 @@ def test_run_cleans_labeled_containers_after_success(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("error", "match"),
+    ("error", "raised", "match"),
     [
-        (RuntimeError("agent failed"), "agent failed"),
-        (RunnerError("subprocess timed out"), "timed out"),
-        (RunCancelled("subprocess cancelled"), "cancelled"),
+        # A non-cancellation agent failure that leaves no prediction behind
+        # surfaces as the empty-predictions failure, with the agent error
+        # chained as its cause.
+        (RuntimeError("agent failed"), RunnerError, "did not produce preds.json"),
+        (RunnerError("subprocess timed out"), RunnerError, "did not produce preds"),
+        (RunCancelled("subprocess cancelled"), RunCancelled, "cancelled"),
     ],
 )
 def test_run_cleans_labeled_containers_after_failure(
-    monkeypatch, tmp_path, error, match
+    monkeypatch, tmp_path, error, raised, match
 ):
     runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     cleaned: list[str] = []
@@ -453,10 +459,134 @@ def test_run_cleans_labeled_containers_after_failure(
     monkeypatch.setattr(runner, "_run_agent", fail_agent)
     monkeypatch.setattr(runner, "_cleanup_containers", cleaned.append)
 
-    with pytest.raises(type(error), match=match):
+    with pytest.raises(raised, match=match) as exc_info:
         runner.run(_request(["http://endpoint:30000"]), tmp_path / "run-2")
 
+    if raised is not RunCancelled:
+        assert exc_info.value.__cause__ is error
     assert cleaned == ["run-2"]
+
+
+def test_run_scores_predictions_left_behind_by_a_failed_agent_phase(
+    monkeypatch, tmp_path
+):
+    """One worker's infrastructure failure must not discard the eval phase.
+
+    The agent phase fans out across many workers. When one of them dies the
+    exception propagates out of the whole phase, but every prediction the other
+    workers wrote is already on disk. Before this fix a run with predictions for
+    most of its instances was reported as a total loss and never scored at all.
+    """
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    run_dir = tmp_path / "run-partial"
+    scored: list[Path] = []
+
+    def partial_agent(
+        request, patched_config, output_dir, run_dir, secret_values, cancel_token=None
+    ):
+        (output_dir / "preds.json").write_text('{"repo__repo-1":"patch"}')
+        raise RunnerError("Pyxis infrastructure failure before the command completed")
+
+    def fake_run_eval(
+        request, preds_path, output_dir, run_dir, secret_values, cancel_token=None
+    ):
+        scored.append(preds_path)
+        result_path = output_dir / "result.json"
+        result_path.write_text('{"resolved_instances":1,"submitted_instances":1}')
+        return result_path
+
+    monkeypatch.setattr(runner, "_run_agent", partial_agent)
+    monkeypatch.setattr(runner, "_run_eval", fake_run_eval)
+    monkeypatch.setattr(runner, "_cleanup_containers", lambda *a, **k: None)
+
+    result = runner.run(_request(["http://endpoint:30000"]), run_dir)
+
+    assert result == {"resolved_instances": 1, "submitted_instances": 1}
+    assert scored, "eval phase never ran"
+    error_text = (run_dir / "agent_phase_error.txt").read_text()
+    assert "RunnerError" in error_text
+    assert "Pyxis infrastructure failure" in error_text
+
+
+def test_agent_phase_error_is_a_retrievable_artifact():
+    assert "agent_phase_error.txt" in artifacts_mod.SAFE_ARTIFACT_NAMES
+
+
+def test_run_redacts_secrets_from_the_agent_phase_error(monkeypatch, tmp_path):
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    run_dir = tmp_path / "run-secret"
+    request = _request(["http://endpoint:30000"])
+    request.endpoint_api_key = "real-secret"
+
+    def leaky_agent(
+        request, patched_config, output_dir, run_dir, secret_values, cancel_token=None
+    ):
+        (output_dir / "preds.json").write_text('{"repo__repo-1":"patch"}')
+        raise RunnerError("connection to http://endpoint:30000 with real-secret failed")
+
+    def fake_run_eval(
+        request, preds_path, output_dir, run_dir, secret_values, cancel_token=None
+    ):
+        result_path = output_dir / "result.json"
+        result_path.write_text("{}")
+        return result_path
+
+    monkeypatch.setattr(runner, "_run_agent", leaky_agent)
+    monkeypatch.setattr(runner, "_run_eval", fake_run_eval)
+    monkeypatch.setattr(runner, "_cleanup_containers", lambda *a, **k: None)
+
+    runner.run(request, run_dir)
+
+    error_text = (run_dir / "agent_phase_error.txt").read_text()
+    assert "real-secret" not in error_text
+    assert "<redacted>" in error_text
+
+
+def test_run_still_fails_when_the_agent_phase_produced_nothing(monkeypatch, tmp_path):
+    """Tolerating the failure must not turn an empty run into a pass."""
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    cause = RunnerError("every worker died")
+
+    def dead_agent(*args, **kwargs):
+        raise cause
+
+    monkeypatch.setattr(runner, "_run_agent", dead_agent)
+    monkeypatch.setattr(
+        runner,
+        "_run_eval",
+        lambda *a, **k: pytest.fail("eval must not run without predictions"),
+    )
+    monkeypatch.setattr(runner, "_cleanup_containers", lambda *a, **k: None)
+
+    with pytest.raises(RunnerError, match="did not produce preds.json") as exc_info:
+        runner.run(_request(["http://endpoint:30000"]), tmp_path / "run-empty")
+
+    assert exc_info.value.__cause__ is cause
+
+
+def test_run_does_not_tolerate_cancellation(monkeypatch, tmp_path):
+    """Cancellation is not a worker failure and must propagate unchanged."""
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    run_dir = tmp_path / "run-cancelled"
+
+    def cancelled_agent(
+        request, patched_config, output_dir, run_dir, secret_values, cancel_token=None
+    ):
+        (output_dir / "preds.json").write_text('{"repo__repo-1":"patch"}')
+        raise RunCancelled("subprocess cancelled")
+
+    monkeypatch.setattr(runner, "_run_agent", cancelled_agent)
+    monkeypatch.setattr(
+        runner,
+        "_run_eval",
+        lambda *a, **k: pytest.fail("eval must not run after cancellation"),
+    )
+    monkeypatch.setattr(runner, "_cleanup_containers", lambda *a, **k: None)
+
+    with pytest.raises(RunCancelled):
+        runner.run(_request(["http://endpoint:30000"]), run_dir)
+
+    assert not (run_dir / "agent_phase_error.txt").exists()
 
 
 def test_run_cleans_harness_containers_after_eval_cancellation(monkeypatch, tmp_path):

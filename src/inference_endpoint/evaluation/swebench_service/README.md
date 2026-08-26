@@ -109,6 +109,22 @@ allocation. `scancel` does not reclaim them either -- ending the job does not
 remove Enroot containers -- which is why the removal has to be both correctly
 named and audible.
 
+### Agent-phase failures
+
+The agent phase runs `--workers` trajectories concurrently. If it fails after
+some workers have already written their patches, the service still evaluates the
+predictions that reached `preds.json` rather than discarding them: the failure is
+recorded in the `agent_phase_error.txt` artifact and logged at ERROR, and the run
+continues into the eval phase. Instances with no prediction are simply absent from
+the results, which the harness reports as unresolved.
+
+A run whose agent phase produced no predictions at all still fails, with the agent
+error chained as the cause. Cancellation is never tolerated this way: it
+propagates immediately and no eval phase runs.
+
+Consumers that need to know a run was degraded should fetch `agent_phase_error.txt`;
+its presence means some instances may be missing from `swe_bench_results.json`.
+
 The benchmark client submits a run to this service only in `ACC` or `BOTH`
 mode; the default `PERF` mode skips external evaluation.
 

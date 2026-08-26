@@ -42,6 +42,7 @@ SECRET_TEXT_PATTERNS = (
     re.compile(r"(://[^:/\s]+:)[^@\s/]+(@)"),
 )
 SAFE_ARTIFACT_NAMES = {
+    "agent_phase_error.txt",
     "preds.json",
     "swe_bench_agent.log",
     "swe_bench_eval.log",

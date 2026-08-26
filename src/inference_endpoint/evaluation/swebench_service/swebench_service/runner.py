@@ -84,6 +84,8 @@ TEMPLATE_FILES: dict[TemplateName, str] = {
 _LOG_TAIL_MAX_BYTES = 64 * 1024
 _LOG_TAIL_MAX_LINES = 50
 _RUN_LABEL = "com.mlcommons.endpoints.swebench-run"
+#: Written when the agent phase failed but predictions were still scored.
+AGENT_PHASE_ERROR_FILE = "agent_phase_error.txt"
 _PROCESS_TERMINATE_TIMEOUT_S = 10
 _SWEBENCH_DATASETS = {
     "verified": "princeton-nlp/SWE-bench_Verified",
@@ -298,7 +300,7 @@ class SweBenchRunner:
                 request,
                 run_id=run_dir.name,
             )
-            self._run_agent(
+            agent_error = self._run_agent_tolerantly(
                 request,
                 patched_config,
                 output_dir,
@@ -309,7 +311,10 @@ class SweBenchRunner:
 
         preds_path = output_dir / "preds.json"
         if not preds_path.exists():
-            raise RunnerError("mini-extra did not produce preds.json")
+            # A genuinely empty agent phase still fails loudly: there is
+            # nothing to score. The agent error, if any, is the cause.
+            error = RunnerError("mini-extra did not produce preds.json")
+            raise error from agent_error
         self._validate_prediction_ids(request, preds_path)
         shutil.copy2(preds_path, run_dir / "preds.json")
 
@@ -318,6 +323,56 @@ class SweBenchRunner:
         )
         shutil.copy2(result_path, run_dir / "swe_bench_results.json")
         return msgspec.json.decode(result_path.read_bytes(), type=dict)
+
+    def _run_agent_tolerantly(
+        self,
+        request: RunRequest,
+        patched_config: Path,
+        output_dir: Path,
+        run_dir: Path,
+        secret_values: set[str],
+        cancel_token: CancellationToken | None,
+    ) -> BaseException | None:
+        """Run the agent phase; record a failure instead of discarding the run.
+
+        The agent phase fans out across many concurrent workers, and a single
+        worker's infrastructure failure (a container that would not start, an
+        `srun` step that never launched) propagates out of the whole phase. The
+        predictions every *other* worker already wrote are on disk and are
+        perfectly scoreable, but the exception reached ``run()`` before
+        ``preds.json`` was ever looked at, so the entire eval phase was skipped
+        and a run with 137 of 200 predictions reported as a total loss.
+
+        The failure is not hidden. It is written to ``agent_phase_error.txt``,
+        served as a run artifact, logged at ERROR, and chained onto the
+        ``preds.json`` failure when the phase really did produce nothing.
+        Cancellation is not a failure to tolerate: it propagates unchanged.
+        """
+        try:
+            self._run_agent(
+                request,
+                patched_config,
+                output_dir,
+                run_dir,
+                secret_values,
+                cancel_token,
+            )
+        except RunCancelled:
+            raise
+        except Exception as exc:
+            atomic_write_bytes(
+                run_dir / AGENT_PHASE_ERROR_FILE,
+                redact_text(f"{type(exc).__name__}: {exc}\n", secret_values).encode(),
+            )
+            logger.error(
+                "SWE-bench agent phase failed for run %s; continuing to eval so "
+                "the predictions already on disk are still scored: %s",
+                run_dir.name,
+                exc,
+                exc_info=True,
+            )
+            return exc
+        return None
 
     def _load_template(self, request: RunRequest) -> dict[str, Any]:
         template_path = self._template_dir / TEMPLATE_FILES[request.template]
