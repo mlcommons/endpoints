@@ -29,21 +29,21 @@ datasets:
           - http://swe-host-2:18080
         swebench_service_auth_token: ${SWEBENCH_TOKEN}
         num_instances: 200
-        shard_size: 10          # instances per unit; 200 / 10 = 20 units
+        shard_size: 10 # instances per unit; 200 / 10 = 20 units
         max_attempts: 3
-        expected_model: Org/Model-FP8   # optional; gates checkpoint identity
-        min_prompt_tokens: 2000         # tool-call gate scale floor
+        expected_model: Org/Model-FP8 # optional; gates checkpoint identity
+        min_prompt_tokens: 2000 # tool-call gate scale floor
         stall_timeout_s: 10800
 ```
 
-| Extra | Default | Meaning |
-| --- | --- | --- |
+| Extra                   | Default  | Meaning                                                                                                                                                     |
+| ----------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `swebench_service_urls` | required | One URL per service host. Duplicates are refused: two entries for one host is not extra capacity, it is two runs contending for the same container runtime. |
-| `shard_size` | 10 | Instances per unit. |
-| `max_attempts` | 3 | Counted attempts before a unit is abandoned. Environment faults are not counted. |
-| `expected_model` | none | When set, every endpoint must serve exactly this checkpoint. |
-| `min_prompt_tokens` | 2000 | Floor the tool-call gate must prove it reaches. `0` waives the proof. |
-| `stall_timeout_s` | 10800 | A service completing no unit in this long is quarantined even if healthy. |
+| `shard_size`            | 10       | Instances per unit.                                                                                                                                         |
+| `max_attempts`          | 3        | Counted attempts before a unit is abandoned. Environment faults are not counted.                                                                            |
+| `expected_model`        | none     | When set, every endpoint must serve exactly this checkpoint.                                                                                                |
+| `min_prompt_tokens`     | 2000     | Floor the tool-call gate must prove it reaches. `0` waives the proof.                                                                                       |
+| `stall_timeout_s`       | 10800    | A service completing no unit in this long is quarantined even if healthy.                                                                                   |
 
 ## What runs, in order
 
@@ -60,14 +60,14 @@ datasets:
 
 ## The gates
 
-| Gate | Refuses |
-| --- | --- |
-| `CheckpointIdentityGate` | Any endpoint not serving *exactly* `expected_model`. `/get_model_info` is preferred over `/v1/models`, because the latter echoes `--served-model-name`, which is routinely identical across checkpoints. Comparison is `==`: `Org/Model` is a strict prefix of `Org/Model-FP8`, so any `startswith`/`in` test accepts FP8 as BF16. Unidentifiable means fail. |
-| `ToolCallGate` | Any endpoint that does not return a well-formed tool call — right name, `arguments` parse as JSON, non-empty `command`. |
-| `EndpointFingerprintGate` | Any endpoint whose identity cannot be read at all. Records a fingerprint compared again at publish time. |
+| Gate                      | Refuses                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CheckpointIdentityGate`  | Any endpoint not serving _exactly_ `expected_model`. `/get_model_info` is preferred over `/v1/models`, because the latter echoes `--served-model-name`, which is routinely identical across checkpoints. Comparison is `==`: `Org/Model` is a strict prefix of `Org/Model-FP8`, so any `startswith`/`in` test accepts FP8 as BF16. Unidentifiable means fail. |
+| `ToolCallGate`            | Any endpoint that does not return a well-formed tool call — right name, `arguments` parse as JSON, non-empty `command`.                                                                                                                                                                                                                                       |
+| `EndpointFingerprintGate` | Any endpoint whose identity cannot be read at all. Records a fingerprint compared again at publish time.                                                                                                                                                                                                                                                      |
 
 **The scale rule.** Every gate implements `assert_scale()`, it runs before the
-gate's own check, and a scale failure is a *gate failure*, never a skip.
+gate's own check, and a scale failure is a _gate failure_, never a skip.
 `ToolCallGate` measures its prompt with the server's own `/tokenize` and fails if
 the prompt is below `min_prompt_tokens`. This exists because a tool-call gate
 that exercised exactly the right operation with a 278-token prompt passed
@@ -128,13 +128,13 @@ only `.extern` on the clusters this targets and would mark every live step dead.
 Every unit is classified after the service reports success. The rule list is
 ordered and first-match-wins; the order is load-bearing.
 
-| Kind | Class | Why |
-| --- | --- | --- |
-| `container_fork_eagain`, `container_exec_refused`, `runtime_read_timeout`, `image_build_timeout`, `image_build_error`, `step_infrastructure_failure`, `endpoint_changed` | infra → **retry** | Defects in infrastructure we provided. |
-| `test_timeout` | genuine | A patch that makes the suite loop is a failing patch. |
-| `test_memory_exceeded` | genuine | A patch that makes a graded test allocate without bound is a failing patch. The alternative to killing it was never "the test passes", it was "the host OOMs and the instance still never completes". |
-| `patch_apply_failed` | genuine | The model emitted a diff that does not apply. SWE-bench books it as `error`, but it is model behaviour. |
-| `unknown` | genuine | **The bias rule.** |
+| Kind                                                                                                                                                                     | Class             | Why                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `container_fork_eagain`, `container_exec_refused`, `runtime_read_timeout`, `image_build_timeout`, `image_build_error`, `step_infrastructure_failure`, `endpoint_changed` | infra → **retry** | Defects in infrastructure we provided.                                                                                                                                                                |
+| `test_timeout`                                                                                                                                                           | genuine           | A patch that makes the suite loop is a failing patch.                                                                                                                                                 |
+| `test_memory_exceeded`                                                                                                                                                   | genuine           | A patch that makes a graded test allocate without bound is a failing patch. The alternative to killing it was never "the test passes", it was "the host OOMs and the instance still never completes". |
+| `patch_apply_failed`                                                                                                                                                     | genuine           | The model emitted a diff that does not apply. SWE-bench books it as `error`, but it is model behaviour.                                                                                               |
+| `unknown`                                                                                                                                                                | genuine           | **The bias rule.**                                                                                                                                                                                    |
 
 **The bias rule is deliberately asymmetric.** An error that cannot be classified
 confidently is genuine, never infrastructure. A false bad-run costs one redo; a
@@ -148,11 +148,11 @@ recorded at claim time is re-read at publish time; a change requeues the unit.
 
 ### Attempt accounting
 
-* **Environment fault** (service unreachable, submit failed) — recorded under
+- **Environment fault** (service unreachable, submit failed) — recorded under
   `failed/env/`, does **not** consume the attempt budget, and counts toward
   quarantining that service. A broken host is a property of the host, not of the
   unit.
-* **Infra / failed** — counted. After `max_attempts` the unit is published as
+- **Infra / failed** — counted. After `max_attempts` the unit is published as
   `abandoned` and its claim released, so it stops burning capacity and shows up
   loudly in the merge gate instead of spinning forever.
 
@@ -182,7 +182,7 @@ unrelated configurations into one number.
 ### What a refusal still publishes
 
 A refusal that carries no numbers is not the end of the story -- somebody still
-has to report *something*, and with the gate silent they compute it by hand. That
+has to report _something_, and with the gate silent they compute it by hand. That
 is how a run which lost 106 of its 200 instances to infrastructure came to be
 reported as **47.0%** and compared against a complete-run reference of 70.67%. It
 was read as a model regression. It was attrition.
@@ -191,14 +191,14 @@ was read as a model regression. It was attrition.
 anything and returns a `CompletenessReport`, which is attached to both
 `MergeResult` and `MergeRefusal` and written to the run's merge artifacts.
 
-| Field | Always present | Meaning |
-| --- | --- | --- |
-| `resolved_rate` | yes, may be `null` | The headline. `null` unless the run is structurally complete **and** lost nothing to infrastructure. |
-| `conditional_resolved_rate` | yes | Resolved over the instances that actually completed. Honest about what it measures; **not** comparable to a complete-run reference. |
-| `resolved_rate_lower_bound` | yes | Resolved over everything planned. Infrastructure losses can only ever *add* resolutions, so this bounds the truth from below. |
-| `incomplete_instance_ids` | yes | Exactly which instances never reached a terminal state. |
-| `infra_lost_instances`, `infra_lost_unit_ids` | yes | What the harness lost, as distinct from what the model failed. |
-| `resolved_rate_withheld_reason` | yes, may be `null` | Which of the two conditions failed, and by how much. |
+| Field                                         | Always present     | Meaning                                                                                                                             |
+| --------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `resolved_rate`                               | yes, may be `null` | The headline. `null` unless the run is structurally complete **and** lost nothing to infrastructure.                                |
+| `conditional_resolved_rate`                   | yes                | Resolved over the instances that actually completed. Honest about what it measures; **not** comparable to a complete-run reference. |
+| `resolved_rate_lower_bound`                   | yes                | Resolved over everything planned. Infrastructure losses can only ever _add_ resolutions, so this bounds the truth from below.       |
+| `incomplete_instance_ids`                     | yes                | Exactly which instances never reached a terminal state.                                                                             |
+| `infra_lost_instances`, `infra_lost_unit_ids` | yes                | What the harness lost, as distinct from what the model failed.                                                                      |
+| `resolved_rate_withheld_reason`               | yes, may be `null` | Which of the two conditions failed, and by how much.                                                                                |
 
 The two conditions are deliberately separate and conflating them gets both
 wrong. An instance the model attempted and failed is a legitimate score; one the
@@ -241,13 +241,13 @@ Retries are bounded and, more importantly, counted. `InfraRetryLedger` appends
 one JSON line per event so a run that dies still leaves its retry history, and
 `summary()` publishes:
 
-| Field | Meaning |
-| --- | --- |
-| `infra_retries_total` | Every retry event. |
-| `instances_saved_by_retry` | Targets that recovered and did not later exhaust. |
-| `infra_retries_exhausted` | Targets the budget could not rescue. |
-| `infra_retry_succeeded_on_attempt` | Which attempt each recovery landed on. |
-| `run_quality` | `CLEAN` / `OK_WITH_RETRIES` / `DEGRADED`. |
+| Field                              | Meaning                                           |
+| ---------------------------------- | ------------------------------------------------- |
+| `infra_retries_total`              | Every retry event.                                |
+| `instances_saved_by_retry`         | Targets that recovered and did not later exhaust. |
+| `infra_retries_exhausted`          | Targets the budget could not rescue.              |
+| `infra_retry_succeeded_on_attempt` | Which attempt each recovery landed on.            |
+| `run_quality`                      | `CLEAN` / `OK_WITH_RETRIES` / `DEGRADED`.         |
 
 `run_quality` is `DEGRADED` on any exhaustion or not-retryable failure, and also
 when more than 2% of operations needed a retry **even if every one of them
@@ -275,16 +275,16 @@ what it exists to catch.
 
 Two rules are enforced by construction and by test:
 
-* **Kill by pid, never by pattern.** There is no `pkill`/`pgrep` path in the
+- **Kill by pid, never by pattern.** There is no `pkill`/`pgrep` path in the
   module and it never shells out; `kill_by_pid` refuses this process and its
   ancestors. A pattern can match the guard's own command line, and a long-lived
   daemon can carry a dead process's argv for days.
-* **A conjunctive guard must not degenerate.** `combine_terms()` returns
+- **A conjunctive guard must not degenerate.** `combine_terms()` returns
   `INDETERMINATE`, never `UNHEALTHY`, when any term has zero evidence. An
   AND-guard whose honest term loses its data source collapses into its weaker
   clauses and starts firing on healthy targets.
 
-The kill marker is written *before* the signal, and its phase is load-bearing:
+The kill marker is written _before_ the signal, and its phase is load-bearing:
 only `eval.*` markers make an instance's error a genuine failure. An `agent`
 kill merely makes one tool call return an error observation, so it is recorded
 for audit and must not influence classification. An unresolvable container name
@@ -292,15 +292,15 @@ fails closed to `unknown`.
 
 ## Operational notes
 
-* `--kill-on-bad-exit=0` does **not** prevent a scheduler force-terminating a
+- `--kill-on-bad-exit=0` does **not** prevent a scheduler force-terminating a
   whole step when one node OOMs; OOM escalation is separate from task exit codes.
   The defence is small, independently retryable units plus `MemoryGuard` acting
   before the host dies — not the flag.
-* A service that answers `/health` while completing nothing is the silent
+- A service that answers `/health` while completing nothing is the silent
   failure. Verify the effect, never the status: the dispatcher quarantines a
   service that has completed no unit within `stall_timeout_s` and requeues its
   work.
-* In shell tooling around this queue, remember `grep -c` exits 1 on zero
+- In shell tooling around this queue, remember `grep -c` exits 1 on zero
   matches; a pipeline under `set -e` will abort on an empty, correct answer.
 
 ## What is intentionally not here

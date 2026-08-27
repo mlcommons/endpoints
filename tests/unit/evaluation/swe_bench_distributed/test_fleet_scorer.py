@@ -61,9 +61,7 @@ class TestOptions:
             )
 
     def test_defaults_are_sane(self):
-        options = SWEBenchFleetScorer._resolve_options(
-            {"swebench_service_urls": URLS}
-        )
+        options = SWEBenchFleetScorer._resolve_options({"swebench_service_urls": URLS})
         assert options["shard_size"] == 10
         assert options["max_attempts"] == 3
         # The tool-call gate's floor must stay at SWE-bench prompt scale.

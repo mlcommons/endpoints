@@ -113,9 +113,7 @@ class SWEBenchFleetScorer(Scorer, scorer_id="swe_bench_fleet"):
 
     @classmethod
     def _resolve_options(cls, extras: dict[str, Any]) -> dict[str, Any]:
-        options: dict[str, Any] = dict(
-            SWEBenchScorer._resolve_dataset_options(extras)
-        )
+        options: dict[str, Any] = dict(SWEBenchScorer._resolve_dataset_options(extras))
         options["service_urls"] = cls._service_urls(extras)
         options["auth_token"] = extras.get("swebench_service_auth_token") or None
         options["num_instances"] = SWEBenchScorer._get_extra_int(
