@@ -98,7 +98,7 @@ the task image. It preserves SWE-bench 4.1.0's patch-application order, test tim
 captured output, and `get_eval_report` grading. A patch failure or test timeout is an
 unresolved task; an `srun`, Enroot, or container-start failure is an infrastructure
 loss, recorded per instance and reported rather than allowed to fail the whole run
-(see *Eval-phase failures*). The service then aggregates the per-instance reports
+(see _Eval-phase failures_). The service then aggregates the per-instance reports
 and removes its named Pyxis containers.
 
 Pyxis namespaces a named container by its allocation: `--container-name=X` inside
@@ -132,7 +132,7 @@ still graded and the run report is still produced: an instance with no
 visible outcome. The instances that were lost are listed in the
 `eval_infra_failures.txt` artifact, one `instance_id<TAB>error` per line.
 
-A run in which *no* instance could be evaluated still fails — but only after the
+A run in which _no_ instance could be evaluated still fails — but only after the
 report has been written, so the run can be diagnosed from its own artifacts.
 
 ### Telling a degraded run apart from a bad one
@@ -140,7 +140,7 @@ report has been written, so the run can be diagnosed from its own artifacts.
 Both artifacts are machine-readable on purpose. `agent_phase_error.txt` means
 some instances may be missing from `swe_bench_results.json`; `eval_infra_failures.txt`
 names the instances the harness lost during grading. Instances lost this way are
-*infrastructure* losses, not model failures, and a consumer that cannot separate
+_infrastructure_ losses, not model failures, and a consumer that cannot separate
 the two will read attrition as an accuracy regression. Neither file exists on a
 clean run.
 
