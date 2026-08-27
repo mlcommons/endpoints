@@ -76,14 +76,14 @@ class SWEBenchFleetScorer(Scorer, scorer_id="swe_bench_fleet"):
         ground_truth_column: str | None = "instance_id",
         **extras: Any,
     ) -> None:
+        resolved_report_dir = Path(report_dir).resolve()
         super().__init__(
             dataset_name=dataset_name,
             dataset=dataset,
-            report_dir=report_dir,
+            report_dir=resolved_report_dir,
             extractor=extractor,
             ground_truth_column=ground_truth_column or "instance_id",
         )
-        self.report_dir = self.report_dir.resolve()
         self.options = self._resolve_options(extras)
 
     # --------------------------------------------------------------- config --
@@ -113,7 +113,9 @@ class SWEBenchFleetScorer(Scorer, scorer_id="swe_bench_fleet"):
 
     @classmethod
     def _resolve_options(cls, extras: dict[str, Any]) -> dict[str, Any]:
-        options = dict(SWEBenchScorer._resolve_dataset_options(extras))
+        options: dict[str, Any] = dict(
+            SWEBenchScorer._resolve_dataset_options(extras)
+        )
         options["service_urls"] = cls._service_urls(extras)
         options["auth_token"] = extras.get("swebench_service_auth_token") or None
         options["num_instances"] = SWEBenchScorer._get_extra_int(
