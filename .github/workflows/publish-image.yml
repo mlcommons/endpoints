@@ -29,6 +29,14 @@ on:
         options:
           - "1"
           - "0"
+      provision_vbench:
+        description: "Bake in the WAN 2.2 VBench accuracy scorer (heavier; downloads AMT/RAFT/RAM weights at build time)"
+        required: true
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "0"
       no_cache:
         description: "Build with --no-cache (clean/reproducible, slower)"
         required: true
@@ -86,6 +94,7 @@ jobs:
           ENDPOINTS_REF: ${{ inputs.ref || github.ref_name }}
           PLATFORM: ${{ inputs.platforms }}
           PROVISION_DSR1: ${{ inputs.provision_dsr1 }}
+          PROVISION_VBENCH: ${{ inputs.provision_vbench }}
           NO_CACHE: ${{ inputs.no_cache == 'true' && '1' || '0' }}
           # Fixed flag or empty — the input value itself is never interpolated into the command.
           FORCE_FLAG: ${{ inputs.force == 'true' && '--force' || '' }}

@@ -37,6 +37,7 @@
 #   NO_CACHE        1=--no-cache, 0=cache    (default: 1)
 #   ALLOW_DIRTY     1=build HEAD with uncommitted tracked changes (default: 0)
 #   PROVISION_DSR1  passthrough build-arg    (default: Dockerfile default = 1)
+#   PROVISION_VBENCH passthrough build-arg   (default: Dockerfile default = 1)
 #   IMAGE_DESCRIPTION  GHCR package-page description (default: "endpoints client image (ref <ref>, commit <sha>)")
 #   GHCR_USER/GHCR_TOKEN  optional registry login (fallback: GITHUB_ACTOR/GITHUB_TOKEN)
 set -euo pipefail
@@ -211,6 +212,7 @@ fi
 BUILD_ARGS=()
 [[ "$NO_CACHE" == "1" ]] && BUILD_ARGS+=(--no-cache)
 [[ -n "${PROVISION_DSR1:-}" ]] && BUILD_ARGS+=(--build-arg "PROVISION_DSR1=${PROVISION_DSR1}")
+[[ -n "${PROVISION_VBENCH:-}" ]] && BUILD_ARGS+=(--build-arg "PROVISION_VBENCH=${PROVISION_VBENCH}")
 
 # Don't attach SLSA provenance attestations. buildx adds them by default on --push,
 # which surfaces a spurious `unknown/unknown` entry on the GHCR package page and
