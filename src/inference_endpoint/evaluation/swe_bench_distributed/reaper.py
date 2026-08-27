@@ -49,7 +49,8 @@ class LivenessVerdict:
 class OwnerLiveness(Protocol):
     """Decides whether the process that claimed a unit still exists."""
 
-    def probe(self, owner: OwnerRecord) -> LivenessVerdict: ...
+    def probe(self, owner: OwnerRecord) -> LivenessVerdict:
+        pass
 
 
 class LocalProcessLiveness:
