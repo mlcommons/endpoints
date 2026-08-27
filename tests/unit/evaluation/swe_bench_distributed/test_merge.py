@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import inspect
+from typing import Any
 
 import pytest
 
@@ -34,7 +35,7 @@ def queue(tmp_path):
 
 def publish(queue: WorkQueue, unit_id: str, **overrides) -> None:
     unit = queue.plan.unit(unit_id)
-    payload = {
+    payload: dict[str, Any] = {
         "unit_id": unit_id,
         "run_id": unit.run_id,
         "plan_digest": queue.plan.digest,
