@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 from typing import Literal, get_type_hints
@@ -22,8 +23,10 @@ from inference_endpoint.evaluation.swebench_service.swebench_service import (
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service.pyxis_environment import (
     PyxisEnvironment,
+    StepNotLaunched,
     build_srun_command,
     enroot_container_name,
+    read_step_sentinel,
     resolve_image,
     safe_srun_env,
 )
@@ -40,6 +43,17 @@ from inference_endpoint.evaluation.swebench_service.swebench_service.schemas imp
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _single_step_attempt(monkeypatch):
+    """Most tests assert single-shot step behaviour.
+
+    The step runner re-attempts a *provable* non-launch, so without this every
+    such test would run its fake three times and sleep between them. Retry
+    behaviour has its own tests, which opt back in explicitly.
+    """
+    monkeypatch.setenv("SWEBENCH_PYXIS_STEP_RETRIES", "1")
 
 
 def test_pyxis_implementation_is_confined_to_environment_and_worker_modules():
@@ -1224,6 +1238,244 @@ def test_pyxis_failure_carries_srun_output(monkeypatch, tmp_path):
         PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
 
     assert "failed to start Pyxis container" in str(exc_info.value)
+
+
+def _bare_environment(tmp_path, failure_path=None):
+    environment = object.__new__(PyxisEnvironment)
+    environment.config = types.SimpleNamespace(
+        cwd="/testbed",
+        env={},
+        timeout_s=30,
+        interpreter=["bash", "-c"],
+        infrastructure_failure_path=failure_path,
+    )
+    environment.name = "mswe_run-1_abcd1234"
+    environment._tmp_dir = tmp_path
+    return environment
+
+
+@pytest.mark.parametrize(
+    ("status", "provable"),
+    [
+        # The step script never ran its first line: the command provably did
+        # not execute, so re-running it cannot double-apply anything.
+        ("pending\n", True),
+        # The step script started; the command may well have executed.
+        ("started\n", False),
+        # A report for some other return code: the command ran.
+        ("finished:0\n", False),
+    ],
+)
+def test_step_failure_reports_whether_non_execution_is_provable(
+    monkeypatch, tmp_path, status, provable
+):
+    """srun's text says *what* broke; this says whether a re-run is safe.
+
+    Attaching srun's output made these failures readable. It does not make them
+    machine-actionable: nothing in the text distinguishes "the step never
+    launched" from "the command ran and its report was lost", and only the first
+    can be retried without risking double execution.
+    """
+    environment = _bare_environment(tmp_path)
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    def fake_run(command, **kwargs):
+        (tmp_path / Path("/tmp/.mlperf_srun_status").name).write_text(status)
+        return subprocess.CompletedProcess(command, 7, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(StepNotLaunched) as exc_info:
+        environment.execute({"command": "pytest -q"})
+
+    failure = exc_info.value
+    assert failure.provable_non_execution is provable
+    assert failure.status == status.strip()
+    assert failure.srun_rc == 7
+    assert repr(status.strip()) in str(failure)
+
+
+class TestStepRetry:
+    """Re-attempt only a provable non-launch, and count every attempt.
+
+    Re-running a command that may already have run can apply an edit twice,
+    delete twice, or double a test run. So the gate is not "an error happened".
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fast(self, monkeypatch):
+        monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+        monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+        monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    def _environment(self, tmp_path):
+        return _bare_environment(tmp_path)
+
+    def test_a_provable_non_launch_is_retried(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SWEBENCH_PYXIS_STEP_RETRIES", "3")
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if len(calls) < 3:
+                # Status file untouched: still "pending".
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+            _finish_srun_step(command, 0)
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        output = self._environment(tmp_path).execute({"command": "pytest -q"})
+
+        assert output["returncode"] == 0
+        assert len(calls) == 3
+
+    def test_a_step_that_started_is_never_retried(self, monkeypatch, tmp_path):
+        """It may have executed. Another attempt could double-apply it."""
+        monkeypatch.setenv("SWEBENCH_PYXIS_STEP_RETRIES", "5")
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            (tmp_path / ".mlperf_srun_status").write_text("started\n")
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        with pytest.raises(StepNotLaunched):
+            self._environment(tmp_path).execute({"command": "rm -rf build"})
+
+        assert len(calls) == 1
+
+    def test_the_attempt_budget_is_bounded(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SWEBENCH_PYXIS_STEP_RETRIES", "4")
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        with pytest.raises(StepNotLaunched):
+            self._environment(tmp_path).execute({"command": "pytest -q"})
+
+        assert len(calls) == 4
+
+    def test_every_attempt_is_recorded(self, monkeypatch, tmp_path):
+        log = tmp_path / "infra_retries.jsonl"
+        monkeypatch.setenv("SWEBENCH_PYXIS_STEP_RETRIES", "3")
+        monkeypatch.setenv("SWEBENCH_PYXIS_INFRA_RETRY_LOG", str(log))
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if len(calls) < 2:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+            _finish_srun_step(command, 0)
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        self._environment(tmp_path).execute({"command": "pytest -q"})
+
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        assert [row["outcome"] for row in rows] == ["retrying", "recovered"]
+
+    def test_an_exhausted_step_is_recorded_as_exhausted(self, monkeypatch, tmp_path):
+        log = tmp_path / "infra_retries.jsonl"
+        monkeypatch.setenv("SWEBENCH_PYXIS_STEP_RETRIES", "2")
+        monkeypatch.setenv("SWEBENCH_PYXIS_INFRA_RETRY_LOG", str(log))
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda command, **kwargs: subprocess.CompletedProcess(
+                command, 1, stdout="", stderr=""
+            ),
+        )
+
+        with pytest.raises(StepNotLaunched):
+            self._environment(tmp_path).execute({"command": "pytest -q"})
+
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        assert [row["outcome"] for row in rows] == ["retrying", "exhausted"]
+
+    def test_accounting_never_takes_the_step_down(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SWEBENCH_PYXIS_STEP_RETRIES", "3")
+        monkeypatch.setenv(
+            "SWEBENCH_PYXIS_INFRA_RETRY_LOG", str(tmp_path / "nope" / "retries.jsonl")
+        )
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if len(calls) < 2:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+            _finish_srun_step(command, 0)
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        assert self._environment(tmp_path).execute({"command": "x"})["returncode"] == 0
+
+
+def test_step_not_launched_is_a_runner_error():
+    """Existing ``except RunnerError`` handlers must keep working unchanged."""
+    assert issubclass(StepNotLaunched, RunnerError)
+
+
+def test_step_reports_its_return_code_in_band(monkeypatch, tmp_path):
+    """The sentinel is authoritative and is stripped from the output.
+
+    It removes the shared-filesystem dependency from the success path: a step
+    can report its result even where the status file is unreadable, which on a
+    distributed filesystem is a real failure mode of its own.
+    """
+    environment = _bare_environment(tmp_path)
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    def fake_run(command, **kwargs):
+        nonce = command[command.index("pyxis-step") + 3]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"real output\n\n__MLPERF_STEP_RC__ {nonce} 3\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    output = environment.execute({"command": "false"})
+
+    assert output["returncode"] == 3
+    assert output["output"] == "real output"
+
+
+def test_step_sentinel_cannot_be_forged_by_command_output(monkeypatch, tmp_path):
+    environment = _bare_environment(tmp_path)
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command, 1, stdout="__MLPERF_STEP_RC__ deadbeef 0\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(StepNotLaunched):
+        environment.execute({"command": "echo spoof"})
+
+
+def test_read_step_sentinel_ignores_unrelated_output():
+    assert read_step_sentinel("no marker here\n", "abc") == (None, "no marker here\n")
+    assert read_step_sentinel("out\n__MLPERF_STEP_RC__ abc x\n", "abc") == (
+        None,
+        "out\n__MLPERF_STEP_RC__ abc x\n",
+    )
+    assert read_step_sentinel("out\n__MLPERF_STEP_RC__ abc -1\n", "abc") == (-1, "out")
 
 
 def test_pyxis_environment_preserves_command_failure(monkeypatch, tmp_path):

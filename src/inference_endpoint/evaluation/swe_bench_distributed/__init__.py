@@ -11,6 +11,15 @@ emit an accuracy number unless every planned instance id is accounted for
 exactly once.
 """
 
+from .guards import HealthTerm, HealthVerdict, MemoryGuard, combine_terms, kill_by_pid
+from .infra_retry import (
+    InfraRetryLedger,
+    RetryOutcome,
+    RetryRecord,
+    RunQuality,
+    is_provable_non_execution,
+    retry_on_provable_non_execution,
+)
 from .merge import (
     CompletenessReport,
     MergeRefusal,
@@ -25,20 +34,36 @@ from .queue import (
     UnitResult,
     WorkQueue,
 )
+from .reaper import LocalProcessLiveness, OwnerLiveness, SlurmStepLiveness, reap
 from .units import Unit, UnitPlan, plan_units
 
 __all__ = [
     "ClaimError",
     "CompletenessReport",
+    "HealthTerm",
+    "HealthVerdict",
+    "InfraRetryLedger",
+    "LocalProcessLiveness",
+    "MemoryGuard",
     "MergeRefusal",
     "MergeResult",
+    "OwnerLiveness",
+    "RetryOutcome",
+    "RetryRecord",
+    "RunQuality",
+    "SlurmStepLiveness",
     "Unit",
     "UnitOutcome",
     "UnitPlan",
     "UnitResult",
     "WorkQueue",
     "assess_run",
+    "combine_terms",
+    "is_provable_non_execution",
+    "kill_by_pid",
     "merge_run",
     "plan_units",
+    "reap",
+    "retry_on_provable_non_execution",
     "verify_inventory",
 ]
