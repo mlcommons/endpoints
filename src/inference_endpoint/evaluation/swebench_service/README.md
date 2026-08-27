@@ -20,8 +20,8 @@ external-service convention for heavyweight evaluation work.
 
 ### Endpoint credentials
 
-`accuracy_config.extras.swebench_service_auth_token` authenticates the *client to
-this service*. The credential the agent presents to the *model endpoint* is
+`accuracy_config.extras.swebench_service_auth_token` authenticates the _client to
+this service_. The credential the agent presents to the _model endpoint_ is
 separate and comes from the run's endpoint configuration.
 
 When no endpoint credential is configured, the agent subprocess is given
