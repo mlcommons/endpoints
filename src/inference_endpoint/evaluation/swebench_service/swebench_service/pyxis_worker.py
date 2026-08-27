@@ -15,7 +15,7 @@ from typing import Any
 
 from .artifacts import atomic_write_bytes
 from .pyxis_environment import resolve_image, run_srun_step
-from .runner import RunnerError
+from .runner import EVAL_INFRA_FAILURES_FILE, RunnerError
 
 _PRINT_LOCK = threading.Lock()
 _INFRASTRUCTURE_FAILURE = ".pyxis_infrastructure_failure"
@@ -94,6 +94,18 @@ def _run_agent(args: argparse.Namespace) -> None:
             raise RunnerError("Pyxis infrastructure failure during agent execution")
     finally:
         swebench.get_sb_environment = original_get_sb_environment
+
+
+def _record_eval_failures(output_dir: Path, failures: dict[str, str]) -> None:
+    lines = "".join(
+        f"{instance_id}\t{detail}\n" for instance_id, detail in sorted(failures.items())
+    )
+    try:
+        atomic_write_bytes(output_dir / EVAL_INFRA_FAILURES_FILE, lines.encode())
+    except OSError:
+        # Accounting must never be able to take the report down.
+        with _PRINT_LOCK:
+            print("could not record eval infrastructure failures", flush=True)
 
 
 def _evaluate_instance(
@@ -212,19 +224,26 @@ def _run_eval(args: argparse.Namespace) -> None:
             ].instance_id
             for payload in payloads
         }
-        failures = []
+        failures: dict[str, str] = {}
         for future in concurrent.futures.as_completed(futures):
+            instance_id = futures[future]
             try:
                 future.result()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- one instance, not the run
                 with _PRINT_LOCK:
-                    print(f"Pyxis evaluation failed: {exc}", flush=True)
-                failures.append(futures[future])
-        if failures:
-            raise RunnerError(
-                "Pyxis infrastructure failure evaluating: "
-                + ", ".join(sorted(failures))
-            )
+                    print(
+                        f"Pyxis evaluation failed for {instance_id} "
+                        f"(non-fatal): {exc}",
+                        flush=True,
+                    )
+                failures[instance_id] = f"{type(exc).__name__}: {exc}"
+
+    # The report is produced even when some instances could not be evaluated.
+    # An instance with no report.json is counted as an error by make_run_report,
+    # which is the correct and visible outcome; raising here instead discarded
+    # every other instance's grade along with it.
+    if failures:
+        _record_eval_failures(args.output_dir, failures)
 
     output_dir = args.output_dir.resolve()
     with contextlib.chdir(output_dir):
@@ -233,6 +252,14 @@ def _run_eval(args: argparse.Namespace) -> None:
             [{"instance_id": instance_id} for instance_id in args.instance_ids],
             args.run_id,
             client=None,
+        )
+
+    if payloads and len(failures) == len(payloads):
+        # Nothing was evaluated at all. The report is on disk for diagnosis,
+        # but a report in which no instance ran is not a result.
+        raise RunnerError(
+            "Pyxis infrastructure failure evaluating every instance: "
+            + ", ".join(sorted(failures)[:10])
         )
 
 

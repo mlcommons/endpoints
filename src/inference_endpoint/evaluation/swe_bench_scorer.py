@@ -67,6 +67,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         "artifacts.download",
     }
     SAFE_ARTIFACT_NAMES: ClassVar[set[str]] = {
+        "agent_phase_error.txt",
+        "eval_infra_failures.txt",
         "preds.json",
         "swe_bench_agent.log",
         "swe_bench_eval.log",
