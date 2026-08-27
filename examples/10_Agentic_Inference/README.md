@@ -15,9 +15,9 @@ Use flat JSONL with one row per message. Rows for each `conversation_id` must be
 
 Required fields are `conversation_id`, `turn`, and `role`. User rows normally include `content`; agentic rows can also include `system`, `tools`, `tool_calls`, `tool_results`, `reasoning_content`, and `delay_seconds`.
 
-The official MLPerf dataset is available from [MLCommons storage](https://endpoints.mlcommons-storage.org/index.html#mlperf-agentic-inference). The dataset SHA-256 is `1beb24c882122df96571cf11b390acbea388944038bc55c78b891475459014ae`. Submitters must use this dataset unchanged for official submissions.
+The official MLPerf dataset is available from [MLCommons storage](https://endpoints.mlcommons-storage.org/index.html#mlperf-agentic-inference). The predefined `agentic_inference_conversations` dataset downloads and caches the official JSONL automatically under `dataset_cache/agentic_inference_conversations/` on first use. It verifies the dataset SHA-256, `1beb24c882122df96571cf11b390acbea388944038bc55c78b891475459014ae`, before loading it. Submitters must use this dataset unchanged for official submissions.
 
-Place the dataset under `examples/10_Agentic_Inference/datasets/` or point the YAML at another accessible JSONL path.
+The runnable configs use this automatic download and do not need a dataset path. To use another accessible JSONL file, set `path` with a non-predefined dataset name while retaining the `agentic_inference` configuration.
 
 ## Supported Models
 
@@ -120,7 +120,7 @@ uv run --project src/inference_endpoint/evaluation/swebench_service \
 
 ## Run The Client
 
-Update the first `datasets` entry (`name` and `path`), `model_params.name`, and `endpoint_config.endpoints` as needed. Then select the matching model config and run it from the repo root:
+Update `model_params.name` and `endpoint_config.endpoints` as needed. The first `datasets` entry uses the official dataset download by default. Then select the matching model config and run it from the repo root:
 
 ```bash
 CONFIG=examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml

@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import json
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -25,6 +27,13 @@ from inference_endpoint.dataset_manager.agentic_inference_dataset import (
 )
 from inference_endpoint.dataset_manager.dataset import DatasetFormat
 from inference_endpoint.exceptions import InputValidationError
+
+
+def _mock_downloader_response() -> MagicMock:
+    response = MagicMock()
+    response.content = b"#!/usr/bin/env bash\nexit 0\n"
+    response.raise_for_status.return_value = None
+    return response
 
 
 @pytest.fixture
@@ -233,6 +242,37 @@ def test_agentic_inference_dataset_validation_missing_fields(missing_fields_json
         AgenticInferenceDataset.load_from_file(
             missing_fields_jsonl, format=DatasetFormat.JSONL
         )
+
+
+@pytest.mark.unit
+def test_agentic_inference_dataset_downloads_dataset(tmp_path, monkeypatch):
+    payload = b'{"conversation_id":"c1","turn":1,"role":"user","content":"hello"}\n'
+    monkeypatch.setattr(
+        AgenticInferenceDataset, "DATASET_SHA256", hashlib.sha256(payload).hexdigest()
+    )
+
+    def fake_run(command, **kwargs):
+        cache_dir = Path(command[command.index("-d") + 1])
+        (cache_dir / AgenticInferenceDataset.CACHE_FILENAME).write_bytes(payload)
+        return MagicMock(returncode=0, stderr="")
+
+    import inference_endpoint.dataset_manager.agentic_inference_dataset as module
+
+    monkeypatch.setattr(
+        module.requests,
+        "get",
+        lambda *args, **kwargs: _mock_downloader_response(),
+    )
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    dataframe = AgenticInferenceDataset.generate(tmp_path)
+    cache_path = (
+        tmp_path
+        / AgenticInferenceDataset.DATASET_ID
+        / AgenticInferenceDataset.CACHE_FILENAME
+    )
+    assert cache_path.read_bytes() == payload
+    assert dataframe.iloc[0]["conversation_id"] == "c1"
 
 
 @pytest.mark.unit

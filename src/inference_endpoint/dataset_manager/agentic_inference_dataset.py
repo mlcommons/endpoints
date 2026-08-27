@@ -15,11 +15,16 @@
 
 """Agentic inference conversation dataset for conversational AI benchmarking."""
 
+import hashlib
 import logging
+import subprocess
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
+import requests
 
 from ..config.schema import APIType, ModelParams
 from ..exceptions import InputValidationError
@@ -241,6 +246,108 @@ class AgenticInferenceDataset(Dataset, dataset_id="agentic_inference_conversatio
     """
 
     COLUMN_NAMES = ["conversation_id", "turn", "role", "content"]
+    CACHE_FILENAME = "mlperf_agentic_inference_dataset.jsonl"
+    R2_DATASET_URI = (
+        "https://endpoints.mlcommons-storage.org/metadata/"
+        "mlperf_agentic_inference_dataset.uri"
+    )
+    DATASET_SHA256 = "1beb24c882122df96571cf11b390acbea388944038bc55c78b891475459014ae"
+    R2_DOWNLOADER_COMMIT = "27da4421877f2831eeb615b43ee5098c4b70be7e"
+    R2_ALLOWED_HOST = "mlcommons-storage.org"
+
+    @classmethod
+    def _verify_sha256(cls, path: Path) -> None:
+        """Raise ValueError if the cached dataset is not the official artifact."""
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != cls.DATASET_SHA256:
+            raise ValueError(
+                f"SHA-256 mismatch for {path.name}: "
+                f"expected {cls.DATASET_SHA256}, got {digest}"
+            )
+
+    @classmethod
+    def _download_dataset(cls, cache_dir: Path, jsonl_path: Path) -> pd.DataFrame:
+        """Download, verify, and load the official MLPerf Agentic dataset."""
+        parsed = urlparse(cls.R2_DATASET_URI)
+        host = parsed.hostname or ""
+        if parsed.scheme != "https" or not (
+            host == cls.R2_ALLOWED_HOST or host.endswith("." + cls.R2_ALLOWED_HOST)
+        ):
+            raise ValueError(
+                f"Refusing to download dataset from untrusted URI "
+                f"'{cls.R2_DATASET_URI}': expected https on {cls.R2_ALLOWED_HOST}"
+            )
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        script_path = cache_dir / "mlc-r2-downloader.sh"
+        downloader_url = (
+            "https://raw.githubusercontent.com/mlcommons/r2-downloader/"
+            f"{cls.R2_DOWNLOADER_COMMIT}/mlc-r2-downloader.sh"
+        )
+        response = requests.get(downloader_url, timeout=30)
+        response.raise_for_status()
+        script_path.write_bytes(response.content)
+        script_path.chmod(0o755)
+
+        try:
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(script_path.resolve()),
+                    "-d",
+                    str(cache_dir),
+                    cls.R2_DATASET_URI,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"R2 downloader failed with code {result.returncode}: "
+                    f"{result.stderr}"
+                )
+        finally:
+            script_path.unlink(missing_ok=True)
+
+        if not jsonl_path.exists():
+            found = next(cache_dir.rglob(cls.CACHE_FILENAME), None)
+            if found is not None and found != jsonl_path:
+                found.replace(jsonl_path)
+        if not jsonl_path.exists():
+            raise FileNotFoundError(
+                f"Agentic inference dataset was downloaded, but "
+                f"{jsonl_path} does not exist"
+            )
+
+        cls._verify_sha256(jsonl_path)
+        logger.info("Loaded Agentic Inference dataset from %s", jsonl_path)
+        return pd.read_json(jsonl_path, lines=True)
+
+    @classmethod
+    def generate(cls, datasets_dir: Path, force: bool = False) -> pd.DataFrame:
+        """Load the official Agentic Inference dataset from the local cache."""
+        cache_dir = datasets_dir / cls.DATASET_ID
+        jsonl_path = cache_dir / cls.CACHE_FILENAME
+        if jsonl_path.exists() and not force:
+            try:
+                cls._verify_sha256(jsonl_path)
+            except ValueError as exc:
+                logger.warning(
+                    "Cached Agentic Inference dataset failed verification (%s); "
+                    "re-downloading.",
+                    exc,
+                )
+                jsonl_path.unlink()
+            else:
+                logger.info(
+                    "Loading cached Agentic Inference dataset from %s", jsonl_path
+                )
+                return pd.read_json(jsonl_path, lines=True)
+
+        jsonl_path.unlink(missing_ok=True)
+        return cls._download_dataset(cache_dir, jsonl_path)
 
     def __init__(self, dataframe: pd.DataFrame, **kwargs):
         """Initialize agentic inference dataset.
