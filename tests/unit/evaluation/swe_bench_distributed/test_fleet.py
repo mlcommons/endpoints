@@ -8,7 +8,6 @@ from __future__ import annotations
 import itertools
 
 import pytest
-
 from inference_endpoint.evaluation.swe_bench_distributed.fleet import (
     FleetDispatcher,
     accounted_and_resolved,
