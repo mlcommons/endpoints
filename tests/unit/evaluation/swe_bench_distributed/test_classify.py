@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import pytest
-
 from inference_endpoint.evaluation.swe_bench_distributed.classify import (
     GENUINE_KINDS,
     INFRA_KINDS,
