@@ -2145,6 +2145,8 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
 
 # Late imports register the extracted scorers without introducing a cycle.
 from .swe_bench_fleet_scorer import (  # noqa: E402
-    SWEBenchFleetScorer as SWEBenchFleetScorer,
+    SWEBenchFleetScorer as _SWEBenchFleetScorer,
 )
 from .swe_bench_scorer import SWEBenchScorer as SWEBenchScorer  # noqa: E402
+
+SWEBenchFleetScorer = _SWEBenchFleetScorer

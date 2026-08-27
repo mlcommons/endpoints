@@ -8,8 +8,7 @@ from __future__ import annotations
 import pytest
 
 from inference_endpoint.config.schema import ScorerMethod
-from inference_endpoint.evaluation.scoring import Scorer
-from inference_endpoint.evaluation.swe_bench_fleet_scorer import SWEBenchFleetScorer
+from inference_endpoint.evaluation.scoring import Scorer, SWEBenchFleetScorer
 from inference_endpoint.exceptions import SetupError
 
 pytestmark = pytest.mark.unit
