@@ -1090,9 +1090,9 @@ def test_pyxis_container_create_uses_the_pull_budget_not_the_command_budget(
     create_timeout, command_timeout = timeouts[0], timeouts[1]
     assert create_timeout == 3600 + 30
     assert command_timeout == 300 + 30
-    assert create_timeout > command_timeout, (
-        "container creation must not be bounded by the per-command timeout"
-    )
+    assert (
+        create_timeout > command_timeout
+    ), "container creation must not be bounded by the per-command timeout"
     environment.cleanup()
 
 
