@@ -67,9 +67,10 @@ class Gate(Protocol):
 
     def assert_scale(self, targets: list[str]) -> None:
         """Prove this gate tests what it claims. Raise :class:`GateScaleError`."""
-        ...
+        pass
 
-    def check(self, targets: list[str]) -> GateReport: ...
+    def check(self, targets: list[str]) -> GateReport:
+        pass
 
 
 def _http_json(
