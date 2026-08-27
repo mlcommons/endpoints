@@ -23,6 +23,7 @@ from inference_endpoint.evaluation.swebench_service.swebench_service import (
 from inference_endpoint.evaluation.swebench_service.swebench_service.pyxis_environment import (
     PyxisEnvironment,
     build_srun_command,
+    enroot_container_name,
     resolve_image,
     safe_srun_env,
 )
@@ -852,6 +853,9 @@ def test_pyxis_srun_environment_does_not_forward_credentials(monkeypatch):
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
+        # enroot creates the container inside the step and reads these there.
+        "ENROOT_TEMP_PATH",
+        "ENROOT_CONFIG_PATH",
     ],
 )
 def test_pyxis_srun_environment_forwards_config_and_proxy_policy(monkeypatch, name):
@@ -925,7 +929,7 @@ def test_pyxis_environment_reuses_named_writable_container(
         "enroot",
         "remove",
         "-f",
-        f"pyxis_{container_name}",
+        f"pyxis_1738605_{container_name}",
     ]
     assert first["returncode"] == second["returncode"] == 0
     assert "Executing Pyxis command: touch state" in caplog.text
@@ -1244,6 +1248,96 @@ def test_pyxis_environment_preserves_command_failure(monkeypatch, tmp_path):
     assert output["returncode"] == 1
     assert output["output"] == "command failed\n"
     environment.cleanup()
+
+
+def test_enroot_container_name_is_namespaced_by_job():
+    assert enroot_container_name("1738605", "mswe_run-1_abcd1234") == (
+        "pyxis_1738605_mswe_run-1_abcd1234"
+    )
+
+
+def test_pyxis_cleanup_removes_the_container_pyxis_actually_created(
+    monkeypatch, tmp_path
+):
+    """The removal must name ``pyxis_<jobid>_<name>``, not ``pyxis_<name>``.
+
+    Addressing the wrong name made every removal a no-op, so no rootfs was ever
+    reclaimed for the life of an allocation.
+    """
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    existing = {"pyxis_1738605_placeholder"}
+    removed: list[str] = []
+
+    def fake_run(command, **kwargs):
+        if command[-4:-1] == ["enroot", "remove", "-f"]:
+            target = command[-1]
+            if target not in existing:
+                return subprocess.CompletedProcess(
+                    command, 1, stdout="", stderr=f"[ERROR] No such container: {target}"
+                )
+            existing.discard(target)
+            removed.append(target)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        name = next(
+            (
+                argument.split("=", 1)[1]
+                for argument in command
+                if argument.startswith("--container-name=")
+            ),
+            None,
+        )
+        if name is not None:
+            existing.add(f"pyxis_1738605_{name}")
+        _finish_srun_step(command, 0)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    image = tmp_path / "task.sqsh"
+    image.touch()
+    environment = PyxisEnvironment(image=image, run_id="run-1")
+
+    environment.cleanup()
+
+    assert removed == [f"pyxis_1738605_{environment.name}"]
+    assert existing == {"pyxis_1738605_placeholder"}
+
+
+def test_pyxis_cleanup_reports_a_removal_that_did_not_happen(
+    monkeypatch, tmp_path, caplog
+):
+    """A non-zero ``enroot remove`` must be logged, not swallowed.
+
+    ``check=False`` plus ``capture_output=True`` discarded the only evidence
+    that nothing was being reclaimed.
+    """
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+
+    def fake_run(command, **kwargs):
+        if command[-4:-1] == ["enroot", "remove", "-f"]:
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="[ERROR] No such container\n"
+            )
+        _finish_srun_step(command, 0)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    image = tmp_path / "task.sqsh"
+    image.touch()
+    environment = PyxisEnvironment(image=image, run_id="run-1")
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger=(
+            "inference_endpoint.evaluation.swebench_service.swebench_service"
+            ".pyxis_environment"
+        ),
+    ):
+        environment.cleanup()
+
+    assert "enroot remove" in caplog.text
+    assert "No such container" in caplog.text
 
 
 def test_pyxis_cleanup_is_best_effort_outside_allocation(monkeypatch, tmp_path):
