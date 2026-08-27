@@ -18,6 +18,20 @@ The endpoint URL in the benchmark config must be reachable from the service host
 Service mode supports exactly one endpoint URL and follows the LiveCodeBench-style
 external-service convention for heavyweight evaluation work.
 
+### Endpoint credentials
+
+`accuracy_config.extras.swebench_service_auth_token` authenticates the _client to
+this service_. The credential the agent presents to the _model endpoint_ is
+separate and comes from the run's endpoint configuration.
+
+When no endpoint credential is configured, the agent subprocess is given
+`OPENAI_API_KEY=EMPTY`, which is what an unauthenticated OpenAI-compatible server
+expects. An `OPENAI_API_KEY` inherited from the service host's environment is never
+forwarded to the endpoint; it is replaced by the placeholder. The variable is
+always set, regardless of whether the endpoint is on loopback or on another host,
+because the client library refuses to issue a request with no credential at all and
+retries that refusal indefinitely.
+
 ## Runtime workflow
 
 ### Common workflow

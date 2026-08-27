@@ -558,17 +558,23 @@ class SweBenchRunner:
         no_proxy_value = ",".join(sorted(no_proxy))
         env["NO_PROXY"] = no_proxy_value
         env["no_proxy"] = no_proxy_value
-        endpoint_host = (
-            urlparse(str(request.endpoint_urls[0])).hostname
-            if request.endpoint_urls
-            else None
-        )
         if request.endpoint_api_key:
             env["OPENAI_API_KEY"] = request.endpoint_api_key
-        elif endpoint_host in {"localhost", "127.0.0.1", "::1"}:
-            env["OPENAI_API_KEY"] = "EMPTY"
         else:
-            env.pop("OPENAI_API_KEY", None)
+            # No key was configured for this run. An ambient OPENAI_API_KEY
+            # inherited from the service host must never reach the endpoint, so
+            # it is replaced -- but it must be replaced, not removed. litellm
+            # refuses to build a request without a credential and raises
+            # `Missing credentials` locally; mini-swe-agent treats that as a
+            # transient error and retries every 60s indefinitely. The result is
+            # a run in which zero requests ever reach the engine, nothing is
+            # logged as an error, and the run never terminates.
+            #
+            # The placeholder is not host-dependent. An unauthenticated engine
+            # ignores the value whether it is on loopback or on another node,
+            # and gating the placeholder on the hostname is what left every
+            # remote-engine run hanging.
+            env["OPENAI_API_KEY"] = "EMPTY"
         return env
 
     def _cleanup_containers(
