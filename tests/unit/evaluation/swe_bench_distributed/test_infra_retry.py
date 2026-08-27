@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from inference_endpoint.evaluation.swe_bench_distributed.infra_retry import (
     InfraRetryLedger,
     RetryOutcome,

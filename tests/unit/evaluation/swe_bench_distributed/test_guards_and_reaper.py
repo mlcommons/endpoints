@@ -9,7 +9,6 @@ import os
 import time
 
 import pytest
-
 from inference_endpoint.evaluation.swe_bench_distributed import guards as guards_mod
 from inference_endpoint.evaluation.swe_bench_distributed.guards import (
     DEFAULT_KILL_BYTES,

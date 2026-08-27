@@ -15,7 +15,6 @@ from typing import Literal, get_type_hints
 import msgspec.json
 import pytest
 import yaml
-
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
     pyxis_worker as worker_mod,
 )

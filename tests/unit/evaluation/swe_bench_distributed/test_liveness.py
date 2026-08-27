@@ -11,7 +11,6 @@ import subprocess
 from typing import Any
 
 import pytest
-
 from inference_endpoint.evaluation.swe_bench_distributed.queue import OwnerRecord
 from inference_endpoint.evaluation.swe_bench_distributed.reaper import (
     Liveness,
