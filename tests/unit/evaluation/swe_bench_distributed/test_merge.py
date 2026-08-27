@@ -9,7 +9,6 @@ import inspect
 from typing import Any
 
 import pytest
-
 from inference_endpoint.evaluation.swe_bench_distributed.merge import (
     MergeRefusal,
     assess_run,
