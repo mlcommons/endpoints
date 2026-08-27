@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+from typing import Any
 
 import pytest
 
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.unit
 
 
 def owner(**overrides) -> OwnerRecord:
-    payload = {
+    payload: dict[str, Any] = {
         "unit_id": "run-a.s00",
         "host": socket.gethostname(),
         "pid": os.getpid(),

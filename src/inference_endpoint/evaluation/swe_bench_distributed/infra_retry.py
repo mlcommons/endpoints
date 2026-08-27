@@ -37,7 +37,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,8 @@ DEFAULT_MAX_ATTEMPTS = 3
 #: every unit eventually succeeded. Rescuing one operation in fifty is not a
 #: healthy fleet, it is a fleet that happened to be caught.
 DEGRADED_RETRY_FRACTION = 0.02
+
+_T = TypeVar("_T")
 
 
 class RetryOutcome(StrEnum):
@@ -235,8 +237,8 @@ class InfraRetryLedger:
         return RunQuality.OK_WITH_RETRIES
 
 
-def retry_on_provable_non_execution[T](
-    operation: Callable[[], T],
+def retry_on_provable_non_execution(
+    operation: Callable[[], _T],
     *,
     target: str,
     ledger: InfraRetryLedger | None = None,
@@ -244,7 +246,7 @@ def retry_on_provable_non_execution[T](
     backoff_s: float = 2.0,
     max_backoff_s: float = 30.0,
     sleep: Callable[[float], None] = time.sleep,
-) -> T:
+) -> _T:
     """Call ``operation``, retrying only failures that prove it never ran.
 
     Raises the last failure when the budget is exhausted, and re-raises
