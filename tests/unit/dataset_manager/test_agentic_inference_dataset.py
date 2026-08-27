@@ -253,7 +253,9 @@ def test_agentic_inference_dataset_downloads_dataset(tmp_path, monkeypatch):
 
     def fake_run(command, **kwargs):
         cache_dir = Path(command[command.index("-d") + 1])
-        (cache_dir / AgenticInferenceDataset.CACHE_FILENAME).write_bytes(payload)
+        download_dir = cache_dir / "agentic_inference"
+        download_dir.mkdir()
+        (download_dir / AgenticInferenceDataset.CACHE_FILENAME).write_bytes(payload)
         return MagicMock(returncode=0, stderr="")
 
     import inference_endpoint.dataset_manager.agentic_inference_dataset as module
@@ -272,6 +274,111 @@ def test_agentic_inference_dataset_downloads_dataset(tmp_path, monkeypatch):
         / AgenticInferenceDataset.CACHE_FILENAME
     )
     assert cache_path.read_bytes() == payload
+    assert dataframe.iloc[0]["conversation_id"] == "c1"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://evil.example.com/dataset.uri",
+        "http://mlcommons-storage.org/dataset.uri",
+        "file:///etc/passwd",
+    ],
+)
+def test_agentic_inference_dataset_rejects_untrusted_uri(tmp_path, monkeypatch, uri):
+    import inference_endpoint.dataset_manager.agentic_inference_dataset as module
+
+    monkeypatch.setattr(AgenticInferenceDataset, "R2_DATASET_URI", uri)
+    get = MagicMock()
+    run = MagicMock()
+    monkeypatch.setattr(module.requests, "get", get)
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    with pytest.raises(ValueError, match="untrusted URI"):
+        AgenticInferenceDataset._download_dataset(
+            tmp_path, tmp_path / AgenticInferenceDataset.CACHE_FILENAME
+        )
+
+    get.assert_not_called()
+    run.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("returncode", "expected_exception"),
+    [(1, RuntimeError), (0, FileNotFoundError)],
+)
+def test_agentic_inference_dataset_download_failures(
+    tmp_path, monkeypatch, returncode, expected_exception
+):
+    import inference_endpoint.dataset_manager.agentic_inference_dataset as module
+
+    monkeypatch.setattr(
+        module.requests, "get", lambda *args, **kwargs: _mock_downloader_response()
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: MagicMock(returncode=returncode, stderr="boom"),
+    )
+
+    with pytest.raises(expected_exception):
+        AgenticInferenceDataset._download_dataset(
+            tmp_path, tmp_path / AgenticInferenceDataset.CACHE_FILENAME
+        )
+
+
+@pytest.mark.unit
+def test_agentic_inference_dataset_recovers_from_corrupt_cache(tmp_path, monkeypatch):
+    payload = b'{"conversation_id":"c1","turn":1,"role":"user","content":"hello"}\n'
+    monkeypatch.setattr(
+        AgenticInferenceDataset, "DATASET_SHA256", hashlib.sha256(payload).hexdigest()
+    )
+    cache_dir = tmp_path / AgenticInferenceDataset.DATASET_ID
+    cache_dir.mkdir()
+    cache_path = cache_dir / AgenticInferenceDataset.CACHE_FILENAME
+    cache_path.write_bytes(b"corrupt")
+
+    def fake_run(command, **kwargs):
+        cache_dir = Path(command[command.index("-d") + 1])
+        (cache_dir / AgenticInferenceDataset.CACHE_FILENAME).write_bytes(payload)
+        return MagicMock(returncode=0, stderr="")
+
+    import inference_endpoint.dataset_manager.agentic_inference_dataset as module
+
+    monkeypatch.setattr(
+        module.requests, "get", lambda *args, **kwargs: _mock_downloader_response()
+    )
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    dataframe = AgenticInferenceDataset.generate(tmp_path)
+
+    assert cache_path.read_bytes() == payload
+    assert dataframe.iloc[0]["conversation_id"] == "c1"
+
+
+@pytest.mark.unit
+def test_agentic_inference_dataset_uses_valid_cache(tmp_path, monkeypatch):
+    payload = b'{"conversation_id":"c1","turn":1,"role":"user","content":"hello"}\n'
+    monkeypatch.setattr(
+        AgenticInferenceDataset, "DATASET_SHA256", hashlib.sha256(payload).hexdigest()
+    )
+    cache_dir = tmp_path / AgenticInferenceDataset.DATASET_ID
+    cache_dir.mkdir()
+    (cache_dir / AgenticInferenceDataset.CACHE_FILENAME).write_bytes(payload)
+
+    import inference_endpoint.dataset_manager.agentic_inference_dataset as module
+
+    get = MagicMock()
+    run = MagicMock()
+    monkeypatch.setattr(module.requests, "get", get)
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    dataframe = AgenticInferenceDataset.generate(tmp_path)
+
+    get.assert_not_called()
+    run.assert_not_called()
     assert dataframe.iloc[0]["conversation_id"] == "c1"
 
 
