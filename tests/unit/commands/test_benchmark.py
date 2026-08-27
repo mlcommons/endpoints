@@ -27,11 +27,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error as urllib_error
 
+import inference_endpoint.commands.benchmark.execute as execute_mod
 import pandas as pd
 import pytest
-from pydantic import ValidationError
-
-import inference_endpoint.commands.benchmark.execute as execute_mod
 from inference_endpoint.commands.benchmark.cli import (
     _run,
     benchmark_app,
@@ -110,6 +108,7 @@ from inference_endpoint.load_generator.session import (
 )
 from inference_endpoint.metrics.metric import Throughput
 from inference_endpoint.metrics.report import Report
+from pydantic import ValidationError
 
 TEMPLATE_DIR = (
     Path(__file__).resolve().parents[3]
