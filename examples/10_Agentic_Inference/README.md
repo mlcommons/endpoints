@@ -15,7 +15,7 @@ Use flat JSONL with one row per message. Rows for each `conversation_id` must be
 
 Required fields are `conversation_id`, `turn`, and `role`. User rows normally include `content`; agentic rows can also include `system`, `tools`, `tool_calls`, `tool_results`, `reasoning_content`, and `delay_seconds`.
 
-The official MLPerf dataset can be downloaded from MLCommons storage (link TBD). Submitters must use this dataset unchanged for official submissions.
+The official MLPerf dataset is available from [MLCommons storage](https://endpoints.mlcommons-storage.org/index.html#mlperf-agentic-inference). The dataset SHA-256 is `1beb24c882122df96571cf11b390acbea388944038bc55c78b891475459014ae`. Submitters must use this dataset unchanged for official submissions.
 
 Place the dataset under `examples/10_Agentic_Inference/datasets/` or point the YAML at another accessible JSONL path.
 
