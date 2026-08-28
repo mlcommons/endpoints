@@ -111,8 +111,7 @@ def run_benchmark_session(
     rt_settings = RuntimeSettings(
         metric_target=metrics.Throughput(6),
         reported_metrics=[],
-        min_duration_ms=args.min_duration * 1000,
-        max_duration_ms=args.max_duration * 1000,
+        max_issue_duration_ms=args.max_duration * 1000,
         n_samples_from_dataset=0,
         n_samples_to_issue=0,
         min_sample_count=0,
@@ -265,12 +264,6 @@ def main():
     )
 
     # Benchmark configuration arguments
-    parser.add_argument(
-        "--min-duration",
-        type=int,
-        default=10,
-        help="Minimum duration in seconds (default: 10)",
-    )
     parser.add_argument(
         "--max-duration",
         type=int,

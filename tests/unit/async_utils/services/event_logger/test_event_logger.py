@@ -21,11 +21,14 @@ writer orchestration without ZMQ transport by calling process() directly
 """
 
 import asyncio
+import signal
+from unittest.mock import MagicMock
 
 import msgspec
 import pytest
 from inference_endpoint.async_utils.services.event_logger.__main__ import (
     EventLoggerService,
+    _install_signal_handlers,
 )
 from inference_endpoint.async_utils.services.event_logger.file_writer import JSONLWriter
 from inference_endpoint.async_utils.services.event_logger.sql_writer import (
@@ -226,6 +229,25 @@ class TestShutdownBehavior:
                 SampleEventType.COMPLETE,
                 SessionEventType.ENDED,
             ]
+
+    @pytest.mark.asyncio
+    async def test_signal_handlers_ignore_sigint_and_flush_on_sigterm(self):
+        shutdown_event = asyncio.Event()
+        service, writers = _make_stub(shutdown_event=shutdown_event)
+        loop = MagicMock()
+        _install_signal_handlers(loop, service)
+        handlers = {
+            call.args[0]: call.args[1]
+            for call in loop.add_signal_handler.call_args_list
+        }
+
+        handlers[signal.SIGINT]()
+        assert not shutdown_event.is_set()
+        assert all(not writer.closed for writer in writers)
+
+        handlers[signal.SIGTERM]()
+        assert shutdown_event.is_set()
+        assert all(writer.closed for writer in writers)
 
 
 # ---------------------------------------------------------------------------

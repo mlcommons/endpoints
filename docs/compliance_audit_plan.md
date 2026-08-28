@@ -526,9 +526,9 @@ Two scenarios must be covered: **Offline** (`max_throughput`) and **SingleStream
 > comparison.
 
 > **`min_duration` is not a duration floor (current limitation).** The load-generator stop
-> check (`session.py`) halts a phase on **sample count** or **`max_duration_ms`** only;
-> `min_duration_ms` merely _derives_ a count when no explicit count is set. Because TEST04
-> drives an explicit `samples` count, each phase stops at `samples` and `min_duration_ms` is
+> check (`session.py`) halts a phase on **sample count** or **`max_issue_duration_ms`** only;
+> `min_issue_duration_ms` merely _derives_ a count when no explicit count is set. Because TEST04
+> drives an explicit `samples` count, each phase stops at `samples` and `min_issue_duration_ms` is
 > **not** honored as a "run for at least 10 minutes" floor. MLCommons' 10-minute compliance
 > minimum therefore is **not** enforced today; combining a count floor with a duration floor
 > ("AND-semantics") is future work. Set `samples` large enough that each phase reaches a

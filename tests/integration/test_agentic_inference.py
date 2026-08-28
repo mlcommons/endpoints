@@ -149,8 +149,8 @@ async def _run_session(
         rt = RuntimeSettings(
             metrics.Throughput(1000),
             [metrics.Throughput(1000)],
-            min_duration_ms=0,
-            max_duration_ms=30_000,
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=30_000,
             n_samples_from_dataset=ds.num_samples(),
             n_samples_to_issue=ds.num_samples(),
             min_sample_count=1,
@@ -411,8 +411,8 @@ async def test_turn_ordering_enforced_end_to_end(echo_server):
     rt = RuntimeSettings(
         metrics.Throughput(1000),
         [metrics.Throughput(1000)],
-        min_duration_ms=0,
-        max_duration_ms=30_000,
+        min_issue_duration_ms=0,
+        max_issue_duration_ms=30_000,
         n_samples_from_dataset=ds.num_samples(),
         n_samples_to_issue=ds.num_samples(),
         min_sample_count=1,
@@ -720,8 +720,8 @@ async def test_agentic_inference_pipeline_exception_propagates(echo_server):
         rt = RuntimeSettings(
             metrics.Throughput(1000),
             [metrics.Throughput(1000)],
-            min_duration_ms=0,
-            max_duration_ms=30_000,
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=30_000,
             n_samples_from_dataset=ds.num_samples(),
             n_samples_to_issue=ds.num_samples(),
             min_sample_count=1,

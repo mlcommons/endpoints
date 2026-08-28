@@ -39,6 +39,13 @@ from .token_metrics import BatchTokenizer, TokenBatchQueue
 logger = logging.getLogger(__name__)
 
 
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
 def _make_sigterm_handler(
     *,
     loop: asyncio.AbstractEventLoop,
@@ -139,13 +146,14 @@ async def main() -> None:
     )
     parser.add_argument(
         "--drain-timeout",
-        type=float,
-        default=0.0,
+        type=_positive_float,
+        default=None,
         help=(
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
             "after ENDED before the aggregator emits the final snapshot with "
-            "n_pending_tasks > 0 (0 = wait indefinitely, the default; the "
-            "benchmark forwards the schema default, see config/schema.py). "
+            "n_pending_tasks > 0. Omit to wait indefinitely (the default). "
+            "Mirrors settings.timeouts.metrics_drain_timeout_s (see "
+            "config/schema.py). "
             "Increase for very large datasets where the end-of-run tokenize "
             "batch is big."
         ),
@@ -273,7 +281,7 @@ async def main() -> None:
                 ),
                 streaming=args.streaming,
                 shutdown_event=shutdown_event,
-                drain_timeout_s=None if args.drain_timeout == 0 else args.drain_timeout,
+                drain_timeout_s=args.drain_timeout,
             )
             aggregator.start()
 
@@ -313,7 +321,7 @@ async def main() -> None:
             # and let the parent's ENDED-driven path drive shutdown.
             loop.add_signal_handler(
                 signal.SIGINT,
-                lambda: logger.info(
+                lambda: logger.warning(
                     "metrics aggregator received SIGINT — ignoring "
                     "(parent's ENDED path is authoritative)"
                 ),

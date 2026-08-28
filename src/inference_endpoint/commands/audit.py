@@ -32,20 +32,23 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from pathlib import Path
 
-from ..compliance import AuditRunArtifacts, get_audit_test
+from ..compliance import AuditRunArtifacts, AuditRunSpec, AuditTest, get_audit_test
 from ..compliance.result import AuditResult, write_result
-from ..config.schema import BenchmarkConfig, DatasetType
+from ..config.schema import AuditConfig, BenchmarkConfig, DatasetType
 from ..exceptions import CLIError, ExecutionError, SetupError
 from .benchmark.execute import (
     BenchmarkResult,
     TestMode,
+    _run_deadline,
     _salvage_tmpfs,
     finalize_benchmark,
     run_benchmark_async,
     setup_benchmark,
 )
+from .benchmark.watchdog import SigintGovernor, sigint_policy
 
 logger = logging.getLogger(__name__)
 
@@ -81,91 +84,12 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
 
     specs = test.plan_runs(audit_cfg)
 
-    perf_datasets = [d for d in config.datasets if d.type == DatasetType.PERFORMANCE]
-    if not perf_datasets:
-        raise SetupError("Audit requires at least one performance dataset")
-    accuracy_datasets = [d for d in config.datasets if d.type == DatasetType.ACCURACY]
-
-    # Execute each phase back-to-back. The first phase's setup_benchmark loads
-    # the dataset; reuse that size so the test can bounds-check all of its
-    # phases before any of them actually runs. setup_benchmark only loads data
-    # (it spawns no workers), so a failed validation here costs one load and
-    # nothing more.
-    artifacts: list[AuditRunArtifacts] = []
-    dataset_size: int | None = None
-    for spec in specs:
-        phase_dir = base_report_dir / spec.label
-        phase_dir.mkdir(parents=True, exist_ok=True)
-
-        # Per-phase config; datasets depend on the spec's own test_mode.
-        phase_datasets = (
-            perf_datasets
-            if spec.test_mode == TestMode.PERF
-            else perf_datasets + accuracy_datasets
-        )
-        phase_config = config.with_updates(
-            report_dir=phase_dir, audit=None, datasets=phase_datasets
-        )
-
-        bench: BenchmarkResult | None = None
-        try:
-            ctx = setup_benchmark(phase_config, spec.test_mode, audit_run_spec=spec)
-            if ctx.dataloader is None:
-                raise SetupError(
-                    f"Audit phase '{spec.label}' loaded no performance dataset"
-                )
-            if dataset_size is None:
-                dataset_size = ctx.dataloader.num_samples()
-                test.validate(
-                    audit_cfg, dataset_size, config.settings.load_pattern.type
-                )
-            bench = run_benchmark_async(ctx)
-            finalize_benchmark(ctx, bench)
-        except CLIError:
-            # Typed CLI errors already carry the right exit code — SetupError (3),
-            # ExecutionError (4), and the InputValidationError (2) that
-            # setup_benchmark raises for an unsaltable warmup dataset. Propagate
-            # them; only genuinely unexpected exceptions become a phase failure.
-            raise
-        except Exception as exc:
-            raise ExecutionError(f"Audit phase '{spec.label}' failed: {exc}") from exc
-        finally:
-            # Bypasses run_benchmark()'s cleanup, so each phase does its own.
-            if bench is not None and bench.tmpfs_dir.exists():
-                _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
-                shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
-
-        report = bench.report
-        if report is None:
-            raise ExecutionError(f"Audit phase '{spec.label}' produced no report")
-        # A SIGINT/SIGTERM during a (long) audit phase is turned into a graceful
-        # stop, so the phase returns with an "interrupted" report. Propagate it
-        # as KeyboardInterrupt so the CLI exits 130 (interrupted), not as a
-        # generic ExecutionError (exit 4) indistinguishable from a phase crash.
-        if report.state == "interrupted":
-            raise KeyboardInterrupt(f"Audit phase '{spec.label}' interrupted")
-        # A drain-timeout (state complete but async tasks still pending) yields
-        # partial stats; certifying a result from it would let an incomplete
-        # run pass compliance.
-        if not report.complete:
-            raise ExecutionError(
-                f"Audit phase '{spec.label}' did not complete cleanly "
-                "(metrics drain timed out); "
-                "refusing to certify a result from partial data"
-            )
-        # When the spec didn't fix a count (None = full dataset), the requested
-        # count is the number actually issued this phase.
-        n_requested = (
-            spec.n_samples if spec.n_samples is not None else report.n_samples_issued
-        )
-        artifacts.append(
-            AuditRunArtifacts(
-                label=spec.label,
-                report_dir=phase_dir,
-                report=report,
-                n_requested=n_requested,
-            )
-        )
+    # One SIGINT policy for the whole audit (same pattern as run_benchmark):
+    # first ^C stops the current phase gracefully, which surfaces as
+    # report.state=="interrupted" and aborts the audit.
+    sigint = SigintGovernor()
+    with sigint_policy(sigint):
+        artifacts = _run_phases(config, base_report_dir, test, audit_cfg, specs, sigint)
 
     # Normalizes verify()'s zero-QPS ValueError to exit 4, not a traceback.
     try:
@@ -184,3 +108,104 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
         result.details.get("reason", ""),
     )
     return result
+
+
+def _run_phases(
+    config: BenchmarkConfig,
+    base_report_dir: Path,
+    test: AuditTest,
+    audit_cfg: AuditConfig,
+    specs: list[AuditRunSpec],
+    sigint: SigintGovernor,
+) -> list[AuditRunArtifacts]:
+    """Execute the planned phases back-to-back; see ``run_audit``."""
+    perf_datasets = [d for d in config.datasets if d.type == DatasetType.PERFORMANCE]
+    if not perf_datasets:
+        raise SetupError("Audit requires at least one performance dataset")
+    accuracy_datasets = [d for d in config.datasets if d.type == DatasetType.ACCURACY]
+
+    artifacts: list[AuditRunArtifacts] = []
+    dataset_size: int | None = None
+    # Validate once after the first phase setup loads the dataset. setup_benchmark
+    # spawns no workers, so invalid plans fail after one load and before any
+    # phase issues work.
+    for spec in specs:
+        if sigint.interrupted:
+            raise KeyboardInterrupt(f"Audit interrupted before phase '{spec.label}'")
+        phase_dir = base_report_dir / spec.label
+        phase_dir.mkdir(parents=True, exist_ok=True)
+
+        phase_datasets = (
+            perf_datasets
+            if spec.test_mode == TestMode.PERF
+            else perf_datasets + accuracy_datasets
+        )
+        phase_config = config.with_updates(
+            report_dir=phase_dir, audit=None, datasets=phase_datasets
+        )
+
+        bench: BenchmarkResult | None = None
+        try:
+            deadline = _run_deadline(phase_config)
+            ctx = setup_benchmark(phase_config, spec.test_mode, audit_run_spec=spec)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ExecutionError(
+                    f"Audit phase '{spec.label}' exhausted run_timeout_s "
+                    "during setup"
+                )
+            if ctx.dataloader is None:
+                raise SetupError(
+                    f"Audit phase '{spec.label}' loaded no performance dataset"
+                )
+            if dataset_size is None:
+                dataset_size = ctx.dataloader.num_samples()
+                test.validate(
+                    audit_cfg, dataset_size, config.settings.load_pattern.type
+                )
+            bench = run_benchmark_async(ctx, deadline=deadline, sigint=sigint)
+            finalize_benchmark(ctx, bench)
+        except CLIError:
+            # Preserve typed CLI failures (including DatasetValidationError) so
+            # the top-level handler retains their input/setup/execution exit codes.
+            raise
+        except Exception as exc:
+            raise ExecutionError(f"Audit phase '{spec.label}' failed: {exc}") from exc
+        finally:
+            # This direct phase runner bypasses run_benchmark()'s cleanup.
+            if bench is not None and bench.tmpfs_dir.exists():
+                _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
+                shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
+
+        report = bench.report
+        if report is None:
+            raise ExecutionError(f"Audit phase '{spec.label}' produced no report")
+        if bench.run_timed_out:
+            raise ExecutionError(
+                f"Audit phase '{spec.label}' hit the run timeout "
+                "(settings.timeouts.run_timeout_s); report marked INTERRUPTED"
+            )
+        # Preserve the CLI's interrupted exit path instead of recasting it as a
+        # generic phase failure.
+        if report.state == "interrupted":
+            raise KeyboardInterrupt(f"Audit phase '{spec.label}' interrupted")
+        # Compliance must never certify a result built from partial metrics.
+        if not report.complete:
+            raise ExecutionError(
+                f"Audit phase '{spec.label}' did not complete cleanly "
+                "(metrics drain timed out); "
+                "refusing to certify a result from partial data"
+            )
+        # Without a fixed spec count, record what this phase actually issued.
+        n_requested = (
+            spec.n_samples if spec.n_samples is not None else report.n_samples_issued
+        )
+        artifacts.append(
+            AuditRunArtifacts(
+                label=spec.label,
+                report_dir=phase_dir,
+                report=report,
+                n_requested=n_requested,
+            )
+        )
+
+    return artifacts

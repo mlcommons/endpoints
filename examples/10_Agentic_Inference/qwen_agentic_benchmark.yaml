@@ -39,8 +39,7 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 0
-    max_duration_ms: 36000000
+    max_issue_duration_ms: 36000000 # 10-hour cap on the performance phase
 
   load_pattern:
     type: agentic_inference
