@@ -113,8 +113,89 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
         'choice4'
     """
 
+    CHOICE_MAP = {
+        "A": "choice1",
+        "B": "choice2",
+        "C": "choice3",
+        "D": "choice4",
+    }
+
+    # Each pattern below captures the answer letter as group 1.
+    FINAL_ANSWER_PATTERNS = [
+        # JSON-ish final responses.
+        # Examples: {"answer": "A"}, 'answer': 'C'
+        re.compile(r"""(?is)["']answer["']\s*:\s*["']?\s*([ABCD])\b"""),
+        # Explicit final-answer statements.
+        # Examples: "Final answer: B", "answer is (D)", "Answer = **C**"
+        re.compile(
+            r"""(?ix)
+            \b(?:final\s+answer|answer)\b
+            \s*(?:is|:|=)?\s*
+            (?:\\boxed\{\s*)?
+            (?:\*{1,2}|_{1,2})?
+            \(?\s*([ABCD])\b
+            """
+        ),
+        # Explicit option/choice statements near the end of the response.
+        # Examples: "option C", "Choice: (A)", "the correct choice is **B**"
+        re.compile(
+            r"""(?ix)
+            \b(?:option|choice)\b
+            \s*(?:is|:|=)?\s*
+            (?:\*{1,2}|_{1,2})?
+            \(?\s*([ABCD])\b
+            """
+        ),
+        # "the correct answer/choice/option is C", "correct answer: (B)"
+        re.compile(
+            r"""(?ix)
+            \bcorrect\s+(?:answer|choice|option)\b
+            \s*(?:is|:|=)?\s*
+            (?:\\boxed\{\s*)?
+            (?:\*{1,2}|_{1,2})?
+            \(?\s*([ABCD])\b
+            """
+        ),
+        # "C is the correct answer", "**B** the correct choice", "(A) is correct"
+        re.compile(
+            r"""(?ix)
+            (?:\*{1,2}|_{1,2})?
+            \(?\s*([ABCD])\s*\)?
+            (?:\*{1,2}|_{1,2})?
+            \s+(?:is\s+)?(?:the\s+)correct
+            (?:\s+(?:answer|choice|option))?
+            \b
+            """
+        ),
+        # Boxed answers.
+        # Examples: "\\boxed{D}", "\\boxed{\\text{A}}", "\\boxed{\\textbf{C}}"
+        re.compile(r"""(?is)\\boxed\{\s*(?:\\(?:text|textbf)\{\s*)?([ABCD])\b"""),
+        # A final standalone line such as "C", "**D**", or "(B)".
+        # Examples: final line "A", final line "**D**", final line "(B)"
+        re.compile(
+            r"""(?im)^\s*
+            (?:\*{1,2}|_{1,2})?
+            \(?\s*([ABCD])\s*\)?
+            (?:\*{1,2}|_{1,2})?
+            \s*[\.\)]?\s*$
+            """
+        ),
+        # A final answer line with the option text included, e.g. "(D) foo".
+        # Examples: "(D) all of the above", "**(B)** pressure increases"
+        re.compile(
+            r"""(?im)^\s*
+            (?:\*{1,2}|_{1,2})?
+            \(\s*([ABCD])\s*\)
+            (?:\*{1,2}|_{1,2})?
+            \s+\S
+            """
+        ),
+    ]
+
+    # Each fallback pattern below also captures the answer letter as group 1.
     PATTERNS = [
         # 0) "**Answer:** A" or "*Answers* – B", i.e. markdown-wrapped "Answer(s)" with an unwrapped letter.
+        # Examples: "**Answer:** A", "*Answers* - B", "__Answer__ C"
         re.compile(
             r"""(?ix)                   # case-insensitive, ignore-space
             (?:\*{1,2}|_{1,2})          # leading *…*  or _…_
@@ -127,6 +208,7 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
             re.X,
         ),
         # 0.1) Answer with optional markdown and colons
+        # Examples: "Answer: **D**", "**Answer:** C", "answer B"
         re.compile(
             r"""(?ix)           # ignore case, allow verbose mode
             ^\s*                      # optional leading whitespace
@@ -142,31 +224,41 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
             re.MULTILINE,
         ),
         # 1) Answer: (C)   or   Answers: (B)
+        # Examples: "Answer: (C)", "Answers - (B)"
         re.compile(r"(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*\(\s*([ABCD])\s*\)"),
         # 2) Answer: C    or   Answers – D
+        # Examples: "Answer: C", "Answers - D"
         re.compile(r"(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*([ABCD])\b"),
         # 3) Option B   or   Choice: C
+        # Examples: "Option B", "Choice: C"
         re.compile(r"(?ix)\b(?:Option|Choice)\b\s*[:\-–]?\s*([ABCD])\b"),
         # 7) LaTeX \boxed{...A...}, catches both \boxed{A} and
         #    \boxed{\text{A } 2.08\times10^{-6}\,\mathrm{m}} etc.
+        # Examples: "\\boxed{A}", "\\boxed{the answer is C}"
         re.compile(r"(?x)\\boxed\{[^}]*?([ABCD])[^}]*\}", re.MULTILINE),
         # 7.5) LaTeX \boxed{\textbf{...C...}}
+        # Examples: "\\boxed{\\textbf{C}}", "\\boxed{\\textbf{choice D}}"
         re.compile(
             r"(?x)\\boxed\{[^}]*?\\textbf\{[^}]*?([ABCD])[^}]*\}[^}]*\}", re.MULTILINE
         ),
         # 7.51) LaTeX \boxed{\text{...C...}}
+        # Examples: "\\boxed{\\text{B}}", "\\boxed{\\text{Answer: A}}"
         re.compile(
             r"(?x)\\boxed\{[^}]*?\\text\{[^}]*?([ABCD])[^}]*\}[^}]*\}", re.MULTILINE
         ),
         # 4) bare singletons:  (A)  [B]
+        # Examples: "(A)", "[B]"
         re.compile(r"(?x)(?<![A-Za-z0-9])[\(\[]\s*([ABCD])\s*[\)\]](?![A-Za-z0-9])"),
         # 5) Markdown-wrapped: *A*  **B**  _C_  __D__
+        # Examples: "*A*", "**B**", "_C_", "__D__"
         re.compile(
             r"(?x)(?<![A-Za-z0-9])(?:\*{1,2}|_{1,2})([ABCD])(?:\*{1,2}|_{1,2})(?![A-Za-z0-9])"
         ),
         # 6) LaTeX \textbf{...C...}
+        # Examples: "\\textbf{C}", "\\textbf{Answer D}"
         re.compile(r"(?x)\\textbf\{[^}]*?([ABCD])[^}]*\}"),
         # 8) markdown-wrapped answer plus ")" plus description, e.g. **D) …**
+        # Examples: "**D) all of the above**", "_B) pressure increases_"
         re.compile(r"""(?x)                        # ignore whitespace in pattern
             (?<![A-Za-z0-9])            # not preceded by word-char
             (?:\*{1,2}|_{1,2})          # opening ** or __ or * or _
@@ -176,6 +268,7 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
             (?![A-Za-z0-9])             # not followed by word-char
         """),
         # 9) final fallback: a line that's exactly "A", "B.", "C)", "**D**", etc.
+        # Examples: "A", "B.", "C)", "**D**", "A - because ..."
         re.compile(
             r"""(?x)^\s*
             (?:\*{1,2}|_{1,2})?     # optional markdown wrapper
@@ -190,34 +283,54 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
 
     @classmethod
     def extract(cls, text: str, default: str | None = None) -> str | None:
+        if not text or not isinstance(text, str):
+            return default if default is not None else ""
+
+        # Reasoning models often produce a long rationale followed by a concise
+        # final answer. Prefer explicit answer forms near the response tail before
+        # broad option-list fallbacks such as "(A)" or "(B)".
+        #
+        # Rightmost-match rule: scan only the last 6000 characters, collect every
+        # final-answer regex match as (start_offset, end_offset, letter), then
+        # select max(..., key=(start_offset, end_offset)). This guarantees that
+        # the latest regex match inside the scanned tail wins, e.g. an earlier
+        # "Choice: A" is overridden by a later "Final answer: D". This is still a
+        # regex-position guarantee, not a semantic guarantee: if the true answer
+        # is outside the tail, does not match these regexes, or is followed by a
+        # later false-positive answer-like string, the extractor can still choose
+        # the wrong letter.
+        tail = text.strip()[-6000:]
+        final_matches: list[tuple[int, int, str]] = []
+        for pat in cls.FINAL_ANSWER_PATTERNS:
+            for m in pat.finditer(tail):
+                letter = m.group(1).upper()
+                if letter in cls.CHOICE_MAP:
+                    final_matches.append((m.start(), m.end(), letter))
+        if final_matches:
+            _, _, letter = max(final_matches, key=lambda item: (item[0], item[1]))
+            return cls.CHOICE_MAP[letter]
+
         matches = []
         for prio, pat in enumerate(cls.PATTERNS):
-            m = pat.search(text)
-            if m:
-                letter = m.group(1).upper()
+            sm = pat.search(text)
+            if sm:
+                letter = sm.group(1).upper()
                 if letter in "ABCD":
-                    matches.append((prio, m, letter))
+                    matches.append((prio, sm, letter))
 
         # Sort by priority (lower is better) and then by match length (shorter is better)
         matches.sort(key=lambda triple: (triple[0], len(triple[1].group(0))))
 
-        choice_map = {
-            "A": "choice1",
-            "B": "choice2",
-            "C": "choice3",
-            "D": "choice4",
-        }
-
         # Return the best match
         for _, _, letter in matches:
-            return choice_map[letter]
+            return cls.CHOICE_MAP[letter]
 
         # Final fallback from OpenAI: take first character after stripping markdown
         # This is a last resort if no patterns matched
         stripped = text.removeprefix("**")
         if stripped and stripped[0].upper() in "ABCD":
             abcd_choice = stripped[0].upper()
-            return choice_map[abcd_choice]
+            return cls.CHOICE_MAP[abcd_choice]
 
         return default if default is not None else ""
 
@@ -279,6 +392,44 @@ class PythonCodeExtractor(Extractor, extractor_id="python_code_extractor"):
         '# FAILED'
     """
 
+    @staticmethod
+    def _parses(code: str) -> bool:
+        try:
+            ast.parse(code)
+            return True
+        except (SyntaxError, ValueError):
+            return False
+
+    @classmethod
+    def _select_solution_block(cls, blocks: list[str]) -> str:
+        """Choose the block most likely to be the complete final solution.
+
+        Preference order (last-wins within each tier, since the final rewrite is
+        usually latest):
+          1. Parseable blocks that define a function/class OR read input and
+             write output (a self-contained program), length >= 200.
+          2. Any parseable block of length >= 200.
+          3. Any parseable block.
+          4. The last raw block (previous behaviour) as a last resort.
+        """
+        parseable = [b for b in blocks if cls._parses(b)]
+
+        def _complete(b: str) -> bool:
+            has_def = "def " in b or "class " in b
+            has_in = "input(" in b or "sys.stdin" in b
+            has_out = "print(" in b or "sys.stdout" in b
+            return has_def or (has_in and has_out)
+
+        for b in reversed(parseable):
+            if len(b) >= 200 and _complete(b):
+                return b
+        substantial = [b for b in parseable if len(b) >= 200]
+        if substantial:
+            return substantial[-1]
+        if parseable:
+            return parseable[-1]
+        return blocks[-1]
+
     @classmethod
     def extract(cls, text: str, default: str | None = None) -> str | None:
         if not text or not isinstance(text, str):
@@ -288,19 +439,53 @@ class PythonCodeExtractor(Extractor, extractor_id="python_code_extractor"):
         if not text:
             return default
 
-        # Try ```python blocks first (most specific)
-        python_matches = list(re.finditer(r"```python(.*?)```", text, re.DOTALL))
-        if python_matches:
-            return python_matches[-1].group(1).strip()
+        # Collapse repeated/empty language openers (e.g. a stray
+        # "```python\n\n```python\n<code>") that otherwise make the middle
+        # fence look like a closing fence and yield an empty block.
+        text = re.sub(
+            r"(?:```[ \t]*(?:python|py)[ \t]*\r?\n\s*)+?(```[ \t]*(?:python|py)[ \t]*\r?\n)",
+            r"\1",
+            text,
+            flags=re.IGNORECASE,
+        )
 
-        # Fall back to plain ``` blocks
-        plain_matches = list(re.finditer(r"```(.*?)```", text, re.DOTALL))
-        if plain_matches:
-            # Get the last match
-            code = plain_matches[-1].group(1).strip()
-            # Remove language tag if present (e.g., ```python\n or ```py\n)
-            code = re.sub(r"^(?:python|py)\s*\n", "", code, flags=re.IGNORECASE)
-            return code
+        # Try ```python blocks first (most specific). Reasoning models (e.g.
+        # DeepSeek-V4) stream their whole rationale into the answer and emit MANY
+        # ```python blocks — full-solution rewrites interleaved with tiny debug
+        # snippets ("idx = i + 1") and non-parseable pseudo-blocks. Blindly
+        # taking the last block often grabs a trailing fragment that references
+        # names defined in an earlier block (→ NameError) or garbage. Instead
+        # pick the last block that looks like a COMPLETE, self-contained solution.
+        python_blocks = [
+            m.group(1).strip()
+            for m in re.finditer(
+                r"```[ \t]*python[ \t]*\r?\n(.*?)```", text, re.DOTALL | re.IGNORECASE
+            )
+        ]
+        python_blocks = [c for c in python_blocks if c]
+        if python_blocks:
+            return cls._select_solution_block(python_blocks)
+
+        # Fall back to plain ``` blocks (strip any lang tag).
+        plain_blocks = []
+        for m in re.finditer(r"```(.*?)```", text, re.DOTALL):
+            code = re.sub(
+                r"^(?:python|py)\s*\r?\n", "", m.group(1).strip(), flags=re.IGNORECASE
+            ).strip()
+            if code:
+                plain_blocks.append(code)
+        if plain_blocks:
+            return cls._select_solution_block(plain_blocks)
+
+        # Last resort: an unclosed final fence (truncated response). Take from
+        # the last opening fence to the end of text.
+        tail_m = re.search(
+            r"```[ \t]*(?:python|py)?[ \t]*\r?\n(.*)$", text, re.DOTALL | re.IGNORECASE
+        )
+        if tail_m:
+            code = tail_m.group(1).strip().rstrip("`").strip()
+            if code:
+                return code
 
         return default
 

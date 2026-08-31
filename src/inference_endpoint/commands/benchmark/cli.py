@@ -31,6 +31,7 @@ from inference_endpoint.commands.benchmark.execute import (
 )
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
+    DatasetType,
     OfflineBenchmarkConfig,
     OnlineBenchmarkConfig,
     TestMode,
@@ -183,7 +184,12 @@ def from_config(
         )
     if report_dir is not None:
         resolved = resolved.with_updates(report_dir=report_dir)
-    test_mode = mode or (
-        TestMode.BOTH if resolved.type == TestType.SUBMISSION else TestMode.PERF
-    )
+    if mode is not None:
+        test_mode = mode
+    elif resolved.type == TestType.SUBMISSION:
+        test_mode = TestMode.BOTH
+    elif any(ds.type == DatasetType.ACCURACY for ds in resolved.datasets):
+        test_mode = TestMode.BOTH
+    else:
+        test_mode = TestMode.PERF
     _run(resolved, [], test_mode, accuracy_only=accuracy_only)

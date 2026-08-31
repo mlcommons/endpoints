@@ -190,6 +190,8 @@ outputs/
 # `data/` rule above would otherwise exclude them.
 !examples/07_DeepSeekR1_Example/data/
 !examples/07_DeepSeekR1_Example/data/deepseek_r1_eval.parquet
+!examples/10_DeepSeekV4Pro_Example/data/
+!examples/10_DeepSeekV4Pro_Example/data/perf_stub.jsonl
 
 # Example vLLM virtualenv
 examples/03_BenchmarkComparison/vllm_venv/

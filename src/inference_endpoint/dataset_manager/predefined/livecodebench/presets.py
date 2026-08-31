@@ -35,3 +35,7 @@ _FORMAT = (
 
 def gptoss() -> list[Transform]:
     return [UserPromptFormatter(user_prompt_format=_FORMAT)]
+
+
+def deepseek_v4() -> list[Transform]:
+    return gptoss()

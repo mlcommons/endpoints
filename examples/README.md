@@ -29,6 +29,11 @@ Sample yaml configurations for benchmarking `meta-llama/Llama-3.1-8B-Instruct` (
 
 Sample yaml configuration to benchmark the multimodal `Qwen/Qwen3-VL-235B-A22B` model on a visual reasoning workload.
 
+### [10_DeepSeekV4Pro_Example](10_DeepSeekV4Pro_Example/)
+
+Pass@1 accuracy suite for `deepseek-ai/DeepSeek-V4-Pro` with SGLang (ROCm / MI35x):
+AIME25 + GPQA + LiveCodeBench at concurrency 64 and `max_new_tokens` 256000.
+
 ## Getting Help
 
 - For general usage: See main [README](../README.md)

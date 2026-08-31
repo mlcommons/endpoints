@@ -90,13 +90,13 @@ class AIME25(
                 "opencompass/AIME2025",
                 dataset_name="AIME2025-I",
                 split="test",
-                cache_dir=datasets_dir / "hf_cache" / "aime25",
+                cache_dir=datasets_dir / "hf_cache" / "aime25" / "AIME2025-I",
             )
             df_ii = load_from_huggingface(
                 "opencompass/AIME2025",
                 dataset_name="AIME2025-II",
                 split="test",
-                cache_dir=datasets_dir / "hf_cache" / "aime25",
+                cache_dir=datasets_dir / "hf_cache" / "aime25" / "AIME2025-II",
             )
             df = pd.concat([df_i, df_ii])
             logger.info(f"Loaded {len(df)} samples from AIME25-I and AIME25-II")

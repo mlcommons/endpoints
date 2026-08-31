@@ -57,6 +57,14 @@ class TestHttpEchoMockFixtures:
                 assert response_data["request"]["endpoint"] == "/echo"
                 assert response_data["request"]["json_payload"] == payload
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_mock_http_echo_server_health(self, mock_http_echo_server):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{mock_http_echo_server.url}/health") as response:
+                assert response.status == 200
+                assert await response.json() == {"status": "ok"}
+
     @pytest.mark.asyncio
     async def test_mock_http_echo_server_chat_completions(self, mock_http_echo_server):
         """Test basic echo functionality of the real HTTP server."""
