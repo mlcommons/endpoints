@@ -128,6 +128,28 @@ def test_build_super_pass_series_records_e2e_latency(tmp_path):
     assert series[0].latency_ns == [2000.0]  # complete(3000) - issued(1000)
 
 
+def test_warm_turn_ttft_excludes_cold_first_turn(tmp_path):
+    def evt(et, ts, uuid, turn, data=None):
+        return json.dumps(
+            {"event_type": et, "timestamp_ns": ts, "sample_uuid": uuid,
+             "turn": turn, "data": data}
+        )
+    lines = [
+        _ev("session.start_performance_tracking", 0),
+        evt("sample.issued", 1000, "A", 1),
+        evt("sample.recv_first", 1200, "A", 1),  # cold turn 1 -> ttft 200
+        evt("sample.complete", 3000, "A", 1, ["TextModelOutput", ["a ", "b"]]),
+        evt("sample.issued", 1100, "B", 2),
+        evt("sample.recv_first", 1150, "B", 2),  # warm turn 2 -> ttft 50
+        evt("sample.complete", 2000, "B", 2, ["TextModelOutput", ["c ", "d"]]),
+        _ev("session.stop_performance_tracking", 4000),
+    ]
+    path = _write_events(tmp_path, lines)
+    series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
+    assert sorted(series[0].ttft_ns) == [50.0, 200.0]  # all turns
+    assert series[0].ttft_warm_ns == [50.0]  # turn 1 discarded
+
+
 def test_build_super_pass_series_ignores_events_outside_tracking(tmp_path):
     lines = [
         _ev("sample.issued", 500, "PRE"),  # before tracking -> ignored

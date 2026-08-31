@@ -146,6 +146,9 @@ TRACKED_METRICS: tuple[TrackedMetric, ...] = (
     TrackedMetric("latency_p50", "latency_ns", 0.50, False),
     TrackedMetric("latency_p90", "latency_ns", 0.90, False),
     TrackedMetric("latency_p95", "latency_ns", 0.95, False),
+    # Warm-turn TTFT (agentic turn >= 2): cold first-turn prefill discarded.
+    TrackedMetric("ttft_warm_p50", "ttft_warm_ns", 0.50, False),
+    TrackedMetric("ttft_warm_p95", "ttft_warm_ns", 0.95, False),
 )
 
 # Metrics that gate admissibility (p50/p95); p99 is diagnostic-only.
@@ -200,6 +203,7 @@ class SuperPassRollup:
     last_issue_ns: int = -1  # latest issue ts (offered-load span end; throughput denom)
     last_event_ns: int = -1  # latest event ts incl. completions (drain-inclusive end)
     ttft_ns: list[float] = field(default_factory=list)
+    ttft_warm_ns: list[float] = field(default_factory=list)  # turn >= 2 (KV-cache warm)
     tpot_ns: list[float] = field(default_factory=list)
     latency_ns: list[float] = field(default_factory=list)  # issue -> complete (e2e)
     out_tokens: int = 0
@@ -298,7 +302,15 @@ def build_super_pass_series(
                     # must not contribute a second TTFT to the super-pass.
                     if row.recv_first_ns is None:
                         row.recv_first_ns = ts
-                        series[row.sp_index].ttft_ns.append(float(ts - row.issue_ns))
+                        ttft = float(ts - row.issue_ns)
+                        sp = series[row.sp_index]
+                        sp.ttft_ns.append(ttft)
+                        # Warm-turn TTFT excludes the cold first turn of each agentic
+                        # trajectory (turn 1 = no KV-cache hit). turn is None for
+                        # single-turn workloads -> treated as warm (kept).
+                        turn = rec.get("turn")
+                        if turn is None or turn > 1:
+                            sp.ttft_warm_ns.append(ttft)
             elif et == EV_COMPLETE:
                 uuid = rec.get("sample_uuid")
                 row = rows.pop(uuid, None)
