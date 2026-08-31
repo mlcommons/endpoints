@@ -229,6 +229,12 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # which can differ per audit phase — are deferred to a follow-up.)
     run_config: dict[str, Any] | None = None
 
+    # SHA-256 (hex) over the bytes of the run's events.jsonl, attached in
+    # finalize_benchmark after the log is salvaged to report_dir. Content-only,
+    # so copying or renaming the log does not change it. None when no event log
+    # was produced (e.g. SIGKILL before salvage).
+    events_sha256: str | None = None
+
     # Per-dataset accuracy entries (one per scored dataset), attached after
     # scoring in finalize_benchmark. Accuracy is not in the metrics snapshot, so
     # from_snapshot leaves this empty; runs without configured scoring keep it
