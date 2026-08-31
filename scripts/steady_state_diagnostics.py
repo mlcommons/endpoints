@@ -141,6 +141,11 @@ TRACKED_METRICS: tuple[TrackedMetric, ...] = (
     TrackedMetric("tpot_p95", "tpot_ns", 0.95, True),
     TrackedMetric("ttft_p99", "ttft_ns", 0.99, False),
     TrackedMetric("tpot_p99", "tpot_ns", 0.99, False),
+    # End-to-end sample latency (issue->complete). Diagnostic by default (its variance
+    # tracks the OSL mix, §5.1); useful for agentic where per-turn TTFT is turbulent.
+    TrackedMetric("latency_p50", "latency_ns", 0.50, False),
+    TrackedMetric("latency_p90", "latency_ns", 0.90, False),
+    TrackedMetric("latency_p95", "latency_ns", 0.95, False),
 )
 
 # Metrics that gate admissibility (p50/p95); p99 is diagnostic-only.
@@ -196,6 +201,7 @@ class SuperPassRollup:
     last_event_ns: int = -1  # latest event ts incl. completions (drain-inclusive end)
     ttft_ns: list[float] = field(default_factory=list)
     tpot_ns: list[float] = field(default_factory=list)
+    latency_ns: list[float] = field(default_factory=list)  # issue -> complete (e2e)
     out_tokens: int = 0
 
 
@@ -300,6 +306,7 @@ def build_super_pass_series(
                     continue
                 sp = series[row.sp_index]
                 sp.last_event_ns = max(sp.last_event_ns, ts)
+                sp.latency_ns.append(float(ts - row.issue_ns))  # e2e, no recv_first needed
                 if row.recv_first_ns is None:
                     continue
                 text = text_after_first_chunk(rec.get("data"))

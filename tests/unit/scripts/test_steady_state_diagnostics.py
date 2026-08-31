@@ -115,6 +115,19 @@ def test_build_super_pass_series_buckets_by_issue_order(tmp_path):
     assert sp1.ttft_ns == [200.0]
 
 
+def test_build_super_pass_series_records_e2e_latency(tmp_path):
+    lines = [
+        _ev("session.start_performance_tracking", 0),
+        _ev("sample.issued", 1000, "A"),
+        _ev("sample.recv_first", 1500, "A"),
+        _ev("sample.complete", 3000, "A", ["TextModelOutput", ["a ", "b b"]]),
+        _ev("session.stop_performance_tracking", 4000),
+    ]
+    path = _write_events(tmp_path, lines)
+    series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
+    assert series[0].latency_ns == [2000.0]  # complete(3000) - issued(1000)
+
+
 def test_build_super_pass_series_ignores_events_outside_tracking(tmp_path):
     lines = [
         _ev("sample.issued", 500, "PRE"),  # before tracking -> ignored
