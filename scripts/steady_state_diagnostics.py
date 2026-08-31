@@ -1284,10 +1284,14 @@ def render_text(result: DiagnosticsResult, cov_bounds: Sequence[float]) -> str:
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
-def _make_token_counter(tokenizer_id: str) -> Callable[[list[str]], list[int]]:
+def _make_token_counter(
+    tokenizer_id: str, trust_remote_code: bool = False
+) -> Callable[[list[str]], list[int]]:
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(tokenizer_id)
+    tok = AutoTokenizer.from_pretrained(
+        tokenizer_id, trust_remote_code=trust_remote_code
+    )
 
     def count(texts: list[str]) -> list[int]:
         enc = tok(texts, add_special_tokens=False)["input_ids"]
@@ -1313,6 +1317,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("events", help="path to events.jsonl")
     ap.add_argument(
         "--tokenizer", required=True, help="HF model dir/id for TTFT+TPOT token counts"
+    )
+    ap.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="allow the tokenizer's custom code (needed for Kimi-K3 and similar)",
     )
     ap.add_argument(
         "--dataset-size", type=int, required=True, help="samples per dataset pass"
@@ -1367,7 +1376,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     superpass_size = args.superpass_size or args.dataset_size
-    count_tokens = _make_token_counter(args.tokenizer)
+    count_tokens = _make_token_counter(args.tokenizer, args.trust_remote_code)
     result = run(
         args.events,
         superpass_size=superpass_size,
