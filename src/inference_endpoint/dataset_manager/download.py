@@ -126,8 +126,8 @@ def download_r2_artifact(
 
         candidates = [
             path
-            for path in destination_dir.rglob(artifact_name)
-            if path.is_file() and path != script_path
+            for path in destination_dir.rglob("*")
+            if path.is_file() and path.name == artifact_name and path != script_path
         ]
         if len(candidates) != 1:
             if not candidates:

@@ -116,25 +116,41 @@ def test_missing_artifact(tmp_path: Path, monkeypatch) -> None:
         download_r2_artifact(_URI, tmp_path, "artifact.bin", _COMMIT)
 
 
-def test_relocates_exact_nested_artifact(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("artifact_name", "decoy_name"),
+    [
+        ("artifact.bin", None),
+        ("artifact[1].bin", "artifact1.bin"),
+    ],
+)
+def test_relocates_exact_nested_artifact(
+    tmp_path: Path,
+    monkeypatch,
+    artifact_name: str,
+    decoy_name: str | None,
+) -> None:
     payload = b"nested artifact"
     monkeypatch.setattr(f"{_MODULE}.requests.get", lambda *args, **kwargs: _response())
 
     def run(*args, **kwargs):
-        nested = tmp_path / "manifest-directory" / "artifact.bin"
+        nested = tmp_path / "manifest-directory" / artifact_name
         nested.parent.mkdir()
         nested.write_bytes(payload)
+        if decoy_name is not None:
+            decoy = tmp_path / "decoy-directory" / decoy_name
+            decoy.parent.mkdir()
+            decoy.write_bytes(b"decoy")
         return _run_result()
 
     monkeypatch.setattr(f"{_MODULE}.subprocess.run", run)
     result = download_r2_artifact(
         _URI,
         tmp_path,
-        "artifact.bin",
+        artifact_name,
         _COMMIT,
         expected_sha256=hashlib.sha256(payload).hexdigest(),
     )
-    assert result == tmp_path / "artifact.bin"
+    assert result == tmp_path / artifact_name
     assert result.read_bytes() == payload
 
 
