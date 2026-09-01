@@ -690,8 +690,8 @@ def _make_settings(load_pattern):
     return RuntimeSettings(
         metric_target=Throughput(100),
         reported_metrics=[],
-        min_duration_ms=0,
-        max_duration_ms=None,
+        min_issue_duration_ms=0,
+        max_issue_duration_ms=None,
         n_samples_from_dataset=10,
         n_samples_to_issue=10,
         min_sample_count=10,

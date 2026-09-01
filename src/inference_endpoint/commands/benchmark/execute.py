@@ -21,8 +21,8 @@ Phases:
     3. finalize_benchmark()     — accuracy scoring, results JSON
 
 Cohesive sub-concerns live in sibling modules: profiler triggers (``profiling``),
-accuracy scoring (``accuracy``), and the ZMQ/metrics/event-logger service lifecycle
-(``pipeline``).
+timeout/signal policy (``watchdog``), accuracy scoring (``accuracy``), and the
+ZMQ/metrics/event-logger service lifecycle (``pipeline``).
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ import json
 import logging
 import random
 import shutil
-import signal
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -60,6 +60,12 @@ from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
 from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
     write_profiling_section,
+)
+from inference_endpoint.commands.benchmark.watchdog import (
+    RunWatchdog,
+    SigintGovernor,
+    _PerfPhaseTimeout,
+    sigint_policy,
 )
 from inference_endpoint.compliance import AuditRunSpec
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -162,6 +168,8 @@ class BenchmarkResult:
     # settings.profiling.engine is set; None otherwise. Rendered into
     # report.txt and a sibling profiling.json by finalize_benchmark.
     profiling: dict[str, Any] | None = None
+    run_timed_out: bool = False
+    user_interrupted: bool = False
 
 
 @dataclass
@@ -545,9 +553,7 @@ def setup_benchmark(
         f"Mode: {test_mode}, Target QPS: {config.settings.load_pattern.target_qps}, Responses: {collect_responses}"
     )
     if rt_settings is not None:
-        logger.info(
-            f"Min Duration: {rt_settings.min_duration_ms / 1000:.1f}s, Expected samples: {total_samples}"
-        )
+        logger.info(f"Expected samples: {total_samples}")
     else:
         logger.info(f"Accuracy-only mode, Expected samples: {total_samples}")
     for ec in eval_configs:
@@ -580,7 +586,7 @@ def _build_phases(
 ) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
-    drain_cfg = ctx.config.settings.drain
+    timeouts = ctx.config.settings.timeouts
 
     if ctx.dataloader is not None and ctx.rt_settings is not None:
         perf_dataset = next(
@@ -604,8 +610,8 @@ def _build_phases(
             )
             warmup_rt = dataclass_replace(
                 ctx.rt_settings,
-                min_duration_ms=0,
-                max_duration_ms=None,
+                min_issue_duration_ms=None,
+                max_issue_duration_ms=None,
                 n_samples_from_dataset=ctx.dataloader.num_samples(),
                 n_samples_to_issue=warmup_cfg.n_requests,
                 min_sample_count=1,
@@ -620,7 +626,7 @@ def _build_phases(
                     warmup_dataset,
                     PhaseType.WARMUP,
                     drain_after=warmup_cfg.drain,
-                    drain_timeout=drain_cfg.warmup_timeout_s,
+                    drain_timeout=timeouts.warmup_drain_timeout_s,
                 )
             )
 
@@ -631,7 +637,7 @@ def _build_phases(
                 ctx.dataloader,
                 PhaseType.PERFORMANCE,
                 strategy=perf_strategy,
-                drain_timeout=drain_cfg.performance_timeout_s,
+                drain_timeout=timeouts.performance_drain_timeout_s,
                 routing_headers=routing_headers,
             )
         )
@@ -671,8 +677,8 @@ def _build_phases(
         acc_settings = RuntimeSettings(
             metric_target=rng_settings.metric_target,
             reported_metrics=rng_settings.reported_metrics,
-            min_duration_ms=0,
-            max_duration_ms=None,
+            min_issue_duration_ms=None,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=acc_ds.num_samples(),
             n_samples_to_issue=acc_ds.num_samples() * acc_ds.repeats,
             min_sample_count=acc_ds.num_samples() * acc_ds.repeats,
@@ -686,45 +692,11 @@ def _build_phases(
                 acc_settings,
                 acc_ds,
                 PhaseType.ACCURACY,
-                drain_timeout=drain_cfg.accuracy_timeout_s,
+                drain_timeout=timeouts.accuracy_drain_timeout_s,
             )
         )
 
     return phases
-
-
-class _PerfPhaseTimeout:
-    """Session-stop timer that bounds the PERFORMANCE phase only.
-
-    ``max_duration_ms`` is a safety cap on the performance phase. The timer is
-    armed when the performance phase starts and cancelled as soon as any later
-    phase starts, so it can never truncate a subsequent accuracy phase: a
-    combined perf+accuracy run must let accuracy finish regardless of how long
-    perf ran.
-    """
-
-    def __init__(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        max_duration_ms: int | None,
-        on_timeout: Callable[[], None],
-    ) -> None:
-        self._loop = loop
-        self._max_duration_ms = max_duration_ms
-        self._on_timeout = on_timeout
-        self._handle: asyncio.TimerHandle | None = None
-
-    def on_phase_start(self, phase_type: PhaseType) -> None:
-        self.cancel()
-        if phase_type == PhaseType.PERFORMANCE and self._max_duration_ms is not None:
-            self._handle = self._loop.call_later(
-                self._max_duration_ms / 1000.0, self._on_timeout
-            )
-
-    def cancel(self) -> None:
-        if self._handle is not None:
-            self._handle.cancel()
-            self._handle = None
 
 
 async def _create_issuer(
@@ -816,6 +788,9 @@ def _wire_on_sample_complete(
 async def _run_benchmark_async(
     ctx: BenchmarkContext,
     loop: asyncio.AbstractEventLoop,
+    *,
+    deadline: float | None = None,
+    sigint: SigintGovernor,
 ) -> BenchmarkResult:
     """Run async benchmark session."""
     config = ctx.config
@@ -856,6 +831,10 @@ async def _run_benchmark_async(
     # would otherwise leak the client's worker subprocesses. shutdown_async() is
     # idempotent, so the clean-path shutdown below is a harmless second call.
     http_client: HTTPEndpointClient | None = None
+    abort_event = asyncio.Event()
+    watchdog = RunWatchdog(loop, deadline, abort_event)
+    watchdog.bind_task(asyncio.current_task())
+    sigint.bind_task(asyncio.current_task(), loop)
 
     try:
         tmpfs_dir.mkdir(parents=True, exist_ok=True)
@@ -893,22 +872,24 @@ async def _run_benchmark_async(
                     on_sample_complete=on_sample_complete,
                     session_id=session_id,
                 )
+                watchdog.bind_session(session)
+                sigint.bind_session(session, abort_event)
                 phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
 
-                max_duration_ms = (
-                    ctx.rt_settings.max_duration_ms
+                max_issue_duration_ms = (
+                    ctx.rt_settings.max_issue_duration_ms
                     if ctx.rt_settings is not None
                     else None
                 )
-                _timeout_done = False
+                _perf_cap_done = False
                 session_completed_normally = False
 
-                def _on_global_timeout() -> None:
-                    if not _timeout_done:
+                def _on_perf_phase_timeout() -> None:
+                    if not _perf_cap_done:
                         logger.warning(
                             "Performance phase max_duration reached (%d ms); "
                             "ending performance phase.",
-                            max_duration_ms,
+                            max_issue_duration_ms,
                         )
                         # Stop only the perf phase, not the whole session, so a
                         # combined perf+accuracy run still runs accuracy after the
@@ -916,56 +897,68 @@ async def _run_benchmark_async(
                         session.stop_current_phase()
 
                 perf_timeout = _PerfPhaseTimeout(
-                    loop, max_duration_ms, _on_global_timeout
+                    loop, max_issue_duration_ms, _on_perf_phase_timeout
                 )
 
                 def _on_phase_start(phase: PhaseConfig) -> None:
-                    # _PerfPhaseTimeout arms the perf cap on PERFORMANCE and cancels
-                    # it when any later phase starts, so a combined perf+accuracy run
-                    # can never have its accuracy phase truncated by the perf cap.
+                    if phase.phase_type == PhaseType.PERFORMANCE:
+                        # Fire /start_profile sequentially before any perf
+                        # request is issued, so the server is armed when
+                        # traffic begins.
+                        profiler.start()
+                    # Arms the perf cap on PERFORMANCE and cancels it when any
+                    # later phase starts, so a combined perf+accuracy run can
+                    # never have its accuracy phase truncated by the perf cap.
                     perf_timeout.on_phase_start(phase.phase_type)
-                    if phase.phase_type != PhaseType.PERFORMANCE:
-                        return
-                    # Fire /start_profile sequentially before any perf request is
-                    # issued, so the server is armed when traffic begins.
-                    profiler.start()
 
-                loop.add_signal_handler(signal.SIGINT, session.stop)
                 try:
-                    result = await session.run(phases, on_phase_start=_on_phase_start)
-                    session_completed_normally = True
+                    result = await session.run(
+                        phases,
+                        on_phase_start=_on_phase_start,
+                    )
+                    session_completed_normally = not session.stop_requested
                 except Exception as e:
-                    raise ExecutionError(f"Benchmark execution failed: {e}") from e
+                    if watchdog.fired:
+                        logger.exception(
+                            "Session error after run timeout fired "
+                            "(continuing to finalize)"
+                        )
+                        result = SessionResult(
+                            session_id=session_id,
+                            phase_results=[],
+                            start_time_ns=0,
+                            end_time_ns=0,
+                        )
+                    else:
+                        raise ExecutionError(f"Benchmark execution failed: {e}") from e
                 finally:
-                    _timeout_done = True
+                    _perf_cap_done = True
                     perf_timeout.cancel()
-                    loop.remove_signal_handler(signal.SIGINT)
                     # Fire /stop_profile for URLs whose /start_profile succeeded.
-                    # Unifies the clean phase-end path and the abort path — both
-                    # reach this block.
-                    profiler.stop(session_completed_normally)
+                    # Unifies the clean phase-end path and the abort path.
+                    profiler.stop(session_completed_normally and not watchdog.fired)
                     # Graceful drain runs on both the clean-finish and session-
-                    # failure paths (BenchmarkSession.run publishes ENDED in its own
-                    # finally, so a failed run still has a terminal snapshot worth
-                    # draining). Nulls pipe.publisher so __aexit__ releases the ZMQ
-                    # scope without killing the services.
+                    # failure paths; BenchmarkSession.run publishes ENDED in finally.
                     try:
-                        report = await pipe.drain_and_build_report()
+                        report = await pipe.drain_and_build_report(
+                            abort_event=abort_event,
+                            interrupted_teardown_grace_s=(
+                                config.settings.timeouts.interrupted_teardown_grace_s
+                            ),
+                        )
                         if report is None:
                             raise ExecutionError(
                                 "Benchmark completed without a usable metrics report"
                             )
                     except Exception as e:  # noqa: BLE001
-                        # On a clean run a drain / report-build failure must be loud:
-                        # silently returning report=None would exit 0 with no perf
-                        # artifacts. On the session-failure path the run is already
-                        # raising, so swallow it there rather than let a teardown
-                        # error replace the in-flight exception.
-                        if session_completed_normally:
+                        # Surface drain/report failures on a clean run. Once the
+                        # run is already failing, preserve the original error
+                        # instead of replacing it with a teardown failure.
+                        if session_completed_normally and not sigint.interrupted:
                             raise
                         logger.warning(
-                            "Drain/report build error suppressed (run already "
-                            "failing): %s",
+                            "Drain/report build error suppressed (run "
+                            "already failing): %s",
                             e,
                         )
             finally:
@@ -986,16 +979,28 @@ async def _run_benchmark_async(
                         await http_client.shutdown_async()
                     except Exception as e:  # noqa: BLE001 — best-effort; idempotent
                         logger.warning(f"Client cleanup error: {e}")
-    except BaseException:
+    except BaseException as e:
+        # Abnormal unwind: preserve the event log before re-raising.
         if tmpfs_dir.exists():
             try:
                 _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
                 shutil.rmtree(tmpfs_dir, ignore_errors=True)
-            except Exception as e:  # noqa: BLE001 — salvage best-effort; keep original exc
+            except Exception as salvage_err:  # noqa: BLE001 — salvage best-effort; keep original exc
                 logger.warning(
-                    "Failed to salvage tmpfs: %s — tmpfs retained at %s", e, tmpfs_dir
+                    "Failed to salvage tmpfs: %s — tmpfs retained at %s",
+                    salvage_err,
+                    tmpfs_dir,
                 )
+        if sigint.interrupted and isinstance(e, asyncio.CancelledError):
+            raise KeyboardInterrupt from e
+        if watchdog.fired and isinstance(e, Exception | asyncio.CancelledError):
+            raise ExecutionError(
+                "Run timeout (settings.timeouts.run_timeout_s) reached; run "
+                "aborted before a report could be produced"
+            ) from e
         raise
+    finally:
+        watchdog.cancel()
 
     return BenchmarkResult(
         session=result,
@@ -1003,13 +1008,31 @@ async def _run_benchmark_async(
         report=report,
         tmpfs_dir=tmpfs_dir,
         profiling=profiler.payload(),
+        run_timed_out=watchdog.fired,
+        user_interrupted=sigint.interrupted,
     )
 
 
-def run_benchmark_async(ctx: BenchmarkContext) -> BenchmarkResult:
-    """Run async benchmark. Sync entry point — drives the event loop."""
+def _run_deadline(config: BenchmarkConfig) -> float | None:
+    run_timeout_s = config.settings.timeouts.run_timeout_s
+    return None if run_timeout_s is None else time.monotonic() + run_timeout_s
+
+
+def run_benchmark_async(
+    ctx: BenchmarkContext,
+    *,
+    deadline: float | None = None,
+    sigint: SigintGovernor | None = None,
+) -> BenchmarkResult:
+    """Drive the async benchmark through the process's managed event loop."""
+    if sigint is None:
+        sigint = SigintGovernor()
+    if deadline is None:
+        deadline = _run_deadline(ctx.config)
     loop = LoopManager().default_loop
-    return loop.run_until_complete(_run_benchmark_async(ctx, loop))
+    return loop.run_until_complete(
+        _run_benchmark_async(ctx, loop, deadline=deadline, sigint=sigint)
+    )
 
 
 def _write_scoring_artifacts(
@@ -1131,35 +1154,48 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     result = bench.session
     collector = bench.collector
     report = bench.report
+    aborted = (
+        bench.run_timed_out
+        or bench.user_interrupted
+        or (report is not None and report.state == "interrupted")
+    )
+    if report is not None and aborted and report.state != "interrupted":
+        report = msgspec.structs.replace(report, complete=False, state="interrupted")
+        bench.report = report
 
     # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
     # sample_idx_map.json + events.jsonl from here).
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
-    # Accuracy scoring (one entry per accuracy dataset). Scoring runs before the
-    # report is written so the accuracy headline can be attached, but the report
-    # is written in the `finally` below so a scoring failure (e.g. lcb-service
-    # unreachable, missing eval subproject, bad extras) still leaves the perf
-    # run's result_summary.json / report.txt on disk instead of discarding them —
-    # then the exception propagates as before.
+    # Accuracy scoring runs before report writing so its headline can attach.
+    # The finally block still writes the performance report if scoring fails.
     accuracy_scores: list[dict[str, Any]] = []
     try:
-        accuracy_scores = score_accuracy(ctx, result)
+        if aborted:
+            logger.warning("Run aborted — skipping accuracy scoring on partial data")
+        else:
+            accuracy_scores = score_accuracy(ctx, result)
+    except KeyboardInterrupt:
+        if report is not None:
+            report = msgspec.structs.replace(
+                report, complete=False, state="interrupted"
+            )
+            bench.report = report
+        raise
     finally:
         # Attach the per-dataset accuracy list so result_summary.json, the
-        # console summary, and report.txt all carry it (stays [] on a scoring
-        # failure).
+        # console summary, and report.txt all carry it.
         if report is not None:
-            report = msgspec.structs.replace(report, accuracy=accuracy_scores)
-        # Display the report + write result_summary.json / report.txt.
-        if report is not None:
-            _write_report_artifacts(ctx, report, bench.profiling)
+            final_report = msgspec.structs.replace(report, accuracy=accuracy_scores)
+            _write_report_artifacts(ctx, final_report, bench.profiling)
+            report = final_report
+    bench.report = report
 
     _summarize_and_log_metrics(ctx, report, result, collector)
 
     # Sibling profiling.json — kept separate so Report stays a pure snapshot-
-    # derived struct. Written after the report artifacts (and best-effort) so an
-    # OSError here can't discard the already-written perf report.
+    # derived struct. Written after the report artifacts (and best-effort) so
+    # an OSError here can't discard the already-written perf report.
     if bench.profiling is not None:
         try:
             (ctx.report_dir / "profiling.json").write_text(
@@ -1188,33 +1224,61 @@ def run_benchmark(
     a config with an ``audit:`` block, point ``run_audit`` at ``<report_dir>/audit``).
     The compliance audit is dispatched by the caller (``cli._run``), not here, so
     this module does not depend on ``commands.audit``.
+
     """
     logger.debug(
         "BenchmarkConfig (%s):\n%s",
         type(config).__name__,
         config.model_dump_json(indent=2, exclude_none=True),
     )
-    ctx = setup_benchmark(config, test_mode)
+    deadline = _run_deadline(config)
+    run_timeout_s = config.settings.timeouts.run_timeout_s
+    sigint = SigintGovernor()
     bench: BenchmarkResult | None = None
-    try:
-        bench = run_benchmark_async(ctx)
-        finalize_benchmark(ctx, bench)
-    except KeyboardInterrupt:
-        # Salvage results (finally), then propagate to main.py -> exit 130.
-        logger.warning("Benchmark interrupted by user")
-        raise
-    finally:
-        if bench:
-            if bench.tmpfs_dir.exists():
-                try:
-                    _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
-                    shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
-                except Exception as e:  # noqa: BLE001 — salvage best-effort
-                    logger.warning(
-                        "Failed to salvage tmpfs: %s — tmpfs retained at %s",
-                        e,
-                        bench.tmpfs_dir,
-                    )
-            logger.info(f"Partial results saved to {ctx.report_dir}")
+    with sigint_policy(sigint):
+        try:
+            ctx = setup_benchmark(config, test_mode)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ExecutionError(
+                    f"Run timeout ({run_timeout_s}s) reached during setup; "
+                    "no services were started"
+                )
+            bench = run_benchmark_async(ctx, deadline=deadline, sigint=sigint)
+            bench.user_interrupted = bench.user_interrupted or sigint.interrupted
+            finalize_benchmark(ctx, bench)
+            if bench.user_interrupted or sigint.interrupted:
+                raise KeyboardInterrupt
+            if bench.run_timed_out:
+                raise ExecutionError(
+                    f"Run timeout ({run_timeout_s}s) reached; run aborted and "
+                    "report marked INTERRUPTED"
+                )
+            if bench.report is None:
+                raise ExecutionError("Benchmark produced no usable metrics report")
+            if not (report := bench.report).complete:
+                if report.state == "complete" and report.n_samples_dropped == 0:
+                    raise ExecutionError("Metrics tokenization did not finish")
+                raise ExecutionError(
+                    "Benchmark report is incomplete "
+                    f"(state={report.state}, "
+                    f"n_samples_dropped={report.n_samples_dropped})"
+                )
+        except KeyboardInterrupt:
+            # Salvage results (finally), then propagate to main.py -> exit 130.
+            logger.warning("Benchmark interrupted by user")
+            raise
+        finally:
+            if bench:
+                if bench.tmpfs_dir.exists():
+                    try:
+                        _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
+                        shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
+                    except Exception as e:  # noqa: BLE001 — salvage best-effort
+                        logger.warning(
+                            "Failed to salvage tmpfs: %s — tmpfs retained at %s",
+                            e,
+                            bench.tmpfs_dir,
+                        )
+                logger.info(f"Partial results saved to {ctx.report_dir}")
 
     return ctx.report_dir

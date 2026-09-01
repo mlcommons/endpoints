@@ -17,6 +17,7 @@
 
 import asyncio
 import multiprocessing
+import signal
 import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -530,6 +531,7 @@ class TestSetupShardsDecisions:
             (16, -1, 2),  # auto: one shard per 8-core block
             (10, -1, 1),  # auto: always at least one shard
             (6, -1, 1),  # auto: even below one full block
+            (24, -1, 3),  # auto: 22 usable cores, including a partial block
             (48, 3, 3),  # explicit count under capacity
             (16, 10, 2),  # explicit count clamped to capacity
             (16, 1, 1),  # explicit single shard honored
@@ -540,10 +542,26 @@ class TestSetupShardsDecisions:
         with self._make(monkeypatch, cpus, n_workers) as tok:
             assert len(tok._procs) == expected_shards
 
-    def test_blocks_are_disjoint_consecutive_core_sets(self, monkeypatch):
+    def test_blocks_reserve_two_cpus_and_use_partial_final_block(self, monkeypatch):
         with self._make(monkeypatch, 16, -1) as tok:
             blocks = [set(ex.initargs[1]) for ex in tok._procs]
-            assert blocks == [set(range(0, 8)), set(range(8, 16))]
+            assert blocks == [set(range(0, 8)), set(range(8, 14))]
+
+    def test_worker_spawn_ignores_sigint_and_restores_parent_handler(self, monkeypatch):
+        dispositions = []
+
+        class _SignalCapturingExecutor(_SpawnlessExecutor):
+            def submit(self, fn, *args):
+                dispositions.append(signal.getsignal(signal.SIGINT))
+                return super().submit(fn, *args)
+
+        previous = signal.getsignal(signal.SIGINT)
+        with self._make(monkeypatch, 16, -1, executor=_SignalCapturingExecutor):
+            pass
+
+        assert dispositions
+        assert all(handler is signal.SIG_IGN for handler in dispositions)
+        assert signal.getsignal(signal.SIGINT) is previous
 
     def test_structured_tokenization_does_not_require_a_text_backend(self, monkeypatch):
         monkeypatch.setattr(

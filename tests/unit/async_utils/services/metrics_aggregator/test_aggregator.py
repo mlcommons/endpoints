@@ -534,9 +534,32 @@ class TestEdgeCases:
                     ]
                 )
                 publisher.publish_final.assert_awaited_once()
+                assert publisher.publish_final.await_args.kwargs["interrupted"] is False
                 # close() is invoked twice: once explicitly in the ENDED branch,
                 # then again from the aggregator's ``close`` (via _finalize).
                 assert publisher.close.call_count >= 1
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_marker_tags_final_snapshot(self, tmp_path):
+        """The session's INTERRUPTED marker (published just before ENDED on an
+        aborted run) must flow through to ``publish_final(interrupted=True)``
+        so the ENDED-driven finalize writes state=interrupted — a ^C'd run
+        must never produce a COMPLETE final snapshot."""
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, publisher = make_aggregator(ctx, loop, "agg_interrupted_marker")
+            try:
+                await agg.process(
+                    [
+                        session_event(SessionEventType.STARTED, ts=0),
+                        session_event(SessionEventType.INTERRUPTED, ts=50),
+                        session_event(SessionEventType.ENDED, ts=100),
+                    ]
+                )
+                publisher.publish_final.assert_awaited_once()
+                assert publisher.publish_final.await_args.kwargs["interrupted"] is True
             finally:
                 agg.close()
 

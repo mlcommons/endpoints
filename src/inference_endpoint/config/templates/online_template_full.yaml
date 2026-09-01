@@ -51,8 +51,8 @@ datasets:  # Dataset configs
   generation_config_override: null  # Per-dataset overrides for the top-level model_params (sparse — only the fields you want to override). Merged on top of BenchmarkConfig.model_params at dataset-load time. Useful for MLPerf-style runs where accuracy and performance use different output budgets in the same fleet, e.g. generation_config_override: {max_new_tokens: 32768, temperature: 0.0}. NOTE: per-run/identity keys (`name`, `streaming`, `tokenizer_name`) are rejected here — set them on top-level model_params.
 settings:
   runtime:
-    min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
-    max_duration_ms: 0  # Maximum test duration in ms (0 for no limit)
+    min_issue_duration_ms: null  # Poisson sample-count sizing input: target_qps × duration. Explicit n_samples_to_issue wins; None issues the dataset once.
+    max_issue_duration_ms: null  # Cap on performance-phase issuing in ms; reaching it ends the phase normally (None = no cap)
     n_samples_to_issue: null  # Sample count override
     scheduler_random_seed: 42  # Scheduler RNG seed
     dataloader_random_seed: 42  # Dataloader RNG seed
@@ -85,12 +85,14 @@ settings:
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
-  drain:  # Per-phase in-flight response drain timeout configuration
-    warmup_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)
-    performance_timeout_s: 240.0  # Performance drain timeout in seconds (None = wait indefinitely)
-    accuracy_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely)
-    metrics_drain_timeout_s: 0.0  # Wall-clock budget (seconds) to finish tokenizing buffered samples after ENDED (default: 0 = unlimited). An incomplete drain is surfaced via n_pending_tasks > 0, never silently dropped.
-    metrics_tokenizer_workers: 4  # In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT (default: 4; 0 = defer everything to the end-of-run drain).
+  timeouts:  # All global waits and deadlines (see config/schema.py)
+    run_timeout_s: null  # Whole-run watchdog seconds (None = off).
+    interrupted_teardown_grace_s: 30.0  # Abort drain grace before remaining services are killed.
+    service_ready_timeout_s: 30.0  # Service startup wait in seconds.
+    warmup_drain_timeout_s: 240.0  # Warmup drain seconds (None = unlimited).
+    performance_drain_timeout_s: null  # Performance drain seconds (None = unlimited).
+    accuracy_drain_timeout_s: null  # Accuracy drain seconds (None = unlimited).
+    metrics_drain_timeout_s: null  # Metrics drain seconds (None = unlimited).
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
@@ -102,14 +104,13 @@ settings:
     urls: null  # URL(s) the profiler start/stop triggers are derived from. When None, derived from endpoint_config.endpoints instead. Use when the profiler admin endpoint differs from the inference endpoint.
   early_stopping:  # MLPerf early-stopping percentile estimates (on by default; enabled: false opts out)
     enabled: true  # Early-stopping percentile estimates (default on)
-  service_ready_timeout_s: 30.0  # Seconds to wait for metrics-aggregator/event-logger services to become ready.
+  metrics_tokenizer_workers: 4  # In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT (default: 4; 0 = defer everything to the end-of-run drain).
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000
   api_key: null  # API key
   api_type: openai  # API type: openai, sglang, or videogen | options: openai, openai_completions, sglang, videogen
 report_dir: null  # Report output directory
-timeout: null  # Global timeout in seconds
 verbose: false  # Enable verbose logging
 enable_cpu_affinity: true  # NUMA-aware CPU pinning
 audit: null  # Compliance audit config (YAML only). When set, runs the audit after the main benchmark.

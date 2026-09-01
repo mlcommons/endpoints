@@ -29,6 +29,18 @@ _SAFE_SRUN_ENV = (
     "LC_ALL",
     "TMPDIR",
     "XDG_RUNTIME_DIR",
+    # Proxy policy must reach enroot, which performs the registry pull inside
+    # the step.
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "ALL_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    # srun locates its own configuration through SLURM_CONF.
+    "SLURM_CONF",
 )
 _STEP_STATUS = "/tmp/.mlperf_srun_status"
 _STEP_SCRIPT = r"""set +e

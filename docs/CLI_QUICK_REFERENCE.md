@@ -96,7 +96,8 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--model-params.max-new-tokens --max-output-tokens` - Max output tokens (default: 1024)
 - `--model-params.osl-distribution.min --min-output-tokens` - Min output tokens (default: 1)
 - `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default: auto)
-- `--runtime.min-duration-ms --duration` - Min duration: ms default, or with suffix (600s, 10m) (default: 600000)
+- `--runtime.min-issue-duration-ms` - Poisson sample-count sizing from QPS × duration (unset = dataset once)
+- `--runtime.max-issue-duration-ms` - Performance issuing cap; in-flight responses still drain
 - `--runtime.n-samples-to-issue --num-samples` - Explicit sample count override
 - `--client.num-workers --workers` - HTTP workers (-1=auto, default: -1)
 - `--client.max-connections --max-connections` - Max TCP connections (-1=unlimited)
@@ -106,7 +107,8 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
   Note: applies to CLI-driven `benchmark offline` / `benchmark online`; `benchmark from-config`
   does not expose a CLI override for `report_dir`. Set it in the YAML only if you need to control
   the output location; otherwise a default report directory is used.
-- `--timeout` - Global timeout in seconds
+- `--timeout` - Whole-run watchdog (`settings.timeouts.run_timeout_s`; unset = off)
+- Other timeout flags: `--timeouts.service-ready-timeout-s`, `--timeouts.warmup-drain-timeout-s`, `--timeouts.performance-drain-timeout-s`, `--timeouts.accuracy-drain-timeout-s`, `--timeouts.metrics-drain-timeout-s`, `--timeouts.interrupted-teardown-grace-s`
 - `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
 - `--no-early-stopping` - opt out of the MLPerf early-stopping percentile estimates in `result_summary.json` (default: on; see [early_stopping.md](early_stopping.md))
 
@@ -224,14 +226,14 @@ inference-endpoint benchmark online \
   --report-dir production_report \
   -v
 
-# Or with duration (calculates samples from target_qps * duration)
+# Or size a Poisson run from target_qps × issue duration
 inference-endpoint benchmark online \
   --endpoints https://api.production.com \
   --model Qwen/Qwen3-8B \
   --dataset prod_queries.jsonl \
   --load-pattern poisson \
   --target-qps 100 \
-  --duration 5m \
+  --runtime.min-issue-duration-ms 5m \
   --workers 16 \
   --report-dir production_report \
   -v
@@ -290,10 +292,14 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minutes
-    n_samples_to_issue: null # Optional: explicit sample count (null = auto-calculate)
+    min_issue_duration_ms: null # Poisson sample-count sizing
+    max_issue_duration_ms: null # Performance issuing cap
+    n_samples_to_issue: null # Explicit count; null with no min duration = dataset once
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
+  timeouts:
+    run_timeout_s: null # Whole-run watchdog; null = off
+    performance_drain_timeout_s: null # null = unlimited
   load_pattern:
     type: "max_throughput"
     target_qps: 10.0
@@ -331,8 +337,8 @@ Note: For submission configs, `model_params.name` is optional when `submission_r
 
 **Sample Count Control:**
 
-- Priority: `--num-samples` > calculated (target_qps × duration) > dataset size
-- Default duration: 600000ms (10 minutes)
+- Priority: `--num-samples` > Poisson QPS × min issue duration > dataset size
+- No sample count or min issue duration means one dataset pass.
 
 **Mode Requirements:**
 

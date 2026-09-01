@@ -210,8 +210,8 @@ async def _run_perf_slice(
         rt = RuntimeSettings(
             metrics.Throughput(1000),
             [metrics.Throughput(1000)],
-            min_duration_ms=0,
-            max_duration_ms=60_000,
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=60_000,
             n_samples_from_dataset=ds.num_samples(),
             n_samples_to_issue=ds.num_samples(),
             min_sample_count=1,

@@ -46,8 +46,7 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minutes
-    max_duration_ms: 1800000 # 30 minutes
+    max_issue_duration_ms: 1800000 # 30 minutes
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
 
