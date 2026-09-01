@@ -17,12 +17,40 @@
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from inference_endpoint import __version__
 from inference_endpoint.utils import version as version_mod
-from inference_endpoint.utils.version import _REPO_ROOT, get_git_sha, get_version_info
+from inference_endpoint.utils.version import (
+    _REPO_ROOT,
+    _valid_sha,
+    get_git_sha,
+    get_version_info,
+    resolve_git_sha,
+)
+
+
+def _fake_git_run(sha: str, *, dirty: bool):
+    """subprocess.run stand-in dispatching on the git subcommand.
+
+    ``rev-parse`` returns a matching toplevel + ``sha``; ``status`` lists one
+    modified tracked file (dirty) or nothing (clean).
+    """
+
+    def fake_run(cmd, *args, **kwargs):
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=f"{_REPO_ROOT}\n{sha}\n"
+            )
+        if "status" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=b" M tracked.py\n" if dirty else b""
+            )
+        raise AssertionError(f"unexpected git invocation: {cmd}")
+
+    return fake_run
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -35,38 +63,167 @@ def _git(*args: str, cwd: Path) -> str:
     ).stdout.strip()
 
 
+# ---------------------------------------------------------------------------
+# _valid_sha
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "value",
+    [
+        "abc1234",  # 7-char short SHA-1
+        "abc1234-dirty",  # with dirty marker
+        "a" * 40,  # full SHA-1
+        "A1B2C3D",  # uppercase accepted
+        "f" * 64,  # full SHA-256
+        "  abc1234  ",  # surrounding whitespace stripped
+    ],
+)
+def test_valid_sha_accepts(value):
+    assert _valid_sha(value) == value.strip()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        1234567,  # non-string (unquoted GIT_SHA in a hand-edited _build_info.py)
+        "",
+        "   ",
+        "unknown",  # the display sentinel
+        "not-a-sha",
+        "abc123",  # too short (6)
+        "a" * 65,  # too long (>64)
+        "abc1234\ndef5678",  # embedded newline (injection) — fullmatch anchors
+        "abc1234-dirty-dirty",  # trailing junk
+        "abc1234\x1b[31m",  # ANSI escape
+    ],
+)
+def test_valid_sha_rejects(value):
+    assert _valid_sha(value) is None
+
+
+# ---------------------------------------------------------------------------
+# get_git_sha (live-git channel)
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.unit
 def test_get_git_sha():
     """Test that get_git_sha returns a string or None."""
     sha = get_git_sha()
     if sha is not None:
         assert isinstance(sha, str)
+        # A dirty working tree appends a "-dirty" suffix; strip it before the
+        # shape checks on the bare SHA.
+        base = sha.removesuffix("-dirty")
         # --short=7 is a minimum width; git lengthens it on prefix collision.
-        assert 7 <= len(sha) <= 40
-        assert sha.isalnum()  # Should only contain alphanumeric chars
+        assert 7 <= len(base) <= 40
+        assert base.isalnum()
 
 
 @pytest.mark.unit
-def test_get_version_info():
-    """Test that get_version_info returns correct structure."""
-    info = get_version_info()
-    assert isinstance(info, dict)
-    assert "version" in info
-    assert "git_sha" in info
-    assert info["version"] == __version__
-    # git_sha can be None if not in a git repo
-    if info["git_sha"] is not None:
-        assert isinstance(info["git_sha"], str)
-        assert 7 <= len(info["git_sha"]) <= 40
+def test_get_git_sha_appends_dirty_when_tree_has_tracked_changes(monkeypatch):
+    """Uncommitted tracked changes surface as a ``-dirty`` suffix on the SHA."""
+    monkeypatch.setattr(
+        version_mod.subprocess, "run", _fake_git_run("abc1234", dirty=True)
+    )
+    assert get_git_sha() == "abc1234-dirty"
 
 
 @pytest.mark.unit
-def test_version_info_cached():
-    """Test that get_version_info is properly cached."""
-    info1 = get_version_info()
-    info2 = get_version_info()
-    # Should return the same object due to lru_cache
-    assert info1 is info2
+def test_git_tree_dirty_fails_to_dirty_on_error_returncode(monkeypatch):
+    """A non-zero status code (e.g. 128 from a corrupt index) errs to dirty."""
+
+    def fake_run(cmd, *args, **kwargs):
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=f"{_REPO_ROOT}\nabc1234\n"
+            )
+        if "status" in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=128, stdout=b"")
+        raise AssertionError(f"unexpected git invocation: {cmd}")
+
+    monkeypatch.setattr(version_mod.subprocess, "run", fake_run)
+    assert get_git_sha() == "abc1234-dirty"
+
+
+@pytest.mark.unit
+def test_git_tree_dirty_fails_to_dirty_on_exception(monkeypatch):
+    """If the dirty probe raises (timeout/OSError), err on the side of dirty."""
+
+    def fake_run(cmd, *args, **kwargs):
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=f"{_REPO_ROOT}\nabc1234\n"
+            )
+        if "status" in cmd:
+            raise subprocess.TimeoutExpired(cmd="git", timeout=1.0)
+        raise AssertionError(f"unexpected git invocation: {cmd}")
+
+    monkeypatch.setattr(version_mod.subprocess, "run", fake_run)
+    assert get_git_sha() == "abc1234-dirty"
+
+
+@pytest.mark.unit
+def test_git_tree_dirty_handles_non_utf8_output(tmp_path, monkeypatch):
+    """A non-UTF-8 path in status output (core.quotePath=false) reads as dirty."""
+    monkeypatch.setattr(
+        version_mod.subprocess,
+        "run",
+        lambda cmd, *a, **k: subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout=b" M caf\xe9.txt\n"
+        ),
+    )
+    assert version_mod._git_tree_dirty(tmp_path) is True
+
+
+@pytest.mark.unit
+def test_get_git_sha_none_outside_source_layout(monkeypatch):
+    """Without a source-checkout root, git is never consulted."""
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("git must not run outside a source checkout")
+
+    monkeypatch.setattr(version_mod, "_REPO_ROOT", None)
+    monkeypatch.setattr(version_mod.subprocess, "run", fail_run)
+    assert get_git_sha() is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "fake",
+    [
+        FileNotFoundError(),
+        subprocess.TimeoutExpired(cmd="git", timeout=1.0),
+        subprocess.CompletedProcess(args=[], returncode=128, stdout="", stderr="x"),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="only-one-line\n"),
+        subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="/some/other/repo\ndeadbee\n"
+        ),
+    ],
+)
+def test_git_sha_returns_none_on_untrusted_or_missing_repo(fake, monkeypatch):
+    """A foreign/absent repo yields None rather than a wrong provenance SHA."""
+
+    def fake_run(*args, **kwargs):
+        if isinstance(fake, BaseException):
+            raise fake
+        return fake
+
+    monkeypatch.setattr(version_mod.subprocess, "run", fake_run)
+    assert get_git_sha() is None
+
+
+@pytest.mark.unit
+def test_git_sha_returned_when_toplevel_matches(monkeypatch):
+    """Happy path: toplevel == _REPO_ROOT and a clean tree -> bare sha, no suffix."""
+    monkeypatch.setattr(
+        version_mod.subprocess, "run", _fake_git_run("abc1234", dirty=False)
+    )
+    assert get_git_sha() == "abc1234"
 
 
 @pytest.mark.unit
@@ -79,13 +236,11 @@ def test_git_sha_is_endpoints_repo_not_cwd(tmp_path, monkeypatch):
     if shutil.which("git") is None:
         pytest.skip("git not available")
 
-    # The endpoints repo SHA, resolved independently of the process CWD.
     try:
         expected = _git("rev-parse", "--short=7", "HEAD", cwd=_REPO_ROOT)
     except subprocess.CalledProcessError:
         pytest.skip("Source tree is not a git repository")
 
-    # A distinct, unrelated git repo the CLI is pretend-launched from.
     other = tmp_path / "other_repo"
     other.mkdir()
     _git("init", cwd=other)
@@ -101,77 +256,293 @@ def test_git_sha_is_endpoints_repo_not_cwd(tmp_path, monkeypatch):
         cwd=other,
     )
     other_sha = _git("rev-parse", "--short=7", "HEAD", cwd=other)
-    assert other_sha != expected  # sanity: the two repos differ
+    assert other_sha != expected
 
     monkeypatch.chdir(other)
-    get_git_sha.cache_clear()
-    try:
-        sha = get_git_sha()
-    finally:
-        # Don't leak the cache-cleared value into other tests' assumptions.
-        get_git_sha.cache_clear()
+    sha = get_git_sha()
 
-    assert sha == expected
-    assert sha != other_sha
+    # A dirty source tree (e.g. mid-development) appends "-dirty"; compare bases.
+    assert sha is not None
+    base = sha.removesuffix("-dirty")
+    assert base == expected
+    assert base != other_sha
+
+
+_GIT_LOCATION_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
+@pytest.mark.unit
+def test_git_env_drops_git_location_family(monkeypatch):
+    """_git_env scrubs the git-location family, disables optional locks, keeps the rest."""
+    for var in _GIT_LOCATION_VARS:
+        monkeypatch.setenv(var, "/foreign")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = version_mod._git_env()
+    for var in _GIT_LOCATION_VARS:
+        assert var not in env
+    assert env["GIT_OPTIONAL_LOCKS"] == "0"
+    assert env["PATH"] == "/usr/bin"
+
+
+@pytest.mark.unit
+def test_get_git_sha_scrubs_git_env_and_preserves_dirty(monkeypatch):
+    """Both git calls get a scrubbed env, and a stray index can't fake a clean tree.
+
+    GIT_DIR/GIT_INDEX_FILE set in the ambient env must not reach either
+    subprocess, and a dirty status still yields a -dirty SHA.
+    """
+    monkeypatch.setenv("GIT_DIR", "/foreign/.git")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/foreign/.git/index")
+    seen_envs = []
+    fake_git = _fake_git_run("abc1234", dirty=True)
+
+    def fake_run(cmd, *args, **kwargs):
+        seen_envs.append(kwargs.get("env"))
+        return fake_git(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(version_mod.subprocess, "run", fake_run)
+    assert get_git_sha() == "abc1234-dirty"
+    assert len(seen_envs) == 2  # rev-parse + status
+    for env in seen_envs:
+        assert env is not None
+        assert "GIT_DIR" not in env
+        assert "GIT_INDEX_FILE" not in env
+
+
+@pytest.mark.unit
+def test_get_git_sha_ignores_stray_git_dir(tmp_path, monkeypatch):
+    """A stray GIT_DIR must not slip a foreign repo's SHA past the toplevel guard.
+
+    With GIT_DIR set (and GIT_WORK_TREE unset) git defaults the work-tree to cwd,
+    so ``--show-toplevel`` reports our repo (guard passes) while ``HEAD`` would
+    otherwise resolve the foreign repo. Scrubbing GIT_DIR closes that.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    try:
+        our_sha = _git("rev-parse", "--short=7", "HEAD", cwd=_REPO_ROOT)
+    except subprocess.CalledProcessError:
+        pytest.skip("Source tree is not a git repository")
+
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    _git("init", cwd=foreign)
+    _git(
+        "-c",
+        "user.email=t@t.co",
+        "-c",
+        "user.name=t",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "foreign",
+        cwd=foreign,
+    )
+    foreign_sha = _git("rev-parse", "--short=7", "HEAD", cwd=foreign)
+    assert foreign_sha != our_sha
+
+    monkeypatch.setenv("GIT_DIR", str(foreign / ".git"))
+    monkeypatch.delenv("GIT_WORK_TREE", raising=False)
+    sha = get_git_sha()
+
+    assert sha is not None
+    base = sha.removesuffix("-dirty")
+    assert base == our_sha
+    assert base != foreign_sha
+
+
+@pytest.mark.unit
+def test_git_tree_dirty_ignores_stat_only_changes_of_a_copied_checkout(tmp_path):
+    """A copied checkout (new inodes/ctimes, same content) is clean, not -dirty.
+
+    Untracked files don't count, and the probe leaves the index untouched.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git("init", cwd=repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    _git("add", "tracked.txt", cwd=repo)
+    _git("-c", "user.email=t@t.co", "-c", "user.name=t", "commit", "-m", "x", cwd=repo)
+    copy = tmp_path / "copy"
+    shutil.copytree(repo, copy)
+    (copy / "scratch.jsonl").write_text("untracked\n")
+    index_before = (copy / ".git" / "index").read_bytes()
+
+    assert version_mod._git_tree_dirty(copy) is False
+    assert (copy / ".git" / "index").read_bytes() == index_before
+    (copy / "tracked.txt").write_text("v2\n")
+    assert version_mod._git_tree_dirty(copy) is True
+
+
+# ---------------------------------------------------------------------------
+# resolve_git_sha (channel precedence + validation)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_git_sha_prefers_live_git_over_baked_and_env(monkeypatch):
+    """Live git of the package's own checkout wins; source is 'git'."""
+    monkeypatch.setattr(version_mod, "_BAKED_GIT_SHA", "abc1234")
+    monkeypatch.setenv("ENDPOINTS_GIT_SHA", "def5678")
+    monkeypatch.setattr(version_mod, "get_git_sha", lambda: "0000fff-dirty")
+    assert resolve_git_sha() == ("0000fff-dirty", "git")
+
+
+@pytest.mark.unit
+def test_resolve_git_sha_uses_baked_when_no_git(monkeypatch):
+    """Without a git checkout, a baked SHA wins over env; source is 'baked'."""
+    monkeypatch.setattr(version_mod, "get_git_sha", lambda: None)
+    monkeypatch.setattr(version_mod, "_BAKED_GIT_SHA", "abc1234")
+    monkeypatch.setenv("ENDPOINTS_GIT_SHA", "def5678")
+    assert resolve_git_sha() == ("abc1234", "baked")
+
+
+@pytest.mark.unit
+def test_resolve_git_sha_uses_env_when_no_git_or_baked(monkeypatch):
+    """With neither git nor a baked SHA, the env var wins; source is 'env'."""
+    monkeypatch.setattr(version_mod, "get_git_sha", lambda: None)
+    monkeypatch.setattr(version_mod, "_BAKED_GIT_SHA", None)
+    monkeypatch.setenv("ENDPOINTS_GIT_SHA", "def5678")
+    assert resolve_git_sha() == ("def5678", "env")
+
+
+@pytest.mark.unit
+def test_resolve_git_sha_accepts_dirty_and_uppercase_env(monkeypatch):
+    """A dirty-suffixed / uppercase env attestation is honored verbatim."""
+    monkeypatch.setattr(version_mod, "get_git_sha", lambda: None)
+    monkeypatch.setattr(version_mod, "_BAKED_GIT_SHA", None)
+    monkeypatch.setenv("ENDPOINTS_GIT_SHA", "ABC1234-dirty")
+    assert resolve_git_sha() == ("ABC1234-dirty", "env")
+
+
+@pytest.mark.unit
+def test_resolve_git_sha_none_when_nothing_resolves(monkeypatch):
+    """No git checkout, no baked SHA, no env -> (None, 'none')."""
+    monkeypatch.setattr(version_mod, "get_git_sha", lambda: None)
+    monkeypatch.setattr(version_mod, "_BAKED_GIT_SHA", None)
+    monkeypatch.delenv("ENDPOINTS_GIT_SHA", raising=False)
+    assert resolve_git_sha() == (None, "none")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["", "   ", "unknown", "not-a-sha"])
+def test_resolve_git_sha_rejects_blank_or_non_sha_env(monkeypatch, value):
+    """A blank, sentinel or non-hex ENDPOINTS_GIT_SHA is treated as unset."""
+    monkeypatch.setattr(version_mod, "get_git_sha", lambda: None)
+    monkeypatch.setattr(version_mod, "_BAKED_GIT_SHA", None)
+    monkeypatch.setenv("ENDPOINTS_GIT_SHA", value)
+    assert resolve_git_sha() == (None, "none")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("baked", ["not-a-real-sha", 1234567])
+def test_resolve_git_sha_rejects_malformed_baked_falls_through(monkeypatch, baked):
+    """A malformed or non-string baked value is ignored; resolution reaches env."""
+    monkeypatch.setattr(version_mod, "get_git_sha", lambda: None)
+    monkeypatch.setattr(version_mod, "_BAKED_GIT_SHA", baked)
+    monkeypatch.setenv("ENDPOINTS_GIT_SHA", "def5678")
+    assert resolve_git_sha() == ("def5678", "env")
+
+
+@pytest.mark.unit
+def test_resolve_git_sha_validates_live_git_channel(monkeypatch):
+    """Polluted git output is not trusted; resolution continues to baked."""
+    monkeypatch.setattr(version_mod, "get_git_sha", lambda: "abc1234\x1b[31m")
+    monkeypatch.setattr(version_mod, "_BAKED_GIT_SHA", "def5678")
+    monkeypatch.delenv("ENDPOINTS_GIT_SHA", raising=False)
+    assert resolve_git_sha() == ("def5678", "baked")
+
+
+@pytest.mark.unit
+def test_resolve_git_sha_reflects_later_env_change(monkeypatch):
+    """resolve_git_sha is not cached: a later env change is observed."""
+    monkeypatch.setattr(version_mod, "_BAKED_GIT_SHA", None)
+    monkeypatch.setattr(version_mod, "get_git_sha", lambda: None)
+    monkeypatch.delenv("ENDPOINTS_GIT_SHA", raising=False)
+    assert resolve_git_sha() == (None, "none")
+    monkeypatch.setenv("ENDPOINTS_GIT_SHA", "def5678")
+    assert resolve_git_sha() == ("def5678", "env")
+
+
+# ---------------------------------------------------------------------------
+# get_version_info
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_get_version_info():
+    """Test that get_version_info returns correct structure."""
+    info = get_version_info()
+    assert isinstance(info, dict)
+    assert "version" in info
+    assert "git_sha" in info
+    assert "git_sha_source" in info
+    assert info["version"] == __version__
+    assert info["git_sha_source"] in {"baked", "env", "git", "none"}
+    if info["git_sha"] is not None:
+        assert isinstance(info["git_sha"], str)
+        assert 7 <= len(info["git_sha"].removesuffix("-dirty")) <= 64
+
+
+@pytest.mark.unit
+def test_corrupt_baked_file_degrades_not_crashes():
+    """A corrupt _build_info.py must degrade (fall through), not crash version import.
+
+    A hand-edited unquoted ``GIT_SHA = abc1234`` raises NameError at import — not
+    ImportError/SyntaxError — so the baked-import handler must be broad enough to
+    catch it, honoring the "degrade, don't crash Report.from_snapshot" invariant.
+    Run in a subprocess (import-time behavior can't be re-exercised in-process).
+    """
+    pkg_dir = Path(version_mod.__file__).resolve().parents[1]
+    baked = pkg_dir / "_build_info.py"
+    if baked.exists():
+        pytest.skip("a real _build_info.py is present; not overwriting it")
+    baked.write_text("GIT_SHA = abc1234\n")  # unquoted -> NameError on import
+    probe = (
+        "from inference_endpoint.utils.version import resolve_git_sha; "
+        "print(resolve_git_sha()[1])"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        baked.unlink(missing_ok=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() in {"baked", "env", "git", "none"}
+
+
+@pytest.mark.unit
+def test_resolve_repo_root_in_source_layout(monkeypatch):
+    monkeypatch.setattr(
+        version_mod, "__file__", "/repo/src/inference_endpoint/utils/version.py"
+    )
+    assert version_mod._resolve_repo_root() == Path("/repo").resolve()
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "fake",
+    "module_path",
     [
-        # git missing / cwd gone / timed out
-        FileNotFoundError(),
-        subprocess.TimeoutExpired(cmd="git", timeout=1.0),
-        # not a git repo (non-zero exit)
-        subprocess.CompletedProcess(args=[], returncode=128, stdout="", stderr="x"),
-        # malformed output (not exactly two lines)
-        subprocess.CompletedProcess(args=[], returncode=0, stdout="only-one-line\n"),
-        # discovered repo is NOT this source tree (e.g. wheel nested in another repo)
-        subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="/some/other/repo\ndeadbee\n"
-        ),
+        "/inference_endpoint/utils/version.py",  # too shallow
+        "/venv/lib/python3.12/site-packages/inference_endpoint/utils/version.py",
+        "/other_repo/vendor/inference_endpoint/utils/version.py",  # vendored copy
     ],
 )
-def test_git_sha_returns_none_on_untrusted_or_missing_repo(fake, monkeypatch):
-    """A foreign/absent repo yields None rather than a wrong provenance SHA."""
-
-    def fake_run(*args, **kwargs):
-        if isinstance(fake, BaseException):
-            raise fake
-        return fake
-
-    monkeypatch.setattr(version_mod.subprocess, "run", fake_run)
-    get_git_sha.cache_clear()
-    try:
-        assert get_git_sha() is None
-    finally:
-        get_git_sha.cache_clear()
-
-
-@pytest.mark.unit
-def test_git_sha_returned_when_toplevel_matches(monkeypatch):
-    """Happy path without a real git repo: toplevel == _REPO_ROOT -> return sha.
-
-    Covers the success branch deterministically so it holds in a no-git
-    environment (installed wheel / clean container).
-    """
-
-    def fake_run(*args, **kwargs):
-        return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=f"{_REPO_ROOT}\nabc1234\n"
-        )
-
-    monkeypatch.setattr(version_mod.subprocess, "run", fake_run)
-    get_git_sha.cache_clear()
-    try:
-        assert get_git_sha() == "abc1234"
-    finally:
-        get_git_sha.cache_clear()
-
-
-@pytest.mark.unit
-def test_resolve_repo_root_falls_back_on_shallow_tree(monkeypatch):
-    """A too-shallow module path yields the filesystem root, not IndexError."""
-    monkeypatch.setattr(version_mod, "__file__", "/inference_endpoint/utils/version.py")
-    root = version_mod._resolve_repo_root()
-    assert root == Path("/inference_endpoint/utils/version.py").resolve().parents[-1]
+def test_resolve_repo_root_none_outside_source_layout(monkeypatch, module_path):
+    """Only <root>/src/inference_endpoint/utils/ is a source checkout."""
+    monkeypatch.setattr(version_mod, "__file__", module_path)
+    assert version_mod._resolve_repo_root() is None

@@ -38,6 +38,8 @@
 #   ALLOW_DIRTY     1=build HEAD with uncommitted tracked changes (default: 0)
 #   PROVISION_DSR1  passthrough build-arg    (default: Dockerfile default = 1)
 #   PROVISION_VBENCH passthrough build-arg   (default: Dockerfile default = 1)
+#   (always passed) GIT_SHA build-arg = short HEAD SHA (+"-dirty"), surfaced at
+#                   runtime as ENDPOINTS_GIT_SHA for the report's provenance
 #   IMAGE_DESCRIPTION  GHCR package-page description (default: "endpoints client image (ref <ref>, commit <sha>)")
 #   GHCR_USER/GHCR_TOKEN  optional registry login (fallback: GITHUB_ACTOR/GITHUB_TOKEN)
 set -euo pipefail
@@ -213,6 +215,14 @@ BUILD_ARGS=()
 [[ "$NO_CACHE" == "1" ]] && BUILD_ARGS+=(--no-cache)
 [[ -n "${PROVISION_DSR1:-}" ]] && BUILD_ARGS+=(--build-arg "PROVISION_DSR1=${PROVISION_DSR1}")
 [[ -n "${PROVISION_VBENCH:-}" ]] && BUILD_ARGS+=(--build-arg "PROVISION_VBENCH=${PROVISION_VBENCH}")
+# Runtime provenance for the report: forward the source SHA into the image env
+# (Dockerfile ARG GIT_SHA -> ENV ENDPOINTS_GIT_SHA), so a benchmark run inside the
+# published image self-reports its commit. Mirror the -dirty suffix
+# resolve_git_sha() applies when building from a dirty tree (reachable only via
+# --allow-dirty / --no-push, since a clean :SHA is otherwise required above).
+GIT_SHA_VALUE="$(git rev-parse --short=7 HEAD)"
+tree_has_tracked_changes && GIT_SHA_VALUE="${GIT_SHA_VALUE}-dirty"
+BUILD_ARGS+=(--build-arg "GIT_SHA=${GIT_SHA_VALUE}")
 
 # Don't attach SLSA provenance attestations. buildx adds them by default on --push,
 # which surfaces a spurious `unknown/unknown` entry on the GHCR package page and
