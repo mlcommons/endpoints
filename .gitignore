@@ -212,3 +212,9 @@ CLAUDE.local.md
 
 # Generated dataset cache (created by Dataset.get_dataloader())
 dataset_cache/
+
+# Generated build-time provenance (scripts/write_build_info.py). Packed into
+# wheels by uv_build; NOT into images (.dockerignored — images carry the SHA via
+# the ENDPOINTS_GIT_SHA build-arg). The .tmp is the atomic-write staging file.
+src/inference_endpoint/_build_info.py
+src/inference_endpoint/_build_info.py.tmp
