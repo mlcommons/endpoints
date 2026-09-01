@@ -211,6 +211,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
     version: str
     git_sha: str | None
+    # Which channel resolved git_sha, in resolution order: "git" (live checkout),
+    # "baked" (build-info file), "env" (ENDPOINTS_GIT_SHA), or "none". Records how
+    # much to trust the SHA — a clean git/baked SHA is ground truth, an env one an
+    # attestation, a "-dirty" one a warning. See utils/version.resolve_git_sha.
+    git_sha_source: str
     test_started_at: int
     n_samples_issued: int
     # Terminal responses; failed samples are a subset of this count.
@@ -429,6 +434,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         return cls(
             version=str(version_info.get("version", "unknown")),
             git_sha=version_info.get("git_sha"),
+            git_sha_source=str(version_info.get("git_sha_source", "none")),
             test_started_at=0,  # TODO: surface session_started_ns via snapshot
             n_samples_issued=n_issued,
             n_samples_completed=n_completed,
@@ -528,8 +534,12 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 f"final snapshot received) — some async metrics may be missing.{newline}"
             )
         fn(f"Version: {self.version}{newline}")
-        if self.git_sha:
-            fn(f"Git SHA: {self.git_sha}{newline}")
+        # Always emitted (even when unresolved) so a missing SHA is unambiguous —
+        # a blank line could mean capture failed or an old report format; the
+        # explicit "unknown (source: none)" says provenance was attempted.
+        fn(
+            f"Git SHA: {self.git_sha or 'unknown'} (source: {self.git_sha_source}){newline}"
+        )
         if self.run_config:
             fn(f"Run config:{newline}")
             for section, params in self.run_config.items():
