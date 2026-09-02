@@ -390,6 +390,54 @@ passes CoV if at least one ensemble setting certifies it for every gating metric
 Detector concordance is a corroborating guardrail. The trend gate remains mandatory
 and primary; the CoV ensemble is secondary.
 
+**Minimum window _duration_ (a time floor, not just a count floor).** The
+minimum-length floor above is a **sample-count** floor (`MIN_TREND_N` super-passes, so
+the trend test has enough points). That count is throughput-blind, and at high
+concurrency it is far too permissive: when concurrency approaches the super-pass size,
+a window of `MIN_TREND_N` super-passes is only **seconds** of wall-clock, over which no
+minutes-scale hiccup (KV-cache eviction, a sick worker, a slow autoscale) can possibly
+be observed. A steady _number_ measured over 2 seconds of a 2-hour run is not a steady
+_state_. The window must therefore also clear a **minimum wall-time**, computed per
+window as
+
+```
+min_duration = max( T_precision , T_relaxation , T_floor )
+  T_precision  = k*·τ_sp,   k* = max( ceil( (1.96·CoV_b / ε)² ), MIN_TREND_N )   # ±ε batch-means precision
+  T_relaxation = 5·L_p99                                                          # queue / KV-eviction transient safety
+  T_floor      = 600 s                                                            # MLPerf-style min-duration floor
+```
+
+where `τ_sp` is the median per-super-pass offered (issue) span, `CoV_b` the coefficient
+of variation of per-super-pass `tpot_p50` across the window, and `L_p99` the p99 sample
+end-to-end latency. The three terms cover three regimes: the **floor** binds for clean,
+fast runs (short output, high concurrency); **relaxation** binds for long-output /
+long-tail runs (e.g. DeepSeek-R1, whose p99 sample lifetime alone is minutes);
+**precision** binds for noisy metrics (agentic), where a high `CoV_b` raises `k*` so
+more batches are demanded. The window's wall-time is measured by its offered-load span
+(the same denominator as the reported system TPS, §5.1), so a high-throughput window
+with a short offered span is correctly asked for many more super-passes than the count
+floor alone. `ε = 5%` and the `k*` floor is `MIN_TREND_N` (not a larger constant): the
+batch-means CI already widens honestly when `CoV_b` is high, so `k*` self-raises where
+it matters and a larger floor would only over-penalize clean runs.
+
+This was calibrated against a synthetic throughput × concurrency sweep (planted steady
+plateaus at known service rates, spanning ~1k to ~3.3M output tok/s): the detector
+recovers the planted steady TPOT to within 0.1% wherever a genuine steady region exists
+(validated up to 1.6M tok/s), while runs whose sampled span never leaves the load ramp
+— the `n_samples ≈ concurrency` degenerate case — are reported by the naïve gate as a
+confident but ~3× wrong steady value. The duration floor is exactly what rejects that
+case. The multiplier on the relaxation term is a literature-derived safety margin
+(relaxation time `1/(μ(1−ρ))`), not fit from the fluid synthetic (which has no queueing
+transient to exercise it).
+
+By default a plateau shorter than `min_duration` is **hard-rejected** (`found = false`,
+with the required duration and dominant term in the reason) — a too-brief window is not
+a certifiable steady state. `--no-min-duration` downgrades this to an advisory: the
+plateau is still reported, carrying a **"Window too short"** warning that states the
+observed vs required duration. Either way the full `short_window` breakdown
+(`window_duration_s`, `min_duration_s`, dominant term, `k*`, `CoV_b`, `τ_sp`, `L_p99`)
+is in the machine-readable output.
+
 ## 5.6 Edge cases and error handling
 
 The step never hard-fails a run; every input yields a result plus a `status`.

@@ -89,6 +89,20 @@ ZERO_MEDIAN_FLOOR = 1e-9
 # Texts buffered before a tokenizer flush during the parse.
 TOKENIZE_BATCH_SIZE = 4096
 
+# Minimum steady-window TIME duration (docs/steady-state-detection.md §5.5). Passing the
+# >= MIN_TREND_N super-pass floor is not enough: at high throughput a window of a few
+# super-passes is only seconds of wall-time, far too brief to certify steadiness. The
+# required duration is max(precision, relaxation, floor):
+#   precision  = k*.tau_sp,  k* = max(ceil((1.96.CoV_b / eps)^2), MIN_TREND_N)  (batch-means +-eps)
+#   relaxation = mult . p99(sample latency)   (queue/KV-eviction transient safety)
+#   floor      = MLPerf min-duration floor
+MIN_DUR_EPS = 0.05
+MIN_DUR_RELAX_MULT = 5.0
+MIN_DUR_FLOOR_S = 600.0
+# k* floor: >= MIN_TREND_N batches. The batch-means CI already widens when CoV is high,
+# so k* self-raises for noisy metrics; a >4 floor would only over-penalize clean runs.
+MIN_DUR_KSTAR_FLOOR = MIN_TREND_N
+
 # A per-super-pass metric trajectory is classified into one of these states.
 Verdict = Literal["up", "down", "steady", "insufficient"]
 
@@ -115,6 +129,20 @@ class TpsBlock(TypedDict):
     system_ci: list[float]
 
 
+class ShortWindow(TypedDict):
+    is_short: bool  # window wall-time < required min-duration
+    window_duration_s: float  # offered-load (issue) span of the reported window
+    min_duration_s: float  # max(precision, relaxation, floor)
+    dominant: str  # "precision" | "relaxation" | "floor" — which term set min_duration
+    t_precision_s: float
+    t_relaxation_s: float
+    t_floor_s: float
+    kstar: int  # batch-count target for +-MIN_DUR_EPS precision
+    cov_b: float  # CoV of per-super-pass tpot_p50 over the window
+    tau_sp_s: float  # median per-super-pass offered span
+    l_p99_s: float  # p99 sample e2e latency over the window
+
+
 class SteadyState(TypedDict):
     found: bool
     reason: str | None
@@ -123,6 +151,7 @@ class SteadyState(TypedDict):
     tpot: dict | None
     tps: TpsBlock | None
     anomaly: Anomaly
+    short_window: ShortWindow | None  # min-duration gate detail (None if no plateau)
     global_trend: dict[
         str, Verdict
     ]  # gated metric -> trend from the plateau to run end
@@ -1267,15 +1296,70 @@ def adaptive_warmup(
     return max(min_warmup, w)
 
 
+def min_steady_duration(
+    series: Sequence[SuperPassRollup], lo: int, hi: int
+) -> ShortWindow:
+    """Required steady-window wall-time for the window ``[lo, hi)`` (§5.5).
+
+    ``max(precision, relaxation, floor)``. ``is_short`` compares it to the window's
+    offered-load span (the throughput denominator, so it matches the TPS reported for the
+    same window). All inputs come from the window itself, so a high-throughput window with
+    a short offered span is correctly asked for far more super-passes than the trend floor.
+    """
+    window = series[lo:hi]
+    tpot_p50 = [
+        percentile_lower(sorted(sp.tpot_ns), 0.50) for sp in window if sp.tpot_ns
+    ]
+    cov_b = cov(tpot_p50) if len(tpot_p50) >= 2 else 0.0
+    spans = [
+        (sp.last_issue_ns - sp.first_issue_ns) / 1e9
+        for sp in window
+        if sp.last_issue_ns > sp.first_issue_ns >= 0
+    ]
+    tau_sp = median(spans) if spans else 0.0
+    lat = pooled(series, lo, hi, "latency_ns")
+    l_p99 = percentile_lower(sorted(lat), 0.99) / 1e9 if lat else 0.0
+
+    kstar = max(math.ceil((CI_Z_95 * cov_b / MIN_DUR_EPS) ** 2), MIN_DUR_KSTAR_FLOOR)
+    t_prec = kstar * tau_sp
+    t_relax = MIN_DUR_RELAX_MULT * l_p99
+    min_s = max(t_prec, t_relax, MIN_DUR_FLOOR_S)
+    dominant = (
+        "precision"
+        if min_s == t_prec
+        else "relaxation"
+        if min_s == t_relax
+        else "floor"
+    )
+    window_dur = window_issue_span_ns(series, lo, hi) / 1e9
+    return {
+        "is_short": window_dur < min_s,
+        "window_duration_s": window_dur,
+        "min_duration_s": min_s,
+        "dominant": dominant,
+        "t_precision_s": t_prec,
+        "t_relaxation_s": t_relax,
+        "t_floor_s": MIN_DUR_FLOOR_S,
+        "kstar": kstar,
+        "cov_b": cov_b,
+        "tau_sp_s": tau_sp,
+        "l_p99_s": l_p99,
+    }
+
+
 def build_steady_state(
     series: Sequence[SuperPassRollup],
     gate_algo: str = "mk_hamed_rao",
     cov_bounds: Sequence[float] = (0.03, 0.05, 0.08),
     gated_metrics: Sequence[TrackedMetric] = GATED_METRICS,
+    enforce_min_duration: bool = True,
 ) -> SteadyState:
     """Select the first steady plateau and summarize it (window, TTFT/TPOT, TPS).
 
     ``series`` is the post-warmup super-pass series; window indices are relative to it.
+    ``enforce_min_duration`` (default) hard-rejects a plateau whose wall-time is below the
+    §5.5 minimum (``found=False``); when disabled the plateau is still reported and the
+    ``short_window`` detail carries an advisory instead.
     """
     plateaus = segment_plateaus(series, gate_algo, cov_bounds, gated_metrics)
     anomaly = detect_level_shift(series, plateaus)
@@ -1289,6 +1373,7 @@ def build_steady_state(
             "tpot": None,
             "tps": None,
             "anomaly": anomaly,
+            "short_window": None,
             "global_trend": gt,
             "drifting_up": [k for k, v in gt.items() if v == "up"],
         }
@@ -1326,7 +1411,8 @@ def build_steady_state(
         system_ci = [system - half, system + half]
     else:
         system_ci = [system, system]
-    return {
+    short = min_steady_duration(series, lo, hi)
+    ss: SteadyState = {
         "found": True,
         "reason": None,
         "window": {
@@ -1344,9 +1430,20 @@ def build_steady_state(
             "system_ci": system_ci,
         },
         "anomaly": anomaly,
+        "short_window": short,
         "global_trend": gt,
         "drifting_up": [k for k, v in gt.items() if v == "up"],
     }
+    if short["is_short"] and enforce_min_duration:
+        # Hard-fail: the plateau is genuine but too brief to certify. Keep the window
+        # summary in the blob (informative), but report no steady state.
+        ss["found"] = False
+        ss["reason"] = (
+            f"window too short: {short['window_duration_s']:.0f}s steady < "
+            f"{short['min_duration_s']:.0f}s required "
+            f"({short['dominant']}-dominated); pass --no-min-duration to override"
+        )
+    return ss
 
 
 # --------------------------------------------------------------------------- #
@@ -1426,6 +1523,7 @@ def run(
     tokenize_batch_size: int = TOKENIZE_BATCH_SIZE,
     warmup_band: float = 0.05,
     warmup_driver: str = "tpot_p50",
+    enforce_min_duration: bool = True,
 ) -> DiagnosticsResult:
     """Build the full diagnostics result (the ``--json`` blob).
 
@@ -1462,7 +1560,9 @@ def run(
         "trajectories": trajectories,
         "cov": {},
         "drift": {},
-        "steady_state": build_steady_state(post, trend_gate, cov_bounds),
+        "steady_state": build_steady_state(
+            post, trend_gate, cov_bounds, enforce_min_duration=enforce_min_duration
+        ),
         "per_super_pass": per_super_pass_diagnostics(post),
         "alpha": alpha,
     }
@@ -1541,6 +1641,15 @@ def _render_steady_state(ss: SteadyState) -> list[str]:
                     f"  p95 {_fmt_ms(s['p95'])}  p99 {_fmt_ms(s['p99'])}"
                     f"  mean {_fmt_ms(s['mean'])}"
                 )
+    sw = ss["short_window"]
+    if ss["found"] and sw is not None and sw["is_short"]:
+        # Reached only with the min-duration gate disabled (--no-min-duration); the
+        # enforced path reports found=False with the same numbers in `reason`.
+        out.append(
+            f"  WARNING: Window too short -- {sw['window_duration_s']:.0f}s steady vs "
+            f"{sw['min_duration_s']:.0f}s desired ({sw['dominant']}-dominated); "
+            f"the steady number is a best-effort estimate over too little wall-time"
+        )
     if ss["drifting_up"]:
         out.append(
             f"  WARNING: {', '.join(ss['drifting_up'])} drifting UP over the rest of the "
@@ -1717,6 +1826,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--trend-gate", default="mk_hamed_rao", choices=list(ALGORITHMS))
     ap.add_argument("--tokenize-batch-size", type=int, default=None)
     ap.add_argument(
+        "--no-min-duration",
+        dest="enforce_min_duration",
+        action="store_false",
+        help="do not hard-reject a steady window shorter than the required min-duration "
+        "(§5.5); instead report it with a 'Window too short' warning and the desired "
+        "duration",
+    )
+    ap.add_argument(
         "--json", dest="json_out", default=None, help="write JSON blob here"
     )
     args = ap.parse_args(argv)
@@ -1783,6 +1900,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         tokenize_batch_size=flush,
         warmup_band=args.warmup_band,
         warmup_driver=warmup_driver,
+        enforce_min_duration=args.enforce_min_duration,
     )
     print(render_text(result, cov_bounds))
     if args.json_out:

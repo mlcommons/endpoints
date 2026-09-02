@@ -59,6 +59,7 @@ overrides**:
 --superpass-size N  --window-sizes 4,6,8  --warmup auto  --warmup-band 0.05
 --warmup-driver tpot_p50  --cov-bounds 0.03,0.05,0.08  --trend-gate mk_hamed_rao
 --alpha 0.05  --tokenize-batch-size N  --trust-remote-code  --json out.json
+--no-min-duration         # downgrade the min-duration gate from reject to warning
 ```
 
 **Model registry** (extend as needed): `kimi-k3`, `kimi-k2` → Moonshot (trust-remote-code);
@@ -99,6 +100,22 @@ If no window qualifies:
 
 means no contiguous run of super-passes was steady enough — the run drifts or is too
 short. The per-window diagnostics below show why (which metric failed CoV/trend).
+
+A second "not found" form is the **min-duration gate** (docs/steady-state-detection.md
+§5.5): a genuine plateau was found but is too brief in wall-time to certify.
+
+```
+  not found: window too short: 3s steady < 600s required (floor-dominated); pass --no-min-duration to override
+```
+
+A window that clears the ≥4-super-pass floor can still be only seconds long at high
+throughput (a `c16k`-scale run's 4 super-passes ≈ the concurrency), which cannot reveal
+a minutes-scale hiccup. The required duration is `max(precision, relaxation, floor)`:
+`floor` (600s) binds for clean fast runs, `relaxation` (5·p99-latency) for long-tail
+workloads, `precision` (k·τ) for noisy metrics. This is a **hard reject by default**;
+`--no-min-duration` downgrades it to a `WARNING: Window too short` line while still
+reporting the (best-effort) steady number. Full breakdown is in `--json`
+(`steady_state.short_window`).
 
 ### `ANOMALY` line
 

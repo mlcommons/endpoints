@@ -530,7 +530,7 @@ def test_detect_level_shift_none_on_single_plateau():
 
 def test_build_steady_state_reports_first_plateau_and_anomaly():
     series = _mk_series([(100, 50)] * 6 + [(200, 60)] * 6)
-    ss = mod.build_steady_state(series, GATE, BOUNDS)
+    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
     assert ss["found"] is True
     assert ss["window"]["sp_lo"] == 0 and ss["window"]["sp_hi"] == 6  # first plateau
     assert ss["tps"]["per_user"] > 0 and ss["tps"]["system"] > 0
@@ -567,7 +567,7 @@ def test_build_steady_state_flags_global_drift_after_first_plateau():
     # First plateau is flat, but TPOT ramps up for the rest of the run (the C22528
     # pattern): a local plateau exists, yet the metric drifts up globally.
     series = _mk_series([(100, 50)] * 6 + [(100 + 25 * i, 50) for i in range(1, 8)])
-    ss = mod.build_steady_state(series, GATE, BOUNDS)
+    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
     assert ss["found"] is True
     assert ss["window"]["sp_lo"] == 0 and ss["window"]["sp_hi"] == 6
     assert ss["anomaly"]["detected"] is False  # gradual ramp, not a discrete staircase
@@ -577,15 +577,98 @@ def test_build_steady_state_flags_global_drift_after_first_plateau():
 
 def test_build_steady_state_no_global_drift_on_flat_run():
     series = _mk_series([(100, 50)] * 8)
-    ss = mod.build_steady_state(series, GATE, BOUNDS)
+    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
     assert ss["drifting_up"] == []
 
 
 def test_build_steady_state_none_when_run_never_settles():
     # per-super-pass TPOT ramps every step -> no length-4 window is within CoV
     series = _mk_series([(100 + 20 * i, 50) for i in range(8)])
-    ss = mod.build_steady_state(series, GATE, BOUNDS)
+    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
     assert ss["found"] is False
+
+
+def _spanned_series(
+    n, tpot=100.0, per_sp_span_s=1.0, gap_s=0.0, latency_s=0.1, samples=40
+):
+    """SuperPassRollups with explicit wall-time: per-SP offered span + inter-SP gap +
+    a constant sample latency. Lets the min-duration gate see realistic seconds."""
+    series = []
+    t = 0.0
+    for i in range(n):
+        sp = mod.SuperPassRollup(index=i)
+        sp.tpot_ns = [float(tpot)] * samples
+        sp.ttft_ns = [50.0] * samples
+        sp.latency_ns = [latency_s * 1e9] * samples
+        sp.out_tokens = samples * 10
+        sp.n_issued = samples
+        sp.first_issue_ns = int(t * 1e9)
+        sp.last_issue_ns = int((t + per_sp_span_s) * 1e9)
+        sp.last_event_ns = int((t + per_sp_span_s + latency_s) * 1e9)
+        series.append(sp)
+        t += per_sp_span_s + gap_s
+    return series
+
+
+def test_min_steady_duration_floor_dominates_clean_short_run():
+    sw = mod.min_steady_duration(
+        _spanned_series(6, per_sp_span_s=1.0, latency_s=0.1), 0, 6
+    )
+    assert sw["dominant"] == "floor"
+    assert sw["min_duration_s"] == mod.MIN_DUR_FLOOR_S
+    assert sw["kstar"] == mod.MIN_DUR_KSTAR_FLOOR  # flat metric -> k* pinned at floor
+    assert sw["is_short"] is True  # ~6s window << 600s floor
+
+
+def test_min_steady_duration_relaxation_dominates_on_long_tail():
+    # p99 sample latency 200s -> relax = 5 * 200 = 1000s > floor
+    sw = mod.min_steady_duration(
+        _spanned_series(6, per_sp_span_s=1.0, latency_s=200.0), 0, 6
+    )
+    assert sw["dominant"] == "relaxation"
+    assert abs(sw["min_duration_s"] - 1000.0) < 1e-3
+
+
+def test_min_steady_duration_precision_dominates_on_noisy_metric():
+    series = _spanned_series(8, per_sp_span_s=50.0, latency_s=0.1)
+    for i, sp in enumerate(series):
+        sp.tpot_ns = [
+            100.0 if i % 2 == 0 else 160.0
+        ] * 40  # high CoV_b across super-passes
+    sw = mod.min_steady_duration(series, 0, 8)
+    assert sw["kstar"] > mod.MIN_DUR_KSTAR_FLOOR  # k* self-raises with CoV
+    assert sw["dominant"] == "precision"
+
+
+def test_min_steady_duration_not_short_when_window_long_enough():
+    # 6 super-passes each 120s offered -> window span ~720s >= 600s floor
+    sw = mod.min_steady_duration(
+        _spanned_series(6, per_sp_span_s=120.0, latency_s=1.0), 0, 6
+    )
+    assert sw["is_short"] is False
+
+
+def test_build_steady_state_hard_fails_short_window():
+    series = _mk_series([(100, 50)] * 8)  # flat plateau, microsecond spans
+    ss = mod.build_steady_state(series, GATE, BOUNDS)  # enforce default True
+    assert ss["found"] is False
+    assert ss["reason"] is not None and "too short" in ss["reason"]
+    assert ss["short_window"]["is_short"] is True
+    assert ss["window"] is not None  # window summary kept for context
+
+
+def test_build_steady_state_soft_reports_short_window():
+    series = _mk_series([(100, 50)] * 8)
+    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
+    assert ss["found"] is True  # not rejected, only flagged
+    assert ss["short_window"]["is_short"] is True
+
+
+def test_build_steady_state_accepts_long_enough_window():
+    series = _spanned_series(8, per_sp_span_s=120.0, latency_s=1.0)  # flat, ~960s span
+    ss = mod.build_steady_state(series, GATE, BOUNDS)  # enforce default True
+    assert ss["found"] is True
+    assert ss["short_window"]["is_short"] is False
 
 
 def test_run_result_has_steady_state_block(tmp_path):
