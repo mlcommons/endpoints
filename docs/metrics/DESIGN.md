@@ -76,6 +76,7 @@ subscriber's last live snapshot and the resulting `Report.complete` is `False`.
 class Report(msgspec.Struct, frozen=True):
     version: str
     git_sha: str | None
+    git_sha_source: str  # which channel resolved git_sha: baked | env | git | none
     test_started_at: int
     n_samples_issued: int
     n_samples_completed: int

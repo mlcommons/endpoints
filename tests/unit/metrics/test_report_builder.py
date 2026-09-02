@@ -507,6 +507,7 @@ class TestReportDisplayAndSerialize:
         report = Report(
             version="test",
             git_sha=None,
+            git_sha_source="none",
             test_started_at=0,
             n_samples_issued=0,
             n_samples_completed=0,
@@ -525,11 +526,61 @@ class TestReportDisplayAndSerialize:
         output = "\n".join(lines)
         assert "Test started at" not in output
 
+    def test_display_always_prints_git_sha_line_with_source(self):
+        """The Git SHA line is emitted unconditionally, showing 'unknown' + source."""
+        report = Report(
+            version="test",
+            git_sha=None,
+            git_sha_source="none",
+            test_started_at=0,
+            n_samples_issued=0,
+            n_samples_completed=0,
+            n_samples_failed=0,
+            duration_ns=None,
+            state="complete",
+            complete=True,
+            ttft={},
+            tpot={},
+            latency={},
+            input_sequence_lengths={},
+            output_sequence_lengths={},
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "\n".join(lines)
+        assert "Git SHA: unknown" in output
+        assert "source: none" in output
+
+    def test_display_prints_git_sha_with_source_when_present(self):
+        """A resolved SHA renders with its provenance source annotated."""
+        report = Report(
+            version="test",
+            git_sha="abc1234-dirty",
+            git_sha_source="git",
+            test_started_at=0,
+            n_samples_issued=0,
+            n_samples_completed=0,
+            n_samples_failed=0,
+            duration_ns=None,
+            state="complete",
+            complete=True,
+            ttft={},
+            tpot={},
+            latency={},
+            input_sequence_lengths={},
+            output_sequence_lengths={},
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "\n".join(lines)
+        assert "Git SHA: abc1234-dirty (source: git)" in output
+
     def test_display_warns_when_incomplete(self):
         """Reports with ``complete=False`` surface a WARNING in display()."""
         report = Report(
             version="test",
             git_sha=None,
+            git_sha_source="none",
             test_started_at=0,
             n_samples_issued=10,
             n_samples_completed=10,
@@ -553,6 +604,7 @@ class TestReportDisplayAndSerialize:
         report = Report(
             version="test",
             git_sha=None,
+            git_sha_source="none",
             test_started_at=0,
             n_samples_issued=10,
             n_samples_completed=5,
@@ -800,3 +852,12 @@ def test_scrub_nonfinite_round_trip_yields_none():
     json.dumps(d, allow_nan=False)
     # Sanity: original NaN was indeed non-finite.
     assert not math.isfinite(float("nan"))
+
+
+@pytest.mark.unit
+def test_from_snapshot_populates_and_serializes_git_sha_source():
+    """from_snapshot sets git_sha_source from version info and to_json carries it."""
+    report = _build_report(_make_registry(n_samples=5))
+    assert report.git_sha_source in {"baked", "env", "git", "none"}
+    data = json.loads(report.to_json())
+    assert data["git_sha_source"] == report.git_sha_source
