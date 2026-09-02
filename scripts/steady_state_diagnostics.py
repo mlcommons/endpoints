@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["transformers>=4.40"]
+# dependencies = ["transformers>=4.40", "pyyaml>=6.0"]
 # ///
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -42,11 +42,12 @@ Convergence metrics are TTFT/TPOT at p50 + p95; p99 is carried as an optional di
 (shown, not gated). End-to-end latency is intentionally excluded (its variation tracks the
 OSL mix, not system steadiness).
 
-usage:
-  uv run scripts/steady_state_diagnostics.py <events.jsonl> \
-      --tokenizer <hf-model-dir-or-id> --dataset-size <N> \
-      [--superpass-size <N>] [--window-sizes 4,5] [--warmup 1] \
-      [--cov-bounds 0.03,0.05,0.08] [--alpha 0.05] [--json <out.json>]
+usage (auto-detects tokenizer, dataset size, and workload profile from the run's
+config.yaml / run_meta.json sidecars; see the model registry + PROFILES below):
+  uv run scripts/steady_state_diagnostics.py <run_dir>                 # 0 flags
+  uv run scripts/steady_state_diagnostics.py <events.jsonl> --model kimi-k3   # 1 flag
+Every derived setting has an explicit override (--tokenizer, --dataset-size,
+--superpass-size, --profile, --cov-bounds, --window-sizes, --warmup, --json, ...).
 """
 
 from __future__ import annotations
@@ -54,11 +55,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from statistics import NormalDist, median, pstdev
 from typing import Literal, NamedTuple, TypedDict
+
+import yaml
 
 # --------------------------------------------------------------------------- #
 # Event wire constants (mirror core/record.py category.value topics)
@@ -154,6 +158,296 @@ TRACKED_METRICS: tuple[TrackedMetric, ...] = (
 # Metrics that gate admissibility (p50/p95); p99 is diagnostic-only.
 GATED_METRICS: tuple[TrackedMetric, ...] = tuple(m for m in TRACKED_METRICS if m.gated)
 _METRIC_BY_KEY: dict[str, TrackedMetric] = {m.key: m for m in TRACKED_METRICS}
+
+
+# --------------------------------------------------------------------------- #
+# Model registry + workload profiles + run-dir auto-detection
+# --------------------------------------------------------------------------- #
+# Maintained source of truth: model-name substring -> (HF tokenizer id, trust_remote_code).
+# A run's config often carries a cluster path (e.g. /models/Kimi-K3) that will not load
+# off the cluster, so the model name is mapped to a portable HF tokenizer id here.
+MODEL_REGISTRY: tuple[tuple[str, str, bool], ...] = (
+    ("kimi-k3", "moonshotai/Kimi-K3", True),
+    ("kimi-k2", "moonshotai/Kimi-K2-Instruct", True),
+    ("gpt-oss", "openai/gpt-oss-120b", False),
+    ("deepseek-r1", "deepseek-ai/DeepSeek-R1", False),
+    ("dsr1", "deepseek-ai/DeepSeek-R1", False),
+    ("deepseek", "deepseek-ai/DeepSeek-R1", False),
+)
+
+
+def resolve_tokenizer(model: str) -> tuple[str, bool] | None:
+    """Map a model name to (HF tokenizer id, trust_remote_code); None if unknown."""
+    low = model.lower()
+    for sub, tok, trust in MODEL_REGISTRY:
+        if sub in low:
+            return (tok, trust)
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class Profile:
+    name: str
+    metric: str  # "window" | "natl"
+    superpass_unit: str  # "samples" | "trajectories"
+    superpass_size: int | None  # None -> use dataset-size
+    cov_bounds: tuple[float, ...]
+    warmup_driver: str
+    tokenize_batch_size: int
+    supported: bool
+    note: str = ""
+
+
+PROFILES: dict[str, Profile] = {
+    "concurrency": Profile(
+        "concurrency",
+        "window",
+        "samples",
+        None,
+        (0.03, 0.05, 0.08),
+        "tpot_p50",
+        4096,
+        True,
+    ),
+    "poisson": Profile(
+        "poisson",
+        "window",
+        "samples",
+        None,
+        (0.03, 0.05, 0.08),
+        "tpot_p50",
+        4096,
+        True,
+        "poisson: same detection as concurrency; usually under-saturated with the "
+        "weakest ramp/drain.",
+    ),
+    "offline": Profile(
+        "offline",
+        "window",
+        "samples",
+        None,
+        (0.03, 0.05, 0.08),
+        "tpot_p50",
+        4096,
+        True,
+        "offline: issue-time throughput degenerate (all issued at t=0); the window and "
+        "drain are completion-based (partial support -- system TPS is unreliable).",
+    ),
+    "agentic": Profile(
+        "agentic",
+        "natl",
+        "trajectories",
+        32,
+        (0.10, 0.15),
+        "tpot_p50",
+        512,
+        False,
+        "agentic steady-state detection is NOT yet supported and requires further study.",
+    ),
+}
+_LOAD_PATTERN_PROFILE: dict[str, str] = {
+    "agentic_inference": "agentic",
+    "poisson": "poisson",
+    "max_throughput": "offline",
+    "offline": "offline",
+    "concurrency": "concurrency",
+}
+
+
+def profile_for_load_pattern(lp: str) -> Profile:
+    return PROFILES[_LOAD_PATTERN_PROFILE.get(lp, "concurrency")]
+
+
+def find_run_files(target: str) -> tuple[str, str | None, str | None]:
+    """Resolve (events.jsonl, config.yaml|None, run_meta.json|None) from a run dir or an
+    events.jsonl path. A directory is searched in ``./`` and ``./client/``."""
+    if os.path.isdir(target):
+        cands = [
+            os.path.join(target, "events.jsonl"),
+            os.path.join(target, "client", "events.jsonl"),
+        ]
+        events = next((c for c in cands if os.path.isfile(c)), None)
+        if events is None:
+            raise FileNotFoundError(
+                f"no events.jsonl under {target} (looked in ./ and ./client/)"
+            )
+    else:
+        events = target
+        if not os.path.isfile(events):
+            raise FileNotFoundError(f"no such events file: {events}")
+    d = os.path.dirname(events)
+    cfg = os.path.join(d, "config.yaml")
+    meta = os.path.join(d, "run_meta.json")
+    return (
+        events,
+        cfg if os.path.isfile(cfg) else None,
+        meta if os.path.isfile(meta) else None,
+    )
+
+
+def read_run_config(
+    config_yaml_path: str | None, run_meta_json_path: str | None
+) -> dict:
+    """Best-effort model / load-pattern / dataset-size from a run's sidecar files."""
+    out: dict = {
+        "model": None,
+        "load_pattern": None,
+        "dataset_size": None,
+        "num_trajectories": None,
+    }
+    if config_yaml_path and os.path.isfile(config_yaml_path):
+        try:
+            with open(config_yaml_path) as fh:
+                cfg = yaml.safe_load(fh) or {}
+        except Exception:  # malformed YAML -> best-effort empty
+            cfg = {}
+        if isinstance(cfg, dict):
+            mp = cfg.get("model_params") or {}
+            out["model"] = mp.get("name") or mp.get("tokenizer_name")
+            lp = (
+                (cfg.get("settings") or {}).get("load_pattern")
+                or cfg.get("load_pattern")
+                or {}
+            )
+            if isinstance(lp, dict):
+                out["load_pattern"] = lp.get("type")
+            for ds in cfg.get("datasets") or []:
+                nt = ((ds or {}).get("agentic_inference") or {}).get(
+                    "num_trajectories_to_issue"
+                )
+                if nt:
+                    out["num_trajectories"] = int(nt)
+                    break
+    if run_meta_json_path and os.path.isfile(run_meta_json_path):
+        try:
+            with open(run_meta_json_path) as fh:
+                meta = json.load(fh)
+            if isinstance(meta, dict) and meta.get("dataset_size"):
+                out["dataset_size"] = int(meta["dataset_size"])
+        except Exception:  # malformed JSON -> leave dataset_size None
+            pass
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# NATL (agentic per-trajectory throughput) -- EXPERIMENTAL, see the CLI warning
+# --------------------------------------------------------------------------- #
+def full_output_text(data: object) -> str:
+    """All generated text for a turn (reasoning + output + tool_calls), for OSL counting."""
+    if not isinstance(data, list):
+        return ""
+    parts: list[str] = []
+    reasoning = data[2] if len(data) > 2 else None
+    output = data[1] if len(data) > 1 else ""
+    if reasoning:
+        parts.extend(reasoning if isinstance(reasoning, list) else [reasoning])
+    if output:
+        parts.extend(output if isinstance(output, list) else [output])
+    tool_calls = data[3] if len(data) > 3 else None
+    if tool_calls:
+        parts.append(json.dumps(tool_calls))
+    return "".join(str(p) for p in parts)
+
+
+def build_trajectory_natl(
+    events_path: str,
+    count_tokens: Callable[[list[str]], list[int]],
+    flush_size: int = 512,
+) -> list[tuple[int, float]]:
+    """Per-trajectory NATL = sum(output tokens) / sum(e2e latency s), keyed by
+    conversation_id. Returns (last_complete_ns, natl) sorted by completion."""
+    issue: dict[str, tuple[str, int]] = {}
+    conv_lat_s: dict[str, float] = {}
+    conv_tokens: dict[str, int] = {}
+    conv_end_ns: dict[str, int] = {}
+    b_conv: list[str] = []
+    b_text: list[str] = []
+    tracking = False
+
+    def flush() -> None:
+        if b_text:
+            for conv, cnt in zip(b_conv, count_tokens(b_text), strict=True):
+                conv_tokens[conv] = conv_tokens.get(conv, 0) + cnt
+        b_conv.clear()
+        b_text.clear()
+
+    with open(events_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            et = rec.get("event_type")
+            ts = rec.get("timestamp_ns")
+            if et == EV_START_TRACKING:
+                tracking = True
+            elif et == EV_STOP_TRACKING:
+                tracking = False
+            elif et == EV_ISSUED:
+                uuid = rec.get("sample_uuid")
+                if tracking and uuid and ts is not None:
+                    issue[uuid] = (rec.get("conversation_id") or "", ts)
+            elif et == EV_COMPLETE:
+                iv = issue.pop(rec.get("sample_uuid"), None)
+                if iv is None or ts is None:
+                    continue
+                conv, its = iv
+                conv_lat_s[conv] = conv_lat_s.get(conv, 0.0) + (ts - its) / 1e9
+                conv_end_ns[conv] = max(conv_end_ns.get(conv, 0), ts)
+                text = full_output_text(rec.get("data"))
+                if text:
+                    b_conv.append(conv)
+                    b_text.append(text)
+                    if len(b_text) >= flush_size:
+                        flush()
+    flush()
+    pairs = [
+        (conv_end_ns[c], conv_tokens[c] / conv_lat_s[c])
+        for c in conv_lat_s
+        if conv_lat_s[c] > 0 and conv_tokens.get(c, 0) > 0
+    ]
+    pairs.sort(key=lambda p: p[0])
+    return pairs
+
+
+def build_natl_result(
+    pairs: Sequence[tuple[int, float]],
+    superpass_trajectories: int = 32,
+    cov_bounds: Sequence[float] = (0.10, 0.15),
+) -> dict:
+    """Distribution + steadiness (batch-means over trajectory super-passes) for NATL."""
+    natl = [n for _, n in pairs]  # completion-ordered
+    n = len(natl)
+    sp_median: list[float] = []
+    for i in range(0, n, superpass_trajectories):
+        chunk = natl[i : i + superpass_trajectories]
+        if len(chunk) >= superpass_trajectories // 2:
+            sp_median.append(median(chunk))
+    n_sp = len(sp_median)
+    across = cov(sp_median) if n_sp >= 2 else 0.0
+    se_pct = 100.0 * across / math.sqrt(n_sp) if n_sp else 0.0
+    s = sorted(natl)
+    dist = {
+        "p10": percentile_lower(s, 0.10) if s else 0.0,
+        "p50": percentile_lower(s, 0.50) if s else 0.0,
+        "p90": percentile_lower(s, 0.90) if s else 0.0,
+        "p99": percentile_lower(s, 0.99) if s else 0.0,
+        "mean": (sum(s) / n) if n else 0.0,
+        "cov": cov(natl),
+    }
+    return {
+        "n_trajectories": n,
+        "superpass_trajectories": superpass_trajectories,
+        "n_super_passes": n_sp,
+        "distribution": dist,
+        "sp_median": sp_median,
+        "across_cov": across,
+        "batch_means_se_pct": se_pct,
+        "found": n_sp >= 2 and across <= max(cov_bounds),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -318,7 +612,9 @@ def build_super_pass_series(
                     continue
                 sp = series[row.sp_index]
                 sp.last_event_ns = max(sp.last_event_ns, ts)
-                sp.latency_ns.append(float(ts - row.issue_ns))  # e2e, no recv_first needed
+                sp.latency_ns.append(
+                    float(ts - row.issue_ns)
+                )  # e2e, no recv_first needed
                 if row.recv_first_ns is None:
                     continue
                 text = text_after_first_chunk(rec.get("data"))
@@ -1331,11 +1627,53 @@ def _warmup_arg(s: str) -> int | str:
     return "auto" if s == "auto" else int(s)
 
 
+def _agentic_warning() -> str:
+    msg = [
+        "AGENTIC STEADY-STATE DETECTION IS NOT YET SUPPORTED.",
+        "",
+        "The NATL metric above is EXPERIMENTAL and REQUIRES FURTHER STUDY.",
+        "Per-turn TTFT/TPOT do NOT converge on agentic multi-turn runs (structural",
+        "server-side queue/eviction variance), so the standard steady-state window",
+        "does not apply. NATL (per-trajectory throughput) is a promising candidate but",
+        "is NOT validated for official reporting.",
+        "",
+        "DO NOT use these numbers for submissions or gating decisions.",
+    ]
+    w = max(len(m) for m in msg) + 6
+    bar = "#" * w
+    out = ["", bar, bar]
+    out += ["##  " + m.ljust(w - 6) + "##" for m in msg]
+    out += [bar, bar, ""]
+    return "\n".join(out)
+
+
+def render_natl(r: dict) -> str:
+    d = r["distribution"]
+    return "\n".join(
+        [
+            "=== NATL (agentic per-trajectory throughput) ===",
+            f"  trajectories: {r['n_trajectories']}  (super-pass = "
+            f"{r['superpass_trajectories']} trajectories -> {r['n_super_passes']} "
+            "super-passes)",
+            f"  NATL tok/s: p10 {d['p10']:.1f}  p50 {d['p50']:.1f}  p90 {d['p90']:.1f}  "
+            f"p99 {d['p99']:.1f}  mean {d['mean']:.1f}  (distribution CoV {d['cov']:.2f})",
+            f"  steadiness: across-super-pass CoV {r['across_cov']:.3f}  (batch-means SE "
+            f"{r['batch_means_se_pct']:.1f}%)  -> "
+            f"{'STEADY' if r['found'] else 'NOT steady'}",
+        ]
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("events", help="path to events.jsonl")
+    ap.add_argument("target", help="run directory OR path to events.jsonl")
     ap.add_argument(
-        "--tokenizer", required=True, help="HF model dir/id for TTFT+TPOT token counts"
+        "--model",
+        default=None,
+        help="model name (auto-detected from config if omitted)",
+    )
+    ap.add_argument(
+        "--tokenizer", default=None, help="HF tokenizer id/dir (overrides the registry)"
     )
     ap.add_argument(
         "--trust-remote-code",
@@ -1343,18 +1681,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="allow the tokenizer's custom code (needed for Kimi-K3 and similar)",
     )
     ap.add_argument(
-        "--dataset-size", type=int, required=True, help="samples per dataset pass"
+        "--dataset-size",
+        type=int,
+        default=None,
+        help="samples per dataset pass (overrides run_meta/config)",
     )
     ap.add_argument(
         "--superpass-size",
         type=int,
         default=None,
-        help="samples per super-pass (default: --dataset-size)",
+        help="samples (or, agentic: trajectories) per super-pass",
+    )
+    ap.add_argument(
+        "--profile",
+        default=None,
+        choices=list(PROFILES),
+        help="workload profile (auto-selected from the run's load pattern)",
     )
     ap.add_argument(
         "--window-sizes",
         type=_parse_int_list,
-        default=[4, 5],
+        default=None,
         help="comma-separated window sizes, in super-passes",
     )
     ap.add_argument(
@@ -1363,56 +1710,84 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="auto",
         help="'auto' (data-driven crop) or a fixed super-pass count",
     )
-    ap.add_argument(
-        "--warmup-band",
-        type=float,
-        default=0.05,
-        help="auto warmup: crop leading super-passes >this fraction off the steady level",
-    )
-    ap.add_argument(
-        "--warmup-driver",
-        default="tpot_p50",
-        choices=list(_METRIC_BY_KEY),
-        help="auto warmup: metric whose ramp defines the crop",
-    )
-    ap.add_argument("--cov-bounds", type=_parse_float_list, default=[0.03, 0.05, 0.08])
+    ap.add_argument("--warmup-band", type=float, default=0.05)
+    ap.add_argument("--warmup-driver", default=None, choices=list(_METRIC_BY_KEY))
+    ap.add_argument("--cov-bounds", type=_parse_float_list, default=None)
     ap.add_argument("--alpha", type=float, default=0.05)
-    ap.add_argument(
-        "--trend-gate",
-        default="mk_hamed_rao",
-        choices=list(ALGORITHMS),
-        help="trend algorithm gating plateau admissibility",
-    )
-    ap.add_argument(
-        "--tokenize-batch-size",
-        type=int,
-        default=TOKENIZE_BATCH_SIZE,
-        help="output texts buffered per tokenizer flush; lower to bound peak memory",
-    )
+    ap.add_argument("--trend-gate", default="mk_hamed_rao", choices=list(ALGORITHMS))
+    ap.add_argument("--tokenize-batch-size", type=int, default=None)
     ap.add_argument(
         "--json", dest="json_out", default=None, help="write JSON blob here"
     )
     args = ap.parse_args(argv)
 
-    superpass_size = args.superpass_size or args.dataset_size
-    count_tokens = _make_token_counter(args.tokenizer, args.trust_remote_code)
+    events, cfg_path, meta_path = find_run_files(args.target)
+    cfg = read_run_config(cfg_path, meta_path)
+
+    # tokenizer: explicit flag > model registry > config tokenizer path
+    model = args.model or cfg["model"]
+    reg = resolve_tokenizer(model) if model else None
+    if args.tokenizer:
+        tokenizer, trust = args.tokenizer, args.trust_remote_code
+    elif reg is not None:
+        tokenizer, trust = reg
+    elif model and "/" in model:
+        tokenizer, trust = model, args.trust_remote_code
+    else:
+        ap.error(
+            "could not resolve a tokenizer; pass --model (a known model) or --tokenizer"
+        )
+
+    profile = (
+        PROFILES[args.profile]
+        if args.profile
+        else profile_for_load_pattern(cfg["load_pattern"] or "concurrency")
+    )
+    if profile.note:
+        print(f"[profile: {profile.name}] {profile.note}\n", file=sys.stderr)
+
+    cov_bounds = args.cov_bounds or list(profile.cov_bounds)
+    warmup_driver = args.warmup_driver or profile.warmup_driver
+    flush = args.tokenize_batch_size or profile.tokenize_batch_size
+    window_sizes = args.window_sizes or [4, 6, 8]
+    count_tokens = _make_token_counter(tokenizer, trust)
+
+    if profile.metric == "natl":
+        sp_traj = args.superpass_size or profile.superpass_size or 32
+        pairs = build_trajectory_natl(events, count_tokens, flush)
+        result = build_natl_result(pairs, sp_traj, tuple(cov_bounds))
+        print(render_natl(result))
+        if args.json_out:
+            with open(args.json_out, "w") as fh:
+                json.dump(result, fh, indent=2)
+            print(f"wrote {args.json_out}", file=sys.stderr)
+        print(_agentic_warning())
+        return 0
+
+    # window profiles (concurrency / poisson / offline): super-pass = samples
+    size = args.superpass_size or args.dataset_size or cfg["dataset_size"]
+    if not size or size <= 0:
+        ap.error(
+            "could not resolve dataset/super-pass size; pass --dataset-size or "
+            "--superpass-size"
+        )
     result = run(
-        args.events,
-        superpass_size=superpass_size,
+        events,
+        superpass_size=int(size),
         count_tokens=count_tokens,
-        window_sizes=args.window_sizes,
+        window_sizes=window_sizes,
         warmup=args.warmup,
-        cov_bounds=args.cov_bounds,
+        cov_bounds=cov_bounds,
         alpha=args.alpha,
         trend_gate=args.trend_gate,
-        tokenize_batch_size=args.tokenize_batch_size,
+        tokenize_batch_size=flush,
         warmup_band=args.warmup_band,
-        warmup_driver=args.warmup_driver,
+        warmup_driver=warmup_driver,
     )
-    print(render_text(result, args.cov_bounds))
+    print(render_text(result, cov_bounds))
     if args.json_out:
-        with open(args.json_out, "w") as f:
-            json.dump(result, f, indent=2)
+        with open(args.json_out, "w") as fh:
+            json.dump(result, fh, indent=2)
         print(f"\nwrote {args.json_out}", file=sys.stderr)
     return 0
 

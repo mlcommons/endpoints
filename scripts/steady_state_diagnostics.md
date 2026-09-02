@@ -26,29 +26,49 @@ operator's quick reference.
 
 ## Requirements
 
-- `uv` (the script declares its deps inline via a PEP 723 header — only `transformers`).
-- A tokenizer the run's model uses (HF id or local dir), e.g. `openai/gpt-oss-120b`,
-  `deepseek-ai/DeepSeek-R1`.
+- `uv` (the script declares its deps inline via a PEP 723 header — `transformers` + `pyyaml`).
+- Network access to fetch the model's tokenizer (or a local tokenizer dir).
 
 ## Run
 
+**Zero-config** — point it at a run directory and it auto-detects everything from the
+sidecar `config.yaml` + `run_meta.json` (model → tokenizer, dataset size, load pattern →
+profile):
+
 ```bash
-uv run scripts/steady_state_diagnostics.py <run>/events.jsonl \
-    --tokenizer <hf-id-or-dir> \
-    --dataset-size <N> \
-    [--superpass-size N]      # samples per super-pass (default: --dataset-size)
-    [--window-sizes 4,6,8]    # diagnostic scan sizes, in super-passes (min useful: 4)
-    [--warmup auto]           # "auto" (data-driven crop) or a fixed super-pass count
-    [--warmup-band 0.05]      # auto: crop leading super-passes >5% off the steady level
-    [--warmup-driver tpot_p50] # auto: metric whose ramp defines the crop
-    [--cov-bounds 0.03,0.05,0.08]
-    [--trend-gate mk_hamed_rao]   # {mann_kendall,mk_hamed_rao,newey_west,theil_sen,slope_vs_scatter}
-    [--alpha 0.05]
-    [--json out.json]         # full machine-readable result
+uv run scripts/steady_state_diagnostics.py <run_dir>/
 ```
 
-`--dataset-size` is the number of samples in one dataset pass (see the run's
-`run_meta.json` / config).
+**One flag** — a bare `events.jsonl` with no sidecar; `--model` drives the built-in
+model→tokenizer registry and the workload profile:
+
+```bash
+uv run scripts/steady_state_diagnostics.py events.jsonl --model kimi-k3
+```
+
+Everything is auto-resolved from the run's config + a **workload profile**
+(`concurrency` / `poisson` / `offline` / `agentic`), which sets the tokenizer, super-pass
+size, CoV bounds, and metric. All of the following remain available as **optional
+overrides**:
+
+```
+--model <name>            # else auto-detected from config
+--tokenizer <hf-id-or-dir># else from the model registry / config
+--dataset-size <N>        # else from run_meta.json / config
+--profile {concurrency,poisson,offline,agentic}   # else from load_pattern
+--superpass-size N  --window-sizes 4,6,8  --warmup auto  --warmup-band 0.05
+--warmup-driver tpot_p50  --cov-bounds 0.03,0.05,0.08  --trend-gate mk_hamed_rao
+--alpha 0.05  --tokenize-batch-size N  --trust-remote-code  --json out.json
+```
+
+**Model registry** (extend as needed): `kimi-k3`, `kimi-k2` → Moonshot (trust-remote-code);
+`gpt-oss` → `openai/gpt-oss-120b`; `deepseek-r1`/`dsr1` → `deepseek-ai/DeepSeek-R1`.
+
+**Profiles:** `concurrency` and `poisson` share the standard issue-time window + TPOT/TTFT
+gate; `offline` uses the same gates but its window/throughput are completion-based (partial
+support); `agentic` computes **NATL** (per-trajectory throughput) over trajectory
+super-passes and prints a prominent **NOT-YET-SUPPORTED** banner — agentic steady-state is
+experimental and must not be used for submissions.
 
 ## Interpreting the output
 

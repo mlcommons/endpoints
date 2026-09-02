@@ -131,9 +131,15 @@ def test_build_super_pass_series_records_e2e_latency(tmp_path):
 def test_warm_turn_ttft_excludes_cold_first_turn(tmp_path):
     def evt(et, ts, uuid, turn, data=None):
         return json.dumps(
-            {"event_type": et, "timestamp_ns": ts, "sample_uuid": uuid,
-             "turn": turn, "data": data}
+            {
+                "event_type": et,
+                "timestamp_ns": ts,
+                "sample_uuid": uuid,
+                "turn": turn,
+                "data": data,
+            }
         )
+
     lines = [
         _ev("session.start_performance_tracking", 0),
         evt("sample.issued", 1000, "A", 1),
@@ -601,3 +607,157 @@ def test_render_text_has_section_headers(tmp_path):
     assert "CoV steadiness" in text
     assert "drift (whole-run" in text
     assert "ttft_p50" in text
+
+
+# --------------------------------------------------------------------------- #
+# CLI simplification: model registry, profiles, sidecar auto-detect, NATL
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_tokenizer_matches_and_none():
+    assert mod.resolve_tokenizer("Kimi-K3-Instruct") == ("moonshotai/Kimi-K3", True)
+    assert mod.resolve_tokenizer("/models/gpt-oss-120b") == (
+        "openai/gpt-oss-120b",
+        False,
+    )
+    assert mod.resolve_tokenizer("some-deepseek-r1-distill") == (
+        "deepseek-ai/DeepSeek-R1",
+        False,
+    )
+    assert mod.resolve_tokenizer("llama-3-70b") is None
+
+
+def test_profile_for_load_pattern():
+    assert mod.profile_for_load_pattern("agentic_inference").name == "agentic"
+    assert mod.profile_for_load_pattern("agentic_inference").metric == "natl"
+    assert mod.profile_for_load_pattern("poisson").name == "poisson"
+    assert mod.profile_for_load_pattern("max_throughput").name == "offline"
+    assert mod.profile_for_load_pattern("offline").name == "offline"
+    assert mod.profile_for_load_pattern("concurrency").name == "concurrency"
+    assert mod.profile_for_load_pattern("something-unknown").name == "concurrency"
+
+
+def test_find_run_files_from_dir_and_events(tmp_path):
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / "events.jsonl").write_text("{}\n")
+    (client / "config.yaml").write_text("model_params:\n  name: /models/Kimi-K3\n")
+    (client / "run_meta.json").write_text('{"dataset_size": 613}')
+    ev, cfg, meta = mod.find_run_files(str(tmp_path))
+    assert ev.endswith("client/events.jsonl")
+    assert cfg is not None and cfg.endswith("config.yaml")
+    assert meta is not None and meta.endswith("run_meta.json")
+    # passing the events path directly resolves the same sidecars
+    ev2, cfg2, meta2 = mod.find_run_files(ev)
+    assert (ev2, cfg2, meta2) == (ev, cfg, meta)
+
+
+def test_find_run_files_missing_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        mod.find_run_files(str(tmp_path))
+
+
+def test_read_run_config(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "model_params:\n"
+        "  name: /models/Kimi-K3\n"
+        "  tokenizer_name: /models/Kimi-K3\n"
+        "settings:\n"
+        "  load_pattern:\n"
+        "    type: agentic_inference\n"
+        "datasets:\n"
+        "  - name: agentic_combined\n"
+        "    agentic_inference:\n"
+        "      num_trajectories_to_issue: 613\n"
+    )
+    meta = tmp_path / "run_meta.json"
+    meta.write_text('{"dataset_size": 6396}')
+    c = mod.read_run_config(str(cfg), str(meta))
+    assert c["model"] == "/models/Kimi-K3"
+    assert c["load_pattern"] == "agentic_inference"
+    assert c["num_trajectories"] == 613
+    assert c["dataset_size"] == 6396
+
+
+def test_read_run_config_top_level_load_pattern(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "load_pattern:\n  type: concurrency\nmodel_params:\n  name: gpt-oss\n"
+    )
+    c = mod.read_run_config(str(cfg), None)
+    assert c["load_pattern"] == "concurrency"
+    assert c["model"] == "gpt-oss"
+    assert c["dataset_size"] is None
+
+
+def _conv_ev(et, ts, uuid, conv, turn=None, data=None):
+    return json.dumps(
+        {
+            "event_type": et,
+            "timestamp_ns": ts,
+            "sample_uuid": uuid,
+            "conversation_id": conv,
+            "turn": turn,
+            "data": data,
+        }
+    )
+
+
+def test_build_trajectory_natl(tmp_path):
+    lines = [
+        _ev("session.start_performance_tracking", 0),
+        # c1: two turns, 1s each -> sum latency 2s; tokens 2 + 3 = 5 -> NATL 2.5
+        _conv_ev("sample.issued", 0, "a", "c1", 1),
+        _conv_ev(
+            "sample.complete",
+            1_000_000_000,
+            "a",
+            "c1",
+            1,
+            ["TextModelOutput", ["a ", "b"]],
+        ),
+        _conv_ev("sample.issued", 2_000_000_000, "b", "c1", 2),
+        _conv_ev(
+            "sample.complete",
+            3_000_000_000,
+            "b",
+            "c1",
+            2,
+            ["TextModelOutput", ["c ", "d ", "e"]],
+        ),
+        # c2: one turn, 2s; tokens 4 -> NATL 2.0
+        _conv_ev("sample.issued", 0, "d", "c2", 1),
+        _conv_ev(
+            "sample.complete",
+            2_000_000_000,
+            "d",
+            "c2",
+            1,
+            ["TextModelOutput", ["w ", "x ", "y ", "z"]],
+        ),
+        _ev("session.stop_performance_tracking", 9_000_000_000),
+    ]
+    path = _write_events(tmp_path, lines)
+    pairs = mod.build_trajectory_natl(path, _words)
+    # sorted by completion: c2 completes at 2e9, c1 at 3e9
+    assert [round(n, 3) for _, n in pairs] == [2.0, 2.5]
+    assert [t for t, _ in pairs] == [2_000_000_000, 3_000_000_000]
+
+
+def test_build_natl_result_flat_and_varied():
+    flat = [(i, 5.0) for i in range(100)]
+    r = mod.build_natl_result(flat, superpass_trajectories=10, cov_bounds=(0.10, 0.15))
+    assert r["n_trajectories"] == 100
+    assert r["n_super_passes"] == 10
+    assert len(r["sp_median"]) == 10
+    assert r["across_cov"] == 0.0
+    assert r["found"] is True
+    assert r["distribution"]["p50"] == 5.0
+    # a wildly varying series across super-passes -> high across-CoV -> not found
+    varied = [(i, float(1 + (i // 10) * 5)) for i in range(100)]  # 1,6,11,...,46
+    r2 = mod.build_natl_result(
+        varied, superpass_trajectories=10, cov_bounds=(0.10, 0.15)
+    )
+    assert r2["across_cov"] > 0.15
+    assert r2["found"] is False
