@@ -48,7 +48,7 @@ Key nested models:
 | Model            | Purpose                                             |
 | ---------------- | --------------------------------------------------- |
 | `LoadPattern`    | Pattern type + parameters (target QPS, concurrency) |
-| `RuntimeConfig`  | Duration, sample count, RNG seeds                   |
+| `RuntimeConfig`  | Workload sizing, issue-duration cap, and RNG seeds  |
 | `ClientSettings` | Worker count and HTTP client settings               |
 | `EndpointConfig` | Endpoint URLs, API key                              |
 | `Dataset`        | Dataset path, type (performance / accuracy)         |
@@ -70,6 +70,16 @@ Immutable snapshot of all parameters needed to execute a run.
 | `rng_sample_index`   | `Random`       | seeded from `dataloader_random_seed`    |
 
 Once constructed, `RuntimeSettings` cannot be modified. All consumers receive the same instance.
+
+### Endpoint response idle timeout
+
+`settings.timeouts.endpoint_response_idle_timeout_s` is a client-side liveness deadline, `None` by default. When enabled, use at least 300 seconds in normal deployments. Once a phase has an in-flight request, `BenchmarkSession` fails the run if no streamed chunk or final response arrives within the interval. The clock starts at local issuance — when the request is handed to the client transport. There is no server-acceptance acknowledgment in the client contract, so worker scheduling, connection acquisition, and local transport queueing all consume the deadline before the server even sees the request. It does not replace an engine's own KV-transfer deadline.
+
+**What counts as progress.** Only messages that reach the main process reset the clock. Under the default `client.stream_all_chunks: false`, workers forward a request's first streamed chunk and its final result — intermediate chunks never cross the IPC boundary. The largest gap a healthy streaming request can therefore produce is its full first-chunk-to-completion span, not a per-token gap. With `stream_all_chunks: true` every chunk resets the clock, at the cost of per-chunk IPC traffic.
+
+**Choosing a value.** Use `>=300` seconds and set it above the deployment's longest expected gap between main-process-visible events. Under the default `stream_all_chunks: false` — and for any non-streaming endpoint — that is the full latency of the longest single request, including pre-accept overhead; use `600` seconds or more for reasoning or long-output workloads. For TensorRT-LLM disaggregated serving, match the executor `hang_detection_timeout` (default 300 s), not `cache_transceiver_config.kv_transfer_timeout_ms`; raise the value if the normal p99 gap between visible events is longer.
+
+**On failure**, the run still drains the metrics pipeline and writes the standard artifacts (`performance/result_summary.json`, `report.txt`) with the report marked `INTERRUPTED`, then exits non-zero.
 
 ### `BenchmarkSuiteRuleset` (abstract base)
 
