@@ -492,6 +492,16 @@ class TestReportDisplayAndSerialize:
         # Absent run_config -> null, not omitted.
         assert json.loads(Report.from_snapshot(snap).to_json())["run_config"] is None
 
+    def test_to_json_carries_events_sha256(self):
+        """result_summary.json fingerprints the run's events.jsonl. The digest is
+        attached post-hoc (like accuracy), so from_snapshot leaves it null and it
+        serializes as null until set."""
+        report = _build_report(_make_registry(n_samples=5))
+        assert json.loads(report.to_json())["events_sha256"] is None
+
+        stamped = msgspec.structs.replace(report, events_sha256="deadbeef")
+        assert json.loads(stamped.to_json())["events_sha256"] == "deadbeef"
+
     def test_to_json_save(self, tmp_path: Path):
         registry = _make_registry(n_samples=5)
         report = _build_report(registry)

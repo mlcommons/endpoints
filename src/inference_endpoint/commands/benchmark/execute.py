@@ -107,6 +107,7 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
+from inference_endpoint.utils.hashing import sha256_file
 
 if TYPE_CHECKING:
     from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -1111,9 +1112,13 @@ def _write_report_artifacts(
     """Display the report and write result_summary.json + report.txt.
 
     result_summary.json is the self-complete machine-readable report (carries
-    qps/tps/seeds/accuracy via Report.to_json); report.txt is the full
-    human-readable dump; the console log shows the summary.
+    qps/tps/seeds/accuracy plus the events.jsonl SHA-256 via Report.to_json);
+    report.txt is the full human-readable dump; the console log shows the
+    summary.
     """
+    report = msgspec.structs.replace(
+        report, events_sha256=sha256_file(ctx.report_dir / "events.jsonl")
+    )
     report.display(fn=lambda s: logger.info(s), summary_only=True)
     performance_dir = ctx.report_dir / "performance"
     performance_dir.mkdir(parents=True, exist_ok=True)
