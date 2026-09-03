@@ -209,6 +209,7 @@ class TestFromSnapshot:
         # No duration -> from_snapshot leaves throughput unset.
         assert report.qps is None
         assert report.tps is None
+        assert report.e2e_avg_interactivity is None
         # Series with count==0 should produce empty dicts.
         assert report.ttft == {}
         assert report.latency == {}
@@ -226,6 +227,7 @@ class TestFromSnapshot:
         assert report.n_samples_completed == 50
         assert report.duration_ns == 10_000_000_000
         assert report.qps == pytest.approx(5.0)
+        assert report.e2e_avg_interactivity == pytest.approx(20_000.0)
 
         assert "min" in report.ttft
         assert "percentiles" in report.ttft
@@ -357,6 +359,7 @@ class TestReportDisplayAndSerialize:
         assert "Summary" in output
         assert "QPS:" in output
         assert "TPS:" in output
+        assert "E2E average interactivity: 20000.00 tokens/s" in output
         assert "End of Summary" in output
 
     def test_from_snapshot_leaves_accuracy_empty(self):
@@ -369,7 +372,9 @@ class TestReportDisplayAndSerialize:
         report = _build_report(_make_registry(n_samples=0))
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
-        assert "TPS: N/A" in "\n".join(lines)
+        output = "\n".join(lines)
+        assert "TPS: N/A" in output
+        assert "E2E average interactivity: N/A" in output
 
     def test_display_accuracy_section(self):
         """Each accuracy entry renders score + sample counts, plus per-subset
@@ -462,12 +467,14 @@ class TestReportDisplayAndSerialize:
         assert data["qps"] == pytest.approx(5.0)  # 50 completed / 10s
         assert data["tps"] == pytest.approx(report.tps)
         assert data["tps"] > 0  # OSL was recorded, so TPS is computable
+        assert data["e2e_avg_interactivity"] == pytest.approx(20_000.0)
 
     def test_to_json_qps_tps_null_without_duration(self):
         """No duration -> qps/tps serialize as null, not omitted or crashing."""
         data = json.loads(_build_report(_make_registry(n_samples=0)).to_json())
         assert data["qps"] is None
         assert data["tps"] is None
+        assert data["e2e_avg_interactivity"] is None
 
     def test_to_json_and_display_carry_run_config(self):
         """result_summary.json + report.txt carry the run's config so a run is
