@@ -182,56 +182,88 @@ consumer can **pull and run it with no `HF_TOKEN` and no rebuild**.
 Two scripts in this directory wrap the docker build/tag/push/pull steps. Both resolve the image reference from environment variables
 (shared via `_image_env.sh`):
 
-| Variable             | Required | Default              | Meaning                                                                     |
-| -------------------- | -------- | -------------------- | --------------------------------------------------------------------------- |
-| `LCB_IMAGE_REGISTRY` | yes      | —                    | registry + namespace, e.g. `myregistry.com/team`                            |
-| `LCB_IMAGE_NAME`     | no       | `lcb-service`        | image repo name                                                             |
-| `LCB_IMAGE_TAG`      | no       | `release_v6`         | tag; defaults to the baked-in dataset version so the tag is self-describing |
-| `LCB_LOCAL_TAG`      | no       | `lcb-service:latest` | local tag the run command / scorer expect                                   |
+| Variable             | Required             | Default                               | Meaning                                                                                                                                                                                                                                                          |
+| -------------------- | -------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LCB_IMAGE_REGISTRY` | yes                  | —                                     | registry + namespace, e.g. `myregistry.com/team`                                                                                                                                                                                                                 |
+| `LCB_IMAGE_NAME`     | no                   | `lcb-service`                         | image repo name                                                                                                                                                                                                                                                  |
+| `LCB_IMAGE_TAG`      | push: no · pull: yes | `<endpoints short SHA>-livecodebench` | image tag; `push_image.sh` defaults the SHA part to the endpoints commit SHA and `_image_env.sh` always appends a `-livecodebench` suffix (one immutable, self-identifying tag per build). Pull must name the build — pass the SHA; the suffix is added for you. |
+| `LCB_LOCAL_TAG`      | no                   | `lcb-service:latest`                  | local tag the run command / scorer expect                                                                                                                                                                                                                        |
 
-The resolved remote reference is `${LCB_IMAGE_REGISTRY}/${LCB_IMAGE_NAME}:${LCB_IMAGE_TAG}`.
+The resolved remote reference is `${LCB_IMAGE_REGISTRY}/${LCB_IMAGE_NAME}:${LCB_IMAGE_TAG}`, where `_image_env.sh` always appends a `-livecodebench` suffix to `LCB_IMAGE_TAG` so the LCB image is self-identifying and never collides with the client image's bare `:<sha>` tag in a shared package. `push_image.sh` defaults the SHA part to the endpoints commit short SHA, so each build publishes an immutable `…/lcb-service:<sha>-livecodebench` — there is no moving `latest`/`release_v6` tag. The same SHA is also baked into the image as the `org.opencontainers.image.revision` label.
 
 #### Push (maintainer)
 
 Requires `docker login dhi.io` (base images) and `docker login` to your target registry first.
 
+##### Updating the official repo image (`ghcr.io/mlcommons/endpoints`)
+
+Maintainers with `write:packages` on the **mlcommons** org publish the canonical image from the repo root. Authenticate to GHCR (a PAT / `GITHUB_TOKEN` with `write:packages`) and to `dhi.io` (hardened base images) first, then run the push script with the official registry + name:
+
 ```bash
-# Build (using HF_TOKEN as a build secret) and push:
+echo <YOUR_GHCR_TOKEN> | docker login ghcr.io -u <github-username> --password-stdin
+docker login dhi.io
+
+LCB_IMAGE_REGISTRY=ghcr.io/mlcommons LCB_IMAGE_NAME=endpoints HF_TOKEN=<YOUR_TOKEN> \
+  ./src/inference_endpoint/evaluation/livecodebench/push_image.sh
+```
+
+This builds a multi-arch manifest and publishes `ghcr.io/mlcommons/endpoints:<endpoints short SHA>-livecodebench`. The `-livecodebench` suffix keeps it distinct from the client image's bare `:<sha>` tag in the same package, and the tag is immutable — re-pushing the same commit is refused unless you add `--force`.
+
+##### Publishing to your own registry
+
+```bash
+# Build (using HF_TOKEN as a build secret) and push a MULTI-ARCH manifest
+# (linux/amd64,linux/arm64) by default:
 LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<your HuggingFace Token> \
   ./push_image.sh
 
-# Or push an already-built local image without rebuilding:
-LCB_IMAGE_REGISTRY=myregistry.com/team ./push_image.sh --no-build
+# Or push an already-built local image without rebuilding (name the build explicitly):
+LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./push_image.sh --no-build
 ```
 
-**Cross-architecture builds.** To build for an architecture other than the host's (e.g. build `arm64` on an
-`x86_64` node, or a multi-arch manifest), pass `--platform`:
+Every build goes through `docker buildx` and pushes **straight to the registry**: buildx forces gzip layers so the
+image is extractable by enroot/pyxis on SLURM (see [#467](https://github.com/mlcommons/endpoints/issues/467)), and a
+multi-arch image cannot be loaded into the local docker store anyway. The script auto-creates a `docker-container`
+buildx builder. `--no-build` is the one exception: it publishes a pre-built local `lcb-service:latest` (**host arch only**) by pushing it to a transient `staging-…` tag, verifying its layers, then promoting onto the pinned tag on success. Because a plain push cannot force gzip, a local image carrying zstd layers (containerd image store) is **rejected, not repaired** — rebuild via the buildx path (drop `--no-build`) to get gzip layers. `--no-build` also ignores `--platform`.
+
+Each build publishes an immutable `:<sha>-livecodebench` tag, so **re-pushing an existing `:<sha>-livecodebench` is refused** to protect it. Pass `--force` to overwrite deliberately (e.g. re-running a partially failed push):
+
+```bash
+LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<token> ./push_image.sh --force
+```
+
+**Single-arch / cross-arch builds.** Pass `--platform` to override the multi-arch default — e.g. a single arch (much
+faster, no emulation) or a specific target:
 
 ```bash
 LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<token> ./push_image.sh --platform linux/arm64
 LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<token> ./push_image.sh --platform linux/amd64,linux/arm64
 ```
 
-Platform builds use `docker buildx` and push the image **straight to the registry** (a non-native image cannot be
-loaded into the local docker store, so there is no `--no-build` for this path). The script auto-creates a
-`docker-container` buildx builder. The target architecture must have **QEMU emulation registered on the host**,
-a one-time step that needs `--privileged`:
+Building an architecture other than the host's needs **QEMU emulation registered on the host**, a one-time step that
+needs `--privileged`:
 
 ```bash
 docker run --privileged --rm tonistiigi/binfmt --install all
 ```
 
-> ⚠️ The dataset-generation step runs under emulation when cross-building, which is **much slower** than a native
-> build (and still needs the same ~21 GiB peak). Prefer building natively on a host of the target architecture
-> when one is available.
+> ⚠️ The dataset-generation step runs under emulation for any non-host arch, which is **much slower** than native
+> (and still needs the same ~21 GiB peak). Since multi-arch is the default, expect the non-host arch to build under
+> emulation; pass `--platform <host-arch>` for a quick single-arch image when that is enough.
 
 #### Pull (consumer / eval side)
 
-No `HF_TOKEN` needed. By default the image is re-tagged locally as `lcb-service:latest`, so the
-[hardened run command](#hardened-run-command) and the scorer's `ws://localhost:13835/evaluate` expectation work unchanged.
+No `HF_TOKEN` needed. Set `LCB_IMAGE_TAG` to the build (short SHA) you want to pull. By default the image is re-tagged
+locally as `lcb-service:latest`, so the [hardened run command](#hardened-run-command) and the scorer's
+`ws://localhost:13835/evaluate` expectation work unchanged.
 
 ```bash
-LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh
+LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh
+
+# Official image published by maintainers (matches the push recipe above). LCB_IMAGE_NAME
+# must be set to `endpoints`, otherwise this resolves to ghcr.io/mlcommons/lcb-service (a
+# different repo). Pass the SHA; the `-livecodebench` suffix is added for you.
+LCB_IMAGE_REGISTRY=ghcr.io/mlcommons LCB_IMAGE_NAME=endpoints LCB_IMAGE_TAG=<sha> ./pull_image.sh
 ```
 
 ### (Only if using enroot) Generating a .sqsh file for enroot
@@ -240,8 +272,8 @@ The pull script can produce an enroot `.sqsh` from the pulled image with the `--
 [enroot](https://github.com/NVIDIA/enroot/tree/main) (e.g. SLURM clusters):
 
 ```bash
-LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh --sqsh            # writes lcb_service.sqsh
-LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh --sqsh out.sqsh   # custom output path
+LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh --sqsh            # writes lcb_service.sqsh
+LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh --sqsh out.sqsh   # custom output path
 ```
 
 This runs `enroot import --output <file> dockerd://${LCB_IMAGE_REF}` on the just-pulled image. Running the service via enroot is
