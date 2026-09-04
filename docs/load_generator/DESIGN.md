@@ -35,6 +35,7 @@ each producing an independent report.
 BenchmarkSession.run(phases)
     |
     +-- STARTED
+    +-- [endpoint response idle watchdog]   armed only if endpoint_response_idle_timeout_s is set (default null)
     +-- [warmup]     strategy.execute() → drain_after=False (keep in-flight saturated)
     +-- [perf phase 1]   START_PERFORMANCE_TRACKING → strategy.execute() → drain → STOP_PERFORMANCE_TRACKING
     +-- [warmup]     strategy.execute() → drain_after=False (keep in-flight saturated)
@@ -173,7 +174,7 @@ class BenchmarkSession:
 **`run(phases)`** lifecycle:
 
 1. Publish `SessionEventType.STARTED`
-2. Start receiver coroutine (`_receive_responses`)
+2. Start receiver coroutine (`_receive_responses`). When the endpoint response idle timeout is set, a single session-liveness timer is armed while work is in flight and fails the session if every in-flight request is silent for the interval. Configure `>=300` seconds; see `docs/config/DESIGN.md` for tuning.
 3. For each phase:
    a. Create `SampleOrder` and `LoadStrategy` from phase settings
    b. Set `self._current_dataset` to phase dataset
@@ -296,12 +297,16 @@ async def _receive_responses(self):
                 self._strategy_task.cancel()
             break
         self._handle_response(resp)
+        if self._endpoint_response_idle_timeout_ns is not None:
+            self._last_response_progress_ns = time.monotonic_ns()
 ```
 
 Uses `recv()` exclusively — no `poll()` spin. The ZMQ fd is registered with
 the event loop, so `recv()` wakes exactly when a response is available with
 zero CPU overhead. Each `recv()` call yields to the event loop, ensuring
 strategy coroutines (call_at callbacks, semaphore waiters) are never starved.
+
+The endpoint response idle guard rides this same path to catch a client-visible worker or transport stall. It is not a per-request engine timeout: any chunk or final response counts as progress, and only a fully silent endpoint fails the run. A request may remain stuck while other in-flight requests respond; once those requests drain, the remaining stuck request causes the session to fail after the interval. The receiver only stamps a timestamp, and only when the deadline is set — streaming frame rate is QPS x output length, so per-chunk work is paid per token. The armed `call_later` timer re-derives its own deadline from that stamp when it fires, and re-arms for the remainder if progress raced it.
 
 For `ConcurrencyStrategy`, `_handle_response` calls `strategy.on_query_complete()`
 which releases the semaphore. Since `recv()` returns as soon as the fd is readable

@@ -835,6 +835,40 @@ def test_pyxis_srun_environment_does_not_forward_credentials(monkeypatch):
     assert "HF_TOKEN" not in environment
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        # srun locates its own configuration through SLURM_CONF; without it a
+        # configless or multi-cluster site aborts every step before a container
+        # is created.
+        "SLURM_CONF",
+        # enroot performs the registry pull inside the step and needs the same
+        # proxy policy as the caller.
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+    ],
+)
+def test_pyxis_srun_environment_forwards_config_and_proxy_policy(monkeypatch, name):
+    monkeypatch.setenv(name, "value")
+
+    assert safe_srun_env().get(name) == "value"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["SLURM_JOB_ID", "SLURM_STEP_ID", "SLURM_NTASKS", "SLURM_NNODES", "SLURM_PROCID"],
+)
+def test_pyxis_srun_environment_withholds_inherited_step_identity(monkeypatch, name):
+    """Only SLURM_CONF is forwarded; step identity would break a nested srun."""
+    monkeypatch.setenv(name, "inherited")
+
+    assert name not in safe_srun_env()
+
+
 def test_pyxis_environment_reuses_named_writable_container(
     monkeypatch, tmp_path, caplog
 ):

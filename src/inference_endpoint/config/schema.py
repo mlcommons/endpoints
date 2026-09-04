@@ -801,6 +801,21 @@ class Timeouts(WithUpdatesMixin, BaseModel):
         gt=0,
         description="Whole-run watchdog seconds (None = off).",
     )
+    endpoint_response_idle_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--endpoint-response-idle-timeout",
+        ),
+    ] = Field(
+        None,
+        gt=0,
+        description=(
+            "Endpoint liveness deadline: fail the run when work is in flight but "
+            "no response chunk or completion arrives for this many seconds "
+            "(None = off). When enabled, recommend >=300 seconds and size it above the longest "
+            "single-request latency. See docs/config/DESIGN.md."
+        ),
+    )
     interrupted_teardown_grace_s: float = Field(
         30.0,
         gt=0,

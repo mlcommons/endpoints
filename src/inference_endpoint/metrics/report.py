@@ -32,7 +32,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.aggregator impor
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     build_token_series_dict,
 )
-from inference_endpoint.evaluation.accuracy_results import average_accuracy
+from inference_endpoint.evaluation.accuracy_results import (
+    samples_weighted_average_accuracy,
+)
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
@@ -501,7 +503,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                         fn(f"    {sub}: {sub_score:.2f}%{newline}")
                 if entry.get("complete") is False:
                     fn(f"    (incomplete){newline}")
-            avg = average_accuracy(self.accuracy)
+            avg = samples_weighted_average_accuracy(self.accuracy)
             if avg is not None:
                 fn(f"  Average: {avg:.4g}{newline}")
             if any("osl_tokenize_s" in e for e in self.accuracy):

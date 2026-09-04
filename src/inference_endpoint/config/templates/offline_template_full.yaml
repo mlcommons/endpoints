@@ -86,6 +86,7 @@ settings:
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
   timeouts:  # All global waits and deadlines (see config/schema.py)
     run_timeout_s: null  # Whole-run watchdog seconds (None = off).
+    endpoint_response_idle_timeout_s: null  # Endpoint liveness deadline: fail the run when work is in flight but no response chunk or completion arrives for this many seconds (None = off). When enabled, recommend >=300 seconds and size it above the longest single-request latency. See docs/config/DESIGN.md.
     interrupted_teardown_grace_s: 30.0  # Abort drain grace before remaining services are killed.
     service_ready_timeout_s: 30.0  # Service startup wait in seconds.
     warmup_drain_timeout_s: 240.0  # Warmup drain seconds (None = unlimited).

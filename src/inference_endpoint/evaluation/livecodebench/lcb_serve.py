@@ -35,6 +35,7 @@ running in.
 """
 
 import argparse
+import ctypes
 import json
 import logging
 import multiprocessing as mp
@@ -43,26 +44,46 @@ from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
+from multiprocessing.sharedctypes import Synchronized
 from pathlib import Path
+from typing import cast
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
 from .generate import generate_dataset
+from .run_lcb_tests import run_test
 
 logger = logging.getLogger(__name__)
 
+# Error codes that mean the judge is broken, as opposed to the submitted code
+# failing its tests: -5 TestRunnerError, -6 GradingChildDied (child died
+# before grading started, e.g. a bad start method). Submission-attributed
+# codes stay out: timeouts (-1), sys.exit() (-7 SubmissionExit), submissions
+# that kill their own interpreter (-8 SubmissionKilledChild), and -4 (the
+# submission's code failed to compile or define the expected function --
+# see the outer except in run_lcb_tests.grade_call_based/grade_stdio callers
+# -- which is the submission's fault, not the judge's, even though it's
+# labeled "Error during testing").
+_LCB_INFRA_ERROR_CODES = {-5, -6}
 
-def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
+
+def execute_code_single(
+    test_suite_json: str,
+    code: str,
+    timeout_sec: int = 60,
+    *,
+    started_flag: Synchronized | None = None,
+) -> tuple[list, dict]:
     # Run code with lcb_runner. Note that the lcb_runner has a very rudimentary sandbox
     # which is extremely easy to bypass, and as such it is recommended to run this both
     # in an unprivileged container and in a separate process.
-    import numpy as np
-
-    from .run_lcb_tests import run_test
-
     res, metadata = run_test(
-        {"input_output": test_suite_json}, test=code, timeout=timeout_sec
+        {"input_output": test_suite_json},
+        test=code,
+        timeout=timeout_sec,
+        started_flag=started_flag,
     )
 
     # LCB results are expected to be plain booleans or error codes.
@@ -78,16 +99,36 @@ def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
 
 
 def execute_code_single_suppressed_errors(
-    *args, resp_buffer: list | None = None, **kwargs
-):
+    test_suite_json: str,
+    code: str,
+    timeout_sec: int = 60,
+    *,
+    resp_buffer: list | None = None,
+    started_flag: Synchronized | None = None,
+) -> tuple[list, dict]:
     """Wrapper around execute code so that all errors are resurfaced as failed tests"""
     try:
-        res, metadata = execute_code_single(*args, **kwargs)
+        # started_flag is flipped inside run_test, once judge-side setup
+        # (reliability_guard, suite parse) is done and the submission's own
+        # code is next; see run_lcb_tests.run_test.
+        res, metadata = execute_code_single(
+            test_suite_json, code, timeout_sec=timeout_sec, started_flag=started_flag
+        )
         if not isinstance(res, list):
             raise ValueError(f"Expected boolean result, got {type(res)}")
 
         if not isinstance(metadata, dict):
             raise ValueError(f"Expected metadata to be a dict, got {type(metadata)}")
+    except SystemExit as e:
+        # sys.exit() in submitted code is a BaseException, not caught below.
+        # It's the submission's fault, not the judge's, so give it its own
+        # error code and keep it out of _LCB_INFRA_ERROR_CODES.
+        res = [-2]
+        metadata = {
+            "error": f"Submission called sys.exit({e.code!r})",
+            "error_code": -7,
+            "error_message": "SubmissionExit",
+        }
     except Exception:
         # Magic number (see https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/evaluation/compute_code_generation_metrics.py#L65)
         res = [-2]  # LCB internal error code for test runner failed test cases
@@ -106,7 +147,7 @@ def run_code_subprocess(
     test_suite_json: str,
     code: str,
     timeout_sec: int = 60,
-):
+) -> tuple[list, dict]:
     # Compute global timeout -
     # https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/evaluation/compute_code_generation_metrics.py#L43
 
@@ -117,37 +158,67 @@ def run_code_subprocess(
         suite["inputs"]
     ) + flat_timeout_extension
 
-    manager = mp.Manager()
-    resp_buffer = manager.list()
-    p = mp.Process(
-        target=execute_code_single_suppressed_errors,
-        args=(
-            test_suite_json,
-            code,
-        ),
-        kwargs={
-            "resp_buffer": resp_buffer,
-            "timeout_sec": timeout_sec,
-        },
-    )
-    p.start()
-    p.join(timeout=global_timeout)
+    with mp.Manager() as manager:
+        resp_buffer = manager.list()
+        # typeshed types ctx.Value() as SynchronizedBase, which lacks .value.
+        # lock=False: single writer (the child), single reader (the parent,
+        # after join), so no lock is needed and none of the semaphore risk
+        # that comes with one.
+        started_flag = cast(Synchronized, mp.Value(ctypes.c_bool, False, lock=False))
+        p = mp.Process(
+            target=execute_code_single_suppressed_errors,
+            args=(
+                test_suite_json,
+                code,
+            ),
+            kwargs={
+                "resp_buffer": resp_buffer,
+                "timeout_sec": timeout_sec,
+                "started_flag": started_flag,
+            },
+        )
+        p.start()
+        p.join(timeout=global_timeout)
 
-    if p.is_alive():
-        p.kill()
+        timed_out = p.is_alive()
+        if timed_out:
+            p.kill()
+            p.join()
 
-    if len(resp_buffer) == 0:
-        # Assume timeout
-        res = [-1] * len(suite["inputs"])
+        if len(resp_buffer) > 0:
+            return resp_buffer[0]
+
+        started = bool(started_flag.value)
+        exitcode = p.exitcode
+
+    # No result was reported: every test case counts as failed, only the
+    # attribution differs.
+    res = [-1] * len(suite["inputs"])
+    if timed_out:
+        # Still running at the deadline: the submitted code took too long.
         metadata = {
             "error": "Test suite timeout",
             "error_code": -1,
             "error_message": f"Subprocess did not complete in time ({global_timeout}s)",
         }
-        return res, metadata
+    elif started:
+        # The interpreter died while grading was running (os._exit(),
+        # segfault, OOM, ...). Grading executes the untrusted submission, so
+        # this is the submission's fault, not the judge's.
+        metadata = {
+            "error": "Grading child killed while executing the submission",
+            "error_code": -8,
+            "error_message": f"SubmissionKilledChild (exitcode={exitcode})",
+        }
     else:
-        res, metadata = resp_buffer[0]
-        return res, metadata
+        # Died before grading started (e.g. bad start method): the judge is
+        # broken.
+        metadata = {
+            "error": "Grading subprocess died before grading started",
+            "error_code": -6,
+            "error_message": f"GradingChildDied (exitcode={exitcode})",
+        }
+    return res, metadata
 
 
 class LCBTestLoader:
@@ -270,6 +341,7 @@ class _LCBWorker:
         for qid, test_codes in zip(question_ids, codes, strict=False):
             results[qid] = [False] * len(test_codes)
         futures = {}
+        infra_errors = 0
 
         with ProcessPoolExecutor(max_workers=self.n_lcb_workers) as executor:
             for qid, test_codes in zip(question_ids, codes, strict=False):
@@ -290,9 +362,19 @@ class _LCBWorker:
                 qid, code_idx = futures[future]
                 res, metadata = future.result()
                 if "error" in metadata:
-                    logger.warning(
-                        f"Test execution error for question {qid}: {metadata}"
-                    )
+                    if metadata.get("error_code") in _LCB_INFRA_ERROR_CODES:
+                        infra_errors += 1
+                        logger.error(
+                            f"Test execution error for question {qid}: {metadata}"
+                        )
+                    else:
+                        # Routine submission-attributed outcomes (timeout,
+                        # sys.exit, os._exit, bad code) -- expected at scale,
+                        # would otherwise flood ERROR and drown out the
+                        # infra signal above.
+                        logger.warning(
+                            f"Test execution error for question {qid}: {metadata}"
+                        )
 
                 # LCB uses any result > 0 as a 'pass' since:
                 # Negative numbers indicate error codes
@@ -316,6 +398,17 @@ class _LCBWorker:
                             e,
                             exc_info=True,
                         )
+
+        # Every subprocess hitting an infra error means the judge itself is
+        # broken, not that every code sample failed its tests. Timeouts are
+        # excluded: a batch where every submission loops forever is a valid
+        # 0 score, not a broken judge.
+        if futures and infra_errors == len(futures):
+            raise RuntimeError(
+                f"All {len(futures)} grading subprocesses reported "
+                "infrastructure errors - the LCB judge is broken; refusing "
+                "to report a 0 score. See the logged error metadata above."
+            )
 
         return results
 
@@ -348,6 +441,7 @@ class LCBServe:
         if n_workers is None:
             n_workers = mp.cpu_count() // 2
         logger.info("Using %d workers for LCB eval", n_workers)
+        logger.info("Multiprocessing start method: %s", mp.get_start_method())
         self.n_workers = n_workers
 
         self.path_to_dataset = (

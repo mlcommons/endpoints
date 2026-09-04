@@ -102,6 +102,7 @@ from inference_endpoint.exceptions import (
 )
 from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import (
+    EndpointResponseIdleTimeoutError,
     PhaseResult,
     PhaseType,
     SessionResult,
@@ -677,6 +678,32 @@ class TestCommandHandlers:
         )
         lp = bound.arguments["config"].settings.load_pattern
         assert lp.use_legacy_loadgen_qps_metrics is False
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--endpoint-response-idle-timeout", "300"),
+            ("--timeouts.endpoint-response-idle-timeout-s", "600"),
+        ],
+    )
+    def test_endpoint_response_idle_timeout_cli_spellings(self, flag, value):
+        _, bound, _ = benchmark_app.parse_args(
+            [
+                "offline",
+                "--endpoints",
+                "http://h:80",
+                "--model",
+                "m",
+                "--dataset",
+                "d.jsonl",
+                flag,
+                value,
+            ],
+            exit_on_error=False,
+        )
+        config = bound.arguments["config"]
+        assert config.settings.timeouts.endpoint_response_idle_timeout_s == float(value)
 
     @pytest.mark.unit
     def test_warmup_salt_flag_default_and_negative(self):
@@ -1702,6 +1729,82 @@ class TestAggregatorArgs:
             with pytest.raises(expected_error, match=expected_match):
                 await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_error_drains_and_returns_partial_result(
+        self, tmp_path
+    ):
+        """A liveness failure must preserve the drained report for finalization."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+        mock_client = MagicMock()
+        mock_client.shutdown_async = AsyncMock()
+        mock_session = MagicMock()
+        mock_session.run = AsyncMock(
+            side_effect=EndpointResponseIdleTimeoutError("endpoint stalled")
+        )
+        report = MagicMock()
+        drain = AsyncMock(return_value=report)
+        loop = asyncio.get_event_loop()
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(return_value=(MagicMock(), mock_client)),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_agentic_strategy",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.BenchmarkSession",
+                return_value=mock_session,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_phases",
+                return_value=[],
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline."
+                "MetricsPipeline.drain_and_build_report",
+                new=drain,
+            ),
+            patch.object(loop, "add_signal_handler"),
+            patch.object(loop, "remove_signal_handler"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            bench = await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+        assert bench.stall_error == "endpoint stalled"
+        assert bench.report is report
+        assert bench.session.phase_results == []
+        drain.assert_awaited_once()
+        mock_client.shutdown_async.assert_awaited_once()
+
 
 class TestAccuracyOnlyDatasetLoading:
     """`--accuracy-only` must skip the performance dataset even when the config
@@ -2471,15 +2574,16 @@ class TestFinalizeBenchmark:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("abort_field", "snapshot_state"),
+        ("abort_field", "abort_value", "snapshot_state"),
         [
-            ("run_timed_out", "complete"),
-            ("user_interrupted", "live"),
-            (None, "interrupted"),
+            ("run_timed_out", True, "complete"),
+            ("user_interrupted", True, "live"),
+            ("stall_error", "endpoint stalled", "complete"),
+            (None, None, "interrupted"),
         ],
     )
     def test_aborted_run_never_scores_or_writes_complete_artifacts(
-        self, tmp_path, monkeypatch, abort_field, snapshot_state
+        self, tmp_path, monkeypatch, abort_field, abort_value, snapshot_state
     ):
         """Split-brain guard: an aborted run must never ship artifacts under
         any non-interrupted state. "complete": the aggregator finalized before
@@ -2493,7 +2597,7 @@ class TestFinalizeBenchmark:
         bench = _make_benchmark_result(tmp_path)
         bench.report = self._make_report(state=snapshot_state)
         if abort_field is not None:
-            setattr(bench, abort_field, True)
+            setattr(bench, abort_field, abort_value)
         score_accuracy = MagicMock()
         monkeypatch.setattr(execute_mod, "score_accuracy", score_accuracy)
 
@@ -2561,6 +2665,32 @@ class TestFinalizeBenchmark:
                 ],
             }
         )
+
+
+class TestRunBenchmarkStallOutcome:
+    """An endpoint stall must finalize artifacts before the run fails."""
+
+    @pytest.mark.unit
+    def test_stall_finalizes_then_raises(self, tmp_path, monkeypatch):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config, tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        bench.stall_error = "endpoint stalled"
+        finalize = MagicMock()
+
+        monkeypatch.setattr(execute_mod, "setup_benchmark", MagicMock(return_value=ctx))
+        monkeypatch.setattr(
+            execute_mod, "run_benchmark_async", MagicMock(return_value=bench)
+        )
+        monkeypatch.setattr(execute_mod, "finalize_benchmark", finalize)
+
+        with pytest.raises(ExecutionError, match="endpoint stalled"):
+            execute_mod.run_benchmark(config, TestMode.PERF)
+
+        # The raise happens only after finalize wrote the standard artifacts;
+        # reaching pytest.raises without this call would mean the stall
+        # propagated before finalization (the pre-fix behavior).
+        finalize.assert_called_once_with(ctx, bench)
 
 
 class TestScorerMethodSync:

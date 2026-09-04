@@ -90,6 +90,18 @@ Dataset Manager ──> Load Generator ──> Endpoint Client ──> External 
 - **Online** (`poisson`): Fixed QPS with Poisson arrival distribution for latency profiling
 - **Concurrency**: Fixed concurrent request count
 
+### Endpoint liveness
+
+Set an endpoint response idle timeout to fail the run when in-flight work stops responding. Use `>=300` seconds; raise it for long requests:
+
+```yaml
+settings:
+  timeouts:
+    endpoint_response_idle_timeout_s: 300
+```
+
+Or pass `--endpoint-response-idle-timeout 300`. The guard is client-side; see [the configuration guide](docs/config/DESIGN.md#endpoint-response-idle-timeout) for tuning.
+
 ### Performance Design
 
 The hot path is optimized for minimal overhead:

@@ -54,6 +54,16 @@ registry requires authentication. Launch the service on the compute node inside 
 active one-node Slurm allocation. The runtime requires `SLURM_JOB_ID` and
 `SLURMD_NODENAME` and assumes the node is exclusive to the user.
 
+Each `srun` step is given an explicit allow-list of environment variables rather
+than the service's whole environment, so that inherited `SLURM_JOB_ID` /
+`SLURM_STEP_ID` cannot corrupt a nested `srun`. Two entries on that list are load
+bearing on real clusters: `SLURM_CONF`, without which the child `srun` falls back
+to `/etc/slurm/slurm.conf` and aborts on a configless or multi-cluster site; and
+the proxy variables (`http_proxy`, `https_proxy`, `no_proxy` and their uppercase
+forms), which Enroot needs because it performs the registry pull inside the step.
+Credentials such as `OPENAI_API_KEY`, `HF_TOKEN` and the service auth token are
+never forwarded.
+
 During generation, the service still uses mini-swe-agent for the agent loop and
 model requests, but replaces its Docker environment with `PyxisEnvironment`. Every
 trajectory receives a named, writable Pyxis container. Each tool call becomes an
