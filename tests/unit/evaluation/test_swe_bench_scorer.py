@@ -250,6 +250,39 @@ class TestSWEBenchScorerPreflight:
         with pytest.raises(SetupError, match="returned invalid JSON"):
             SWEBenchScorer._http_json("http://service-host:18080/health")
 
+    def test_http_json_retries_timeout(self, monkeypatch):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"status":"ok"}'
+        opener = MagicMock()
+        opener.open.side_effect = [
+            TimeoutError("timed out"),
+            TimeoutError("timed out"),
+            response,
+        ]
+        sleeps: list[float] = []
+        monkeypatch.setattr(swe_bench_mod, "_NO_REDIRECT_OPENER", opener)
+        monkeypatch.setattr(swe_bench_mod.time, "sleep", sleeps.append)
+
+        result = SWEBenchScorer._http_json("http://service-host:18080/health")
+
+        assert result == {"status": "ok"}
+        assert opener.open.call_count == 3
+        assert sleeps == [5.0, 5.0]
+
+    def test_http_json_raises_after_timeout_attempts(self, monkeypatch):
+        opener = MagicMock()
+        opener.open.side_effect = TimeoutError("timed out")
+        sleeps: list[float] = []
+        monkeypatch.setattr(swe_bench_mod, "_NO_REDIRECT_OPENER", opener)
+        monkeypatch.setattr(swe_bench_mod, "_HTTP_TIMEOUT_MAX_ATTEMPTS", 3)
+        monkeypatch.setattr(swe_bench_mod.time, "sleep", sleeps.append)
+
+        with pytest.raises(TimeoutError, match="timed out"):
+            SWEBenchScorer._http_json("http://service-host:18080/health")
+
+        assert opener.open.call_count == 3
+        assert sleeps == [5.0, 5.0]
+
     def test_capability_mismatch_raises(self, monkeypatch):
         monkeypatch.setattr(
             SWEBenchScorer,
