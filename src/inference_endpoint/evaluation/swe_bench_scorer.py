@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_HTTP_TIMEOUT_MAX_ATTEMPTS = 10
+_HTTP_TIMEOUT_RETRY_DELAY_S = 5.0
 
 
 class _RejectRedirectHandler(urllib_request.HTTPRedirectHandler):
@@ -181,19 +183,30 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             data = msgspec.json.encode(payload)
             headers["Content-Type"] = "application/json"
         req = urllib_request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with _NO_REDIRECT_OPENER.open(req, timeout=timeout_s) as resp:
-                body = resp.read()
-        except urllib_error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise SetupError(
-                f"SWE-bench service request failed: {url} returned HTTP "
-                f"{exc.code}: {detail}"
-            ) from exc
-        except urllib_error.URLError as exc:
-            raise SetupError(
-                f"SWE-bench service is unreachable at {url}: {exc.reason}"
-            ) from exc
+        for attempt in range(1, _HTTP_TIMEOUT_MAX_ATTEMPTS + 1):
+            try:
+                with _NO_REDIRECT_OPENER.open(req, timeout=timeout_s) as resp:
+                    body = resp.read()
+                break
+            except TimeoutError:
+                if attempt == _HTTP_TIMEOUT_MAX_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "SWE-bench service HTTP timeout; retrying (%d/%d)",
+                    attempt,
+                    _HTTP_TIMEOUT_MAX_ATTEMPTS,
+                )
+                time.sleep(_HTTP_TIMEOUT_RETRY_DELAY_S)
+            except urllib_error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                raise SetupError(
+                    f"SWE-bench service request failed: {url} returned HTTP "
+                    f"{exc.code}: {detail}"
+                ) from exc
+            except urllib_error.URLError as exc:
+                raise SetupError(
+                    f"SWE-bench service is unreachable at {url}: {exc.reason}"
+                ) from exc
         try:
             decoded = msgspec.json.decode(body, type=dict)
         except msgspec.DecodeError as exc:

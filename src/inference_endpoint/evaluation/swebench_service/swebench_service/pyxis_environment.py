@@ -6,10 +6,12 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import random
 import re
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,14 @@ _SAFE_SRUN_ENV = (
     "SLURM_CONF",
 )
 _STEP_STATUS = "/tmp/.mlperf_srun_status"
+_SRUN_MAX_ATTEMPTS = 5
+_RETRYABLE_PRELAUNCH_ERRORS = (
+    "spank_sybil: rpc request error",
+    "required plugin spank_sybil.so",
+    "failed to connect to any sack sockets",
+    "failed to create token",
+    "curl: (56) connect tunnel failed",
+)
 _STEP_SCRIPT = r"""set +e
 status_path=$1
 timeout_s=$2
@@ -57,6 +67,14 @@ exit "$returncode"
 
 def safe_srun_env() -> dict[str, str]:
     return {name: os.environ[name] for name in _SAFE_SRUN_ENV if name in os.environ}
+
+
+def _is_retryable_prelaunch_failure(status: str, output: str) -> bool:
+    """Return whether Slurm rejected the step before its command started."""
+    if status != "pending":
+        return False
+    lowered = output.lower()
+    return any(marker in lowered for marker in _RETRYABLE_PRELAUNCH_ERRORS)
 
 
 def build_srun_command(
@@ -120,8 +138,6 @@ def run_srun_step(
     workdir: str | None = None,
     stderr: int = subprocess.STDOUT,
 ) -> subprocess.CompletedProcess[str]:
-    status_path.write_text("pending\n")
-    status_path.chmod(0o666)
     command = build_srun_command(
         image=image,
         name=name,
@@ -137,28 +153,57 @@ def run_srun_step(
             *argv,
         ],
     )
-    try:
-        result = subprocess.run(
-            command,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=stderr,
-            timeout=timeout_s + 30,
-            env=safe_srun_env(),
+    for attempt in range(1, _SRUN_MAX_ATTEMPTS + 1):
+        status_path.write_text("pending\n")
+        status_path.chmod(0o666)
+        try:
+            result = subprocess.run(
+                command,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                timeout=timeout_s + 30,
+                env=safe_srun_env(),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            if failure_path is not None:
+                failure_path.touch()
+            raise RunnerError(
+                "Pyxis infrastructure failure before the command completed"
+            ) from exc
+
+        status = status_path.read_text().strip()
+        if status == f"finished:{result.returncode}":
+            return result
+
+        output = (result.stdout or "").strip()
+        retryable = _is_retryable_prelaunch_failure(status, output)
+        if retryable and attempt < _SRUN_MAX_ATTEMPTS:
+            delay_s = min(2**attempt, 16) + random.uniform(0.0, 1.0)
+            logger.warning(
+                "Retrying Pyxis pre-launch failure in %.1fs (attempt %d/%d)",
+                delay_s,
+                attempt,
+                _SRUN_MAX_ATTEMPTS,
+            )
+            time.sleep(delay_s)
+            continue
+
+        if failure_path is not None:
+            failure_path.touch()
+        if len(output) > 8000:
+            output = "...<truncated>...\n" + output[-8000:]
+        detail = (
+            "Pyxis infrastructure failure before the command completed "
+            f"(srun return code {result.returncode}, attempts {attempt})"
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        if failure_path is not None:
-            failure_path.touch()
-        raise RunnerError(
-            "Pyxis infrastructure failure before the command completed"
-        ) from exc
-    if status_path.read_text().strip() != f"finished:{result.returncode}":
-        if failure_path is not None:
-            failure_path.touch()
-        raise RunnerError("Pyxis infrastructure failure before the command completed")
-    return result
+        if output:
+            detail += f"\nCaptured srun output:\n{output}"
+        raise RunnerError(detail)
+
+    raise AssertionError("unreachable")
 
 
 def resolve_image(image_registry: str, instance_id: str) -> str:
