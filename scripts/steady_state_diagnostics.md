@@ -14,11 +14,13 @@ operator's quick reference.
    (`(complete − recv_first) / tokens(output-after-first-chunk)`); TPOT needs the
    `--tokenizer`, so it is required.
 3. Finds the **first steady plateau**: grow a window from the start while it stays
-   _admissible_ — every gated metric (TTFT/TPOT p50 & p95) is trend-steady
-   (Mann–Kendall + Hamed–Rao) **and** within a CoV bound. A staircase jump breaks the
-   window, segmenting the run into plateaus. The **first plateau is the reported steady
-   state** (later plateaus are usually degradation). Selection follows MSER: pick by
-   estimator precision, never by the throughput value.
+   _admissible_ — the gated metric (**TPOT** p50 & p95) is trend-steady
+   (Mann–Kendall + Hamed–Rao) **and** within a CoV bound. **TTFT is not a hard gate** —
+   at high concurrency its tail variance (prefill time tracking dataset ISL skew + queue)
+   is structural, not decode un-steadiness, so it is a diagnostic and a drift _warning_
+   only (see §5.5). A staircase jump breaks the window, segmenting the run into plateaus.
+   The **first plateau is the reported steady state** (later plateaus are usually
+   degradation). Selection follows MSER: pick by estimator precision, never by throughput.
 4. Summarizes that window (TTFT/TPOT histograms + percentiles, **per-user & system
    TPS** with batch-means confidence intervals) and **flags a level shift** toward the
    end of the run (multi-plateau + Pettitt change-point) as an `anomaly`, rather than
@@ -140,12 +142,13 @@ is signed (+ = TPOT rose = worse).
   plateau; global steady state is questionable
 ```
 
-The reported window is locally steady, but a gated metric keeps climbing over the
-super-passes **after** it (the trend gate over the whole tail, not just the window).
-This catches a slow global drift that a short per-window check misses — e.g. TTFT
-creeping up several-fold across a long high-concurrency run. Treat the steady number as
-a best-effort local plateau, not a clean whole-run steady state. (`drifting_up` in
-`--json` lists the affected metrics; distinct from `anomaly`, which is a discrete step.)
+The reported window is locally steady, but a **watched metric (TPOT or TTFT)** keeps
+climbing over the super-passes **after** it (the trend test over the whole tail, not just
+the window). This is TTFT's primary role now that it no longer hard-gates: a slow TTFT
+creep — e.g. queue saturation building several-fold across a long high-concurrency run —
+is surfaced here as a soft warning instead of fragmenting the window. Treat the steady
+number as a best-effort local plateau, not a clean whole-run steady state. (`drifting_up`
+in `--json` lists the affected metrics; distinct from `anomaly`, a discrete step.)
 
 ### Diagnostics (below the headline)
 

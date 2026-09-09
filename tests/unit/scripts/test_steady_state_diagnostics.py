@@ -320,9 +320,11 @@ def test_run_result_structure(tmp_path):
     # window 4 over 7 post-warmup super-passes -> 4 rolling positions
     rolling = result["drift"]["4"]["ttft_p50"]["rolling"]
     assert [r["window"] for r in rolling] == [[0, 4], [1, 5], [2, 6], [3, 7]]
-    # CoV table carries a pass/fail cell per bound and a gate flag
+    # CoV table carries a pass/fail cell per bound and a gate flag. Admissibility gates on
+    # TPOT only, so tpot_p50 is gated while ttft_p50 is now diagnostic.
+    assert result["cov"]["4"]["tpot_p50"]["gated"] is True
     cell = result["cov"]["4"]["ttft_p50"]
-    assert cell["gated"] is True
+    assert cell["gated"] is False
     assert set(cell["passes"]) == {"0.03", "0.05", "0.08"}
     # p99 is present but marked diagnostic (not gated)
     assert result["cov"]["4"]["ttft_p99"]["gated"] is False
@@ -528,6 +530,21 @@ def test_window_admissible_tolerates_small_drift_but_breaks_large():
         ]
     )
     assert mod.window_admissible(big, 0, 6, GATE, BOUNDS) is False
+
+
+def test_ttft_not_gated_but_still_drift_warned():
+    # TPOT flat, TTFT climbs steeply. Admissibility gates on TPOT only, so TTFT does not
+    # fragment the run -> one plateau. But the whole-run drift warning still surfaces TTFT.
+    series = _mk_series(
+        [(100.0, 50.0 + 15.0 * i) for i in range(8)]
+    )  # (tpot flat, ttft ramps)
+    assert (
+        mod.window_admissible(series, 0, 8, GATE, BOUNDS) is True
+    )  # TTFT ignored by the gate
+    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
+    assert ss["found"] is True
+    assert "ttft_p50" in ss["drifting_up"]  # TTFT drift surfaced as a soft warning
+    assert "tpot_p50" not in ss["drifting_up"]  # TPOT is flat
 
 
 def test_segment_plateaus_splits_staircase():

@@ -293,14 +293,21 @@ The reported window and the steady/drift verdict come from two per-metric signal
 a coefficient-of-variation (CoV) stopping rule and a mandatory trend gate — combined
 under a window-selection rule adapted from the steady-state simulation literature.
 
-**Metric set.** The convergence and trend tests run on TTFT and TPOT. The **p50 and
-p95** percentiles are _gating_: a window is steady only when both plateau and are
-within CoV for both metrics. The **p99** (and p99.9 where a super-pass holds enough
-samples to estimate it) are carried as _diagnostic warnings_, not hard gates — a tail
-percentile that fails to converge is surfaced as a warning rather than voiding the
-window, because tail percentiles are estimated from far fewer samples per super-pass
-and are the noisiest signal available. End-to-end latency is reported as context
-only, never as a convergence signal (§5.1).
+**Metric set.** Admissibility gates on **TPOT** (p50 and p95) only — the decode-rate
+steadiness signal. A window is steady only when both TPOT percentiles plateau and are
+within CoV. **TTFT is deliberately not a hard gate.** At high concurrency TTFT's tail is
+dominated by prefill time (which tracks per-request input-length / dataset skew) and
+queue wait, so its per-super-pass variance is _structural_, not decode un-steadiness:
+measured, `ttft_p95` CoV sits at a floor of 0.3–0.9 regardless of super-pass grain while
+`tpot` CoV is ~0.01–0.03. Gating on it fragments genuinely steady runs — two ~800s
+steady-TPOT runs (c7k, c22k) were rejected purely by TTFT-tail fragmentation, and gating
+on TPOT alone recovers both. TTFT (p50/p95) is therefore carried as a **diagnostic** —
+still reported in the headline percentiles and the whole-run trend table, and still
+raising the Drifting-Up **warning** (§5.8) when it climbs, so a genuine saturation drift
+is surfaced softly rather than hidden. The **p99** tail (TPOT and TTFT) and end-to-end
+latency are diagnostic-only as well; a tail percentile that fails to converge is a
+warning, never a void, because tail percentiles come from far fewer samples per
+super-pass and are the noisiest signal available.
 
 **CoV stopping rule.** The coefficient of variation `CoV = sigma / mu` of a
 metric's per-super-pass percentile, over a window of super-passes, is a

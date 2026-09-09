@@ -169,8 +169,8 @@ class SteadyState(TypedDict):
     short_window: ShortWindow | None  # min-duration gate detail (None if no plateau)
     global_trend: dict[
         str, Verdict
-    ]  # gated metric -> trend from the plateau to run end
-    drifting_up: list[str]  # gated metrics Drifting Up over the rest of the run
+    ]  # watched metric (TPOT + TTFT) -> trend from the plateau to run end
+    drifting_up: list[str]  # watched metrics Drifting Up over the rest of the run
 
 
 class TrackedMetric(NamedTuple):
@@ -181,10 +181,10 @@ class TrackedMetric(NamedTuple):
 
 
 # Metric*percentile trajectories tracked. ``gated`` ones participate in convergence;
-# p99 is diagnostic only.
+# everything else is diagnostic. TTFT is intentionally NOT gated (see GATED_METRICS).
 TRACKED_METRICS: tuple[TrackedMetric, ...] = (
-    TrackedMetric("ttft_p50", "ttft_ns", 0.50, True),
-    TrackedMetric("ttft_p95", "ttft_ns", 0.95, True),
+    TrackedMetric("ttft_p50", "ttft_ns", 0.50, False),
+    TrackedMetric("ttft_p95", "ttft_ns", 0.95, False),
     TrackedMetric("tpot_p50", "tpot_ns", 0.50, True),
     TrackedMetric("tpot_p95", "tpot_ns", 0.95, True),
     TrackedMetric("ttft_p99", "ttft_ns", 0.99, False),
@@ -199,8 +199,20 @@ TRACKED_METRICS: tuple[TrackedMetric, ...] = (
     TrackedMetric("ttft_warm_p95", "ttft_warm_ns", 0.95, False),
 )
 
-# Metrics that gate admissibility (p50/p95); p99 is diagnostic-only.
+# Admissibility gate: TPOT p50/p95 only (decode-rate steadiness). TTFT is deliberately
+# NOT a hard gate — at high concurrency its tail variance (prefill time tracking dataset
+# ISL skew + queue wait) is structural, not decode un-steadiness, and fragments genuinely
+# steady runs (docs/steady-state-detection.md §5.5). Measured: two ~800s steady-TPOT runs
+# (c7k, c22k) were rejected purely by TTFT-tail fragmentation; TPOT-only recovers them.
 GATED_METRICS: tuple[TrackedMetric, ...] = tuple(m for m in TRACKED_METRICS if m.gated)
+# Metrics watched for the whole-run Drifting-Up *warning*: the gated TPOT pair plus TTFT
+# p50/p95. TTFT is soft here — a genuine TTFT saturation drift is still surfaced (warning),
+# just never a hard reject.
+DRIFT_WATCH_METRICS: tuple[TrackedMetric, ...] = tuple(
+    m
+    for m in TRACKED_METRICS
+    if m.key in ("tpot_p50", "tpot_p95", "ttft_p50", "ttft_p95")
+)
 _METRIC_BY_KEY: dict[str, TrackedMetric] = {m.key: m for m in TRACKED_METRICS}
 
 
@@ -1288,16 +1300,18 @@ def global_trend(
     series: Sequence[SuperPassRollup],
     from_idx: int,
     gate_algo: str,
-    gated_metrics: Sequence[TrackedMetric] = GATED_METRICS,
+    metrics: Sequence[TrackedMetric] = DRIFT_WATCH_METRICS,
 ) -> dict[str, Verdict]:
-    """Trend verdict per gated metric over ``series[from_idx:]`` (plateau onset to end).
+    """Trend verdict per watched metric over ``series[from_idx:]`` (plateau onset to end).
 
-    A window can be locally flat while the metric climbs across the rest of the run
-    (a slow drift the short per-window gate misses); this whole-tail test catches it.
+    A window can be locally flat while a metric climbs across the rest of the run (a slow
+    drift the short per-window gate misses); this whole-tail test catches it. Watches the
+    drift set (TPOT + TTFT), so a soft TTFT saturation drift is surfaced even though TTFT
+    does not gate admissibility.
     """
     gate = ALGORITHMS[gate_algo]
     out: dict[str, Verdict] = {}
-    for m in gated_metrics:
+    for m in metrics:
         traj = super_pass_percentile_series(
             series[from_idx:], m.source_attr, m.percentile
         )
