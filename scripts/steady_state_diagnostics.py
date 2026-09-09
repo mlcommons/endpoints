@@ -38,9 +38,11 @@ Below the headline, per requested window size, the tool also prints diagnostics:
 pass/fail table and a whole-run trend summary (the full rolling drift scan is in
 ``--json``).
 
-Convergence metrics are TTFT/TPOT at p50 + p95; p99 is carried as an optional diagnostic
-(shown, not gated). End-to-end latency is intentionally excluded (its variation tracks the
-OSL mix, not system steadiness).
+Admissibility gates on TPOT at p50 + p95 only (decode-rate steadiness). TTFT is a
+diagnostic: shown in the headline percentiles and the whole-run trend, and it raises the
+Drifting-Up warning, but it does not gate a window — at high concurrency its tail variance
+is structural (prefill/dataset-ISL skew + queue), not decode un-steadiness. p99 and
+end-to-end latency are diagnostic too (latency's variation tracks the OSL mix).
 
 usage (auto-detects tokenizer, dataset size, and workload profile from the run's
 config.yaml / run_meta.json sidecars; see the model registry + PROFILES below):

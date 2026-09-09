@@ -19,8 +19,10 @@ operator's quick reference.
    at high concurrency its tail variance (prefill time tracking dataset ISL skew + queue)
    is structural, not decode un-steadiness, so it is a diagnostic and a drift _warning_
    only (see §5.5). A staircase jump breaks the window, segmenting the run into plateaus.
-   The **first plateau is the reported steady state** (later plateaus are usually
-   degradation). Selection follows MSER: pick by estimator precision, never by throughput.
+   The **first plateau that clears the min-duration gate is the reported steady state**
+   (usually the literal first; earlier plateaus too brief to certify are skipped). Later
+   plateaus are usually degradation. Selection follows MSER: pick by estimator precision,
+   never by throughput.
 4. Summarizes that window (TTFT/TPOT histograms + percentiles, **per-user & system
    TPS** with batch-means confidence intervals) and **flags a level shift** toward the
    end of the run (multi-plateau + Pettitt change-point) as an `anomaly`, rather than
@@ -67,9 +69,10 @@ overrides**:
 **Model registry** (extend as needed): `kimi-k3`, `kimi-k2` → Moonshot (trust-remote-code);
 `gpt-oss` → `openai/gpt-oss-120b`; `deepseek-r1`/`dsr1` → `deepseek-ai/DeepSeek-R1`.
 
-**Profiles:** `concurrency` and `poisson` share the standard issue-time window + TPOT/TTFT
-gate; `offline` uses the same gates but its window/throughput are completion-based (partial
-support); `agentic` computes **NATL** (per-trajectory throughput) over trajectory
+**Profiles:** `concurrency` and `poisson` share the standard issue-time window + **TPOT
+gate** (TTFT is diagnostic, not a gate); `offline` uses the same gate but its
+window/throughput are completion-based (partial support); `agentic` computes **NATL**
+(per-trajectory throughput) over trajectory
 super-passes and prints a prominent **NOT-YET-SUPPORTED** banner — agentic steady-state is
 experimental and must not be used for submissions.
 

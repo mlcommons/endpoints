@@ -129,7 +129,7 @@ to its section.</p>
 <li><b>Adaptive warmup crop</b> <span class="kv">Drop leading super-passes still climbing toward the steady TPOT level. → <a href="#warmup">§4</a></span></li>
 <li><b>Build trajectories</b> <span class="kv">Per-super-pass percentile series for every tracked metric.</span></li>
 <li><b>Segment into plateaus</b> <span class="kv">Grow admissible windows left-to-right; each must pass the trend + CoV gate. → <a href="#gate">§5</a>, <a href="#segment">§6</a></span></li>
-<li><b>Pick the first plateau</b> <span class="kv">Report it as the steady state; flag any later level shift. → <a href="#anomaly">§7</a></span></li>
+<li><b>Pick the reported plateau</b> <span class="kv">The first plateau that also clears the min-duration gate (§9); flag any later level shift. → <a href="#anomaly">§7</a></span></li>
 <li><b>Summarize + CI</b> <span class="kv">TTFT/TPOT percentiles, per-user &amp; system TPS with batch-means intervals. → <a href="#tps">§8</a></span></li>
 <li><b>Minimum-duration gate</b> <span class="kv">Reject (or warn) if the window is too brief in wall-time to certify. → <a href="#minduration">§9</a></span></li>
 </ol>
@@ -622,23 +622,27 @@ term, <code>k*</code>, <code>CoV_b</code>, <code>τ_sp</code>, <code>L_p99</code
 <code>steady_state.short_window</code>.</p>
 
 <h2 id="e2e">10 · End-to-end worked example</h2>
-<p>A synthetic <code>C=1024</code>, ~102k-TPS run (planted flat plateau, base TPOT 10 ms), 40 s long:</p>
+<p>A real high-concurrency run — gpt-oss-120b, <code>C=7168</code>, ~633k system TPS (13&nbsp;GB
+<code>events.jsonl</code>):</p>
 <table>
 <tr><th>Stage</th><th>Result</th></tr>
-<tr><td>Bucket</td><td>68 super-passes (size 400)</td></tr>
-<tr><td>Warmup</td><td>ramp cropped → warmup = 6, 62 post-warmup super-passes</td></tr>
-<tr><td>Gate + segment</td><td>first plateau found: super-passes 0–3 (post-warmup), trend-flat, CoV ✔</td></tr>
-<tr><td>Throughput</td><td>per-user 199.6 tok/s (CI ±0.9); system 174 112 tok/s</td></tr>
-<tr><td>Min-duration</td><td><code>τ_sp</code> ≈ 0.55 s, <code>CoV_b</code>≈0 → <code>k*</code>=4 →
-T_precision ≈ 2.2 s; <code>L_p99</code> ≈ 3.1 s → T_relaxation ≈ 15.6 s; floor 600 s →
-<b>min_duration = 600 s</b>. Window span = <b>3 s</b>.</td></tr>
-<tr><td><b>Verdict</b></td><td><span class="tag" style="background:var(--bad)">REJECT</span>
-3 s ≪ 600 s. The plateau is genuine but far too brief to certify. <code>--no-min-duration</code> would
-report per-user 199.6 tok/s with a "Window too short" warning.</td></tr>
+<tr><td>Bucket</td><td>70 super-passes (size 6396), warmup = 1 → 69 post-warmup</td></tr>
+<tr><td>Gate + segment</td><td><b>one plateau, super-passes 0–68</b> (the whole run). TPOT is flat
+(<code>tpot_p50</code> 9.58 ms → p99 9.95 ms), so no break. TTFT is <em>not</em> gated: its tail is huge
+and spread (p50 1274 ms, p95 5857 ms) but doesn't fragment the window.</td></tr>
+<tr><td>Throughput</td><td>per-user 104.3 tok/s (CI [104.1, 104.7]); system 633 262 tok/s (CI [624k, 642k])</td></tr>
+<tr><td>Min-duration</td><td><code>CoV_b</code>≈0 → <code>k*</code>=4 (floor) → <b>T_precision exempt</b>;
+floor 600 s binds. Whole-run offered span = <b>853 s</b> ≥ 600 s.</td></tr>
+<tr><td><b>Verdict</b></td><td><span class="tag" style="background:var(--ok)">FOUND</span>
+853 s of steady TPOT. Plus a soft <code>WARNING: ttft_p95 … drifting UP</code> — TTFT climbs across the
+run (queue building), surfaced but not fatal.</td></tr>
 </table>
-<p class="small">Contrast: the same detector on a properly-sampled run (<code>n_samples ≫ concurrency</code>,
-a real multi-minute steady region) at up to <b>1.64M TPS</b> recovers the planted TPOT to within 0.1% and
-passes cleanly.</p>
+<p class="note" style="display:block">Under the earlier all-metric gate this same run was <b>rejected</b>: TTFT-tail
+noise chopped the 853 s plateau into 10 pieces (longest 123 s &lt; 600 s). Gating on TPOT — the metric that
+is actually steady — recovers it. A run <em>does</em> still reject when its whole-run offered span can't reach
+the floor, or (like DeepSeek-R1) when relaxation demands tens of minutes it doesn't have.</p>
+<p class="small">On synthetic runs with planted plateaus the detector recovers the true steady TPOT to within
+0.1% at up to <b>1.64M TPS</b> (see §11).</p>
 
 <h2 id="validation">11 · Validation sweep</h2>
 <p>The min-duration formula and the detector were calibrated against a synthetic throughput × concurrency
@@ -670,7 +674,7 @@ precision for noisy metrics (agentic).</li>
 <h3>Flags that change the algorithm</h3>
 <table>
 <tr><th>Flag</th><th>Default</th><th>Effect</th></tr>
-<tr><td><code>--no-min-duration</code></td><td>gate on (hard-reject)</td><td>downgrade §9 to a warning</td></tr>
+<tr><td><code>--no-min-duration</code></td><td>gate on (skip short, reject if none)</td><td>downgrade §9 to a warning on the first plateau</td></tr>
 <tr><td><code>--warmup auto|N</code></td><td>auto</td><td>data-driven crop vs a fixed super-pass count</td></tr>
 <tr><td><code>--cov-bounds</code></td><td>0.03,0.05,0.08</td><td>the CoV ensemble</td></tr>
 <tr><td><code>--trend-gate</code></td><td>mk_hamed_rao</td><td>which trend algorithm gates admissibility</td></tr>

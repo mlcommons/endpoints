@@ -378,7 +378,12 @@ each subsequent plateau. **The first plateau is the reported steady state.** Thi
 deliberately overrides the pure longest/min-`SE` choice, because empirically the later
 plateaus of a staircase are generally _degradation_ steps — a skewed long-output workload
 building up, or a server going unhealthy — so the first plateau is the representative
-healthy steady state and the later steps are anomalies, not the number to report.
+healthy steady state and the later steps are anomalies, not the number to report. **One
+exception:** the min-duration gate (below) skips a first plateau too brief in wall-time to
+certify and reports the next admissible one, so the reported plateau is the first that is
+_both_ admissible _and_ long enough. `plateau_index` / `skipped_short` record when this
+happened, and the anomaly baseline moves to the reported plateau (a skipped earlier plateau
+is not a degradation).
 
 **Level shifts (staircase) are detected and flagged, never hidden.** Reporting the
 first plateau must not silently discard the fact that the run degraded. A level-shift
@@ -511,10 +516,12 @@ row carrying its status.
 - **Missing token counts.** If the log carries no per-request output-token count,
   TPOT is derived by tokenizing outputs on the cold path. Not every output is
   tokenized: for large logs a sample sufficient to estimate the per-super-pass
-  percentiles is enough, and full re-tokenization of every output is avoided. If
-  neither a count nor a tokenizer is available, the step falls back to TTFT-only
-  and records that TPOT was not assessed (a metric with no data is skipped, not
-  treated as zero, so an absent metric can never fake convergence).
+  percentiles is enough, and full re-tokenization of every output is avoided.
+  Because TPOT is the sole steadiness gate, a tokenizer (or a recorded token count)
+  is required; if neither is available TPOT cannot be computed and the step reports
+  that steadiness could not be assessed rather than substituting TTFT — TTFT is a
+  diagnostic, not a steadiness gate. A metric with no data is skipped, never treated
+  as zero, so an absent metric can never fake convergence.
 - **TPOT from timestamps.** TPOT derived as `(complete − first_token) / (OSL − 1)`
   assumes the request stayed resident in the decode phase for its whole lifetime.
   If the server evicts or preempts a request mid-decode (paging it out and back),
