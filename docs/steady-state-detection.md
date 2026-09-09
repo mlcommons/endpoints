@@ -390,6 +390,23 @@ passes CoV if at least one ensemble setting certifies it for every gating metric
 Detector concordance is a corroborating guardrail. The trend gate remains mandatory
 and primary; the CoV ensemble is secondary.
 
+**Effect-size floor on trend breaks (segmentation only).** The rank trend gate is
+_significance_-only: over a long window it will flag a practically negligible monotonic
+drift — a couple of percent end-to-end — as a "trend," because with enough super-passes
+even a tiny consistent slope is significant. Left unchecked this **over-fragments** a
+genuinely steady run into many sub-window plateaus, none long enough to clear the
+duration floor below. So during plateau segmentation a window is broken on trend only
+when the drift is **both significant and practically large**: `|rel_drift| ≥
+TREND_REL_DRIFT_MIN` (0.05 end-to-end, the OLS-fitted total change over the window
+median). Below that floor the drift is treated as within noise and the window holds;
+**CoV still guards genuine variance/choppiness**, so this relaxes only over-sensitive
+trend fragmentation, not scatter — a choppy run still fragments on CoV. The floor is
+cumulative: a persistent slow drift keeps accumulating as the window grows and still
+breaks once the total change crosses it. Calibrated on the recorded corpora, where
+over-fragmenting breaks had `|rel_drift| ≤ 0.03` while real drifts and level shifts ran
+0.10–0.26. This applies to segmentation only; the whole-run `drifting_up` warning (§5.8)
+stays significance-based, so a locally-tolerated slow creep is still surfaced.
+
 **Minimum window _duration_ (a time floor, not just a count floor).** The
 minimum-length floor above is a **sample-count** floor (`MIN_TREND_N` super-passes, so
 the trend test has enough points). That count is throughput-blind, and at high
@@ -402,10 +419,20 @@ window as
 
 ```
 min_duration = max( T_precision , T_relaxation , T_floor )
-  T_precision  = k*·τ_sp,   k* = max( ceil( (1.96·CoV_b / ε)² ), MIN_TREND_N )   # ±ε batch-means precision
+  T_precision  = k*·τ_sp  (only when k* > MIN_TREND_N),   k* = max( ceil( (1.96·CoV_b / ε)² ), MIN_TREND_N )
   T_relaxation = 5·L_p99                                                          # queue / KV-eviction transient safety
   T_floor      = 600 s                                                            # MLPerf-style min-duration floor
 ```
+
+The precision term is **exempt at the `k*` floor**: when `CoV_b` is low enough that `k*`
+would clamp to `MIN_TREND_N`, the metric is not noisy and the `≥ MIN_TREND_N` super-passes
+already satisfy the trend requirement, so precision contributes nothing (it is dropped
+from the `max`, not merely clamped). This matters because at exactly `MIN_TREND_N = 4`
+super-passes, `k*·τ_sp = 4·τ_sp ≈ the window's own duration`, so an un-exempted precision
+term would flag _every_ minimal 4-super-pass plateau as short regardless of its absolute
+wall-time — a clean 11-minute plateau would be rejected on a technicality. Precision only
+binds once a genuinely noisy metric (`k* > MIN_TREND_N`) demands _more_ batches than the
+trend floor.
 
 where `τ_sp` is the median per-super-pass offered (issue) span, `CoV_b` the coefficient
 of variation of per-super-pass `tpot_p50` across the window, and `L_p99` the p99 sample

@@ -502,6 +502,34 @@ def test_window_admissible_flat_yes_spanning_jump_no():
     assert mod.window_admissible(series, 2, 6, GATE, BOUNDS) is False
 
 
+def test_window_admissible_tolerates_small_drift_but_breaks_large():
+    # ~3% end-to-end monotonic drift, low scatter: the rank gate calls it a trend, but it
+    # is below the effect-size floor (0.05) -> admissible (not fragmented). CoV is fine.
+    small = _mk_series(
+        [
+            (100.0, 50.0),
+            (100.6, 50.0),
+            (101.2, 50.0),
+            (101.8, 50.0),
+            (102.4, 50.0),
+            (103.0, 50.0),
+        ]
+    )
+    assert mod.window_admissible(small, 0, 6, GATE, BOUNDS) is True
+    # ~15% end-to-end drift -> above the floor -> inadmissible (a real drift still breaks).
+    big = _mk_series(
+        [
+            (100.0, 50.0),
+            (103.0, 50.0),
+            (106.0, 50.0),
+            (109.0, 50.0),
+            (112.0, 50.0),
+            (115.0, 50.0),
+        ]
+    )
+    assert mod.window_admissible(big, 0, 6, GATE, BOUNDS) is False
+
+
 def test_segment_plateaus_splits_staircase():
     series = _mk_series([(100, 50)] * 6 + [(200, 60)] * 6)
     plateaus = mod.segment_plateaus(series, GATE, BOUNDS)
@@ -638,6 +666,20 @@ def test_min_steady_duration_precision_dominates_on_noisy_metric():
     sw = mod.min_steady_duration(series, 0, 8)
     assert sw["kstar"] > mod.MIN_DUR_KSTAR_FLOOR  # k* self-raises with CoV
     assert sw["dominant"] == "precision"
+
+
+def test_min_steady_duration_precision_exempt_at_kstar_floor():
+    # Flat metric -> k* floors at MIN_TREND_N. Even with a large per-super-pass span (so
+    # k*·τ would be 4·200 = 800s > floor), the precision term is exempt at the floor, so
+    # min_duration falls back to the 600s floor and the ~800s window is NOT short.
+    sw = mod.min_steady_duration(
+        _spanned_series(4, per_sp_span_s=200.0, latency_s=1.0), 0, 4
+    )
+    assert sw["kstar"] == mod.MIN_DUR_KSTAR_FLOOR
+    assert sw["t_precision_s"] == 0.0
+    assert sw["dominant"] == "floor"
+    assert sw["min_duration_s"] == mod.MIN_DUR_FLOOR_S
+    assert sw["is_short"] is False
 
 
 def test_min_steady_duration_not_short_when_window_long_enough():

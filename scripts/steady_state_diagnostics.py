@@ -82,6 +82,18 @@ MIN_TREND_N = 4
 REL_DRIFT_THRESHOLD = 0.15
 SNR_THRESHOLD = 2.0
 
+# Effect-size floor for a trend to disqualify a steady window during plateau segmentation
+# (§5.5). The rank-based trend gate is significance-only: over a long window it flags a
+# practically negligible monotonic drift (a couple of percent end-to-end) as a "trend" and
+# fragments a genuinely steady run into many sub-window plateaus. A window is broken on
+# trend only when the drift is BOTH significant AND at least this fraction end-to-end;
+# below it, the drift is within noise and the window holds. CoV still guards genuine
+# variance/choppiness, so this relaxes over-sensitive trend fragmentation only — not
+# scatter. Calibrated on the corpus: over-fragmenting breaks had |rel_drift| <= 0.03,
+# while real drift and level shifts far exceed 0.05. Cumulative, so a persistent slow
+# drift still breaks once the growing window's total change crosses the floor.
+TREND_REL_DRIFT_MIN = 0.05
+
 # z for a two-sided 95% confidence interval (Hamed-Rao autocorrelation significance).
 CI_Z_95 = 1.96
 # Floor substituted for a zero median so relative-drift ratios stay finite.
@@ -1063,6 +1075,18 @@ def _ols(values: Sequence[float]) -> tuple[float, float, list[float]]:
     return slope, sxx, resid
 
 
+def _rel_drift(values: Sequence[float]) -> float:
+    """Signed end-to-end fractional change of the OLS trend line over the window.
+
+    Matches ``slope_vs_scatter``'s ``rel_drift``; used as the effect-size floor that keeps
+    a significant-but-negligible trend from fragmenting a steady plateau (§5.5).
+    """
+    if len(values) < 2:
+        return 0.0
+    slope, _sxx, _resid = _ols(values)
+    return slope * (len(values) - 1) / _median_or_floor(values)
+
+
 def newey_west(
     values: Sequence[float], lag: int | None = None, alpha: float = 0.05
 ) -> TrendResult:
@@ -1170,7 +1194,13 @@ def window_admissible(
         traj = _window_percentile_series(series, lo, hi, m.source_attr, m.percentile)
         if traj is None or len(traj) < MIN_TREND_N:
             return False
-        if gate(traj).verdict != "steady":
+        if (
+            gate(traj).verdict != "steady"
+            and abs(_rel_drift(traj)) >= TREND_REL_DRIFT_MIN
+        ):
+            # Significant trend AND practically large: a genuine drift/level-shift breaks
+            # the window. A significant-but-negligible drift (< the effect-size floor) is
+            # within noise and does not fragment the plateau; CoV below still guards scatter.
             return False
         if cov(traj) > loosest:
             return False
@@ -1328,7 +1358,12 @@ def min_steady_duration(
     l_p99 = percentile_lower(sorted(lat), 0.99) / 1e9 if lat else 0.0
 
     kstar = max(math.ceil((CI_Z_95 * cov_b / MIN_DUR_EPS) ** 2), MIN_DUR_KSTAR_FLOOR)
-    t_prec = kstar * tau_sp
+    # The precision term only binds when the metric is noisy enough to demand MORE batches
+    # than the trend floor. At the floor (k* == MIN_TREND_N), the >= MIN_TREND_N super-passes
+    # already satisfy the trend requirement, so duration is governed by relaxation/floor
+    # alone — a clean minimal plateau that meets the wall-time floor is valid, not rejected
+    # by a precision term that degenerates to ~the window's own duration at 4 super-passes.
+    t_prec = kstar * tau_sp if kstar > MIN_DUR_KSTAR_FLOOR else 0.0
     t_relax = MIN_DUR_RELAX_MULT * l_p99
     min_s = max(t_prec, t_relax, MIN_DUR_FLOOR_S)
     dominant = (
