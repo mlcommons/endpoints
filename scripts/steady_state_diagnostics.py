@@ -120,6 +120,9 @@ class SteadyWindow(TypedDict):
     sp_hi: int  # exclusive
     n_super_passes: int
     n_samples: int
+    plateau_index: int  # 0-based index of this plateau among all admissible plateaus
+    n_plateaus: int  # total admissible plateaus found
+    skipped_short: int  # earlier plateaus skipped for failing the min-duration gate
 
 
 class TpsBlock(TypedDict):
@@ -1211,10 +1214,14 @@ def detect_level_shift(
     series: Sequence[SuperPassRollup],
     plateaus: Sequence[tuple[int, int]],
     cov_band: float = 0.05,
+    baseline_idx: int = 0,
 ) -> Anomaly:
-    """Flag a staircase: a later plateau whose TPOT level differs from the first by
-    more than ``cov_band``, corroborated by a Pettitt change-point on the per-super-pass
-    TPOT means. ``delta_pct`` > 0 means the later level is worse (TPOT rose)."""
+    """Flag a staircase: a plateau *after* ``baseline_idx`` whose TPOT level differs from
+    the reported plateau by more than ``cov_band``, corroborated by a Pettitt change-point
+    on the per-super-pass TPOT means. ``delta_pct`` > 0 means the later level is worse
+    (TPOT rose). ``baseline_idx`` is the index of the reported plateau: degradation is
+    measured relative to it, and only plateaus after it count (earlier ones were skipped,
+    not degradations)."""
     result: Anomaly = {
         "detected": False,
         "change_point_sp": None,
@@ -1222,14 +1229,14 @@ def detect_level_shift(
         "pettitt": None,
         "plateaus": [list(p) for p in plateaus],
     }
-    if len(plateaus) < 2:
+    if len(plateaus) <= baseline_idx + 1:
         return result
 
     def _tpot_mean(lo: int, hi: int) -> float:
         vals = pooled(series, lo, hi, "tpot_ns")
         return sum(vals) / len(vals) if vals else 0.0
 
-    first_mean = _tpot_mean(*plateaus[0])
+    first_mean = _tpot_mean(*plateaus[baseline_idx])
     if first_mean <= 0:
         return result
     sp_means = [
@@ -1237,7 +1244,7 @@ def detect_level_shift(
     ]
     pet = pettitt(sp_means)
     result["pettitt"] = pet
-    for lo, hi in plateaus[1:]:
+    for lo, hi in plateaus[baseline_idx + 1 :]:
         rel = (_tpot_mean(lo, hi) - first_mean) / first_mean
         if abs(rel) > cov_band and pet["significant"]:
             result["detected"] = True
@@ -1362,9 +1369,8 @@ def build_steady_state(
     ``short_window`` detail carries an advisory instead.
     """
     plateaus = segment_plateaus(series, gate_algo, cov_bounds, gated_metrics)
-    anomaly = detect_level_shift(series, plateaus)
     if not plateaus:
-        gt = global_trend(series, 0, gate_algo, gated_metrics)
+        gt = global_trend(series, 0, gate_algo)  # drift-watch set (TPOT + TTFT)
         return {
             "found": False,
             "reason": "no admissible steady plateau",
@@ -1372,13 +1378,30 @@ def build_steady_state(
             "ttft": None,
             "tpot": None,
             "tps": None,
-            "anomaly": anomaly,
+            "anomaly": detect_level_shift(series, plateaus),
             "short_window": None,
             "global_trend": gt,
             "drifting_up": [k for k, v in gt.items() if v == "up"],
         }
-    lo, hi = plateaus[0]  # first plateau is the reported steady state
-    gt = global_trend(series, lo, gate_algo, gated_metrics)
+    # Min-duration selection. When enforced, walk plateaus in order and report the FIRST
+    # that clears the min-duration gate — skipping earlier plateaus too brief to certify.
+    # If none qualify, reject, reporting the longest candidate for context. When the gate
+    # is disabled, always report the first plateau (advisory only).
+    shorts = [min_steady_duration(series, lo, hi) for lo, hi in plateaus]
+    if enforce_min_duration:
+        sel = next((i for i, sw in enumerate(shorts) if not sw["is_short"]), None)
+    else:
+        sel = 0
+    reject_all_short = sel is None
+    report_idx = (
+        sel
+        if sel is not None
+        else max(range(len(plateaus)), key=lambda i: shorts[i]["window_duration_s"])
+    )
+    short = shorts[report_idx]
+    lo, hi = plateaus[report_idx]  # the reported steady state
+    anomaly = detect_level_shift(series, plateaus, baseline_idx=report_idx)
+    gt = global_trend(series, lo, gate_algo)  # drift-watch set (TPOT + TTFT)
     ttft = pooled(series, lo, hi, "ttft_ns")
     tpot = pooled(series, lo, hi, "tpot_ns")
     mean_tpot = sum(tpot) / len(tpot) if tpot else 0.0
@@ -1411,7 +1434,7 @@ def build_steady_state(
         system_ci = [system - half, system + half]
     else:
         system_ci = [system, system]
-    short = min_steady_duration(series, lo, hi)
+    skipped_short = sum(1 for i in range(report_idx) if shorts[i]["is_short"])
     ss: SteadyState = {
         "found": True,
         "reason": None,
@@ -1420,6 +1443,9 @@ def build_steady_state(
             "sp_hi": hi,
             "n_super_passes": hi - lo,
             "n_samples": len(ttft),
+            "plateau_index": report_idx,
+            "n_plateaus": len(plateaus),
+            "skipped_short": skipped_short,
         },
         "ttft": summarize(ttft) if ttft else None,
         "tpot": summarize(tpot) if tpot else None,
@@ -1434,13 +1460,13 @@ def build_steady_state(
         "global_trend": gt,
         "drifting_up": [k for k, v in gt.items() if v == "up"],
     }
-    if short["is_short"] and enforce_min_duration:
-        # Hard-fail: the plateau is genuine but too brief to certify. Keep the window
-        # summary in the blob (informative), but report no steady state.
+    if reject_all_short:
+        # Every admissible plateau is genuine but too brief to certify. Keep the longest
+        # candidate's window in the blob (informative), but report no steady state.
         ss["found"] = False
         ss["reason"] = (
-            f"window too short: {short['window_duration_s']:.0f}s steady < "
-            f"{short['min_duration_s']:.0f}s required "
+            f"all {len(plateaus)} admissible plateau(s) too short: longest "
+            f"{short['window_duration_s']:.0f}s < {short['min_duration_s']:.0f}s required "
             f"({short['dominant']}-dominated); pass --no-min-duration to override"
         )
     return ss
@@ -1625,6 +1651,12 @@ def _render_steady_state(ss: SteadyState) -> list[str]:
             f"  window: super-passes {w['sp_lo']}..{w['sp_hi'] - 1} (post-warmup), "
             f"{w['n_samples']} samples"
         )
+        if w["skipped_short"] > 0:
+            out.append(
+                f"  note: skipped {w['skipped_short']} earlier plateau(s) below "
+                f"min-duration; reporting plateau {w['plateau_index'] + 1} of "
+                f"{w['n_plateaus']}"
+            )
         out.append(
             f"  TPS per-user: {tps['per_user']:8.1f} tok/s/user  "
             f"CI [{tps['per_user_ci'][0]:.1f}, {tps['per_user_ci'][1]:.1f}]"

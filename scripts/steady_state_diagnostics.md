@@ -102,20 +102,25 @@ means no contiguous run of super-passes was steady enough — the run drifts or 
 short. The per-window diagnostics below show why (which metric failed CoV/trend).
 
 A second "not found" form is the **min-duration gate** (docs/steady-state-detection.md
-§5.5): a genuine plateau was found but is too brief in wall-time to certify.
+§5.5): every admissible plateau is genuine but too brief in wall-time to certify.
 
 ```
-  not found: window too short: 3s steady < 600s required (floor-dominated); pass --no-min-duration to override
+  not found: all 6 admissible plateau(s) too short: longest 15s < 600s required (floor-dominated); pass --no-min-duration to override
 ```
 
 A window that clears the ≥4-super-pass floor can still be only seconds long at high
 throughput (a `c16k`-scale run's 4 super-passes ≈ the concurrency), which cannot reveal
 a minutes-scale hiccup. The required duration is `max(precision, relaxation, floor)`:
 `floor` (600s) binds for clean fast runs, `relaxation` (5·p99-latency) for long-tail
-workloads, `precision` (k·τ) for noisy metrics. This is a **hard reject by default**;
-`--no-min-duration` downgrades it to a `WARNING: Window too short` line while still
-reporting the (best-effort) steady number. Full breakdown is in `--json`
-(`steady_state.short_window`).
+workloads, `precision` (k·τ) for noisy metrics.
+
+By default the gate is **part of window selection**: the first plateau that clears
+`min_duration` is reported, **skipping** earlier too-short plateaus (the headline then
+shows a `note: skipped N earlier plateau(s) below min-duration` line). Only when no
+plateau qualifies does the run report `not found`. `--no-min-duration` disables this and
+reports the first plateau with a `WARNING: Window too short` line instead. Full breakdown
+is in `--json` (`steady_state.short_window`, plus `window.plateau_index` /
+`skipped_short`).
 
 ### `ANOMALY` line
 

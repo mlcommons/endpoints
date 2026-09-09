@@ -430,13 +430,25 @@ case. The multiplier on the relaxation term is a literature-derived safety margi
 (relaxation time `1/(μ(1−ρ))`), not fit from the fluid synthetic (which has no queueing
 transient to exercise it).
 
-By default a plateau shorter than `min_duration` is **hard-rejected** (`found = false`,
-with the required duration and dominant term in the reason) — a too-brief window is not
-a certifiable steady state. `--no-min-duration` downgrades this to an advisory: the
-plateau is still reported, carrying a **"Window too short"** warning that states the
-observed vs required duration. Either way the full `short_window` breakdown
-(`window_duration_s`, `min_duration_s`, dominant term, `k*`, `CoV_b`, `τ_sp`, `L_p99`)
-is in the machine-readable output.
+By default the gate is **enforced as part of window selection**: segmentation is walked
+in order and the **first plateau that clears `min_duration` is reported**, skipping any
+earlier plateau too brief to certify. This is a deliberate exception to the pure
+first-plateau rule — a plateau that is real but only seconds long is not a certifiable
+steady state, so the reporter moves on to the next admissible plateau rather than
+rejecting outright. (The reported window carries `plateau_index` / `n_plateaus` /
+`skipped_short`, and the human output notes when earlier plateaus were skipped; the
+level-shift/anomaly baseline moves to the reported plateau, so only degradations _after_
+it are flagged.) Only if **no** admissible plateau is long enough does the run report
+`found = false`, naming the longest candidate and the dominant term. Note the tension
+this introduces: if the only long-enough plateau is a later, degraded step, it will be
+reported (with the skip note) rather than the short healthy one — the min-duration
+requirement takes precedence, and the skip metadata keeps that honest.
+
+`--no-min-duration` disables selection-time enforcement: the **first** plateau is
+reported as usual, carrying a **"Window too short"** advisory when it is below
+`min_duration`. Either way the full `short_window` breakdown (`window_duration_s`,
+`min_duration_s`, dominant term, `k*`, `CoV_b`, `τ_sp`, `L_p99`) is in the
+machine-readable output.
 
 ## 5.6 Edge cases and error handling
 

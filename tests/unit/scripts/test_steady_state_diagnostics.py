@@ -671,6 +671,63 @@ def test_build_steady_state_accepts_long_enough_window():
     assert ss["short_window"]["is_short"] is False
 
 
+def _concat_plateaus(segs):
+    """Chain SuperPassRollup segments into one series: renumber indices and offset each
+    segment's timestamps so they run monotonically, with a 1 s gap between segments."""
+    out = []
+    t_off = 0
+    idx = 0
+    for seg in segs:
+        base = min(sp.first_issue_ns for sp in seg)
+        last = 0
+        for sp in seg:
+            sp.index = idx
+            idx += 1
+            sp.first_issue_ns = sp.first_issue_ns - base + t_off
+            sp.last_issue_ns = sp.last_issue_ns - base + t_off
+            sp.last_event_ns = sp.last_event_ns - base + t_off
+            last = max(last, sp.last_event_ns)
+            out.append(sp)
+        t_off = last + 1_000_000_000
+    return out
+
+
+def test_hard_path_skips_short_plateau_for_next_admissible():
+    # Plateau A: 4 super-passes, ~1 s each (4 s window -> short). Plateau B: 8 super-passes,
+    # 120 s each (~960 s window -> long enough). Distinct TPOT levels segment them.
+    A = _spanned_series(4, tpot=5.0, per_sp_span_s=1.0, latency_s=0.1)
+    B = _spanned_series(8, tpot=6.5, per_sp_span_s=120.0, latency_s=1.0)
+    ss = mod.build_steady_state(
+        _concat_plateaus([A, B]), GATE, BOUNDS
+    )  # enforce default
+    assert ss["found"] is True
+    assert ss["window"]["plateau_index"] == 1  # first (short) plateau skipped
+    assert ss["window"]["skipped_short"] == 1
+    assert ss["window"]["sp_lo"] == 4 and ss["window"]["sp_hi"] == 12
+    assert ss["short_window"]["is_short"] is False
+
+
+def test_hard_path_rejects_when_all_plateaus_short():
+    A = _spanned_series(4, tpot=5.0, per_sp_span_s=1.0, latency_s=0.1)
+    B = _spanned_series(5, tpot=6.5, per_sp_span_s=1.0, latency_s=0.1)  # also short
+    ss = mod.build_steady_state(_concat_plateaus([A, B]), GATE, BOUNDS)
+    assert ss["found"] is False
+    assert "too short" in ss["reason"]
+    assert ss["window"] is not None  # longest candidate kept for context
+
+
+def test_soft_path_reports_first_plateau_even_when_short():
+    A = _spanned_series(4, tpot=5.0, per_sp_span_s=1.0, latency_s=0.1)
+    B = _spanned_series(8, tpot=6.5, per_sp_span_s=120.0, latency_s=1.0)
+    ss = mod.build_steady_state(
+        _concat_plateaus([A, B]), GATE, BOUNDS, enforce_min_duration=False
+    )
+    assert ss["found"] is True
+    assert ss["window"]["plateau_index"] == 0  # first plateau, no skipping
+    assert ss["window"]["skipped_short"] == 0
+    assert ss["short_window"]["is_short"] is True  # flagged, advisory only
+
+
 def test_run_result_has_steady_state_block(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100.0)
     result = mod.run(
