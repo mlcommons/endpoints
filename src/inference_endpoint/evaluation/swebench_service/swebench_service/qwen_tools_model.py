@@ -16,16 +16,16 @@
 """mini-swe-agent model extension for the Qwen SWE-bench tool contract."""
 
 import litellm
-from minisweagent.models.litellm_model import LitellmModel
 
 from .qwen_tools import (
     TOOL_SCHEMAS,
     format_toolcall_observation_messages,
     parse_toolcall_actions,
 )
+from .routing_model import SessionRoutingLitellmModel
 
 
-class QwenToolsModel(LitellmModel):
+class QwenToolsModel(SessionRoutingLitellmModel):
     """Expose the Qwen tool behavior through mini-swe-agent's model hook."""
 
     def _query(self, messages: list[dict[str, str]], **kwargs):

@@ -188,6 +188,7 @@ def _ctx(
     tokenizer_name=None,
     report_dir=None,
     test_mode: config_schema.TestMode = config_schema.TestMode.ACC,
+    datasets=None,
 ):
     # tokenizer_name None => OSL is skipped (fake scorers have no get_raw_outputs).
     # report_dir None => the uuid bound falls back to an unbounded read (no map).
@@ -196,6 +197,7 @@ def _ctx(
         tokenizer_name=tokenizer_name,
         report_dir=report_dir,
         test_mode=test_mode,
+        config=SimpleNamespace(datasets=datasets or []),
     )
 
 
@@ -249,7 +251,36 @@ class TestScoreAccuracy:
             "swebench_service_auth_token": "service-secret",
             "model_params": model_params,
             "endpoint_config": endpoint_config,
+            "routing_headers": ("X-Session-ID",),
         }
+
+    @pytest.mark.parametrize(
+        "routing_headers",
+        [
+            ("X-Session-ID", "X-SMG-Routing-Key"),
+            (),
+        ],
+    )
+    def test_swebench_inherits_agentic_performance_routing_headers(
+        self, tmp_path, routing_headers
+    ):
+        cfg = AccuracyConfiguration(
+            scorer=_FakeSWEBenchScorer,  # type: ignore[arg-type]
+            extractor=None,
+            dataset_name="swe_bench",
+            dataset=_FakeDataset(1, 1.0),  # type: ignore[arg-type]
+            report_dir=tmp_path,
+            ground_truth_column=None,
+            num_repeats=1,
+        )
+        perf_dataset = SimpleNamespace(
+            type=DatasetType.PERFORMANCE,
+            agentic_inference=SimpleNamespace(routing_headers=routing_headers),
+        )
+
+        score_accuracy(_ctx([cfg], datasets=[perf_dataset]), _RESULT)
+
+        assert _FakeSWEBenchScorer.received_kwargs["routing_headers"] == routing_headers
 
     def test_each_dataset_gets_its_own_entry(self, tmp_path):
         cfgs = [
