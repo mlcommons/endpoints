@@ -28,15 +28,20 @@ def _install_minisweagent_stubs(monkeypatch):
     class FormatError(Exception):
         pass
 
-    class LitellmModel:
+    class LitellmModelConfig:
         def __init__(self, **kwargs):
             defaults = {
                 "format_error_template": "{{ error }}",
                 "observation_template": "{{ output.output }}",
                 "multimodal_regex": "",
                 "model_kwargs": {},
+                "routing_headers": (),
             }
-            self.config = SimpleNamespace(**(defaults | kwargs))
+            self.__dict__.update(defaults | kwargs)
+
+    class LitellmModel:
+        def __init__(self, *, config_class=LitellmModelConfig, **kwargs):
+            self.config = config_class(**kwargs)
 
     litellm = types.ModuleType("litellm")
     litellm.completion = lambda **kwargs: kwargs
@@ -50,6 +55,7 @@ def _install_minisweagent_stubs(monkeypatch):
     }
     litellm_model = types.ModuleType("minisweagent.models.litellm_model")
     litellm_model.LitellmModel = LitellmModel
+    litellm_model.LitellmModelConfig = LitellmModelConfig
 
     modules = {
         "litellm": litellm,
