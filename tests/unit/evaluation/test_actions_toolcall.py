@@ -223,7 +223,12 @@ def test_qwen_model_query_sends_custom_tool_request(monkeypatch):
     )
     model = model_mod.QwenToolsModel(
         model_name="openai/test-model",
-        model_kwargs={"api_base": "http://endpoint/v1", "temperature": 0.2},
+        model_kwargs={
+            "api_base": "http://endpoint/v1",
+            "temperature": 0.2,
+            "extra_headers": {"X-Existing": "keep"},
+        },
+        routing_headers=("X-Session-ID",),
     )
 
     response = model._query([{"role": "user", "content": "task"}], temperature=0.7)
@@ -236,6 +241,10 @@ def test_qwen_model_query_sends_custom_tool_request(monkeypatch):
             "tools": tools.TOOL_SCHEMAS,
             "api_base": "http://endpoint/v1",
             "temperature": 0.7,
+            "extra_headers": {
+                "X-Existing": "keep",
+                "X-Session-ID": model.routing_session_id,
+            },
         }
     ]
 
