@@ -108,7 +108,7 @@ LOGIN_USER="${GHCR_USER:-${GITHUB_ACTOR:-}}"
 LOGIN_TOKEN="${GHCR_TOKEN:-${GITHUB_TOKEN:-}}"
 if [[ "$PUSH" == "1" && -n "$LOGIN_TOKEN" ]]; then
     echo ">> Logging in to ${REGISTRY_HOST} as ${LOGIN_USER:-<token>}"
-    echo "$LOGIN_TOKEN" | docker login "$REGISTRY_HOST" -u "${LOGIN_USER:-x-access-token}" --password-stdin
+    printf '%s\n' "$LOGIN_TOKEN" | docker login "$REGISTRY_HOST" -u "${LOGIN_USER:-x-access-token}" --password-stdin
 fi
 
 # ---------------------------------------------------------------------------
