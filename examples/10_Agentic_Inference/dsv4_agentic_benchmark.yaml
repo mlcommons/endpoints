@@ -1,0 +1,62 @@
+name: "dsv4-agentic-benchmark"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "deepseek-ai/DeepSeek-V4-Pro-0813"
+  tokenizer_name: "${MODEL_DIR}"
+  temperature: 1.0
+  top_k: 0
+  top_p: 0.95
+  max_new_tokens: 8192
+  streaming: "on"
+  chat_template_kwargs:
+    thinking: true
+    reasoning_effort: max
+    preserve_thinking: true
+
+datasets:
+  - name: agentic_combined
+    type: performance
+    path: /path/to/agentic_combined.jsonl
+    accuracy_config:
+      eval_method: agentic_inference_inline # required benchmark default.
+      num_repeats: 1
+    agentic_inference:
+      turn_timeout_s: 86400.0
+      enable_salt: true # required benchmark default.
+      inject_tool_delay: true
+      num_trajectories_to_issue: 613 # Should be integer multiple of 613.
+      # Required benchmark default; set to true only for faster optimization/debug runs.
+      stop_issuing_on_first_user_complete: false
+  - name: swe_bench # Default PERF skips external evaluation; use ACC or BOTH.
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "swe_bench_scorer"
+      num_repeats: 1
+      extras:
+        swebench_service_url: "http://localhost:18080"
+        swebench_service_auth_token: "${SWEBENCH_SERVICE_AUTH_TOKEN}"
+        num_instances: 200
+        workers: 100
+        # DSV4 SWE-bench template requirement: TBD.
+
+settings:
+  runtime:
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+
+  load_pattern:
+    type: agentic_inference
+    target_concurrency: 8 # Submission-specific concurrency.
+
+  client:
+    warmup_connections: 0
+    max_idle_time: 0.5
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:30000"
+  api_type: openai
+
+report_dir: logs/dsv4_agentic

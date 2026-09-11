@@ -21,7 +21,8 @@ which publishes `MetricsSnapshot` messages and atomically writes the terminal sn
 ## Responsibilities
 
 - Turn a metrics-aggregator snapshot dict into a `Report` (`report.py`, `Report.from_snapshot`)
-- Derive headline QPS/TPS once, so the serialized report is self-complete
+- Derive headline QPS/TPS and E2E average interactivity once, so the serialized report is
+  self-complete
 - Render the report to console (`display`) and to `result_summary.json` (`to_json`)
 - Define the metric **target** types used by rulesets (`metric.py`)
 - Compute MLPerf LoadGen early-stopping percentile estimates (`early_stopping.py`)
@@ -90,6 +91,7 @@ class Report(msgspec.Struct, frozen=True):
     legacy_loadgen_window_duration_ns: int | None = None
     qps: float | None = None
     tps: float | None = None
+    e2e_avg_interactivity: float | None = None
     finish_reason_counts: dict[str, int] = {}
     run_config: dict | None = None          # config (load pattern, warmup, RNG seeds)
     accuracy: list[dict] = []               # per-dataset accuracy, attached post-scoring
@@ -121,6 +123,11 @@ throughput once:
 - `tps` is additionally `None` when no OSL was recorded — i.e. no tokenizer is configured (or the
   output is empty). OSL is captured on `COMPLETE` regardless of streaming, so non-streaming runs
   still get a TPS when a tokenizer is available.
+- For failure-free runs, `e2e_avg_interactivity` is total output tokens divided by summed
+  end-to-end sample latency in seconds. It is `None`/`N/A` when no OSL or positive sample-latency
+  total is available, or when any tracked request failed. Failed responses contribute to
+  `sample_latency_ns` but not OSL, so reporting the ratio in that case would combine different
+  sample populations.
 
 **Accuracy** is not part of the metrics snapshot; `from_snapshot` leaves `accuracy` empty and the
 finalizer attaches per-dataset accuracy entries after scoring. `run_config` is supplied by the
@@ -142,7 +149,8 @@ aggregator) isolated from report formatting and lets the report be rebuilt offli
 
 **The dict snapshot is the contract.** `from_snapshot` takes the `snapshot_to_dict` shape and never
 decodes the wire Struct — see the data-flow note above. `result_summary.json` is self-complete
-(carries derived QPS/TPS and `run_config`) so a valid run is fully described by its own artifact.
+(carries derived QPS/TPS, E2E average interactivity, and `run_config`) so a valid run is fully
+described by its own artifact.
 
 **Honest incompleteness over crashes.** Every snapshot read defaults safely; drain-timeout and
 interrupted runs produce a `Report` with `complete=False` and an explicit indicator in `display()`
