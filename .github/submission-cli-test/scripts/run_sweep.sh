@@ -65,7 +65,7 @@ trap cleanup EXIT
 for _ in $(seq 1 40); do
   if curl -sf -m 2 -o /dev/null \
       -H 'Content-Type: application/json' \
-      -d '{"model":"oracle-sim-model","messages":[{"role":"user","content":"ping"}]}' \
+      -d '{"model":"sim-model","messages":[{"role":"user","content":"ping"}]}' \
       "http://127.0.0.1:$PORT/v1/chat/completions"; then
     break
   fi
@@ -99,7 +99,7 @@ for c in "${POINTS[@]}"; do
 
   log "Preparing run folder $run_dir"
   $RUNNER python .github/submission-cli-test/scripts/make_system_desc.py \
-    --run-dir "$run_dir" --c-max "$C_MAX" --system-name "oracle_sim_ci"
+    --run-dir "$run_dir" --c-max "$C_MAX" --system-name "sim_ci"
 
   log "runs create --dry-run for concurrency $c"
   $SUBMIT_CLI runs create --path "$run_dir" --dry-run > "$payload"

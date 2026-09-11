@@ -12,12 +12,12 @@
 # NOT a rules-conformant measurement point. Rules §6.2 requires 600s (Ultra Low
 # Concurrency) / 1200s (all other regions) of steady state; n_samples_to_issue
 # here is sized for a fast PR gate instead.
-name: "oracle-sim-c128"
+name: "sim-c128"
 version: "1.0"
 type: online
 
 model_params:
-  name: oracle-sim-model
+  name: sim-model
   # Vendored character tokenizer: keeps ISL / OSL / TPOT / TPS populated with no
   # network access and no gated HuggingFace repo in CI. Token counts are
   # therefore character counts, not a real model's tokenization.

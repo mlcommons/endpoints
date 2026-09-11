@@ -148,9 +148,7 @@ def main() -> int:
         required=True,
         help="declared Maximum Supported Concurrency",
     )
-    parser.add_argument(
-        "--system-name", default="oracle_sim_ci", help="system_name to record"
-    )
+    parser.add_argument("--system-name", default="sim_ci", help="system_name to record")
     args = parser.parse_args()
 
     desc = build_system_desc(args.run_dir, args.c_max, args.system_name)
