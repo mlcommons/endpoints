@@ -221,6 +221,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # tokenizer unavailable).
     qps: float | None = None
     tps: float | None = None
+    e2e_avg_interactivity: float | None = None
     finish_reason_counts: dict[str, int] = msgspec.field(default_factory=dict)
 
     # Run configuration (load_pattern, warmup, and the scheduler/dataloader RNG
@@ -349,6 +350,18 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             qps = None
             tps = None
 
+        total_sample_latency_ns = series.get("sample_latency_ns", {}).get("total", 0)
+        # OSL is recorded only for successful responses, while sample latency
+        # includes every terminal request. Without a success-correlated latency
+        # sum, any tracked failure would make the two sides cover different
+        # samples, so omit the derived metric instead of publishing a biased
+        # ratio.
+        e2e_avg_interactivity = (
+            osl.get("total", 0) / (total_sample_latency_ns / 1e9)
+            if osl and total_sample_latency_ns > 0 and n_failed == 0
+            else None
+        )
+
         # Default missing state to "interrupted" — a malformed / partial
         # snapshot dict is treated as worst-case (run did not reach a
         # clean completion). Drives complete=False and the interrupted
@@ -388,6 +401,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
             tps=tps,
+            e2e_avg_interactivity=e2e_avg_interactivity,
             finish_reason_counts=finish_reason_counts,
             run_config=run_config,
         )
@@ -456,6 +470,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             fn(f"TPS: {tps:.2f}{newline}")
         else:
             fn(f"TPS: N/A{newline}")
+
+        if (interactivity := self.e2e_avg_interactivity) is not None:
+            fn(f"E2E average interactivity: {interactivity:.2f} tokens/s{newline}")
+        else:
+            fn(f"E2E average interactivity: N/A{newline}")
 
         if self.accuracy:
             fn(f"Accuracy:{newline}")

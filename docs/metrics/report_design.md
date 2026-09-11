@@ -25,12 +25,12 @@ final_snapshot.json  (dict form of MetricsSnapshot)
         ├── for each series (ttft, tpot, latency, isl, osl):
         │       _series_to_metric_dict(stat) → rollup dict
         │
-        └── derive qps / tps once (window chosen by run config)
+        └── derive qps / tps / e2e_avg_interactivity once
         │
         ▼
      Report (frozen msgspec.Struct)
         ├── .display(fn)   → human-readable output with histograms
-        └── .to_json(path) → result_summary.json (QPS/TPS + run_config included)
+        └── .to_json(path) → result_summary.json (derived metrics + run_config included)
 ```
 
 ## Design Principles
@@ -44,7 +44,8 @@ rebuilt offline from any persisted `final_snapshot.json`.
 default, so a truncated or partial (INTERRUPTED) snapshot produces an honest _empty_ rollup and a
 `complete=False` report rather than raising. Missing `state` defaults to `"interrupted"`.
 
-**Self-describing artifacts.** Derived QPS/TPS, the window that produced them
+**Self-describing artifacts.** Derived QPS/TPS and E2E average interactivity, the window that
+produced QPS/TPS
 (`legacy_loadgen_window_duration_ns`), and `run_config` are all serialized, so a valid run is fully
 identified by its own `result_summary.json`.
 
@@ -69,13 +70,13 @@ p50. A zero-count series returns `{}` (or an all-null early-stopping map if the 
 Fields: `version`, `git_sha`, `test_started_at`, `n_samples_issued/completed/failed`,
 `duration_ns`, `state`, `complete`, the five rollup dicts (`ttft`, `tpot`, `latency`,
 `input_sequence_lengths`, `output_sequence_lengths`), `legacy_loadgen_window_duration_ns`,
-`qps`, `tps`,
+`qps`, `tps`, `e2e_avg_interactivity`,
 `finish_reason_counts`, `run_config`, and `accuracy`.
 
 - `complete` = `state == "complete" and n_pending_tasks == 0` — `False` marks partial async metrics
   (drain timeout, interrupt, or a live-tick fallback when no final snapshot was found).
-- `qps`/`tps` are computed once in `from_snapshot` (see below) rather than as live properties, so
-  the serialized report is self-complete.
+- `qps`/`tps`/`e2e_avg_interactivity` are computed once in `from_snapshot` (see below) rather than
+  as live properties, so the serialized report is self-complete.
 - `accuracy` is empty from `from_snapshot`; per-dataset entries are attached after scoring.
 
 Methods: `display(fn, ...)` for console output with histograms; `to_json(save_to)` for
@@ -107,3 +108,10 @@ legacy window drives the headline QPS/TPS only when it is enabled
 (`QPS = (completed - 1) / window`). Otherwise both QPS and TPS fall back to the native window so
 they always share one window, and `legacy_loadgen_window_duration_ns` is left `None` so the
 serialized report records which view it holds. `tps` is `None` when no OSL was recorded.
+
+**E2E average interactivity.** For failure-free runs, `e2e_avg_interactivity` is total output
+tokens divided by summed end-to-end sample latency in seconds. It is serialized in
+`result_summary.json` and displayed in the human-readable summary. The value is `None`/`N/A` when
+no OSL or positive sample-latency total is available, or when any tracked request failed. Failed
+responses contribute to `sample_latency_ns` but not OSL, so reporting the ratio in that case would
+combine different sample populations.
