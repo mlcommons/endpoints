@@ -14,6 +14,9 @@ import msgspec.json
 import pytest
 import yaml
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
+    pyxis_environment as pyxis_env_mod,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service import (
     pyxis_worker as worker_mod,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
@@ -867,6 +870,95 @@ def test_pyxis_srun_environment_withholds_inherited_step_identity(monkeypatch, n
     monkeypatch.setenv(name, "inherited")
 
     assert name not in safe_srun_env()
+
+
+def test_pyxis_environment_retries_connect_tunnel_prelaunch_failure(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    calls = 0
+    delays: list[float] = []
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="curl: (56) CONNECT tunnel failed, response 403\n",
+                stderr="",
+            )
+        _finish_srun_step(command, 0)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(pyxis_env_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(pyxis_env_mod.time, "sleep", delays.append)
+
+    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+
+    assert calls == 3
+    assert delays == [2, 4]
+    environment.cleanup()
+
+
+def test_pyxis_srun_step_retries_prelaunch_failure_from_stderr(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    status_path = tmp_path / ".mlperf_srun_status"
+    calls = 0
+    delays: list[float] = []
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr="spank_sybil: rpc request error\n",
+            )
+        status_path.write_text("finished:0\n")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(pyxis_env_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(pyxis_env_mod.time, "sleep", delays.append)
+
+    result = pyxis_env_mod.run_srun_step(
+        argv=["true"],
+        status_path=status_path,
+        timeout_s=30,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.stdout == "ok\n"
+    assert calls == 2
+    assert delays == [2]
+
+
+def test_pyxis_environment_does_not_retry_non_retryable_prelaunch_failure(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
+    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 1, stdout="authentication denied\n", stderr=""
+        ),
+    )
+
+    with pytest.raises(
+        RunnerError, match="failed to start Pyxis container"
+    ) as exc_info:
+        PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+
+    assert "Captured srun output" in str(exc_info.value.__cause__)
 
 
 def test_pyxis_environment_reuses_named_writable_container(
