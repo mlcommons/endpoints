@@ -627,6 +627,26 @@ class TestReportDisplayAndSerialize:
         assert "no countable turns" in output
         assert "0.0 tokens" not in output
 
+    def test_display_full_run_osl_partial_is_flagged(self):
+        """A partial block (errored/missing turns) is labeled NOT valid for the gate."""
+        report = self._report_with_full_run_osl(
+            {
+                "output_sequence_lengths": {"avg": 400.0},
+                "n_turns_counted": 1,
+                "n_empty": 0,
+                "n_errors": 1,
+                "n_undecodable": 0,
+                "n_missing": 1,
+                "partial": True,
+            }
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert "1 missing" in output
+        assert "PARTIAL" in output
+        assert "NOT valid for the OSL accuracy gate" in output
+
     def test_display_full_run_osl_missing_on_complete_performance_run(self):
         """A COMPLETE perf run (windowed OSL present) with no full-run block
         blames the tokenizer/sample-map, not incompleteness."""

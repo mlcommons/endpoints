@@ -368,3 +368,90 @@ def test_for_report_skips_without_tokenizer_or_events(tmp_path: Path) -> None:
     """No tokenizer, or a missing events.jsonl, short-circuits to None."""
     assert full_run_osl_for_report(tmp_path, None) is None  # no tokenizer
     assert full_run_osl_for_report(tmp_path, "any-tokenizer") is None  # no events.jsonl
+
+
+def test_missing_turn_is_detected_via_uuid_reconciliation(tmp_path: Path) -> None:
+    """A perf uuid with no COMPLETE record is reconciled as missing and marks the
+    block partial — the silent case where every other counter is zero (#504)."""
+    events = _write_events(
+        tmp_path / "events.jsonl",
+        [
+            _session(SessionEventType.STARTED),
+            _complete(1, "a b c"),
+            _session(SessionEventType.ENDED),
+        ],
+    )
+
+    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+
+    assert result is not None
+    assert result["n_turns_counted"] == 1
+    assert result["n_missing"] == 1  # u3 was expected but never logged a COMPLETE
+    assert result["n_errors"] == 0 and result["n_undecodable"] == 0
+    assert result["partial"] is True
+
+
+def test_failed_turn_marks_block_partial(tmp_path: Path) -> None:
+    """An uncountable turn keeps the surviving mean but flags the block partial."""
+    events = _write_events(
+        tmp_path / "events.jsonl",
+        [
+            _session(SessionEventType.STARTED),
+            _complete(1, "one"),
+            _complete(3, "boom"),
+            _session(SessionEventType.ENDED),
+        ],
+    )
+
+    def flaky(tok_input: MessageInput | TextInput) -> int:
+        if getattr(tok_input, "text", "") == "boom":
+            raise ValueError("tokenizer blew up")
+        return _word_count(tok_input)
+
+    result = compute_full_run_osl(events, flaky, performance_uuids={"u1", "u3"})
+
+    assert result is not None
+    assert result["n_turns_counted"] == 1
+    assert result["n_errors"] == 1
+    assert result["partial"] is True
+
+
+def test_clean_run_is_not_partial(tmp_path: Path) -> None:
+    """Every expected turn counted → partial is False and nothing is missing."""
+    events = _write_events(
+        tmp_path / "events.jsonl",
+        [
+            _session(SessionEventType.STARTED),
+            _complete(1, "a"),
+            _complete(3, "b c"),
+            _session(SessionEventType.ENDED),
+        ],
+    )
+
+    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+
+    assert result is not None
+    assert result["n_turns_counted"] == 2
+    assert result["n_missing"] == 0
+    assert result["partial"] is False
+
+
+def test_empty_turns_do_not_make_block_partial(tmp_path: Path) -> None:
+    """An empty completion is a legitimate shared-rule exclusion, not a defect,
+    so it must not flip the block to partial."""
+    events = _write_events(
+        tmp_path / "events.jsonl",
+        [
+            _session(SessionEventType.STARTED),
+            _complete(1, "a b"),
+            _complete(3, ""),  # empty output → n_empty, not partial
+            _session(SessionEventType.ENDED),
+        ],
+    )
+
+    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+
+    assert result is not None
+    assert result["n_empty"] == 1
+    assert result["n_missing"] == 0
+    assert result["partial"] is False

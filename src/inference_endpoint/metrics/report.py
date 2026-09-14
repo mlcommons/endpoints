@@ -246,10 +246,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # rule (``extract_tokenization_input``) on both. Attached at finalize; None
     # only when the block was skipped (no tokenizer, or an unreadable/missing
     # performance sample map). A run that scanned turns but counted none returns
-    # a block with ``n_turns_counted == 0`` — so a run is invalid for the OSL
-    # accuracy gate when this is None OR ``n_turns_counted == 0`` OR not complete.
+    # a block with ``n_turns_counted == 0``. ``partial`` is True when any turn was
+    # errored, undecodable, or missing (a perf UUID with no COMPLETE record) — the
+    # mean is then over a subset. A run is invalid for the OSL accuracy gate when
+    # this is None OR ``n_turns_counted == 0`` OR ``partial`` OR not complete.
     # Carries ``output_sequence_lengths``/``n_turns_counted``/``n_empty``/
-    # ``n_errors``/``n_undecodable``. See mlcommons/endpoints#500.
+    # ``n_errors``/``n_undecodable``/``n_missing``/``partial``.
+    # See mlcommons/endpoints#500.
     output_sequence_lengths_full_run: dict[str, Any] | None = None
 
     @property
@@ -550,8 +553,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 f"  OSL per-turn mean (accuracy, all turns): "
                 f"{osl.get('avg', 0):.1f} tokens over {n_counted} turns "
                 f"({fr.get('n_empty', 0)} empty, {fr.get('n_errors', 0)} errored, "
-                f"{fr.get('n_undecodable', 0)} undecodable){newline}"
+                f"{fr.get('n_undecodable', 0)} undecodable, "
+                f"{fr.get('n_missing', 0)} missing){newline}"
             )
+            if fr.get("partial"):
+                fn(
+                    f"    (PARTIAL — dropped/missing turns; "
+                    f"NOT valid for the OSL accuracy gate){newline}"
+                )
             if not self.complete:
                 fn(
                     f"    (run incomplete — NOT valid for the OSL accuracy gate){newline}"
@@ -561,7 +570,8 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             fn(
                 f"  OSL per-turn mean (accuracy): no countable turns "
                 f"({fr.get('n_empty', 0)} empty, {fr.get('n_errors', 0)} errored, "
-                f"{fr.get('n_undecodable', 0)} undecodable){newline}"
+                f"{fr.get('n_undecodable', 0)} undecodable, "
+                f"{fr.get('n_missing', 0)} missing){newline}"
             )
         elif self.output_sequence_lengths and self.complete:
             # A complete performance run (windowed OSL present) but no full-run

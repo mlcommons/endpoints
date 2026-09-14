@@ -92,11 +92,16 @@ def compute_full_run_osl(
 ) -> dict[str, Any] | None:
     """Roll up OSL over every completed turn in ``events_path``.
 
-    Returns ``None`` only when the file held no relevant COMPLETE lines at all.
-    A file with records but nothing countable (all empty, timed out, errored, or
-    undecodable) returns a block with an empty ``output_sequence_lengths`` and
-    non-zero ``n_empty``/``n_errors``/``n_undecodable`` so the run stays visible
-    rather than looking uncomputed.
+    Returns ``None`` only when the file held no relevant COMPLETE lines at all
+    and no expected turn was missing. A file with records but nothing countable
+    (all empty, timed out, errored, or undecodable) — or one missing an expected
+    performance turn — returns a block with an empty ``output_sequence_lengths``
+    and non-zero counters so the run stays visible rather than looking uncomputed.
+
+    ``partial`` is True when any turn was errored, undecodable, or missing
+    (reconciled against ``performance_uuids``): the mean is then over a subset of
+    the population and must not feed the OSL accuracy gate. Empty turns do not
+    make it partial — they are the shared rule's legitimate zero-output exclusion.
     """
     decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
     lengths: list[int] = []
@@ -104,6 +109,7 @@ def compute_full_run_osl(
     n_errors = 0
     n_undecodable = 0
     first_error: str | None = None
+    seen_uuids: set[str] = set()
 
     with events_path.open("rb") as events_file:
         for line in events_file:
@@ -119,6 +125,7 @@ def compute_full_run_osl(
                 continue
             if not _in_population(record, performance_uuids):
                 continue
+            seen_uuids.add(record.sample_uuid)
             if record.data is None:
                 n_empty += 1  # e.g. a timed-out turn logs COMPLETE with data=None
                 continue
@@ -142,6 +149,14 @@ def compute_full_run_osl(
                 if first_error is None:
                     first_error = str(e)
 
+    # A performance turn whose COMPLETE record never reached the log is invisible
+    # to the counters above; reconcile observed UUIDs against the expected
+    # performance population so a lost record is flagged, not silently averaged
+    # away (mlcommons/endpoints#504 review).
+    n_missing = (
+        len(set(performance_uuids) - seen_uuids) if performance_uuids is not None else 0
+    )
+
     # Warn once with the aggregate rather than once per turn, so a systematic
     # failure (bad tokenizer, corrupt log) does not flood the finalize log.
     if n_undecodable:
@@ -154,15 +169,32 @@ def compute_full_run_osl(
             n_errors,
             first_error,
         )
+    if n_missing:
+        logger.warning(
+            "Full-run OSL: %d performance turn(s) had no COMPLETE record in the log",
+            n_missing,
+        )
 
-    if not lengths and not n_empty and not n_errors and not n_undecodable:
+    if (
+        not lengths
+        and not n_empty
+        and not n_errors
+        and not n_undecodable
+        and not n_missing
+    ):
         return None
+    # ``partial`` is the machine-readable gate signal: errored / undecodable /
+    # missing turns mean the mean is over a subset and must not feed the OSL
+    # accuracy gate. Empty turns are a legitimate shared-rule exclusion.
+    partial = bool(n_errors or n_undecodable or n_missing)
     return {
         "output_sequence_lengths": series_metric_dict(lengths),
         "n_turns_counted": len(lengths),
         "n_empty": n_empty,
         "n_errors": n_errors,
         "n_undecodable": n_undecodable,
+        "n_missing": n_missing,
+        "partial": partial,
     }
 
 
