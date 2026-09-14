@@ -755,11 +755,15 @@ def _build_agentic_strategy(
         if perf_ds_cfg is not None:
             agentic_cfg = perf_ds_cfg.agentic_inference
     assert ctx.dataloader.conversation_metadata is not None
+    rng_sample_index = (
+        ctx.rt_settings.rng_sample_index if ctx.rt_settings is not None else None
+    )
     return AgenticInferenceStrategy(
         conversation_manager=ConversationManager(),
         dataset_metadata=ctx.dataloader.conversation_metadata,
         agentic_inference_config=agentic_cfg,
         target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
+        rng_sample_index=rng_sample_index,
     )
 
 

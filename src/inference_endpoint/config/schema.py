@@ -635,7 +635,12 @@ class RuntimeConfig(BaseModel):
         cyclopts.Parameter(alias="--num-samples", help="Sample count override"),
     ] = Field(None, gt=0)
     scheduler_random_seed: int = Field(42, description="Scheduler RNG seed")
-    dataloader_random_seed: int = Field(42, description="Dataloader RNG seed")
+    dataloader_random_seed: int = Field(
+        42,
+        description=(
+            "Dataloader RNG seed (sample shuffle; agentic conversation order)"
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_durations(self) -> Self:

@@ -17,6 +17,7 @@
 
 import asyncio
 import hashlib
+import random
 from unittest.mock import MagicMock
 
 import pytest
@@ -151,6 +152,48 @@ def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationM
         max_turns_per_conv=max((max(t) for t in conversations.values()), default=0),
         client_turns_per_conversation={c: len(t) for c, t in conversations.items()},
     )
+
+
+def _source_conversation_id(logical_id: str) -> str:
+    marker = "__repeat_"
+    if marker in logical_id:
+        return logical_id.split(marker, 1)[0]
+    return logical_id
+
+
+def _trajectory_start_order(issuer: RecordingPhaseIssuer) -> list[str]:
+    starts: list[str] = []
+    seen: set[str] = set()
+    for _qid, _idx, conv, _turn, _override in issuer.records:
+        if conv in seen:
+            continue
+        seen.add(conv)
+        starts.append(conv)
+    return starts
+
+
+async def _drain_recording_strategy(
+    strategy: AgenticInferenceStrategy,
+    issuer: RecordingPhaseIssuer,
+) -> int:
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+    completed: set[str] = set()
+
+    async def _pump() -> int:
+        while not execute_task.done():
+            await asyncio.sleep(0)
+            for query_id, *_rest in issuer.records:
+                if query_id in completed:
+                    continue
+                strategy.on_sample_complete(
+                    QueryResult(
+                        id=query_id, response_output=TextModelOutput(output="ok")
+                    )
+                )
+                completed.add(query_id)
+        return await execute_task
+
+    return await asyncio.wait_for(_pump(), timeout=2.0)
 
 
 @pytest.mark.unit
@@ -306,10 +349,10 @@ async def test_salted_turns_use_repeat_and_conversation_salts():
     repeat2_salt = hashlib.blake2b(b"2", digest_size=2).hexdigest()
     conversation_salt = hashlib.blake2b(b"conv1", digest_size=2).hexdigest()
     assert first_system == (
-        f"[salt: {repeat1_salt}]\n\n" f"Be helpful\n\n" f"[salt: {conversation_salt}]"
+        f"[salt: {repeat1_salt}]\n\nBe helpful\n\n[salt: {conversation_salt}]"
     )
     assert repeat_system == (
-        f"[salt: {repeat2_salt}]\n\n" f"Be helpful\n\n" f"[salt: {conversation_salt}]"
+        f"[salt: {repeat2_salt}]\n\nBe helpful\n\n[salt: {conversation_salt}]"
     )
     assert repeat_system != base_messages[0]["content"]
     assert base_messages[0]["content"] == "Be helpful"
@@ -1103,3 +1146,198 @@ async def test_inject_tool_delay_cancels_on_timeout():
         0,
         1,
     ], f"turn 3 should not have been issued after timeout; issued={issuer.issued}"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_conversation_order_without_rng_follows_dataset_order():
+    conv_ids = [f"conv{i}" for i in range(8)]
+    metadata = _make_dataset_metadata({cid: [1] for cid in conv_ids})
+    strategy = AgenticInferenceStrategy(
+        ConversationManager(), metadata, target_concurrency=None
+    )
+    issuer = RecordingPhaseIssuer()
+    await _drain_recording_strategy(strategy, issuer)
+    assert _trajectory_start_order(issuer) == conv_ids
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_conversation_shuffle_matches_without_replacement_sample_order():
+    conv_ids = [f"conv{i}" for i in range(8)]
+    metadata = _make_dataset_metadata({cid: [1] for cid in conv_ids})
+    strategy = AgenticInferenceStrategy(
+        ConversationManager(),
+        metadata,
+        target_concurrency=None,
+        rng_sample_index=random.Random(42),
+    )
+    issuer = RecordingPhaseIssuer()
+    await _drain_recording_strategy(strategy, issuer)
+
+    expected_indices = list(range(8))
+    random.Random(42).shuffle(expected_indices)
+    assert expected_indices != list(range(8))
+    assert _trajectory_start_order(issuer) == [conv_ids[i] for i in expected_indices]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_conversation_shuffle_is_reproducible():
+    conv_ids = [f"conv{i}" for i in range(8)]
+    metadata = _make_dataset_metadata({cid: [1] for cid in conv_ids})
+
+    async def run(seed: int) -> list[str]:
+        strategy = AgenticInferenceStrategy(
+            ConversationManager(),
+            metadata,
+            target_concurrency=None,
+            rng_sample_index=random.Random(seed),
+        )
+        issuer = RecordingPhaseIssuer()
+        await _drain_recording_strategy(strategy, issuer)
+        return _trajectory_start_order(issuer)
+
+    first = await run(42)
+    second = await run(42)
+    other = await run(99)
+    assert first == second
+    assert first != other
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_conversation_shuffle_preserves_turn_order_within_conversation():
+    conv_ids = [f"conv{i}" for i in range(8)]
+    metadata = _make_dataset_metadata({cid: [1, 2] for cid in conv_ids})
+    strategy = AgenticInferenceStrategy(
+        ConversationManager(),
+        metadata,
+        target_concurrency=None,
+        rng_sample_index=random.Random(42),
+    )
+    issuer = RecordingPhaseIssuer()
+    await _drain_recording_strategy(strategy, issuer)
+
+    turns_by_conv: dict[str, list[int]] = {}
+    for _qid, _idx, conv, turn, _override in issuer.records:
+        assert turn is not None
+        turns_by_conv.setdefault(conv, []).append(turn)
+    assert len(turns_by_conv) == 8
+    for turns in turns_by_conv.values():
+        assert turns == [1, 2]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_conversation_shuffle_reshuffles_each_pass():
+    conv_ids = [f"conv{i}" for i in range(8)]
+    metadata = _make_dataset_metadata({cid: [1] for cid in conv_ids})
+    cfg = AgenticInferenceConfig(num_trajectories_to_issue=16)
+    strategy = AgenticInferenceStrategy(
+        ConversationManager(),
+        metadata,
+        agentic_inference_config=cfg,
+        target_concurrency=None,
+        rng_sample_index=random.Random(42),
+    )
+    issuer = RecordingPhaseIssuer()
+    await _drain_recording_strategy(strategy, issuer)
+
+    starts = [
+        _source_conversation_id(logical_id)
+        for logical_id in _trajectory_start_order(issuer)
+    ]
+    first_pass, second_pass = starts[:8], starts[8:]
+    assert sorted(first_pass) == conv_ids
+    assert sorted(second_pass) == conv_ids
+    assert first_pass != second_pass
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_conversation_shuffle_honored_under_bounded_concurrency():
+    """Bounded concurrency draws from the same seeded shuffle as start-all-at-once.
+
+    The production path uses a finite ``target_concurrency`` (e.g. 8), so the
+    shuffle is advanced from ``_fill_slot`` on completion rather than the
+    ``execute()`` seed loop. Start order must still equal the seeded
+    without-replacement permutation and be independent of the concurrency cap.
+    """
+    conv_ids = [f"conv{i}" for i in range(8)]
+    metadata = _make_dataset_metadata({cid: [1] for cid in conv_ids})
+
+    async def start_order(target_concurrency: int | None) -> list[str]:
+        strategy = AgenticInferenceStrategy(
+            ConversationManager(),
+            metadata,
+            target_concurrency=target_concurrency,
+            rng_sample_index=random.Random(42),
+        )
+        issuer = RecordingPhaseIssuer()
+        await _drain_recording_strategy(strategy, issuer)
+        return _trajectory_start_order(issuer)
+
+    expected_indices = list(range(8))
+    random.Random(42).shuffle(expected_indices)
+    expected = [conv_ids[i] for i in expected_indices]
+
+    bounded = await start_order(2)
+    unbounded = await start_order(None)
+    assert bounded == expected
+    assert bounded == unbounded
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_salt_is_unique_across_shuffled_conversations_and_repeats():
+    """Salted prompts stay unique when shuffle and salting are both on.
+
+    Every conversation shares identical base content, so only the
+    ``(repeat_id, conversation_id)`` salt can distinguish issued prompts. With a
+    shuffled start order over two passes, all issued prompts must be distinct
+    (anti-cache), and the same conversation's two passes must differ because
+    ``repeat_id`` changes the salt.
+    """
+    conv_ids = [f"conv{i}" for i in range(4)]
+    metadata = _make_dataset_metadata({cid: [1] for cid in conv_ids})
+    base_messages = [
+        {"role": "system", "content": "Be helpful"},
+        {"role": "user", "content": "hello"},
+    ]
+    metadata.pre_built_messages_by_key = {(cid, 1): base_messages for cid in conv_ids}
+    cfg = AgenticInferenceConfig(enable_salt=True, num_trajectories_to_issue=8)
+    strategy = AgenticInferenceStrategy(
+        ConversationManager(),
+        metadata,
+        agentic_inference_config=cfg,
+        target_concurrency=None,
+        rng_sample_index=random.Random(42),
+    )
+    issuer = RecordingPhaseIssuer()
+    await _drain_recording_strategy(strategy, issuer)
+
+    def _system_salt(override: dict | None) -> str:
+        assert override is not None
+        system = next(m for m in override["messages"] if m["role"] == "system")
+        content = system["content"]
+        assert content.startswith("[salt: ")
+        return content
+
+    salted = [_system_salt(record[4]) for record in issuer.records]
+    assert len(salted) == 8
+    # Anti-cache: identical base content, yet every issued prompt is distinct.
+    assert len(set(salted)) == 8
+
+    # repeat_id changes the salt: each conversation's two passes differ.
+    salts_by_source: dict[str, list[str]] = {}
+    for content, (_q, _idx, logical_id, _turn, _override) in zip(
+        salted, issuer.records, strict=False
+    ):
+        salts_by_source.setdefault(_source_conversation_id(logical_id), []).append(
+            content
+        )
+    assert len(salts_by_source) == 4
+    for source_id, salts in salts_by_source.items():
+        assert len(salts) == 2, source_id
+        assert salts[0] != salts[1], source_id
