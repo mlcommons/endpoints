@@ -66,6 +66,13 @@ Qwen SWE-bench configs opt in with
 packaged Qwen template and activates `QwenToolsModel` through mini-swe-agent's
 `model_class` hook. Omit this setting for Kimi and other non-Qwen runs.
 
+The scorer forwards the performance dataset's
+`agentic_inference.routing_headers` names to the service, defaulting to
+`X-Session-ID` when no agentic performance config is present. The service assigns
+one routing ID per SWE-bench trajectory and reuses it across that trajectory's
+model turns, so consistent-hash routers keep each agent on one backend without
+pinning all concurrent agents to the same backend.
+
 ## Common failure modes
 
 | Symptom                              | Likely cause                              | Fix                                                |

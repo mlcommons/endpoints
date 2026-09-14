@@ -127,6 +127,14 @@ Keep `accuracy_config.num_repeats: 1`: the scorer performs one external evaluati
 
 `accuracy_config.extras.workers` sets the agent run's parallelism (`--workers`). If unset, it defaults to the load pattern's `target_concurrency` (for `concurrency`/`agentic_inference` patterns), else 10. `max_eval_workers` (default 10, `--max_workers`) sets the eval harness's parallelism.
 
+SWE-bench endpoint requests use the same routing-header names as the performance
+dataset's `agentic_inference.routing_headers` setting. If that setting is
+unavailable, the scorer defaults to `X-Session-ID`. The service creates one opaque
+session ID per SWE-bench trajectory, reuses it for every model turn in that
+trajectory, and uses a different ID for each concurrent trajectory. Setting
+`routing_headers: []` on the agentic performance dataset disables these headers in
+both phases.
+
 Qwen tool-call runs should set `accuracy_config.extras.swebench_template: qwen_tools`. The selected packaged template also activates the service's `QwenToolsModel` through mini-swe-agent's `model_class` hook.
 
 If SWE-bench evaluation is needed, start the service with the following command on a host that has Docker:
