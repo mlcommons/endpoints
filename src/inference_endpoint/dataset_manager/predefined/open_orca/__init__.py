@@ -14,16 +14,14 @@
 # limitations under the License.
 
 import gzip
-import hashlib
 import shutil
-import subprocess
 from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
-import requests
 
 from ...dataset import Dataset
+from ...download import download_r2_artifact, verify_sha256
 from . import presets
 
 logger = getLogger(__name__)
@@ -39,16 +37,10 @@ class OpenOrca(
     SOURCE_FILENAME = "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
     CACHE_FILENAME = "open_orca_gpt4_tokenized_llama.sampled_24576.jsonl"
     SOURCE_SHA256 = "b64e66e54b6267f79eb4f9ccec52d466bab3ac94747ed258c3b0f337ed166fab"
-
-    @classmethod
-    def _verify_sha256(cls, path: Path) -> None:
-        """Raise ValueError if the file's SHA-256 digest does not match SOURCE_SHA256."""
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        if digest != cls.SOURCE_SHA256:
-            raise ValueError(
-                f"SHA-256 mismatch for {path.name}: "
-                f"expected {cls.SOURCE_SHA256}, got {digest}"
-            )
+    DATASET_URI = (
+        "https://inference.mlcommons-storage.org/metadata/"
+        "llama-2-70b-open-orca-dataset.uri"
+    )
 
     @classmethod
     def _extract_gz_files(cls, download_dir: Path, gzip_dir: Path) -> None:
@@ -63,7 +55,7 @@ class OpenOrca(
     @classmethod
     def _convert_pickle_cache(cls, pickle_path: Path, jsonl_path: Path) -> pd.DataFrame:
         """Convert the upstream pickle artifact into the local JSONL cache."""
-        cls._verify_sha256(pickle_path)
+        verify_sha256(pickle_path, cls.SOURCE_SHA256)
         dataframe = pd.read_pickle(pickle_path)
         tmp_path = jsonl_path.with_suffix(".jsonl.tmp")
         try:
@@ -124,55 +116,21 @@ class OpenOrca(
             )
             return cls._convert_pickle_cache(pickle_path, jsonl_path)
 
-        # Dataset URL from README
-        dataset_url = "https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri"
-
-        # Download the r2-downloader script into a temp file in the target dir
-        COMMIT_HASH = "27da4421877f2831eeb615b43ee5098c4b70be7e"
-        downloader_url = f"https://raw.githubusercontent.com/mlcommons/r2-downloader/{COMMIT_HASH}/mlc-r2-downloader.sh"
-        download_dir = cache_dir
-        script_path = cache_dir / "mlc-r2-downloader.sh"
-        r = requests.get(downloader_url, timeout=30)
-        r.raise_for_status()
-        script_path.write_bytes(r.content)
-        script_path.chmod(0o755)
-
-        # Run the script with the dataset URL.
+        downloaded_gzip = download_r2_artifact(
+            uri=cls.DATASET_URI,
+            destination_dir=cache_dir,
+            artifact_name=f"{cls.SOURCE_FILENAME}.gz",
+        )
         try:
-            # Use absolute path for the script to avoid path doubling when cwd is set
-            script_abs = str(script_path.resolve())
-            result = subprocess.run(
-                ["bash", script_abs, "-d", str(download_dir), dataset_url],
-                stdout=subprocess.DEVNULL,  # Suppress normal output
-                stderr=subprocess.PIPE,  # Capture errors
-                text=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"R2 downloader failed with code {result.returncode}: {result.stderr}"
+            cls._extract_gz_files(cache_dir, downloaded_gzip.parent)
+            if not pickle_path.exists():
+                raise FileNotFoundError(
+                    f"OpenOrca was downloaded, but {pickle_path} does not exist"
                 )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"R2 downloader failed: {e}") from e
-
-        # Script will generate a new 'open_orca' subdirectory with gzip'd pickle files
-        gzip_dir = download_dir
-        if (gzip_dir / "open_orca").exists():
-            gzip_dir = gzip_dir / "open_orca"
-
-        cls._extract_gz_files(download_dir, gzip_dir)
-
-        if not pickle_path.exists():
-            raise FileNotFoundError(
-                f"OpenOrca was downloaded, but {pickle_path} does not exist"
-            )
-
-        try:
             return cls._convert_pickle_cache(pickle_path, jsonl_path)
         finally:
-            for gz_path in gzip_dir.glob("*.pkl.gz"):
+            for gz_path in downloaded_gzip.parent.glob("*.pkl.gz"):
                 gz_path.unlink()
-            script_path.unlink(missing_ok=True)
 
 
 __all__ = ["OpenOrca"]
