@@ -1009,3 +1009,41 @@ def test_terminate_procs_kills_running_workers():
         ex.shutdown(wait=False, cancel_futures=True)
         if manager_thread is not None:
             manager_thread.join(5)
+
+
+@pytest.mark.unit
+class TestCountSync:
+    """The finalize-side synchronous counter.
+
+    Full-run OSL is computed after the run, outside the event loop, but it
+    must produce the same number the perf-side async path would for the same
+    input — otherwise the windowed and full-run statistics are not comparable
+    (mlcommons/endpoints#500).
+    """
+
+    @pytest.mark.asyncio
+    async def test_count_sync_agrees_with_count_batch_async(self):
+        """Same input, same count, whichever lane counted it."""
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            loop = asyncio.get_running_loop()
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                message = MessageInput(
+                    "hello world",
+                    "reasoning here",
+                    (
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "f", "arguments": "{}"},
+                        },
+                    ),
+                )
+                expected = (await tok.count_batch_async([message], loop))[0]
+
+                assert tok.count_sync(message) == expected
+
+    def test_count_sync_counts_plain_text(self):
+        """Text inputs take the text path, not the chat template."""
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                assert tok.count_sync(TextInput("hello world")) == 2

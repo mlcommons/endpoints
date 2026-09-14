@@ -491,7 +491,10 @@ gates the _timing_ of the next turn, it does not alter its prompt. Concurrency i
 **active conversations** (`_target_concurrency`), not in-flight requests.
 
 - `execute(phase_issuer)` seeds up to `_target_concurrency` initial conversations, then awaits
-  completion of all of them.
+  completion of all of them. Conversation start order is a `WithoutReplacementSampleOrder` over
+  conversation indices when `rng_sample_index` is set (`dataloader_random_seed`, same RNG as
+  non-agentic sample shuffle); intra-conversation turn order is unchanged. Without an RNG,
+  conversations start in dataset encounter order.
 - On each response, `on_sample_complete(result)` synchronously routes it to its conversation and
   calls `_issue_next_turn()` → `_issue_turn_now()`, which stores the new `query_id → conversation_id`
   mapping and issues the turn with zero event-loop delay (or an optional per-turn delay). When a

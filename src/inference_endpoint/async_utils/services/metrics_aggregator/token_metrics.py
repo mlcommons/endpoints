@@ -566,6 +566,40 @@ class BatchTokenizer:
             for (index, _), count in zip(indexed_texts, counts, strict=True)
         ]
 
+    def count_sync(self, item: TokenizationInput) -> int:
+        """Count one input on the calling thread.
+
+        The post-run counterpart to :meth:`count_batch_async`, for callers that
+        run after the event loop is gone (full-run OSL at finalize). Dispatch
+        mirrors ``count_batch_async`` exactly — same text backend, same chat
+        template, same baseline subtraction — so a turn counted here and a turn
+        counted on the perf hot path yield the same number. Divergence between
+        the two lanes would make the windowed and full-run OSL statistics
+        incomparable (mlcommons/endpoints#500).
+        """
+        match item:
+            case TokenIdsInput(token_ids=token_ids):
+                return len(token_ids)
+            case TextInput(text=text):
+                return self._encode_lengths_inproc([text])[0]
+            case MessageInput(content, reasoning, tool_calls):
+                return self._token_count_message(content, reasoning, tool_calls)
+            case PromptInput(
+                messages,
+                tools,
+                chat_template_kwargs,
+                chat_template,
+                tool_choice,
+            ):
+                return self._token_count_prompt(
+                    messages,
+                    tools,
+                    chat_template_kwargs,
+                    chat_template,
+                    tool_choice,
+                )
+        raise TypeError(f"unsupported tokenization input: {type(item).__name__}")
+
     async def count_batch_async(
         self,
         inputs: list[TokenizationInput],
@@ -641,8 +675,15 @@ class BatchTokenizer:
         drops queued encodes (``cancel_futures``); only a single in-flight
         encode (bounded by ``_LIVE_FLUSH_MAX_ITEMS``) is waited on.
         """
-        _terminate_procs(self._procs)
-        self._procs = []
+        # Only walk/terminate when this tokenizer owns shard workers.
+        # _terminate_procs walks multiprocessing.active_children() to catch a
+        # shard hung in its initializer; that set is shard-only in the aggregator
+        # subprocess, but in a non-aggregator host (e.g. the finalize-side
+        # in-process tokenizer, n_workers=0, which never creates shards) it would
+        # be unrelated processes such as the HTTP workers. Skip it when we own none.
+        if self._procs:
+            _terminate_procs(self._procs)
+            self._procs = []
         if self._thread is not None:
             self._thread.shutdown(wait=True, cancel_futures=True)
             self._thread = None

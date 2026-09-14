@@ -56,6 +56,7 @@ from inference_endpoint.commands.benchmark.accuracy import (
     score_accuracy,
     write_accuracy_results,
 )
+from inference_endpoint.commands.benchmark.full_run_osl import full_run_osl_for_report
 from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
 from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
@@ -754,11 +755,15 @@ def _build_agentic_strategy(
         if perf_ds_cfg is not None:
             agentic_cfg = perf_ds_cfg.agentic_inference
     assert ctx.dataloader.conversation_metadata is not None
+    rng_sample_index = (
+        ctx.rt_settings.rng_sample_index if ctx.rt_settings is not None else None
+    )
     return AgenticInferenceStrategy(
         conversation_manager=ConversationManager(),
         dataset_metadata=ctx.dataloader.conversation_metadata,
         agentic_inference_config=agentic_cfg,
         target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
+        rng_sample_index=rng_sample_index,
     )
 
 
@@ -1192,13 +1197,18 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # sample_idx_map.json + events.jsonl from here).
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
-    # Accuracy scoring runs before report writing so its headline can attach.
-    # The finally block still writes the performance report if scoring fails.
+    # Full-run OSL over every turn, including those issued after the performance
+    # window closed, plus accuracy scoring. Both run inside the try/finally so a
+    # Ctrl-C during the (large) event-log scan still writes an interrupted report
+    # instead of losing it. Skipped on abort: a partial tail would report as
+    # complete.
+    full_run_osl: dict[str, Any] | None = None
     accuracy_scores: list[dict[str, Any]] = []
     try:
         if aborted:
             logger.warning("Run aborted — skipping accuracy scoring on partial data")
         else:
+            full_run_osl = full_run_osl_for_report(ctx.report_dir, ctx.tokenizer_name)
             accuracy_scores = score_accuracy(ctx, result)
     except KeyboardInterrupt:
         if report is not None:
@@ -1211,7 +1221,11 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         # Attach the per-dataset accuracy list so result_summary.json, the
         # console summary, and report.txt all carry it.
         if report is not None:
-            final_report = msgspec.structs.replace(report, accuracy=accuracy_scores)
+            final_report = msgspec.structs.replace(
+                report,
+                accuracy=accuracy_scores,
+                output_sequence_lengths_full_run=full_run_osl,
+            )
             _write_report_artifacts(ctx, final_report, bench.profiling)
             report = final_report
     bench.report = report

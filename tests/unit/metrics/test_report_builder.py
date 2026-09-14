@@ -574,6 +574,101 @@ class TestReportDisplayAndSerialize:
         output = "\n".join(lines)
         assert "WARNING" in output or "incomplete" in output.lower()
 
+    def _report_with_full_run_osl(self, fr, *, osl_windowed=None, complete=True):
+        return Report(
+            version="test",
+            git_sha=None,
+            test_started_at=0,
+            n_samples_issued=10,
+            n_samples_completed=10,
+            n_samples_failed=0,
+            duration_ns=1_000_000_000,
+            state="complete" if complete else "interrupted",
+            complete=complete,
+            ttft={},
+            tpot={},
+            latency={},
+            input_sequence_lengths={},
+            output_sequence_lengths=osl_windowed or {},
+            output_sequence_lengths_full_run=fr,
+        )
+
+    def test_display_full_run_osl_mean(self):
+        """A block with counted turns prints the accuracy per-turn mean."""
+        report = self._report_with_full_run_osl(
+            {
+                "output_sequence_lengths": {"avg": 412.5},
+                "n_turns_counted": 1055,
+                "n_empty": 3,
+                "n_errors": 0,
+            }
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert (
+            "OSL per-turn mean (accuracy, all turns): 412.5 tokens over 1055 turns"
+            in output
+        )
+
+    def test_display_full_run_osl_no_countable_turns(self):
+        """An all-empty/all-error block prints counts, not a fabricated 0.0 mean."""
+        report = self._report_with_full_run_osl(
+            {
+                "output_sequence_lengths": {},
+                "n_turns_counted": 0,
+                "n_empty": 5,
+                "n_errors": 2,
+            }
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert "no countable turns" in output
+        assert "0.0 tokens" not in output
+
+    def test_display_full_run_osl_partial_is_flagged(self):
+        """A partial block (errored/missing turns) is labeled NOT valid for the gate."""
+        report = self._report_with_full_run_osl(
+            {
+                "output_sequence_lengths": {"avg": 400.0},
+                "n_turns_counted": 1,
+                "n_empty": 0,
+                "n_errors": 1,
+                "n_undecodable": 0,
+                "n_missing": 1,
+                "partial": True,
+            }
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert "1 missing" in output
+        assert "PARTIAL" in output
+        assert "NOT valid for the OSL accuracy gate" in output
+
+    def test_display_full_run_osl_missing_on_complete_performance_run(self):
+        """A COMPLETE perf run (windowed OSL present) with no full-run block
+        blames the tokenizer/sample-map, not incompleteness."""
+        report = self._report_with_full_run_osl(None, osl_windowed={"avg": 100.0})
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert "no tokenizer or unreadable sample map" in output
+        assert "run incomplete" not in output
+
+    def test_display_full_run_osl_incomplete_run_with_windowed_osl(self):
+        """An INTERRUPTED perf run (windowed OSL present, no block) must report
+        incompleteness — not a false tokenizer/sample-map diagnosis."""
+        report = self._report_with_full_run_osl(
+            None, osl_windowed={"avg": 100.0}, complete=False
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert "run incomplete" in output
+        assert "no tokenizer or unreadable sample map" not in output
+
     def test_display_warns_when_interrupted(self):
         """Reports with ``state == "interrupted"`` surface a distinct WARNING."""
         report = Report(
