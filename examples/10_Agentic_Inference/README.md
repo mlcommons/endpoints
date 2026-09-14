@@ -249,11 +249,11 @@ Every Kimi K3 and Qwen3.6-35B-A3B submitted Pareto point must satisfy all of the
 
 Reference mean values are shown in parentheses.
 
-| Metric             |               Kimi K3 |        Qwen3.6-35B-A3B | DSV4 |
-| ------------------ | --------------------: | ---------------------: | ---: |
-| Inline accuracy    | `>= 58.32%` (`58.9%`) | `>= 55.86%` (`56.43%`) |  TBD |
-| OSL per-turn mean  |      `390-475` tokens |       `355-434` tokens |  TBD |
-| SWE-bench accuracy | `>= 93.5%` (`94.83%`) |     `>= 69%` (`71.7%`) |  TBD |
+| Metric             |                           Kimi K3 |        Qwen3.6-35B-A3B | DSV4 |
+| ------------------ | --------------------------------: | ---------------------: | ---: |
+| Inline accuracy    |             `>= 58.32%` (`58.9%`) | `>= 55.86%` (`56.43%`) |  TBD |
+| OSL per-turn mean  | `425.13-519.60` tokens (`472.36`) |       `355-434` tokens |  TBD |
+| SWE-bench accuracy |             `>= 93.5%` (`94.83%`) |     `>= 69%` (`71.7%`) |  TBD |
 
 ### Approved Checkpoints and Speculative-Decoding Heads
 
