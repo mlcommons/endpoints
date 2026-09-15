@@ -7,6 +7,10 @@
 # evaluator, PROVISION_DSR1=1). It lives under examples/, not src/, so it is COPYed
 # in explicitly. To skip it (leaner image, no wan22 accuracy), build with PROVISION_VBENCH=0:
 # docker build -f scripts/Dockerfile.dev --build-arg PROVISION_VBENCH=0 --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
+#
+# The ROUGE scorer's corpora + metric script are likewise prefetched by default
+# (PROVISION_ROUGE=1) so `eval_method: "rouge"` needs no runtime network; build with
+# PROVISION_ROUGE=0 to skip.
 
 FROM python:3.12.11-slim
 
@@ -52,11 +56,11 @@ ENV PATH="/opt/venv/bin:/home/appuser/.local/bin:$PATH" \
     VBENCH_CACHE_DIR=/opt/vbench_cache
 
 # Install dependencies first (cached unless pyproject.toml/uv.lock change)
-RUN uv sync --frozen --no-install-project --extra dev --extra test
+RUN uv sync --frozen --no-install-project --extra dev --extra test --extra rouge
 
 # Copy source and install project
 COPY --chown=${USER_ID}:${GROUP_ID} src/ ./src/
-RUN uv sync --frozen --extra dev --extra test
+RUN uv sync --frozen --extra dev --extra test --extra rouge
 
 
 # Provision the isolated DeepSeek-R1 accuracy evaluator. Gated by PROVISION_DSR1
@@ -101,6 +105,28 @@ RUN if [ "${PROVISION_VBENCH}" = "1" ]; then \
             "import torch, decord, tokenizers, vbench; print('vbench', vbench.__file__, '| decord', decord.__version__, '| tokenizers', tokenizers.__version__, '| torch', torch.__version__)" ; \
     else \
         echo "PROVISION_VBENCH=${PROVISION_VBENCH}: skipping VBench provisioning" ; \
+    fi
+
+# ROUGE scorer runtime data. The `rouge` extra above installs nltk/evaluate/rouge_score,
+# but neither is self-contained: nltk.sent_tokenize needs the punkt/punkt_tab corpora and
+# evaluate.load("rouge") fetches its metric script from the HF Hub. Without this block the
+# image needs network at evaluation time for `eval_method: "rouge"` - the same gap
+# prefetch_weights.py closes for VBench.
+#
+# Both land in their default per-user caches (~/nltk_data and ~/.cache/huggingface, i.e.
+# appuser's home) and are baked into the image layer. Deliberately NOT redirected to /opt
+# via NLTK_DATA/HF_HOME: HF_HOME is a global runtime env var, and pointing it elsewhere
+# would orphan whatever the DSR1/VBench stages above already cached under the default path.
+# The final python -c asserts the corpora actually resolve, so a silent download failure
+# fails the build here rather than at evaluation time.
+# PROVISION_ROUGE=0 skips this block (leaner image, no offline rouge accuracy).
+ARG PROVISION_ROUGE=1
+RUN if [ "${PROVISION_ROUGE}" = "1" ]; then \
+        python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab')" && \
+        python -c "import evaluate; evaluate.load('rouge'); print('rouge metric cached')" && \
+        python -c "import nltk; assert nltk.sent_tokenize('One. Two.') == ['One.', 'Two.']; print('punkt corpora ok')" ; \
+    else \
+        echo "PROVISION_ROUGE=${PROVISION_ROUGE}: skipping ROUGE corpora/metric prefetch" ; \
     fi
 
 # OCI image metadata so `docker inspect` self-identifies this image (the endpoints benchmark
