@@ -125,11 +125,12 @@ def test_events_have_expected_schema(tmp_path):
 
 def test_issued_events_are_chronological(tmp_path):
     out, _, _ = _generate(tmp_path)
-    issued_ts = [
-        json.loads(line)["timestamp_ns"]
-        for line in open(out)
-        if json.loads(line)["event_type"] == "sample.issued"
-    ]
+    with open(out) as fh:
+        issued_ts = [
+            json.loads(line)["timestamp_ns"]
+            for line in fh
+            if json.loads(line)["event_type"] == "sample.issued"
+        ]
     assert issued_ts == sorted(issued_ts)
 
 
@@ -216,7 +217,11 @@ def test_different_seed_differs(tmp_path):
 
 def test_flat_run_detected_as_steady(tmp_path):
     out, _, _ = _generate(tmp_path)
-    result = diag.run(out, superpass_size=40, count_tokens=_words)
+    # Isolate steadiness detection from the min-duration floor (a short synth run can't
+    # clear 600s); this test asserts the flat plateau is *found*, not that it's long.
+    result = diag.run(
+        out, superpass_size=40, count_tokens=_words, enforce_min_duration=False
+    )
     ss = result["steady_state"]
     assert ss["found"] is True
     assert ss["window"] is not None

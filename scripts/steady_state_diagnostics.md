@@ -62,7 +62,7 @@ overrides**:
 --profile {concurrency,poisson,offline,agentic}   # else from load_pattern
 --superpass-size N  --window-sizes 4,6,8  --warmup auto  --warmup-band 0.05
 --warmup-driver tpot_p50  --cov-bounds 0.03,0.05,0.08  --trend-gate mk_hamed_rao
---alpha 0.05  --tokenize-batch-size N  --trust-remote-code  --json out.json
+--tokenize-batch-size N  --trust-remote-code  --json out.json
 --no-min-duration         # downgrade the min-duration gate from reject to warning
 ```
 

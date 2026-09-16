@@ -1557,7 +1557,6 @@ class DiagnosticsResult(TypedDict):
     drift: dict[str, dict[str, DriftEntry]]  # window size (str) -> metric key -> entry
     steady_state: SteadyState  # the headline: first steady plateau + TPS + anomaly
     per_super_pass: list[dict]  # raw post-warmup per-super-pass rollups (for plotting)
-    alpha: float
 
 
 def _drift_verdicts(trajectory: Sequence[float]) -> dict[str, Verdict]:
@@ -1594,7 +1593,6 @@ def run(
     window_sizes: Sequence[int] = (4, 5),
     warmup: int | str = "auto",
     cov_bounds: Sequence[float] = (0.03, 0.05, 0.08),
-    alpha: float = 0.05,
     trend_gate: str = "mk_hamed_rao",
     tokenize_batch_size: int = TOKENIZE_BATCH_SIZE,
     warmup_band: float = 0.05,
@@ -1640,7 +1638,6 @@ def run(
             post, trend_gate, cov_bounds, enforce_min_duration=enforce_min_duration
         ),
         "per_super_pass": per_super_pass_diagnostics(post),
-        "alpha": alpha,
     }
 
     for w in window_sizes:
@@ -1904,7 +1901,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--warmup-band", type=float, default=0.05)
     ap.add_argument("--warmup-driver", default=None, choices=list(_METRIC_BY_KEY))
     ap.add_argument("--cov-bounds", type=_parse_float_list, default=None)
-    ap.add_argument("--alpha", type=float, default=0.05)
     ap.add_argument("--trend-gate", default="mk_hamed_rao", choices=list(ALGORITHMS))
     ap.add_argument("--tokenize-batch-size", type=int, default=None)
     ap.add_argument(
@@ -1977,7 +1973,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         window_sizes=window_sizes,
         warmup=args.warmup,
         cov_bounds=cov_bounds,
-        alpha=args.alpha,
         trend_gate=args.trend_gate,
         tokenize_batch_size=flush,
         warmup_band=args.warmup_band,
