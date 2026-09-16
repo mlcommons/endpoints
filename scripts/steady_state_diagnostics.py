@@ -38,7 +38,7 @@ Below the headline, per requested window size, the tool also prints diagnostics:
 pass/fail table and a whole-run trend summary (the full rolling drift scan is in
 ``--json``).
 
-Admissibility gates on TPOT at p50 + p95 only (decode-rate steadiness). TTFT is a
+Admissibility gates on TPOT at p50 + p90 only (decode-rate steadiness). TTFT is a
 diagnostic: shown in the headline percentiles and the whole-run trend, and it raises the
 Drifting-Up warning, but it does not gate a window — at high concurrency its tail variance
 is structural (prefill/dataset-ISL skew + queue), not decode un-steadiness. p99 and
@@ -108,7 +108,8 @@ TOKENIZE_BATCH_SIZE = 4096
 # super-passes is only seconds of wall-time, far too brief to certify steadiness. The
 # required duration is max(precision, relaxation, floor):
 #   precision  = k*.tau_sp,  k* = max(ceil((1.96.CoV_b / eps)^2), MIN_TREND_N)  (batch-means +-eps)
-#   relaxation = mult . p99(sample latency)   (queue/KV-eviction transient safety)
+#   relaxation = mult . p90(sample latency)   (queue/KV-eviction transient safety; p90 not
+#                p99, so a few extreme-outlier request lifetimes don't dominate the floor)
 #   floor      = MLPerf min-duration floor
 MIN_DUR_EPS = 0.05
 MIN_DUR_RELAX_MULT = 5.0
@@ -157,7 +158,7 @@ class ShortWindow(TypedDict):
     kstar: int  # batch-count target for +-MIN_DUR_EPS precision
     cov_b: float  # CoV of per-super-pass tpot_p50 over the window
     tau_sp_s: float  # median per-super-pass offered span
-    l_p99_s: float  # p99 sample e2e latency over the window
+    l_p90_s: float  # p90 sample e2e latency over the window
 
 
 class SteadyState(TypedDict):
@@ -176,7 +177,7 @@ class SteadyState(TypedDict):
 
 
 class TrackedMetric(NamedTuple):
-    key: str  # display key, e.g. "ttft_p95"
+    key: str  # display key, e.g. "ttft_p90"
     source_attr: str  # SuperPassRollup attribute holding the raw samples
     percentile: float
     gated: bool  # participates in the convergence gate (vs. diagnostic-only)
@@ -186,34 +187,33 @@ class TrackedMetric(NamedTuple):
 # everything else is diagnostic. TTFT is intentionally NOT gated (see GATED_METRICS).
 TRACKED_METRICS: tuple[TrackedMetric, ...] = (
     TrackedMetric("ttft_p50", "ttft_ns", 0.50, False),
-    TrackedMetric("ttft_p95", "ttft_ns", 0.95, False),
+    TrackedMetric("ttft_p90", "ttft_ns", 0.90, False),
     TrackedMetric("tpot_p50", "tpot_ns", 0.50, True),
-    TrackedMetric("tpot_p95", "tpot_ns", 0.95, True),
+    TrackedMetric("tpot_p90", "tpot_ns", 0.90, True),
     TrackedMetric("ttft_p99", "ttft_ns", 0.99, False),
     TrackedMetric("tpot_p99", "tpot_ns", 0.99, False),
     # End-to-end sample latency (issue->complete). Diagnostic by default (its variance
     # tracks the OSL mix, §5.1); useful for agentic where per-turn TTFT is turbulent.
     TrackedMetric("latency_p50", "latency_ns", 0.50, False),
     TrackedMetric("latency_p90", "latency_ns", 0.90, False),
-    TrackedMetric("latency_p95", "latency_ns", 0.95, False),
     # Warm-turn TTFT (agentic turn >= 2): cold first-turn prefill discarded.
     TrackedMetric("ttft_warm_p50", "ttft_warm_ns", 0.50, False),
-    TrackedMetric("ttft_warm_p95", "ttft_warm_ns", 0.95, False),
+    TrackedMetric("ttft_warm_p90", "ttft_warm_ns", 0.90, False),
 )
 
-# Admissibility gate: TPOT p50/p95 only (decode-rate steadiness). TTFT is deliberately
+# Admissibility gate: TPOT p50/p90 only (decode-rate steadiness). TTFT is deliberately
 # NOT a hard gate — at high concurrency its tail variance (prefill time tracking dataset
 # ISL skew + queue wait) is structural, not decode un-steadiness, and fragments genuinely
 # steady runs (docs/steady-state-detection.md §5.5). Measured: two ~800s steady-TPOT runs
 # (c7k, c22k) were rejected purely by TTFT-tail fragmentation; TPOT-only recovers them.
 GATED_METRICS: tuple[TrackedMetric, ...] = tuple(m for m in TRACKED_METRICS if m.gated)
 # Metrics watched for the whole-run Drifting-Up *warning*: the gated TPOT pair plus TTFT
-# p50/p95. TTFT is soft here — a genuine TTFT saturation drift is still surfaced (warning),
+# p50/p90. TTFT is soft here — a genuine TTFT saturation drift is still surfaced (warning),
 # just never a hard reject.
 DRIFT_WATCH_METRICS: tuple[TrackedMetric, ...] = tuple(
     m
     for m in TRACKED_METRICS
-    if m.key in ("tpot_p50", "tpot_p95", "ttft_p50", "ttft_p95")
+    if m.key in ("tpot_p50", "tpot_p90", "ttft_p50", "ttft_p90")
 )
 _METRIC_BY_KEY: dict[str, TrackedMetric] = {m.key: m for m in TRACKED_METRICS}
 
@@ -790,7 +790,7 @@ def histogram(values: Sequence[float], nbins: int = 20) -> list[dict]:
 
 
 def summarize(values: Sequence[float]) -> dict:
-    """Count, mean, min/max, p50/p90/p95/p99 (nearest-rank-lower), and a histogram."""
+    """Count, mean, min/max, p50/p90/p99 (nearest-rank-lower), and a histogram."""
     s = sorted(values)
     n = len(s)
     return {
@@ -800,7 +800,6 @@ def summarize(values: Sequence[float]) -> dict:
         "max": s[-1],
         "p50": percentile_lower(s, 0.50),
         "p90": percentile_lower(s, 0.90),
-        "p95": percentile_lower(s, 0.95),
         "p99": percentile_lower(s, 0.99),
         "histogram": histogram(s),
     }
@@ -1371,7 +1370,7 @@ def min_steady_duration(
     ]
     tau_sp = median(spans) if spans else 0.0
     lat = pooled(series, lo, hi, "latency_ns")
-    l_p99 = percentile_lower(sorted(lat), 0.99) / 1e9 if lat else 0.0
+    l_p90 = percentile_lower(sorted(lat), 0.90) / 1e9 if lat else 0.0
 
     kstar = max(math.ceil((CI_Z_95 * cov_b / MIN_DUR_EPS) ** 2), MIN_DUR_KSTAR_FLOOR)
     # The precision term only binds when the metric is noisy enough to demand MORE batches
@@ -1380,7 +1379,7 @@ def min_steady_duration(
     # alone — a clean minimal plateau that meets the wall-time floor is valid, not rejected
     # by a precision term that degenerates to ~the window's own duration at 4 super-passes.
     t_prec = kstar * tau_sp if kstar > MIN_DUR_KSTAR_FLOOR else 0.0
-    t_relax = MIN_DUR_RELAX_MULT * l_p99
+    t_relax = MIN_DUR_RELAX_MULT * l_p90
     min_s = max(t_prec, t_relax, MIN_DUR_FLOOR_S)
     dominant = (
         "precision"
@@ -1401,7 +1400,7 @@ def min_steady_duration(
         "kstar": kstar,
         "cov_b": cov_b,
         "tau_sp_s": tau_sp,
-        "l_p99_s": l_p99,
+        "l_p90_s": l_p90,
     }
 
 
@@ -1580,9 +1579,9 @@ def per_super_pass_diagnostics(series: Sequence[SuperPassRollup]) -> list[dict]:
                 "last_issue_ns": sp.last_issue_ns,
                 "last_event_ns": sp.last_event_ns,
                 "ttft_p50": percentile_lower(tt, 0.50) if tt else None,
-                "ttft_p95": percentile_lower(tt, 0.95) if tt else None,
+                "ttft_p90": percentile_lower(tt, 0.90) if tt else None,
                 "tpot_p50": percentile_lower(tp, 0.50) if tp else None,
-                "tpot_p95": percentile_lower(tp, 0.95) if tp else None,
+                "tpot_p90": percentile_lower(tp, 0.90) if tp else None,
             }
         )
     return out
@@ -1721,7 +1720,7 @@ def _render_steady_state(ss: SteadyState) -> list[str]:
             if s:
                 out.append(
                     f"  {name.upper():4} p50 {_fmt_ms(s['p50'])}  p90 {_fmt_ms(s['p90'])}"
-                    f"  p95 {_fmt_ms(s['p95'])}  p99 {_fmt_ms(s['p99'])}"
+                    f"  p99 {_fmt_ms(s['p99'])}"
                     f"  mean {_fmt_ms(s['mean'])}"
                 )
     sw = ss["short_window"]

@@ -14,7 +14,7 @@ operator's quick reference.
    (`(complete − recv_first) / tokens(output-after-first-chunk)`); TPOT needs the
    `--tokenizer`, so it is required.
 3. Finds the **first steady plateau**: grow a window from the start while it stays
-   _admissible_ — the gated metric (**TPOT** p50 & p95) is trend-steady
+   _admissible_ — the gated metric (**TPOT** p50 & p90) is trend-steady
    (Mann–Kendall + Hamed–Rao) **and** within a CoV bound. **TTFT is not a hard gate** —
    at high concurrency its tail variance (prefill time tracking dataset ISL skew + queue)
    is structural, not decode un-steadiness, so it is a diagnostic and a drift _warning_
@@ -85,8 +85,8 @@ experimental and must not be used for submissions.
   window: super-passes 0..3 (post-warmup), 23519 samples
   TPS per-user:    302.3 tok/s/user  CI [302.1, 302.5]
   TPS system:    40960.9 tok/s        CI [39399.3, 40606.8]
-  TTFT p50 86.26ms  p90 156.10ms  p95 183.83ms  p99 248.51ms  mean 97.41ms
-  TPOT p50 3.29ms   p90 3.44ms    p95 3.48ms    p99 3.56ms    mean 3.31ms
+  TTFT p50 86.26ms  p90 156.10ms  p99 248.51ms  mean 97.41ms
+  TPOT p50 3.29ms   p90 3.44ms    p99 3.56ms    mean 3.31ms
 ```
 
 - **window** — the steady plateau, as **post-warmup** super-pass indices `lo..hi`, plus
@@ -116,7 +116,7 @@ A second "not found" form is the **min-duration gate** (docs/steady-state-detect
 A window that clears the ≥4-super-pass floor can still be only seconds long at high
 throughput (a `c16k`-scale run's 4 super-passes ≈ the concurrency), which cannot reveal
 a minutes-scale hiccup. The required duration is `max(precision, relaxation, floor)`:
-`floor` (600s) binds for clean fast runs, `relaxation` (5·p99-latency) for long-tail
+`floor` (600s) binds for clean fast runs, `relaxation` (5·p90-latency) for long-tail
 workloads, `precision` (k·τ) for noisy metrics.
 
 By default the gate is **part of window selection**: the first plateau that clears
@@ -141,7 +141,7 @@ is signed (+ = TPOT rose = worse).
 ### `WARNING` line
 
 ```
-  WARNING: ttft_p95 drifting UP over the rest of the run -- the window is a local
+  WARNING: ttft_p90 drifting UP over the rest of the run -- the window is a local
   plateau; global steady state is questionable
 ```
 

@@ -293,15 +293,15 @@ The reported window and the steady/drift verdict come from two per-metric signal
 a coefficient-of-variation (CoV) stopping rule and a mandatory trend gate — combined
 under a window-selection rule adapted from the steady-state simulation literature.
 
-**Metric set.** Admissibility gates on **TPOT** (p50 and p95) only — the decode-rate
+**Metric set.** Admissibility gates on **TPOT** (p50 and p90) only — the decode-rate
 steadiness signal. A window is steady only when both TPOT percentiles plateau and are
 within CoV. **TTFT is deliberately not a hard gate.** At high concurrency TTFT's tail is
 dominated by prefill time (which tracks per-request input-length / dataset skew) and
 queue wait, so its per-super-pass variance is _structural_, not decode un-steadiness:
-measured, `ttft_p95` CoV sits at a floor of 0.3–0.9 regardless of super-pass grain while
+measured, the TTFT tail (`ttft_p90`) CoV sits at a floor of 0.3–0.9 regardless of super-pass grain while
 `tpot` CoV is ~0.01–0.03. Gating on it fragments genuinely steady runs — two ~800s
 steady-TPOT runs (c7k, c22k) were rejected purely by TTFT-tail fragmentation, and gating
-on TPOT alone recovers both. TTFT (p50/p95) is therefore carried as a **diagnostic** —
+on TPOT alone recovers both. TTFT (p50/p90) is therefore carried as a **diagnostic** —
 still reported in the headline percentiles and the whole-run trend table, and still
 raising the Drifting-Up **warning** (§5.8) when it climbs, so a genuine saturation drift
 is surfaced softly rather than hidden. The **p99** tail (TPOT and TTFT) and end-to-end
@@ -313,7 +313,7 @@ super-pass and are the noisiest signal available.
 metric's per-super-pass percentile, over a window of super-passes, is a
 scale-free measure of how much the metric is still moving relative to its own
 level. A region is a candidate steady state when `CoV < bound` for every gating
-metric and percentile. The bound loosens toward the tail (a p95 is estimated from
+metric and percentile. The bound loosens toward the tail (a p90 is estimated from
 fewer samples per super-pass, so its sampling-noise floor is higher than a p50's).
 
 **Trend gate (mandatory), drift up vs down.** A low CoV over a window certifies
@@ -432,7 +432,7 @@ window as
 ```
 min_duration = max( T_precision , T_relaxation , T_floor )
   T_precision  = k*·τ_sp  (only when k* > MIN_TREND_N),   k* = max( ceil( (1.96·CoV_b / ε)² ), MIN_TREND_N )
-  T_relaxation = 5·L_p99                                                          # queue / KV-eviction transient safety
+  T_relaxation = 5·L_p90                                                          # queue / KV-eviction transient safety
   T_floor      = 600 s                                                            # MLPerf-style min-duration floor
 ```
 
@@ -447,10 +447,10 @@ binds once a genuinely noisy metric (`k* > MIN_TREND_N`) demands _more_ batches 
 trend floor.
 
 where `τ_sp` is the median per-super-pass offered (issue) span, `CoV_b` the coefficient
-of variation of per-super-pass `tpot_p50` across the window, and `L_p99` the p99 sample
+of variation of per-super-pass `tpot_p50` across the window, and `L_p90` the p90 sample
 end-to-end latency. The three terms cover three regimes: the **floor** binds for clean,
 fast runs (short output, high concurrency); **relaxation** binds for long-output /
-long-tail runs (e.g. DeepSeek-R1, whose p99 sample lifetime alone is minutes);
+long-tail runs (e.g. DeepSeek-R1, whose p90 sample lifetime alone is minutes);
 **precision** binds for noisy metrics (agentic), where a high `CoV_b` raises `k*` so
 more batches are demanded. The window's wall-time is measured by its offered-load span
 (the same denominator as the reported system TPS, §5.1), so a high-throughput window
@@ -486,7 +486,7 @@ requirement takes precedence, and the skip metadata keeps that honest.
 `--no-min-duration` disables selection-time enforcement: the **first** plateau is
 reported as usual, carrying a **"Window too short"** advisory when it is below
 `min_duration`. Either way the full `short_window` breakdown (`window_duration_s`,
-`min_duration_s`, dominant term, `k*`, `CoV_b`, `τ_sp`, `L_p99`) is in the
+`min_duration_s`, dominant term, `k*`, `CoV_b`, `τ_sp`, `L_p90`) is in the
 machine-readable output.
 
 ## 5.6 Edge cases and error handling
@@ -571,7 +571,7 @@ the run carries its coverage `status`. Reported quantities:
   (aggregate throughput). Each carries a confidence interval computed by
   **non-overlapping batch means** with super-passes as batches, which accounts for
   the per-super-pass autocorrelation rather than assuming independent samples.
-- **TTFT and TPOT** percentiles (p50/p90/p95/p99) and histograms, over the pooled raw
+- **TTFT and TPOT** percentiles (p50/p90/p99) and histograms, over the pooled raw
   samples of the steady window.
 - **Anomaly.** When the level-shift detector fires (§5.5), an `anomaly` block records
   the change-point super-pass, the shift magnitude and direction, and every detected

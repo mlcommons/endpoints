@@ -112,7 +112,7 @@ per-super-pass series. Think of it as one "batch" for batch-means statistics.</t
 <tr><td><b>trajectory</b></td><td>The per-super-pass series of one metric percentile,
 e.g. <code>tpot_p50</code> = [p50 of super-pass 0, p50 of super-pass 1, …].</td></tr>
 <tr><td><b>gated metrics</b></td><td>The two that must be steady for a window to qualify:
-<code>tpot_p50</code>, <code>tpot_p95</code> (decode-rate steadiness). <b>TTFT is not gated</b> — its
+<code>tpot_p50</code>, <code>tpot_p90</code> (decode-rate steadiness). <b>TTFT is not gated</b> — its
 high-concurrency tail variance is structural (prefill/ISL skew + queue), so it's tracked as a diagnostic
 and raises a soft drift warning, but never hard-fails a window. <code>p99</code>, sample latency, warm-turn
 TTFT are diagnostic too.</td></tr>
@@ -239,9 +239,9 @@ Super-passes 0,1,2 (3.6, 4.1, 4.5 ms) are below the band; super-pass 3 (4.85) is
 
 <h2 id="gate">5 · The admissibility gate (trend + CoV)</h2>
 <div class="note"><b>Gate on TPOT only.</b> Admissibility uses <code>tpot_p50</code> and
-<code>tpot_p95</code> — decode-rate steadiness. <b>TTFT is not a hard gate:</b> at high concurrency its
+<code>tpot_p90</code> — decode-rate steadiness. <b>TTFT is not a hard gate:</b> at high concurrency its
 tail is dominated by prefill time (tracking dataset input-length skew) + queue wait, so its variance is
-<em>structural</em> (<code>ttft_p95</code> CoV floors at 0.3–0.9 regardless of super-pass size) rather than
+<em>structural</em> (the TTFT tail <code>ttft_p90</code> CoV floors at 0.3–0.9 regardless of super-pass size) rather than
 un-steadiness. Gating on it fragmented two genuinely-steady ~800s runs (c7k, c22k); TPOT-only recovers them.
 TTFT stays a diagnostic and raises the soft drift warning (§7). The gate below therefore runs over the TPOT
 pair; the same trend + CoV logic applies.</div>
@@ -469,7 +469,7 @@ each covering a different regime:</p>
 <pre><code>min_duration = max( T_precision , T_relaxation , T_floor )
 
   T_precision  = k*·τ_sp (only if k* &gt; MIN_TREND_N),  k* = max( ⌈(1.96·CoV_b / 0.05)²⌉ , MIN_TREND_N )
-  T_relaxation = 5 · p99(sample e2e latency)                                    # queue / KV-eviction transient
+  T_relaxation = 5 · p90(sample e2e latency)                                    # queue / KV-eviction transient
   T_floor      = 600 s                                                          # MLPerf-style min-duration floor</code></pre>
 <p><code>τ_sp</code> = median per-super-pass offered span, <code>CoV_b</code> = CoV of per-super-pass
 <code>tpot_p50</code>. The window's wall-time is its offered-load span (same denominator as system TPS).</p>
@@ -509,15 +509,15 @@ needs more batches than the floor.</div>
 <rect x="150" y="161.0" width="264.2" height="13" rx="2" fill="#1f6feb" opacity="0.5"/>
 <text x="144" y="171.0" font-size="9.5" text-anchor="end" fill="var(--mut)">precision</text>
 <text x="419.2" y="171.0" font-size="9.5" fill="var(--fg)" font-weight="400">120s</text>
-<rect x="150" y="178.0" width="466.3" height="13" rx="2" fill="#d29922" opacity="0.95"/>
+<rect x="150" y="178.0" width="424.0" height="13" rx="2" fill="#d29922" opacity="0.95"/>
 <text x="144" y="188.0" font-size="9.5" text-anchor="end" fill="var(--mut)">relaxation</text>
-<text x="610.3" y="188.0" font-size="9.5" text-anchor="end" fill="#fff" font-weight="700">4680s  ◀ min_duration</text>
+<text x="579.0" y="188.0" font-size="9.5" fill="var(--fg)" font-weight="700">2175s  ◀ min_duration</text>
 <rect x="150" y="195.0" width="353.0" height="13" rx="2" fill="#2ea043" opacity="0.5"/>
 <text x="144" y="205.0" font-size="9.5" text-anchor="end" fill="var(--mut)">floor</text>
 <text x="508.0" y="205.0" font-size="9.5" fill="var(--fg)" font-weight="400">600s</text>
 </svg><figcaption>Which term binds depends on the workload. <b>Clean, high-throughput
 runs</b> → the 600 s floor dominates (precision and relaxation are tiny). <b>Long-tail reasoning runs</b>
-(DeepSeek-R1) → relaxation dominates: a p99 request lifetime of ~15 min alone demands ~78 min. Precision
+(DeepSeek-R1) → relaxation dominates: a p90 request lifetime of several minutes alone lifts it to tens of minutes (×5). Precision
 binds only when the metric is noisy (high <code>CoV_b</code> → large <code>k*</code>, e.g. agentic).</figcaption></figure>
 
 <p class="small">Why <code>k*</code> floors at <code>MIN_TREND_N</code> rather than a bigger constant: the
@@ -618,7 +618,7 @@ usual, with a <b>"Window too short"</b> advisory when it is below <code>min_dura
   ...
   WARNING: Window too short -- 3s steady vs 600s desired (floor-dominated); the steady number is a best-effort estimate over too little wall-time</code></pre>
 <p>Either way the full breakdown (<code>window_duration_s</code>, <code>min_duration_s</code>, dominant
-term, <code>k*</code>, <code>CoV_b</code>, <code>τ_sp</code>, <code>L_p99</code>) is in the JSON under
+term, <code>k*</code>, <code>CoV_b</code>, <code>τ_sp</code>, <code>L_p90</code>) is in the JSON under
 <code>steady_state.short_window</code>.</p>
 
 <h2 id="e2e">10 · End-to-end worked example</h2>
@@ -629,12 +629,12 @@ term, <code>k*</code>, <code>CoV_b</code>, <code>τ_sp</code>, <code>L_p99</code
 <tr><td>Bucket</td><td>70 super-passes (size 6396), warmup = 1 → 69 post-warmup</td></tr>
 <tr><td>Gate + segment</td><td><b>one plateau, super-passes 0–68</b> (the whole run). TPOT is flat
 (<code>tpot_p50</code> 9.58 ms → p99 9.95 ms), so no break. TTFT is <em>not</em> gated: its tail is huge
-and spread (p50 1274 ms, p95 5857 ms) but doesn't fragment the window.</td></tr>
+and spread (p50 1274 ms, p90 4286 ms) but doesn't fragment the window.</td></tr>
 <tr><td>Throughput</td><td>per-user 104.3 tok/s (CI [104.1, 104.7]); system 633 262 tok/s (CI [624k, 642k])</td></tr>
 <tr><td>Min-duration</td><td><code>CoV_b</code>≈0 → <code>k*</code>=4 (floor) → <b>T_precision exempt</b>;
 floor 600 s binds. Whole-run offered span = <b>853 s</b> ≥ 600 s.</td></tr>
 <tr><td><b>Verdict</b></td><td><span class="tag" style="background:var(--ok)">FOUND</span>
-853 s of steady TPOT. Plus a soft <code>WARNING: ttft_p95 … drifting UP</code> — TTFT climbs across the
+853 s of steady TPOT. Plus a soft <code>WARNING: ttft_p90 … drifting UP</code> — TTFT climbs across the
 run (queue building), surfaced but not fatal.</td></tr>
 </table>
 <p class="note" style="display:block">Under the earlier all-metric gate this same run was <b>rejected</b>: TTFT-tail
@@ -653,7 +653,7 @@ TPOT to <b>&lt;0.1%</b>, validated up to <b>1.64M TPS</b> on 550k-sample runs (n
 <li><b>The ramp-trap.</b> When <code>n_samples ≈ concurrency</code>, each slot issues ~1 sample and the run
 never leaves the ramp; the naïve gate reports a confident but <b>~3× wrong</b> steady value with
 <code>found = true</code>. The duration floor (600 s vs a &lt;2 s wall) is exactly what rejects it.</li>
-<li><b>Regimes.</b> Floor binds for clean/fast runs, relaxation for long-tail (DeepSeek-R1 needs ~78 min),
+<li><b>Regimes.</b> Floor binds for clean/fast runs, relaxation for long-tail (a reasoning workload needs tens of minutes),
 precision for noisy metrics (agentic).</li>
 </ul>
 
