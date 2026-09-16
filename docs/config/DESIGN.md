@@ -146,9 +146,9 @@ has not fully delegated runtime construction to rulesets yet.
 **Reproducibility via explicit seeds**
 
 `RuntimeSettings` contains two seeded `Random` instances: one for scheduler timing jitter
-(`rng_sched`) and one for dataset sample ordering (`rng_sample_index`). These make the runtime
-configuration reproducible in principle, but the original seed values are not currently persisted
-to the report output.
+(`rng_sched`) and one for dataset sample ordering (`rng_sample_index`, including agentic
+conversation start order). These make the runtime configuration reproducible in principle, but
+the original seed values are not currently persisted to the report output.
 
 ## Integration Points
 

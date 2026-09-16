@@ -115,6 +115,8 @@ The benchmark stops performance tracking when the first active user finishes its
 
 For official submissions, submitters must set `agentic_inference.stop_issuing_on_first_user_complete` to `false` so the client finishes already-started trajectories for accuracy. During optimization, set it to `true` to stop issuing future turns at the performance boundary and shorten the tail.
 
+> **OSL for the accuracy gate.** Because tail turns are excluded from performance metrics, the windowed `output_sequence_lengths.avg` in `performance/result_summary.json` is concurrency-dependent and must **not** be used for the OSL accuracy requirement. Use `output_sequence_lengths_full_run.output_sequence_lengths.avg` — the per-turn mean over **all** turns (tail and dataset repeats included), computed with the same token-counting rule as the window, which is invariant to concurrency. A run is not valid for the OSL accuracy check when `output_sequence_lengths_full_run` is `null`, **or** its `n_turns_counted` is `0` (turns were scanned but none were countable), **or** its `partial` flag is `true` (some turns were errored, undecodable, or missing a COMPLETE record — so the mean is over a subset), **or** the report is not `complete`. `report.txt` prints it as `OSL per-turn mean (accuracy, all turns)` and marks a partial block `PARTIAL — NOT valid for the OSL accuracy gate`.
+
 ### SWE-bench Accuracy
 
 Submitters must enable SWE-bench accuracy for official submissions. The Kimi K3, Qwen3.6-35B-A3B, and DSV4 example YAML files include the required SWE-bench accuracy dataset. The benchmark framework skips its built-in endpoint phase for the SWE-bench dataset. Instead, `SWEBenchScorer` submits the run to a native SWE-bench service. The service host owns Docker, `mini-swe-agent`, and the `swebench` evaluation harness, and it drives requests to the configured endpoint.
@@ -252,8 +254,10 @@ Reference mean values are shown in parentheses.
 | Metric             |               Kimi K3 |        Qwen3.6-35B-A3B | DSV4 |
 | ------------------ | --------------------: | ---------------------: | ---: |
 | Inline accuracy    | `>= 58.32%` (`58.9%`) | `>= 55.86%` (`56.43%`) |  TBD |
-| OSL per-turn mean  |      `390-475` tokens |       `355-434` tokens |  TBD |
+| OSL per-turn mean¹ |      `390-475` tokens |       `355-434` tokens |  TBD |
 | SWE-bench accuracy | `>= 93.5%` (`94.83%`) |     `>= 69%` (`71.7%`) |  TBD |
+
+¹ Read from `output_sequence_lengths_full_run.output_sequence_lengths.avg` (the full-run, all-turns mean), **not** the windowed `output_sequence_lengths.avg`. See [Tail Management](#tail-management).
 
 ### Approved Checkpoints and Speculative-Decoding Heads
 

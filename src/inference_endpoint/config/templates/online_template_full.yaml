@@ -55,7 +55,7 @@ settings:
     max_issue_duration_ms: null  # Cap on performance-phase issuing in ms; reaching it ends the phase normally (None = no cap)
     n_samples_to_issue: null  # Sample count override
     scheduler_random_seed: 42  # Scheduler RNG seed
-    dataloader_random_seed: 42  # Dataloader RNG seed
+    dataloader_random_seed: 42  # Dataloader RNG seed (sample shuffle; agentic conversation order)
   load_pattern:
     type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, agentic_inference, burst, step
     target_qps: 10.0  # Target QPS

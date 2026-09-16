@@ -239,6 +239,22 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # scorers, a BFCL-shaped breakdown. Display-only.
     accuracy: list[dict[str, Any]] = msgspec.field(default_factory=list)
 
+    # OSL over EVERY completed turn, including turns issued after the
+    # performance window closed. ``output_sequence_lengths`` above covers only
+    # the window, whose length depends on concurrency — so it is not
+    # comparable across Pareto points, while this block is. Same token-counting
+    # rule (``extract_tokenization_input``) on both. Attached at finalize; None
+    # only when the block was skipped (no tokenizer, or an unreadable/missing
+    # performance sample map). A run that scanned turns but counted none returns
+    # a block with ``n_turns_counted == 0``. ``partial`` is True when any turn was
+    # errored, undecodable, or missing (a perf UUID with no COMPLETE record) — the
+    # mean is then over a subset. A run is invalid for the OSL accuracy gate when
+    # this is None OR ``n_turns_counted == 0`` OR ``partial`` OR not complete.
+    # Carries ``output_sequence_lengths``/``n_turns_counted``/``n_empty``/
+    # ``n_errors``/``n_undecodable``/``n_missing``/``partial``.
+    # See mlcommons/endpoints#500.
+    output_sequence_lengths_full_run: dict[str, Any] | None = None
+
     @property
     def n_samples_succeeded(self) -> int:
         return max(0, self.n_samples_completed - self.n_samples_failed)
@@ -529,6 +545,47 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 osl_tok = sum(e.get("osl_tokenize_s", 0.0) for e in self.accuracy)
                 fn(f"  OSL tokenization: {osl_tok:.3g}s{newline}")
 
+        fr = self.output_sequence_lengths_full_run
+        n_counted = (fr or {}).get("n_turns_counted", 0)
+        if fr and n_counted > 0:
+            osl = fr.get("output_sequence_lengths", {})
+            fn(
+                f"  OSL per-turn mean (accuracy, all turns): "
+                f"{osl.get('avg', 0):.1f} tokens over {n_counted} turns "
+                f"({fr.get('n_empty', 0)} empty, {fr.get('n_errors', 0)} errored, "
+                f"{fr.get('n_undecodable', 0)} undecodable, "
+                f"{fr.get('n_missing', 0)} missing){newline}"
+            )
+            if fr.get("partial"):
+                fn(
+                    f"    (PARTIAL — dropped/missing turns; "
+                    f"NOT valid for the OSL accuracy gate){newline}"
+                )
+            if not self.complete:
+                fn(
+                    f"    (run incomplete — NOT valid for the OSL accuracy gate){newline}"
+                )
+        elif fr:
+            # Block present but no countable turns — do not print a fake 0.0 mean.
+            fn(
+                f"  OSL per-turn mean (accuracy): no countable turns "
+                f"({fr.get('n_empty', 0)} empty, {fr.get('n_errors', 0)} errored, "
+                f"{fr.get('n_undecodable', 0)} undecodable, "
+                f"{fr.get('n_missing', 0)} missing){newline}"
+            )
+        elif self.output_sequence_lengths and self.complete:
+            # A complete performance run (windowed OSL present) but no full-run
+            # block: the accuracy OSL field is missing, so the run is not usable
+            # for that gate.
+            fn(
+                f"  OSL per-turn mean (accuracy): not computed "
+                f"(no tokenizer or unreadable sample map){newline}"
+            )
+        elif not self.complete:
+            fn(
+                f"  OSL per-turn mean (accuracy): not computed — run incomplete{newline}"
+            )
+
         if summary_only:
             fn(f"----------------- End of Summary -----------------{newline}")
             return
@@ -540,7 +597,17 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             ("TPOT", self.tpot, "ms", 1e-6),
             ("Latency", self.latency, "ms", 1e-6),
             ("Input sequence lengths", self.input_sequence_lengths, "tokens", 1.0),
+            # Label deliberately unchanged: existing tooling parses report.txt
+            # by section name. The full-run block is added alongside it.
             ("Output sequence lengths", self.output_sequence_lengths, "tokens", 1.0),
+            (
+                "Output sequence lengths (full run, all turns)",
+                (self.output_sequence_lengths_full_run or {}).get(
+                    "output_sequence_lengths", {}
+                ),
+                "tokens",
+                1.0,
+            ),
         ]:
             if not metric_dict:
                 continue
