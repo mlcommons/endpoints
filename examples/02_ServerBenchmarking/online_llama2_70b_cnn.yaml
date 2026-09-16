@@ -19,8 +19,8 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 60000 # 1 minute
-    max_duration_ms: 180000 # 3 minutes
+    max_issue_duration_ms: 180000 # 3 minute cap on the performance phase
+    n_samples_to_issue: 1000 # One performance dataset pass
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
 

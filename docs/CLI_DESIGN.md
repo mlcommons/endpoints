@@ -61,6 +61,8 @@ Both paths produce the **same subclass with the same defaults**. A YAML file wit
 
 3. **Datasets injected after construction.** `--dataset` strings are parsed by a `BeforeValidator` on the `datasets` field, then merged via `config.with_updates(datasets=...)`.
 
+Fields get their dotted path automatically; those needing a shorter operational spelling also declare a `cyclopts.Parameter(alias=...)`. For example `settings.timeouts.endpoint_response_idle_timeout_s` accepts either `--timeouts.endpoint-response-idle-timeout-s` or the alias `--endpoint-response-idle-timeout`; it defaults to off and, when enabled, we recommend `>=300` seconds.
+
 ### YAML path
 
 1. **`from_yaml_file(path)`** loads YAML, resolves `${VAR}` env vars on parsed values, then passes the dict to a Pydantic `TypeAdapter` with `Discriminator`.

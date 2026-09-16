@@ -75,7 +75,7 @@ uv run inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/assets/datasets/dummy_1k.jsonl \
-  --duration 0
+  --num-samples 1000
 
 # Production test with custom params and report generation
 uv run inference-endpoint -v benchmark offline \
@@ -115,7 +115,7 @@ uv run inference-endpoint -v benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/assets/datasets/dummy_1k.jsonl \
-  --duration 0 \
+  --num-samples 1000 \
   --load-pattern poisson \
   --target-qps 100 \
   --report-dir online_benchmark_report
@@ -311,9 +311,9 @@ uv run inference-endpoint benchmark online \
 
 **Sample Count Control:**
 
-- Use `--duration 0` when you want a local test to stop after exhausting the dataset instead of running for the default timed duration
-- Sample priority: `--num-samples` > dataset size (when `--duration 0`) > calculated (target_qps × duration)
-- Default duration: 600000ms (10 minutes)
+- Use `--num-samples` for a fixed local workload size.
+- Sample priority: `--num-samples` > Poisson QPS × min issue duration > dataset size.
+- With neither sample count nor min issue duration, the dataset is issued once.
 
 **Testing & Debugging:**
 

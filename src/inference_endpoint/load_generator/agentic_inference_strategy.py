@@ -18,6 +18,7 @@
 import asyncio
 import hashlib
 import logging
+import random
 import time
 from collections import defaultdict
 from typing import Any
@@ -28,6 +29,11 @@ from ..core.types import ErrorData, QueryResult
 from ..dataset_manager.agentic_inference_dataset import ConversationMetadata
 from ..exceptions import InputValidationError
 from .conversation_manager import ConversationManager
+from .sample_order import (
+    SampleOrder,
+    SequentialSampleOrder,
+    WithoutReplacementSampleOrder,
+)
 from .strategy import PhaseIssuerProtocol
 
 logger = logging.getLogger(__name__)
@@ -45,10 +51,14 @@ class AgenticInferenceStrategy:
     """Event-driven agentic inference strategy. Completion of each turn triggers the next.
 
     execute() seeds the first N conversations (issues turn 1 for each), then
-    awaits _all_done. on_sample_complete() is called synchronously from the
-    receive coroutine for each response — it issues the next turn immediately
-    (zero event-loop iterations between response and next issuance), or starts
-    a new conversation when the current one finishes all turns.
+    awaits _all_done. Conversation start order uses the same without-replacement
+    shuffle as non-agentic datasets when rng_sample_index is provided
+    (RuntimeSettings.rng_sample_index / dataloader_random_seed); turns inside a
+    conversation stay in dataset order. on_sample_complete() is called
+    synchronously from the receive coroutine for each response — it issues the
+    next turn immediately (zero event-loop iterations between response and next
+    issuance), or starts a new conversation when the current one finishes all
+    turns.
 
     At most target_concurrency conversations are active simultaneously. When
     target_concurrency is None, all conversations start at once.
@@ -76,6 +86,7 @@ class AgenticInferenceStrategy:
         dataset_metadata: ConversationMetadata,
         agentic_inference_config: AgenticInferenceConfig | None = None,
         target_concurrency: int | None = None,
+        rng_sample_index: random.Random | None = None,
     ):
         """Initialize agentic inference strategy.
 
@@ -85,6 +96,9 @@ class AgenticInferenceStrategy:
             agentic_inference_config: Agentic inference conversation configuration.
             target_concurrency: Maximum number of simultaneously active conversations.
                 None means all conversations run concurrently.
+            rng_sample_index: Dataloader RNG used to shuffle conversation start
+                order (same seed as non-agentic WithoutReplacementSampleOrder).
+                None keeps dataset encounter order.
         """
         self._conv_manager = conversation_manager
         self._dataset_metadata = dataset_metadata
@@ -105,6 +119,7 @@ class AgenticInferenceStrategy:
             else _DEFAULT_TURN_TIMEOUT_S
         )
         self._target_concurrency = target_concurrency
+        self._rng_sample_index = rng_sample_index
         self._enable_salt = (
             agentic_inference_config.enable_salt
             if agentic_inference_config is not None
@@ -121,6 +136,7 @@ class AgenticInferenceStrategy:
 
         # Event-driven state — populated in execute().
         self._base_convs: list[tuple[str, ConversationTurns]] = []
+        self._conversation_order: SampleOrder | None = None
         self._active_iters: dict[str, ActiveConversationState] = {}
         self._timeout_handles: dict[str, asyncio.TimerHandle] = {}
         self._delay_handles: dict[str, asyncio.TimerHandle] = {}
@@ -161,6 +177,7 @@ class AgenticInferenceStrategy:
             (conv_id, sorted(turns, key=lambda x: x[1]))
             for conv_id, turns in conv_samples.items()
         ]
+        self._conversation_order = self._make_conversation_order()
         self._validate_salt_system_prompts()
         n_to_start = self._initial_conversations_to_start()
         try:
@@ -210,12 +227,39 @@ class AgenticInferenceStrategy:
     def _has_more_conversation_instances(self) -> bool:
         return bool(self._base_convs and self._has_trajectory_budget())
 
+    def _make_conversation_order(self) -> SampleOrder | None:
+        """Conversation-index iterator; shuffle when a dataloader RNG is set.
+
+        Only permutation orders are valid here. `_next_conversation_instance`
+        derives `repeat_id` as `started_count // n_convs + 1`, which assumes the
+        order yields each conversation index exactly once per block of `n_convs`
+        draws. `WithoutReplacementSampleOrder` and `SequentialSampleOrder` both
+        satisfy this. Do NOT swap in `WithReplacementSampleOrder` (or any order
+        that can repeat an index within a block) without first reworking
+        `repeat_id`: a conversation recurring within a block collides on
+        `(source_id, repeat_id)`, which duplicates the anti-cache salt (server
+        prefix-cache hits corrupt throughput) and the `logical_id` key in
+        `_active_iters` (conversation tracking overwrites).
+        """
+        n_convs = len(self._base_convs)
+        if n_convs == 0:
+            return None
+        if self._rng_sample_index is not None:
+            return WithoutReplacementSampleOrder(
+                n_samples_in_dataset=n_convs,
+                rng=self._rng_sample_index,
+            )
+        return SequentialSampleOrder(n_samples_in_dataset=n_convs)
+
     def _next_conversation_instance(self) -> ConversationInstance | None:
         if not self._has_more_conversation_instances():
             return None
 
-        source_index = self._started_trajectory_count % len(self._base_convs)
+        assert self._conversation_order is not None
+        source_index = next(self._conversation_order)
         source_id, turns = self._base_convs[source_index]
+        # Unique (source_id, repeat_id) relies on _conversation_order being a
+        # permutation every n_convs draws (see _make_conversation_order).
         instance_id = self._started_trajectory_count // len(self._base_convs) + 1
         logical_id = (
             source_id if instance_id == 1 else f"{source_id}__repeat_{instance_id}"
@@ -396,7 +440,7 @@ class AgenticInferenceStrategy:
                     conversation_id.encode("utf-8"), digest_size=2
                 ).hexdigest()
                 message["content"] = (
-                    f"[salt: {repeat_salt}]\n\n" f"{content}\n\n" f"[salt: {conv_salt}]"
+                    f"[salt: {repeat_salt}]\n\n{content}\n\n[salt: {conv_salt}]"
                 )
                 return salted_messages
         raise InputValidationError(

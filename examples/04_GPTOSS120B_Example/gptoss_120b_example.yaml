@@ -17,8 +17,8 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 300
-    max_duration_ms: 6000
+    max_issue_duration_ms: 6000 # 6 s cap on the performance phase (short smoke run)
+    n_samples_to_issue: 6396 # One performance dataset pass
     scheduler_random_seed: 42
     dataloader_random_seed: 42
 

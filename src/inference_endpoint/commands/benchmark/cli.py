@@ -38,7 +38,7 @@ from inference_endpoint.config.schema import (
 )
 from inference_endpoint.exceptions import (
     CLIError,
-    DatasetValidationError,
+    DatasetParseError,
     InputValidationError,
 )
 
@@ -67,9 +67,9 @@ def _run(
                 f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
                 for err in e.errors()
             )
-            raise DatasetValidationError(f"Invalid --dataset: {msgs}") from e
+            raise DatasetParseError(f"Invalid --dataset: {msgs}") from e
         except ValueError as e:
-            raise DatasetValidationError(f"Invalid --dataset: {e}") from e
+            raise DatasetParseError(f"Invalid --dataset: {e}") from e
     if config.audit is None:
         run_benchmark(config, mode)
         return
@@ -174,7 +174,13 @@ def from_config(
     except (yaml.YAMLError, ValidationError, ValueError, FileNotFoundError) as e:
         raise InputValidationError(f"Config error: {e}") from e
     if timeout is not None:
-        resolved = resolved.with_updates(timeout=timeout)
+        if not timeout > 0:
+            raise InputValidationError("--timeout must be greater than zero")
+        resolved = resolved.with_updates(
+            settings=resolved.settings.with_updates(
+                timeouts=resolved.settings.timeouts.with_updates(run_timeout_s=timeout)
+            )
+        )
     if report_dir is not None:
         resolved = resolved.with_updates(report_dir=report_dir)
     test_mode = mode or (

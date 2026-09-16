@@ -76,6 +76,11 @@ def worker_main(
         connector: Transport connector for IPC (ZMQ, shared memory, etc.).
         http_config: HTTP client configuration.
     """
+    # NOTE(vir):
+    # The parent blocks SIGINT across spawn. Ignore it before unblocking so
+    # Python bootstrap cannot surface KeyboardInterrupt tracebacks.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
     # Suppress transformers "no framework found" warning (only tokenizers used)
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 

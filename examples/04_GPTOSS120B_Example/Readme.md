@@ -210,7 +210,6 @@ cd examples/04_GPTOSS120B_Example
 python run.py \
     --report-dir ./results \
     --num-repeats 1 \
-    --min-duration 10 \
     --max-duration 600
 ```
 
@@ -218,7 +217,6 @@ python run.py \
 | -------------------- | ------------------------ | ------------------------------------ |
 | `--report-dir`       | `sglang_accuracy_report` | Directory to save results            |
 | `--num-repeats`      | `1`                      | Repeats per dataset                  |
-| `--min-duration`     | `10`                     | Minimum benchmark duration (seconds) |
 | `--max-duration`     | `600`                    | Maximum benchmark duration (seconds) |
 | `--force-regenerate` | off                      | Force dataset regeneration           |
 

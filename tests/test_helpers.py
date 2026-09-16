@@ -21,6 +21,7 @@ instead of using pytest fixtures with factory patterns.
 """
 
 import hashlib
+import json
 import random
 import string
 import uuid
@@ -31,6 +32,15 @@ from inference_endpoint.core.types import (
     Query,
 )
 from inference_endpoint.dataset_manager.dataset import Dataset
+
+
+def write_large_prompt_dataset(directory: Path, n_samples: int) -> Path:
+    path = directory / "big_prompts.jsonl"
+    prompt = "lorem ipsum " * 21_000
+    with path.open("w") as f:
+        for i in range(n_samples):
+            f.write(json.dumps({"prompt": f"{i} {prompt}"}) + "\n")
+    return path
 
 
 def _generate_random_word(

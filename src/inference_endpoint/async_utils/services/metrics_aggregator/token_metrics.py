@@ -56,17 +56,19 @@ from inference_endpoint.endpoint_client.cpu_affinity import (
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
-# A single rayon pool peaks at ~8 cores for BPE (memory-bound; more threads
-# oversubscribe and, on multi-socket Grace, cross the NUMA boundary). Sharding
-# across processes pinned to disjoint 8-core blocks is how the whole machine is
-# used. Measured on GB200: ~16k texts/s at 18 blocks vs ~1.5k single-process.
+# CORES_PER_WORKER bounds each Rayon BPE pool: larger pools oversubscribe this
+# memory-bound workload and can cross NUMA boundaries. Multiple processes pinned
+# to disjoint CORES_PER_WORKER-sized blocks scale across the allowed CPU set.
 CORES_PER_WORKER = 8
 
-# Budget for the parallel shard warmup (spawn + transformers import +
-# tokenizer load per worker). A hung load (e.g. a stuck network filesystem)
-# must become a bounded startup error, not wedge service startup — and the
-# error must fire before the parent's 30 s service-launch budget kills the
-# subprocess, so the diagnostic wins the race.
+# DRAIN_RESERVED_CPUS keeps part of the CPU set out of the metrics-drain shard
+# pool so the parent, aggregator event loop, and host remain responsive.
+DRAIN_RESERVED_CPUS = 2
+
+# _SHARD_WARMUP_TIMEOUT_S bounds parallel shard setup (spawn, imports, and
+# tokenizer load) so a hung worker cannot wedge this service indefinitely.
+# The parent's configurable service_ready_timeout_s independently bounds the
+# overall service launch and may expire first.
 _SHARD_WARMUP_TIMEOUT_S = 25.0
 
 # Per-flush ceiling for the LIVE lane. Bounds three things at once: how long
@@ -320,12 +322,13 @@ class BatchTokenizer:
         """Spawn one pinned single-worker process per core block.
 
         ``n_workers == 0`` explicitly selects in-process tokenization. Auto
-        (``< 0``) fits one shard per ``cores_per_worker`` block of this
-        process's affinity mask (or the online CPU count when the platform
-        has no affinity API — shards then run unpinned), always at least one;
-        an explicit count is clamped to that capacity. A tokenizer without a
-        fast text backend skips shard creation; structured chat tokenization
-        remains available. A shard warmup failure or timeout raises at startup.
+        (``< 0``) fits one shard per ``cores_per_worker`` block after reserving
+        ``DRAIN_RESERVED_CPUS`` from this process's affinity mask (or the online
+        CPU count when the platform has no affinity API — shards then run unpinned).
+        The final block may be partial; at least one CPU remains usable. An
+        explicit count is clamped to that capacity. A tokenizer without a fast
+        text backend skips shard creation; structured chat tokenization remains
+        available. A shard warmup failure or timeout raises at startup.
         """
         if cores_per_worker <= 0 or n_workers == 0:
             logger.info("BatchTokenizer: in-process tokenization (explicit)")
@@ -337,12 +340,10 @@ class BatchTokenizer:
                 self._tokenizer_name,
             )
             return
-        # The full allowed CPU universe (cgroup-clamped) drives the shard block
-        # math. cgroup_clamped_cpus owns the probe-and-restore of this process's
-        # mask, so the aggregator's event loop, publisher, and live tokenizer
-        # threads stay exactly where the parent placed them (the loadgen mask on
-        # a pinned Linux run); only the drain-phase shard processes, each pinned
-        # to its own block, span the machine.
+        # Reserve DRAIN_RESERVED_CPUS from the cgroup-clamped CPU universe for
+        # the parent, aggregator event loop, and system responsiveness.
+        # cgroup_clamped_cpus owns the probe-and-restore of this process's mask;
+        # only drain-phase shard processes span the usable CPUs.
         available = cgroup_clamped_cpus()
         if available is None:
             # No affinity API (e.g. macOS): shard unpinned — the OS scheduler
@@ -350,14 +351,19 @@ class BatchTokenizer:
             # their rayon pools to the block size instead (_init_worker).
             available = list(range(os.cpu_count() or 1))
             logger.info("BatchTokenizer: CPU affinity unavailable; sharding unpinned")
-        capacity = max(1, len(available) // cores_per_worker)
+        usable = available[: max(1, len(available) - DRAIN_RESERVED_CPUS)]
+        blocks = [
+            usable[start : start + cores_per_worker]
+            for start in range(0, len(usable), cores_per_worker)
+        ]
+        capacity = len(blocks)
         n = capacity if n_workers < 0 else min(n_workers, capacity)
         t0 = time.perf_counter()
         ctx = multiprocessing.get_context("spawn")
         procs: list[ProcessPoolExecutor] = []
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
-            for i in range(n):
-                block = available[i * cores_per_worker : (i + 1) * cores_per_worker]
+            for block in blocks[:n]:
                 ex = ProcessPoolExecutor(
                     max_workers=1,
                     mp_context=ctx,
@@ -381,11 +387,13 @@ class BatchTokenizer:
                 "slow path that cannot keep up with completions. Fix the "
                 "environment (see the chained error)."
             ) from exc
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
         self._procs = procs
         logger.info(
-            "BatchTokenizer: %d shards x %d cores (setup %.1fs)",
+            "BatchTokenizer: %d shards across %d CPUs (setup %.1fs)",
             len(procs),
-            cores_per_worker,
+            sum(len(block) for block in blocks[:n]),
             time.perf_counter() - t0,
         )
 
@@ -558,6 +566,40 @@ class BatchTokenizer:
             for (index, _), count in zip(indexed_texts, counts, strict=True)
         ]
 
+    def count_sync(self, item: TokenizationInput) -> int:
+        """Count one input on the calling thread.
+
+        The post-run counterpart to :meth:`count_batch_async`, for callers that
+        run after the event loop is gone (full-run OSL at finalize). Dispatch
+        mirrors ``count_batch_async`` exactly — same text backend, same chat
+        template, same baseline subtraction — so a turn counted here and a turn
+        counted on the perf hot path yield the same number. Divergence between
+        the two lanes would make the windowed and full-run OSL statistics
+        incomparable (mlcommons/endpoints#500).
+        """
+        match item:
+            case TokenIdsInput(token_ids=token_ids):
+                return len(token_ids)
+            case TextInput(text=text):
+                return self._encode_lengths_inproc([text])[0]
+            case MessageInput(content, reasoning, tool_calls):
+                return self._token_count_message(content, reasoning, tool_calls)
+            case PromptInput(
+                messages,
+                tools,
+                chat_template_kwargs,
+                chat_template,
+                tool_choice,
+            ):
+                return self._token_count_prompt(
+                    messages,
+                    tools,
+                    chat_template_kwargs,
+                    chat_template,
+                    tool_choice,
+                )
+        raise TypeError(f"unsupported tokenization input: {type(item).__name__}")
+
     async def count_batch_async(
         self,
         inputs: list[TokenizationInput],
@@ -633,8 +675,15 @@ class BatchTokenizer:
         drops queued encodes (``cancel_futures``); only a single in-flight
         encode (bounded by ``_LIVE_FLUSH_MAX_ITEMS``) is waited on.
         """
-        _terminate_procs(self._procs)
-        self._procs = []
+        # Only walk/terminate when this tokenizer owns shard workers.
+        # _terminate_procs walks multiprocessing.active_children() to catch a
+        # shard hung in its initializer; that set is shard-only in the aggregator
+        # subprocess, but in a non-aggregator host (e.g. the finalize-side
+        # in-process tokenizer, n_workers=0, which never creates shards) it would
+        # be unrelated processes such as the HTTP workers. Skip it when we own none.
+        if self._procs:
+            _terminate_procs(self._procs)
+            self._procs = []
         if self._thread is not None:
             self._thread.shutdown(wait=True, cancel_futures=True)
             self._thread = None

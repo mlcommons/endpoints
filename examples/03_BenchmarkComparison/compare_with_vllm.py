@@ -129,7 +129,6 @@ def generate_ie_config(
     num_requests: int,
     max_output_tokens: int,
     workers: int,
-    timeout: int,
     report_dir: Path,
     config_path: Path,
 ) -> None:
@@ -148,7 +147,6 @@ def generate_ie_config(
         num_requests: Number of requests to send
         max_output_tokens: Maximum output tokens per request
         workers: Number of parallel http-client workers
-        timeout: Timeout in seconds
         report_dir: Directory to save reports
         config_path: Path to write the config file
     """
@@ -177,8 +175,6 @@ def generate_ie_config(
         ],
         "settings": {
             "runtime": {
-                "min_duration_ms": 0,
-                "max_duration_ms": timeout * 1000,
                 "n_samples_to_issue": num_requests,
             },
             "load_pattern": {"type": "max_throughput"},
@@ -186,7 +182,6 @@ def generate_ie_config(
         },
         "endpoint_config": {"endpoints": [endpoint_url]},
         "report_dir": str(report_dir),
-        "timeout": timeout,
     }
 
     with open(config_path, "w") as f:
@@ -227,7 +222,7 @@ def parse_args() -> argparse.Namespace:
         "--timeout",
         type=int,
         default=900,
-        help="Timeout in seconds for inference-endpoint (default: 900)",
+        help="Whole-run watchdog in seconds passed to inference-endpoint (default: 900)",
     )
     parser.add_argument(
         "--workers",
@@ -278,7 +273,7 @@ def run_inference_endpoint(
         endpoint_url: Server endpoint URL
         num_requests: Number of requests to send
         max_output_tokens: Maximum output tokens per request
-        timeout: Timeout in seconds
+        timeout: Whole-run watchdog in seconds passed via --timeout
         workers: Number of parallel http-client workers
         temp_dir: Temporary directory to save report and config
         dry_run: If True, print command without executing it
@@ -301,7 +296,6 @@ def run_inference_endpoint(
         num_requests=num_requests,
         max_output_tokens=max_output_tokens,
         workers=workers,
-        timeout=timeout,
         report_dir=report_dir,
         config_path=config_path,
     )

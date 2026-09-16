@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
 ## -----------------------------------------------------
-FROM dhi.io/python:3.14-debian13-sfw-dev AS build-stage
+# Mirrors LiveCodeBench's own Python version (README: `uv venv --python 3.11`).
+FROM dhi.io/python:3.11-debian13-sfw-dev AS build-stage
 
 
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -32,7 +33,7 @@ RUN chmod 444 -R /opt/LiveCodeBench_Datasets/*
 RUN chmod 555 /opt/LiveCodeBench_Datasets
 
 ## -----------------------------------------------------
-FROM dhi.io/python:3.14-debian13 AS runtime-stage
+FROM dhi.io/python:3.11-debian13 AS runtime-stage
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1

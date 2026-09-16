@@ -410,7 +410,9 @@ def _audit_config(sample_index=0) -> MagicMock:
     perf_ds = MagicMock()
     perf_ds.type = DatasetType.PERFORMANCE
     config.datasets = [perf_ds]
-    config.with_updates.return_value = MagicMock()
+    phase_config = MagicMock()
+    phase_config.settings.timeouts.run_timeout_s = None
+    config.with_updates.return_value = phase_config
     return config
 
 
@@ -425,14 +427,16 @@ def _patch_phase(monkeypatch, *, num_samples, bench):
         "inference_endpoint.commands.audit.setup_benchmark",
         lambda *a, **k: ctx,
     )
+    run_phase = MagicMock(return_value=bench)
     monkeypatch.setattr(
         "inference_endpoint.commands.audit.run_benchmark_async",
-        lambda ctx: bench,
+        run_phase,
     )
     monkeypatch.setattr(
         "inference_endpoint.commands.audit.finalize_benchmark",
         lambda ctx, b: None,
     )
+    return run_phase
 
 
 class TestRunAuditGuards:
@@ -479,6 +483,7 @@ class TestRunAuditGuards:
         incomplete = MagicMock()
         incomplete.complete = False
         bench = MagicMock()
+        bench.run_timed_out = False
         bench.report = incomplete
         self._patch_phase(monkeypatch, num_samples=100, bench=bench)
 
@@ -495,11 +500,32 @@ class TestRunAuditGuards:
         interrupted.state = "interrupted"
         interrupted.complete = False
         bench = MagicMock()
+        bench.run_timed_out = False
         bench.report = interrupted
         self._patch_phase(monkeypatch, num_samples=100, bench=bench)
 
         with pytest.raises(KeyboardInterrupt):
             run_audit(config, tmp_path)
+
+    @pytest.mark.unit
+    def test_run_timeout_raises_execution_error(self, tmp_path, monkeypatch):
+        """A whole-run watchdog (settings.timeouts.run_timeout_s) firing during
+        an audit phase must surface as ExecutionError naming the timeout, not
+        as the Ctrl-C KeyboardInterrupt path."""
+        config = self._audit_config()
+        config.with_updates.return_value.settings.timeouts.run_timeout_s = 30.0
+        interrupted = MagicMock()
+        interrupted.state = "interrupted"
+        interrupted.complete = False
+        bench = MagicMock()
+        bench.run_timed_out = True
+        bench.report = interrupted
+        run_phase = self._patch_phase(monkeypatch, num_samples=100, bench=bench)
+
+        with pytest.raises(ExecutionError, match="run_timeout_s"):
+            run_audit(config, tmp_path)
+
+        assert run_phase.call_args.kwargs["deadline"] is not None
 
     @pytest.mark.unit
     def test_keyboard_interrupt_propagates(self, tmp_path, monkeypatch):
@@ -509,7 +535,7 @@ class TestRunAuditGuards:
         ctx = MagicMock()
         ctx.dataloader.num_samples.return_value = 100
 
-        def _interrupt(_ctx):
+        def _interrupt(_ctx, **kwargs):
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
@@ -534,6 +560,7 @@ class TestRunAuditGuards:
         config.datasets = [perf_ds, acc_ds]
 
         bench = MagicMock()
+        bench.run_timed_out = False
         bench.report = None  # abort after the first phase's with_updates call
         self._patch_phase(monkeypatch, num_samples=100, bench=bench)
 
@@ -566,6 +593,7 @@ class TestRunAuditGuards:
         report.qps = 0.0
         report.n_samples_completed = 0
         bench = MagicMock()
+        bench.run_timed_out = False
         bench.report = report
         self._patch_phase(monkeypatch, num_samples=100, bench=bench)
 
@@ -589,6 +617,7 @@ class TestRunAuditTmpfsCleanup:
         report.qps = 1.0
         report.n_samples_completed = 4
         bench = MagicMock()
+        bench.run_timed_out = False
         bench.report = report
         tmpfs_dir = tmp_path / "tmpfs"
         tmpfs_dir.mkdir()
@@ -648,11 +677,12 @@ class TestRunAuditSpecTestMode:
             "inference_endpoint.commands.audit.setup_benchmark", setup_spy
         )
         bench = MagicMock()
+        bench.run_timed_out = False
         bench.report = None  # abort right after setup, before finalize matters
         bench.tmpfs_dir = Path("/nonexistent-tmpfs-path-for-tests")
         monkeypatch.setattr(
             "inference_endpoint.commands.audit.run_benchmark_async",
-            lambda ctx: bench,
+            lambda ctx, **kwargs: bench,
         )
         monkeypatch.setattr(
             "inference_endpoint.commands.audit.finalize_benchmark",

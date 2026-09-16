@@ -32,7 +32,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.aggregator impor
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     build_token_series_dict,
 )
-from inference_endpoint.evaluation.accuracy_results import average_accuracy
+from inference_endpoint.evaluation.accuracy_results import (
+    samples_weighted_average_accuracy,
+)
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
@@ -183,6 +185,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     git_sha: str | None
     test_started_at: int
     n_samples_issued: int
+    # Terminal responses; failed samples are a subset of this count.
     n_samples_completed: int
     n_samples_failed: int
     duration_ns: int | None
@@ -191,10 +194,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # without re-parsing the source dict, and so JSON round-trips don't
     # depend on Report importing the SessionState enum.
     state: str
-    # True iff state=="complete" AND n_pending_tasks==0. False signals
-    # partial async metrics — drain timed out (state=="complete",
-    # n_pending_tasks>0), the run was interrupted (state=="interrupted"),
-    # or no final snapshot was found and we fell back to a live tick.
+    # True iff the aggregator completed, no metrics work remains, and every
+    # issued sample reached a terminal outcome with valid counter ordering.
+    # False signals dropped samples, partial async metrics, an interrupted run,
+    # or a live-snapshot fallback.
     complete: bool
 
     # Per-metric rollup dicts (output of _series_to_metric_dict)
@@ -218,6 +221,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # tokenizer unavailable).
     qps: float | None = None
     tps: float | None = None
+    e2e_avg_interactivity: float | None = None
     finish_reason_counts: dict[str, int] = msgspec.field(default_factory=dict)
 
     # Run configuration (load_pattern, warmup, and the scheduler/dataloader RNG
@@ -234,6 +238,30 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # empty. Each entry carries score + sample counts and, for multi-subset
     # scorers, a BFCL-shaped breakdown. Display-only.
     accuracy: list[dict[str, Any]] = msgspec.field(default_factory=list)
+
+    # OSL over EVERY completed turn, including turns issued after the
+    # performance window closed. ``output_sequence_lengths`` above covers only
+    # the window, whose length depends on concurrency — so it is not
+    # comparable across Pareto points, while this block is. Same token-counting
+    # rule (``extract_tokenization_input``) on both. Attached at finalize; None
+    # only when the block was skipped (no tokenizer, or an unreadable/missing
+    # performance sample map). A run that scanned turns but counted none returns
+    # a block with ``n_turns_counted == 0``. ``partial`` is True when any turn was
+    # errored, undecodable, or missing (a perf UUID with no COMPLETE record) — the
+    # mean is then over a subset. A run is invalid for the OSL accuracy gate when
+    # this is None OR ``n_turns_counted == 0`` OR ``partial`` OR not complete.
+    # Carries ``output_sequence_lengths``/``n_turns_counted``/``n_empty``/
+    # ``n_errors``/``n_undecodable``/``n_missing``/``partial``.
+    # See mlcommons/endpoints#500.
+    output_sequence_lengths_full_run: dict[str, Any] | None = None
+
+    @property
+    def n_samples_succeeded(self) -> int:
+        return max(0, self.n_samples_completed - self.n_samples_failed)
+
+    @property
+    def n_samples_dropped(self) -> int:
+        return max(0, self.n_samples_issued - self.n_samples_completed)
 
     @classmethod
     def from_snapshot(
@@ -298,6 +326,8 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         version_info = get_version_info()
         raw_duration_ns = _counter("tracked_duration_ns")
         duration_ns = raw_duration_ns if raw_duration_ns > 0 else None
+        n_issued = _counter("tracked_samples_issued")
+        n_failed = _counter("tracked_samples_failed")
         n_completed = _counter("tracked_samples_completed")
         isl = _series_dict("isl")
         osl = _series_dict("osl")
@@ -336,6 +366,18 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             qps = None
             tps = None
 
+        total_sample_latency_ns = series.get("sample_latency_ns", {}).get("total", 0)
+        # OSL is recorded only for successful responses, while sample latency
+        # includes every terminal request. Without a success-correlated latency
+        # sum, any tracked failure would make the two sides cover different
+        # samples, so omit the derived metric instead of publishing a biased
+        # ratio.
+        e2e_avg_interactivity = (
+            osl.get("total", 0) / (total_sample_latency_ns / 1e9)
+            if osl and total_sample_latency_ns > 0 and n_failed == 0
+            else None
+        )
+
         # Default missing state to "interrupted" — a malformed / partial
         # snapshot dict is treated as worst-case (run did not reach a
         # clean completion). Drives complete=False and the interrupted
@@ -350,16 +392,22 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             for reason in _FINISH_REASON_COUNTERS
         }
 
+        accounting_valid = 0 <= n_failed <= n_completed <= n_issued
         return cls(
             version=str(version_info.get("version", "unknown")),
             git_sha=version_info.get("git_sha"),
             test_started_at=0,  # TODO: surface session_started_ns via snapshot
-            n_samples_issued=_counter("tracked_samples_issued"),
+            n_samples_issued=n_issued,
             n_samples_completed=n_completed,
-            n_samples_failed=_counter("tracked_samples_failed"),
+            n_samples_failed=n_failed,
             duration_ns=duration_ns,
             state=state,
-            complete=(state == "complete" and n_pending_tasks == 0),
+            complete=(
+                state == "complete"
+                and n_pending_tasks == 0
+                and accounting_valid
+                and n_completed == n_issued
+            ),
             **{
                 field: _series_dict(series)
                 for series, field in SERIES_TO_SUMMARY_FIELD.items()
@@ -369,6 +417,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
             tps=tps,
+            e2e_avg_interactivity=e2e_avg_interactivity,
             finish_reason_counts=finish_reason_counts,
             run_config=run_config,
         )
@@ -378,9 +427,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         # the dedicated accuracy report (accuracy/accuracy_results.json). The
         # accuracy field stays on the struct so report.txt / the console summary
         # still render it; it is just dropped from this serialized perf summary.
-        payload = {
-            k: v for k, v in msgspec.structs.asdict(self).items() if k != "accuracy"
-        }
+        payload = msgspec.structs.asdict(self)
+        payload["n_samples_succeeded"] = self.n_samples_succeeded
+        payload["n_samples_dropped"] = self.n_samples_dropped
+        payload.pop("accuracy")
         json_bytes = msgspec.json.format(msgspec.json.encode(payload), indent=2)
         if save_to is not None:
             with Path(save_to).open("wb") as f:
@@ -419,8 +469,9 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             approx = monotime_to_datetime(self.test_started_at)
             fn(f"Test started at: {approx.strftime('%Y-%m-%d %H:%M:%S')}{newline}")
         fn(f"Total samples issued: {self.n_samples_issued}{newline}")
-        fn(f"Total samples completed: {self.n_samples_completed}{newline}")
+        fn(f"Total samples succeeded: {self.n_samples_succeeded}{newline}")
         fn(f"Total samples failed: {self.n_samples_failed}{newline}")
+        fn(f"Total samples dropped: {self.n_samples_dropped}{newline}")
         if self.duration_ns is not None:
             fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds{newline}")
         else:
@@ -435,6 +486,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             fn(f"TPS: {tps:.2f}{newline}")
         else:
             fn(f"TPS: N/A{newline}")
+
+        if (interactivity := self.e2e_avg_interactivity) is not None:
+            fn(f"E2E average interactivity: {interactivity:.2f} tokens/s{newline}")
+        else:
+            fn(f"E2E average interactivity: N/A{newline}")
 
         if self.accuracy:
             fn(f"Accuracy:{newline}")
@@ -482,12 +538,53 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                         fn(f"    {sub}: {sub_score:.2f}%{newline}")
                 if entry.get("complete") is False:
                     fn(f"    (incomplete){newline}")
-            avg = average_accuracy(self.accuracy)
+            avg = samples_weighted_average_accuracy(self.accuracy)
             if avg is not None:
                 fn(f"  Average: {avg:.4g}{newline}")
             if any("osl_tokenize_s" in e for e in self.accuracy):
                 osl_tok = sum(e.get("osl_tokenize_s", 0.0) for e in self.accuracy)
                 fn(f"  OSL tokenization: {osl_tok:.3g}s{newline}")
+
+        fr = self.output_sequence_lengths_full_run
+        n_counted = (fr or {}).get("n_turns_counted", 0)
+        if fr and n_counted > 0:
+            osl = fr.get("output_sequence_lengths", {})
+            fn(
+                f"  OSL per-turn mean (accuracy, all turns): "
+                f"{osl.get('avg', 0):.1f} tokens over {n_counted} turns "
+                f"({fr.get('n_empty', 0)} empty, {fr.get('n_errors', 0)} errored, "
+                f"{fr.get('n_undecodable', 0)} undecodable, "
+                f"{fr.get('n_missing', 0)} missing){newline}"
+            )
+            if fr.get("partial"):
+                fn(
+                    f"    (PARTIAL — dropped/missing turns; "
+                    f"NOT valid for the OSL accuracy gate){newline}"
+                )
+            if not self.complete:
+                fn(
+                    f"    (run incomplete — NOT valid for the OSL accuracy gate){newline}"
+                )
+        elif fr:
+            # Block present but no countable turns — do not print a fake 0.0 mean.
+            fn(
+                f"  OSL per-turn mean (accuracy): no countable turns "
+                f"({fr.get('n_empty', 0)} empty, {fr.get('n_errors', 0)} errored, "
+                f"{fr.get('n_undecodable', 0)} undecodable, "
+                f"{fr.get('n_missing', 0)} missing){newline}"
+            )
+        elif self.output_sequence_lengths and self.complete:
+            # A complete performance run (windowed OSL present) but no full-run
+            # block: the accuracy OSL field is missing, so the run is not usable
+            # for that gate.
+            fn(
+                f"  OSL per-turn mean (accuracy): not computed "
+                f"(no tokenizer or unreadable sample map){newline}"
+            )
+        elif not self.complete:
+            fn(
+                f"  OSL per-turn mean (accuracy): not computed — run incomplete{newline}"
+            )
 
         if summary_only:
             fn(f"----------------- End of Summary -----------------{newline}")
@@ -500,7 +597,17 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             ("TPOT", self.tpot, "ms", 1e-6),
             ("Latency", self.latency, "ms", 1e-6),
             ("Input sequence lengths", self.input_sequence_lengths, "tokens", 1.0),
+            # Label deliberately unchanged: existing tooling parses report.txt
+            # by section name. The full-run block is added alongside it.
             ("Output sequence lengths", self.output_sequence_lengths, "tokens", 1.0),
+            (
+                "Output sequence lengths (full run, all turns)",
+                (self.output_sequence_lengths_full_run or {}).get(
+                    "output_sequence_lengths", {}
+                ),
+                "tokens",
+                1.0,
+            ),
         ]:
             if not metric_dict:
                 continue

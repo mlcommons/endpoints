@@ -24,6 +24,7 @@ the worker pool transport.
 from __future__ import annotations
 
 import logging
+import signal
 import subprocess
 import sys
 import time
@@ -104,20 +105,24 @@ class ServiceLauncher:
         )
 
         try:
-            for i, svc in enumerate(services):
-                cmd = [
-                    sys.executable,
-                    "-m",
-                    svc.module,
-                    *svc.args,
-                    "--readiness-path",
-                    readiness_path,
-                    "--readiness-id",
-                    str(i),
-                ]
-                logger.info("Launching service: %s (id=%d)", svc.module, i)
-                proc = subprocess.Popen(cmd)
-                self._procs.append(proc)
+            previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+            try:
+                for i, svc in enumerate(services):
+                    cmd = [
+                        sys.executable,
+                        "-m",
+                        svc.module,
+                        *svc.args,
+                        "--readiness-path",
+                        readiness_path,
+                        "--readiness-id",
+                        str(i),
+                    ]
+                    logger.info("Launching service: %s (id=%d)", svc.module, i)
+                    proc = subprocess.Popen(cmd)
+                    self._procs.append(proc)
+            finally:
+                signal.signal(signal.SIGINT, previous_sigint)
 
             await receiver.wait(timeout=timeout)
             logger.info("All %d services ready", len(services))

@@ -88,10 +88,15 @@ class MetricsPublisher:
         self._final_snapshot_path = final_snapshot_path
         self._tick_task: asyncio.Task | None = None
         self._closed = False
-        # publish_final is idempotent: the SIGTERM handler in
-        # __main__.py and the aggregator's ENDED-driven path can both
-        # call it; the second call must not re-publish or re-write.
+        # publish_final is idempotent AND serialized: the SIGTERM handler in
+        # __main__.py and the aggregator's ENDED-driven path can both call
+        # it. The lock makes a raced second caller block until the in-flight
+        # finalize (including the atomic file write) completes before
+        # early-returning, so the SIGTERM path's shutdown_event.set() can
+        # never let main() return while the write is still in flight
+        # (which would abandon a .tmp and leave no final_snapshot.json).
         self._finalized = False
+        self._final_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Live tick task
@@ -189,13 +194,28 @@ class MetricsPublisher:
         (which would let a conflate-mode TUI see the live tick instead
         of the terminal state as the last message).
 
-        Idempotent: only the first call writes/publishes; subsequent
-        calls early-return. The SIGTERM handler relies on this to
-        race safely with the ENDED-driven path.
+        Idempotent and serialized: only the first call writes/publishes;
+        a concurrent second call blocks until the first finishes, then
+        early-returns. The SIGTERM handler relies on this to race safely
+        with the ENDED-driven path — its ``shutdown_event.set()`` cannot
+        run before an in-flight finalize write has completed.
         """
-        if self._finalized:
-            return
-        self._finalized = True
+        async with self._final_lock:
+            if self._finalized:
+                return
+            self._finalized = True
+            await self._publish_final_locked(
+                registry, n_pending_tasks=n_pending_tasks, interrupted=interrupted
+            )
+
+    async def _publish_final_locked(
+        self,
+        registry: MetricsRegistry,
+        *,
+        n_pending_tasks: int,
+        interrupted: bool,
+    ) -> None:
+        """Finalize body; runs exactly once, under ``_final_lock``."""
         if self._tick_task is not None:
             self._tick_task.cancel()
             try:

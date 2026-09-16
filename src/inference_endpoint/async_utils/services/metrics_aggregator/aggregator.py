@@ -161,6 +161,10 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         self._streaming = streaming
         self._shutdown_event = shutdown_event
         self._shutdown_received = False
+        # Latched by SessionEventType.INTERRUPTED (published by the session
+        # right before ENDED on an aborted run) so the ENDED-driven finalize
+        # below tags the snapshot state=interrupted, not COMPLETE.
+        self._interrupted = False
         self._drain_timeout_s = drain_timeout_s
 
         self._session_start_ns: int | None = None
@@ -318,6 +322,12 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     logger.info("ENDED event received, shutting down aggregator")
                     self._shutdown_received = True
                     saw_shutdown = True
+                elif ev == SessionEventType.INTERRUPTED:
+                    logger.info(
+                        "INTERRUPTED marker received — final snapshot will be "
+                        "tagged state=interrupted"
+                    )
+                    self._interrupted = True
                 else:
                     if ev == SessionEventType.STARTED:
                         if self._session_start_ns is not None:
@@ -460,7 +470,11 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     MetricCounterKey.LEGACY_LOADGEN_WINDOW_DURATION_NS.value,
                     table.total_loadgen_window_ns,
                 )
-                await self._publisher.publish_final(registry, n_pending_tasks=n_pending)
+                await self._publisher.publish_final(
+                    registry,
+                    n_pending_tasks=n_pending,
+                    interrupted=self._interrupted,
+                )
             finally:
                 # The aggregator MUST close the publisher and signal shutdown even
                 # if the drain/publish above failed — otherwise main()'s

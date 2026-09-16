@@ -3,7 +3,6 @@
 name: "interactive-qwen3-vl-235b-a22b-shopify-8k-benchmark"
 version: "1.0"
 type: "online"
-timeout: 1800 # 30 minutes for quick interactive runs
 
 model_params:
   name: "Qwen/Qwen3-VL-235B-A22B-Instruct"
@@ -23,7 +22,7 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minute
+    n_samples_to_issue: 8000 # One performance dataset pass
     scheduler_random_seed: 42
     dataloader_random_seed: 42
 
@@ -32,13 +31,14 @@ settings:
     target_qps: 3
 
   client:
+    # Increase for slow worker startup (spawn, imports). Default 60s may be too short.
+    worker_initialization_timeout: 120
     num_workers: 5
     transport:
       type: zmq
       recv_buffer_size: 16777216
       send_buffer_size: 16777216
     max_connections: 1000
-    worker_initialization_timeout: 120
 
   warmup:
     enabled: true # Enable warmup phase before performance run

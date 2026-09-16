@@ -37,11 +37,8 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 0
-    max_duration_ms: 0
     scheduler_random_seed: 42
     dataloader_random_seed: 42
-
   load_pattern:
     type: agentic_inference
     target_concurrency: 8 # Submission-specific concurrency.

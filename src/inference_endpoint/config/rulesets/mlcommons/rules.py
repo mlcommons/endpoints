@@ -27,7 +27,6 @@ from enum import Enum
 from .... import metrics
 from ...ruleset_base import BenchmarkSuiteRuleset
 from ...runtime_settings import RuntimeSettings
-from ...schema import SystemDefaults
 from ...user_config import UserConfig
 from . import models
 
@@ -188,16 +187,17 @@ class RoundRuleset(BenchmarkSuiteRuleset):
                     f"Invalid metric type: {mtype} for ruleset type {ruleset.__class__.__name__}"
                 )
 
-        min_duration_ms = ruleset.min_duration_ms_valid
-        if user_config.min_duration_ms is not None:
-            min_duration_ms = user_config.min_duration_ms
+        min_issue_duration_ms = ruleset.min_duration_ms_valid
+        if user_config.min_issue_duration_ms is not None:
+            min_issue_duration_ms = user_config.min_issue_duration_ms
 
-        max_duration_ms = ruleset.max_duration_ms_valid
-        if user_config.max_duration_ms is not None:
-            max_duration_ms = user_config.max_duration_ms
+        max_issue_duration_ms = ruleset.max_duration_ms_valid
+        if user_config.max_issue_duration_ms is not None:
+            max_issue_duration_ms = user_config.max_issue_duration_ms
         assert (
-            max_duration_ms is not None and max_duration_ms >= min_duration_ms
-        ), "Max duration must be greater than or equal to min duration"
+            max_issue_duration_ms is not None
+            and max_issue_duration_ms >= min_issue_duration_ms
+        ), "Max issue duration must be greater than or equal to min issue duration"
 
         n_samples_from_dataset = model.dataset.size
         if user_config.ds_subset_size:
@@ -214,10 +214,10 @@ class RoundRuleset(BenchmarkSuiteRuleset):
         return _RuntimeSettings(
             metric_target=metric_target
             if metric_target is not None
-            else SystemDefaults.DEFAULT_METRIC,
+            else metrics.Throughput(0.0),
             reported_metrics=reported_metrics,
-            min_duration_ms=min_duration_ms,
-            max_duration_ms=max_duration_ms,
+            min_issue_duration_ms=min_issue_duration_ms,
+            max_issue_duration_ms=max_issue_duration_ms,
             n_samples_from_dataset=n_samples_from_dataset,
             n_samples_to_issue=total_sample_count,
             min_sample_count=min_sample_count if min_sample_count is not None else 1,

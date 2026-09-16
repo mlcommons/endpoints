@@ -31,6 +31,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
     TextInput,
     TokenIdsInput,
     TokenizationInput,
+    extract_tokenization_input,
 )
 from inference_endpoint.core.record import SampleEventType, SessionEventType
 from inference_endpoint.core.types import PromptData, TextModelOutput
@@ -346,12 +347,7 @@ class OslTrigger(TokenTrigger):
     def _extract_tokenization_input(self, ev_rec, row, pre_change):
         if not isinstance(ev_rec.data, TextModelOutput):
             return None
-        if ev_rec.data.reasoning or ev_rec.data.tool_calls:
-            return MessageInput(*ev_rec.data.as_message_parts())
-        text = str(ev_rec.data)
-        if text:
-            return TextInput(text)
-        return None
+        return extract_tokenization_input(ev_rec.data)
 
 
 class TpotTrigger(TokenTrigger):

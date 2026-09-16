@@ -10,8 +10,8 @@ datasets:  # Dataset configs
     prompt: text_input
 settings:
   runtime:
-    min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
-    max_duration_ms: 0  # Maximum test duration in ms (0 for no limit)
+    min_issue_duration_ms: null  # Poisson sample-count sizing input: target_qps × duration. Explicit n_samples_to_issue wins; None issues the dataset once.
+    max_issue_duration_ms: null  # Cap on performance-phase issuing in ms; reaching it ends the phase normally (None = no cap)
     n_samples_to_issue: null  # Sample count override
   load_pattern:
     type: concurrency  # Load pattern type | options: max_throughput, poisson, concurrency, agentic_inference, burst, step

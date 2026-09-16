@@ -484,8 +484,8 @@ def max_throughput_runtime_settings(random_seed):
     return RuntimeSettings(
         metrics.Throughput(100),
         reported_metrics=[],
-        min_duration_ms=1000,
-        max_duration_ms=1000,
+        min_issue_duration_ms=1000,
+        max_issue_duration_ms=1000,
         n_samples_from_dataset=100,
         n_samples_to_issue=100,
         min_sample_count=100,
@@ -512,8 +512,8 @@ def poisson_runtime_settings(random_seed, target_qps):
     return RuntimeSettings(
         metric_target=metrics.Throughput(target_qps),
         reported_metrics=[],
-        min_duration_ms=10_000,
-        max_duration_ms=15_000,
+        min_issue_duration_ms=10_000,
+        max_issue_duration_ms=15_000,
         n_samples_from_dataset=100,
         n_samples_to_issue=5000,
         min_sample_count=100,
@@ -528,8 +528,8 @@ def concurrency_runtime_settings(random_seed, target_concurrency):
     return RuntimeSettings(
         metric_target=None,
         reported_metrics=[],
-        min_duration_ms=1000,
-        max_duration_ms=10_000,
+        min_issue_duration_ms=1000,
+        max_issue_duration_ms=10_000,
         n_samples_from_dataset=100,
         n_samples_to_issue=target_concurrency * 10,
         min_sample_count=100,
