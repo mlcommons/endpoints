@@ -27,8 +27,9 @@ does import from other `inference_endpoint` subpackages.
 **No cross-imports from `utils/` helper modules**
 
 `logging.py` and `dataset_utils.py` stay lightweight and broadly reusable. `version.py` is also
-small, but it intentionally imports `inference_endpoint.__version__` and shells out to `git` to
-report build metadata. `benchmark_httpclient.py` is exempt entirely: it is a standalone tool, not
+small, but it intentionally imports `inference_endpoint.__version__` and resolves a build SHA
+through a fallback chain — a baked `_build_info.py`, the `ENDPOINTS_GIT_SHA` env var, then a live
+`git` query — to report build metadata. `benchmark_httpclient.py` is exempt entirely: it is a standalone tool, not
 a reusable helper.
 
 **`benchmark_httpclient.py` is a standalone tool**
@@ -44,7 +45,8 @@ uv run python -m inference_endpoint.utils.benchmark_httpclient --endpoint URL --
 
 ## Integration Points
 
-| Consumer           | Usage                                        |
-| ------------------ | -------------------------------------------- |
-| `main.py`          | Calls `setup_logging()` at startup           |
-| `commands/info.py` | Imports `__version__` for the `info` command |
+| Consumer            | Usage                                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------ |
+| `main.py`           | Calls `setup_logging()` at startup                                                                     |
+| `commands/info.py`  | Imports `__version__` for the `info` command                                                           |
+| `metrics/report.py` | `Report.from_snapshot` calls `get_version_info()` to record `git_sha` / `git_sha_source` in the report |

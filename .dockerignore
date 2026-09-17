@@ -1,0 +1,6 @@
+# Generated build-time provenance (scripts/write_build_info.py). A locally-run
+# generator leaves this in the source tree; excluding it from the Docker build
+# context stops a stale baked SHA from being COPYd into the image and silently
+# overriding the ENDPOINTS_GIT_SHA build-arg (resolve_git_sha prefers baked).
+src/inference_endpoint/_build_info.py
+src/inference_endpoint/_build_info.py.tmp

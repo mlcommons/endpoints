@@ -1,6 +1,7 @@
 # Development Dockerfile for the MLPerf Inference Endpoint Benchmarking System
-# From project root:
-# docker build -f scripts/Dockerfile.dev --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
+# From project root (pass GIT_SHA so the client reports its source commit; see the
+# provenance note at the bottom of this file):
+# docker build -f scripts/Dockerfile.dev --build-arg GIT_SHA=$(git rev-parse --short=7 HEAD) --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
 # docker run -v $(pwd):/mnt/inference-endpoint -it --shm-size=512m inference-endpoint-dev bash
 #
 # VBench (WAN 2.2) accuracy scorer is ON by default (consistent with the DeepSeek-R1
@@ -102,3 +103,17 @@ RUN if [ "${PROVISION_VBENCH}" = "1" ]; then \
     else \
         echo "PROVISION_VBENCH=${PROVISION_VBENCH}: skipping VBench provisioning" ; \
     fi
+
+# Runtime provenance: expose the source git SHA so `inference-endpoint` prints it
+# in its report. This image COPYs src/ but not .git, so live `git rev-parse` finds
+# no repo; resolve_git_sha() reads ENDPOINTS_GIT_SHA instead. Kept LAST so the
+# per-commit SHA (changes every build) doesn't invalidate the cached dependency
+# and provisioning layers above. Pass it at build time:
+#   docker build ... --build-arg GIT_SHA=$(git rev-parse --short=7 HEAD)
+# Default is empty (NOT "unknown"): resolve_git_sha validates the value, so an
+# empty/omitted arg falls through to source=none rather than recording a bogus
+# "unknown" as an env attestation.
+# Image-level provenance (the OCI image.revision annotation / :<sha> tag) is set
+# separately by the publish script on the pushed manifest, so no LABEL here.
+ARG GIT_SHA=
+ENV ENDPOINTS_GIT_SHA=${GIT_SHA}
