@@ -230,7 +230,7 @@ The core is a sequence of pure stages over the per-super-pass series.
 ### Adaptive warmup crop
 
 The ramp is removed by a data-driven crop rather than a fixed count. The steady level of
-a driver metric is estimated from the median of the per-super-pass series' back half, and
+a driver metric is estimated from the median of the per-super-pass series' second half, and
 leading super-passes whose driver value is more than a fractional `band` away from that
 level — in _either_ direction — are dropped, capped at half the run so it can never crop
 everything. The driver is **TPOT p50**: aggregated per super-pass it is a smooth, monotone
@@ -242,6 +242,20 @@ closed-loop admission (empirically CoV ~3 on a high-concurrency reasoning run vs
 the same model under Poisson). The crop self-sizes to the workload: near-zero on
 fast-settling runs, but tens of super-passes on a long-output reasoning run whose decode
 ramp is genuinely long. A fixed crop count remains available as an override.
+
+_Example_ — super-pass size 40, driver `TPOT p50`:
+
+- super-pass 0: `TPOT p50` = 3.6 ms
+- super-pass 1: `TPOT p50` = 4.5 ms
+- super-pass 2: `TPOT p50` = 4.9 ms
+- super-pass 3: `TPOT p50` = 5.0 ms
+- super-passes 4…N: `TPOT p50` ≈ 5.0 ms (plateau)
+
+The steady level is the median of the series' second half ≈ 5.0 ms, giving a ±5% `band` of
+[4.75, 5.25]. Super-passes 0–2 fall below the band; super-pass 3 is the first inside it, so
+`warmup = 3` and the reported window starts at super-pass 3.
+
+## 5.4 Guarded drain-tail cut
 
 The dataset is issued in full, without replacement, repeating across passes, so a
 tail of long-output requests accumulates toward the end of every run; only the
@@ -261,8 +275,6 @@ response is therefore mode-specific: concurrency crops the ramp and applies the
 guarded tail-cut; offline finds its steady region from the TPS/completion-rate
 trend rather than an issue-time window (a client-side tail-cut is not meaningful);
 Poisson reuses the concurrency tooling with a single-pass super-pass.
-
-## 5.4 Guarded drain-tail cut
 
 Excluding the tail is safe for per-token latency, latency tails, and throughput —
 _conditional on the tail sharing the steady per-token distribution_. This is the
@@ -320,9 +332,10 @@ fewer samples per super-pass, so its sampling-noise floor is higher than a p50's
 local flatness, not that the metric has stopped moving: a slowly drifting series can
 sit locally flat while climbing overall. A trend test over the window is therefore
 applied on top. Because per-super-pass series are autocorrelated, the primary gate is
-the rank-based **Mann–Kendall test with the Hamed–Rao autocorrelation correction**
-(so serial correlation does not fake a trend); an OLS slope-vs-scatter check and a
-Newey–West (autocorrelation-consistent) slope test corroborate it. The verdict
+the rank-based **Mann–Kendall test** (Mann 1945; Kendall 1975) **with the Hamed–Rao
+autocorrelation correction** (Hamed & Rao 1998) (so serial correlation does not fake a
+trend); an OLS slope-vs-scatter check and a Newey–West (autocorrelation-consistent) slope
+test (Newey & West 1987) corroborate it. The verdict
 classifies each metric into one of three states — **Drifting Down**, **Plateau**,
 **Drifting Up**:
 
@@ -389,7 +402,7 @@ is not a degradation).
 first plateau must not silently discard the fact that the run degraded. A level-shift
 detector runs alongside the segmentation: when two or more disjoint admissible
 plateaus have pooled means differing by more than the CoV band, corroborated by a
-**Pettitt** change-point test (a nonparametric, rank-based single-change-point test
+**Pettitt** change-point test (Pettitt 1979) (a nonparametric, rank-based single-change-point test
 that pairs naturally with the rank-based trend gate) on the TPOT series, the result
 carries an **anomaly flag** — the change-point super-pass and the magnitude and
 direction of the shift. The steady result is still reported from the first plateau,
@@ -633,3 +646,30 @@ per-super-pass series.
   that fails them is declared _invalid_ versus reported-with-flags (see
   "No-steady-state runs" above), is a benchmark-task-force decision, not fixed by
   this proposal.
+
+# 7 References {#7-references}
+
+DOIs verified to resolve (Sep 2026). Bare `<…>` autolinks are used so DOIs containing
+parentheses (Hamed & Rao) are not truncated by Markdown link parsing.
+
+- **Mann 1945** — Mann, H.B. "Nonparametric tests against trend." _Econometrica_
+  13(3):245–259. <https://doi.org/10.2307/1907187>
+- **Kendall 1975** — Kendall, M.G. _Rank Correlation Methods_, 4th ed. Griffin, London.
+- **Hamed & Rao 1998** — Hamed, K.H. & Rao, A.R. "A modified Mann-Kendall trend test for
+  autocorrelated data." _Journal of Hydrology_ 204(1–4):182–196.
+  <https://doi.org/10.1016/S0022-1694(97)00125-X>
+- **Newey & West 1987** — Newey, W.K. & West, K.D. "A simple, positive semi-definite,
+  heteroskedasticity and autocorrelation consistent covariance matrix." _Econometrica_
+  55(3):703–708. <https://doi.org/10.2307/1913610>
+- **Pettitt 1979** — Pettitt, A.N. "A non-parametric approach to the change-point problem."
+  _J. R. Stat. Soc. Series C (Applied Statistics)_ 28(2):126–135.
+  <https://doi.org/10.2307/2346729>
+- **White 1997** — White, K.P. "An effective truncation heuristic for bias reduction in
+  simulation output." _Simulation_ 69(6):323–334.
+  <https://doi.org/10.1177/003754979706900601>
+- **Schmeiser 1982** — Schmeiser, B. "Batch size effects in the analysis of simulation
+  output." _Operations Research_ 30(3):556–568.
+  <https://doi.org/10.1287/opre.30.3.556>
+- **Reddi et al. 2020** — Reddi, V.J. et al. "MLPerf Inference Benchmark." _ISCA 2020_.
+  <https://arxiv.org/abs/1911.02549> (min-duration floor and statistical early-stopping
+  conventions).
