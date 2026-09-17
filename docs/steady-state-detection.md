@@ -8,6 +8,13 @@ which is deflated by the ramp-up and drain transients. The step is a pure
 function over the durable event log; it also ships as an ad-hoc command-line tool
 that ingests an `events.jsonl` file.
 
+**Scope: single-turn, non-agentic only.** This step targets **single-turn**
+inference workloads; the current validation set is **DeepSeek-R1** and
+**GPT-OSS**. It is **not ready for multi-turn agentic** workloads — the agentic
+per-super-pass throughput signal (NATL) is experimental and unvalidated, and the
+tool prints a NOT-YET-SUPPORTED banner rather than a steady-state verdict for
+agentic runs. Agentic support is future work.
+
 Goals:
 
 - Emit a `steady_state` block alongside the existing whole-run (`total`) metrics
@@ -44,7 +51,8 @@ Two regions of that window are not steady state:
 Averaging over these transients understates throughput and overstates tail
 latency. The magnitude is workload-dependent and can be large for the tail: in
 experiments over recorded runs (single-turn concurrency, offline/max-throughput,
-Poisson, and multi-turn agentic), the reported p99 TTFT
+and Poisson; multi-turn agentic was examined only as exploratory background and
+is not a supported target — see the scope note in §1), the reported p99 TTFT
 was dominated by the ramp spike and fell substantially once the ramp was
 excluded, while per-token latency (TPOT) was essentially unchanged.
 
@@ -310,10 +318,10 @@ steadiness signal. A window is steady only when both TPOT percentiles plateau an
 within CoV. **TTFT is deliberately not a hard gate.** At high concurrency TTFT's tail is
 dominated by prefill time (which tracks per-request input-length / dataset skew) and
 queue wait, so its per-super-pass variance is _structural_, not decode un-steadiness:
-measured, the TTFT tail (`ttft_p90`) CoV sits at a floor of 0.3–0.9 regardless of super-pass grain while
-`tpot` CoV is ~0.01–0.03. Gating on it fragments genuinely steady runs — two ~800s
-steady-TPOT runs (c7k, c22k) were rejected purely by TTFT-tail fragmentation, and gating
-on TPOT alone recovers both. TTFT (p50/p90) is therefore carried as a **diagnostic** —
+measured across GPT-OSS and DeepSeek-R1 logs at a range of concurrencies, the TTFT tail
+(`ttft_p90`) CoV sits at a floor of 0.3–0.9 regardless of super-pass grain while
+`tpot` CoV is ~0.01–0.03. Gating on it fragments genuinely decode-steady runs purely by
+TTFT-tail movement, while gating on TPOT alone recovers them. TTFT (p50/p90) is therefore carried as a **diagnostic** —
 still reported in the headline percentiles and the whole-run trend table, and still
 raising the Drifting-Up **warning** (§5.8) when it climbs, so a genuine saturation drift
 is surfaced softly rather than hidden. The **p99** tail (TPOT and TTFT) and end-to-end

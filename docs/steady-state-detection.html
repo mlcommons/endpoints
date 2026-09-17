@@ -86,6 +86,14 @@ report throughput/latency over exactly that window with an honest confidence int
 to certify a plateau that is real but <em>too brief to trust</em>.
 </div>
 
+<div class="warn">
+<b>Scope — single-turn, non-agentic only.</b> This detector targets <b>single-turn</b> inference
+workloads; the current validation set is <b>DeepSeek-R1</b> and <b>GPT-OSS</b>. It is
+<b>not ready for multi-turn agentic</b> workloads: the agentic per-super-pass throughput signal
+(NATL) is experimental, unvalidated, and prints a NOT-YET-SUPPORTED banner. Do not use agentic
+output for submission decisions.
+</div>
+
 <h2>Contents</h2>
 <div class="toc">
 <a href="#vocab">0 · Vocabulary</a>
@@ -106,10 +114,10 @@ to certify a plateau that is real but <em>too brief to trust</em>.
 <h2 id="vocab">0 · Vocabulary</h2>
 <table>
 <tr><th>Term</th><th>Meaning</th></tr>
-<tr><td><b>super-pass</b></td><td>A contiguous block of <code>dataset_size</code> samples in <em>issue order</em>
-(one full pass over the dataset). The atomic unit of the analysis — every metric becomes a
+<tr><td><b>super-pass</b></td><td>A contiguous block of <code>dataset_size</code> samples in <em>issue order</em> —
+one analysis <b>window</b>. The atomic unit of the analysis — every metric becomes a
 per-super-pass series. Think of it as one "batch" for batch-means statistics.</td></tr>
-<tr><td><b>trajectory</b></td><td>The per-super-pass series of one metric percentile,
+<tr><td><b>metric series</b></td><td>The per-super-pass series of one metric percentile,
 e.g. <code>tpot_p50</code> = [p50 of super-pass 0, p50 of super-pass 1, …].</td></tr>
 <tr><td><b>gated metrics</b></td><td>The two that must be steady for a window to qualify:
 <code>tpot_p50</code>, <code>tpot_p90</code> (decode-rate steadiness). <b>TTFT is not gated</b> — its
@@ -121,13 +129,14 @@ every gated metric. A run can contain several (a staircase).</td></tr>
 </table>
 
 <h2 id="pipe">1 · The pipeline</h2>
-<p>One pass over <code>events.jsonl</code>, then a fixed sequence of transforms. Each stage below links
-to its section.</p>
+<p>This is a <b>post-run, offline</b> analysis — a cold-path step that runs <em>after</em> a benchmark
+finishes, reading the recorded <code>events.jsonl</code>. It never touches the hot path. One pass over
+the log, then a fixed sequence of transforms. Each stage below links to its section.</p>
 <ol class="flow">
 <li><b>Parse &amp; bucket</b> <span class="kv">Group performance-tracked samples into super-passes by issue order. → <a href="#bucket">§2</a></span></li>
 <li><b>Reconstruct metrics</b> <span class="kv">Per sample: TTFT, TPOT, e2e latency, output tokens. → <a href="#metrics">§3</a></span></li>
 <li><b>Adaptive warmup crop</b> <span class="kv">Drop leading super-passes still climbing toward the steady TPOT level. → <a href="#warmup">§4</a></span></li>
-<li><b>Build trajectories</b> <span class="kv">Per-super-pass percentile series for every tracked metric.</span></li>
+<li><b>Build metric series</b> <span class="kv">Per-super-pass percentile series for every tracked metric.</span></li>
 <li><b>Segment into plateaus</b> <span class="kv">Grow admissible windows left-to-right; each must pass the trend + CoV gate. → <a href="#gate">§5</a>, <a href="#segment">§6</a></span></li>
 <li><b>Pick the reported plateau</b> <span class="kv">The first plateau that also clears the min-duration gate (§9); flag any later level shift. → <a href="#anomaly">§7</a></span></li>
 <li><b>Summarize + CI</b> <span class="kv">TTFT/TPOT percentiles, per-user &amp; system TPS with batch-means intervals. → <a href="#tps">§8</a></span></li>
@@ -169,7 +178,7 @@ steady/drift <em>verdicts</em> are unaffected.</p>
 <p>The start of every run is a ramp: connections opening, caches filling, autoscale settling. A fixed
 crop either wastes good data or leaves ramp contamination. Instead the crop is <em>data-driven</em>:</p>
 <ol>
-<li>Take the driver trajectory (<code>tpot_p50</code> — TPOT ramps <em>up</em> to steady, monotone and clean).</li>
+<li>Take the driver series (<code>tpot_p50</code> — TPOT ramps <em>up</em> to steady, monotone and clean).</li>
 <li>Estimate the steady level as the median of the <em>back half</em> of the run.</li>
 <li>Drop leading super-passes whose driver value is more than <b>±5%</b> off that level — in either direction.</li>
 <li>Cap the crop at 50% of the run so it can never eat everything.</li>
@@ -240,17 +249,20 @@ Super-passes 0,1,2 (3.6, 4.1, 4.5 ms) are below the band; super-pass 3 (4.85) is
 <h2 id="gate">5 · The admissibility gate (trend + CoV)</h2>
 <div class="note"><b>Gate on TPOT only.</b> Admissibility uses <code>tpot_p50</code> and
 <code>tpot_p90</code> — decode-rate steadiness. <b>TTFT is not a hard gate:</b> at high concurrency its
-tail is dominated by prefill time (tracking dataset input-length skew) + queue wait, so its variance is
-<em>structural</em> (the TTFT tail <code>ttft_p90</code> CoV floors at 0.3–0.9 regardless of super-pass size) rather than
-un-steadiness. Gating on it fragmented two genuinely-steady ~800s runs (c7k, c22k); TPOT-only recovers them.
-TTFT stays a diagnostic and raises the soft drift warning (§7). The gate below therefore runs over the TPOT
-pair; the same trend + CoV logic applies.</div>
+tail is dominated by prefill time (tracking input-length skew) + queue wait, so its variance is
+<em>structural</em> (the TTFT tail <code>ttft_p90</code> CoV stays high regardless of super-pass size)
+rather than un-steadiness (the TTFT tail <code>ttft_p90</code> CoV floors at 0.3–0.9 regardless of
+super-pass size, while <code>tpot</code> CoV is ~0.01–0.03). <b>This is empirical:</b> on
+<code>events.jsonl</code> logs from GPT-OSS and
+DeepSeek-R1 across a range of concurrencies, gating on the TTFT tail fragmented runs whose decode was
+genuinely steady, while TPOT-only recovers them. TTFT stays a diagnostic and raises the soft drift
+warning (§7). The gate below therefore runs over the TPOT pair; the same trend + CoV logic applies.</div>
 <p>A window <code>[lo, hi)</code> is <b>admissible</b> iff, for <em>every</em> gated metric, its
-per-super-pass trajectory is (a) <b>trend-flat</b> and (b) within the <b>loosest CoV bound</b>. Two
+per-super-pass series is (a) <b>trend-flat</b> and (b) within the <b>loosest CoV bound</b>. Two
 independent tests, because either can miss what the other catches.</p>
 
 <h3>5a · Trend test — Mann–Kendall with Hamed–Rao correction</h3>
-<p>Mann–Kendall is a rank-based (non-parametric) monotonic-trend test. For a trajectory
+<p>Mann–Kendall is a rank-based (non-parametric) monotonic-trend test. For a metric series
 <code>x₀…xₙ₋₁</code> it computes</p>
 <pre><code>S = Σ_{i&lt;j} sign(x_j − x_i)     # +1 per rising pair, −1 per falling pair</code></pre>
 <p>then a tie-corrected variance <code>Var(S)</code>, a continuity-corrected
@@ -266,6 +278,22 @@ only when significant at α = 0.05, else <code>steady</code>.</p>
 <span class="tag" style="background:var(--bad)">up</span></span></div>
 </div>
 
+<div class="card"><b>The score, worked through (rising window).</b>
+<pre><code>x = [4.0, 4.3, 4.6, 4.9, 5.2]     n = 5,  pairs = n(n−1)/2 = 10
+
+S   = Σ_{i&lt;j} sign(x_j − x_i)
+    = +10        # all 10 pairs rising, none falling or tied
+
+Var(S) = n(n−1)(2n+5)/18          # no ties
+       = 5·4·15 / 18 = 16.67
+z   = (S − 1)/√Var(S)             # continuity correction: S→S−1 since S&gt;0
+    = 9 / 4.08 = 2.20
+p   = 2·(1 − Φ(2.20)) = 0.028     # two-sided; 0.028 &lt; α = 0.05  → up</code></pre>
+<span class="small">Flat window: rising and falling pairs cancel → <code>S ≈ 0</code> → <code>z ≈ 0</code> →
+<code>p ≈ 1</code> → <span class="tag" style="background:var(--ok)">steady</span>. Hamed–Rao then
+inflates <code>Var(S)</code> when the series is autocorrelated, shrinking <code>z</code> so serial
+correlation can't masquerade as trend.</span></div>
+
 <div class="note"><b>Why Hamed–Rao?</b> Neighboring super-passes are positively autocorrelated (a slow drift
 persists). Plain Mann–Kendall would under-count that correlation, shrink the variance, and cry "trend"
 on noise. The Hamed–Rao correction <em>inflates</em> <code>Var(S)</code> by the rank-autocorrelation, so
@@ -274,7 +302,7 @@ only drift that survives the run's own persistence is called a trend. This is th
 alongside as a corroborating panel shown in the diagnostics.</p></div>
 
 <h3>5b · Variance test — the CoV ensemble</h3>
-<p>Trend-flat is not enough: a window can be flat <em>on average</em> but jittery. So each trajectory must
+<p>Trend-flat is not enough: a window can be flat <em>on average</em> but jittery. So each metric series must
 also satisfy CoV = σ/μ ≤ bound. Rather than one bound, an <b>ensemble</b> <code>{0.03, 0.05, 0.08}</code>
 is used; admissibility only requires the <em>loosest</em> (0.08), while the diagnostics table shows which
 metrics clear the tighter ones. A window with fewer than 2 points is reported <em>inconclusive</em>, never
