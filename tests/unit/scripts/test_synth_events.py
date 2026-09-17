@@ -4,7 +4,7 @@
 """Tests for scripts/synth_events.py.
 
 The generator plants a known steady region / ramp / drift / staircase into an
-``events.jsonl`` whose wire schema matches ``scripts/steady_state_diagnostics.py``. These
+``events.jsonl`` whose wire schema matches the steady-state detector. These
 tests round-trip generated runs back through the diagnostic (with a whitespace token
 counter, so 1 chunk == 1 word == ~1 token) and assert the reconstructed TTFT/TPOT recover
 the planted base values and that a flat run is detected as steady.
@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from inference_endpoint.metrics import steady_state_diagnostics
 
 pytestmark = pytest.mark.unit
 
@@ -30,7 +31,7 @@ def _load(name, rel):
 
 
 synth = _load("synth_events", "scripts/synth_events.py")
-diag = _load("steady_state_diagnostics", "scripts/steady_state_diagnostics.py")
+diag = steady_state_diagnostics
 
 
 def _words(texts):

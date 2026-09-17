@@ -21,6 +21,7 @@ import io
 import json
 import logging
 import random
+import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -3689,3 +3690,35 @@ class TestRunBenchmarkAuditDispatch:
 
         benchmark_spy.assert_not_called()
         assert audit_calls == [tmp_path / "audit"]
+
+
+class TestSteadyStateHook:
+    """finalize_benchmark hands eligible runs to the steady-state detector."""
+
+    @pytest.mark.unit
+    def test_writes_the_detector_sidecar_for_an_allowlisted_model(self, tmp_path):
+        config = OfflineConfig(
+            **{**_OFFLINE_KWARGS, "model_params": {"name": "gpt-oss-120b"}}
+        )
+        ctx = _make_benchmark_context(
+            config=config, report_dir=tmp_path, dataloader=_make_loaded_dataset(3)
+        )
+
+        finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+        assert json.loads((tmp_path / "run_meta.json").read_text()) == {
+            "dataset_size": 3
+        }
+
+    @pytest.mark.unit
+    def test_other_models_never_spawn_the_detector(self, tmp_path, monkeypatch):
+        ctx = _make_benchmark_context(
+            config=OfflineConfig(**_OFFLINE_KWARGS), report_dir=tmp_path
+        )
+
+        def explode(cmd, **kwargs):
+            raise AssertionError("must not spawn for a non-allowlisted model")
+
+        monkeypatch.setattr(subprocess, "run", explode)
+
+        finalize_benchmark(ctx, _make_benchmark_result(tmp_path))

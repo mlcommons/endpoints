@@ -851,6 +851,11 @@ class Timeouts(WithUpdatesMixin, BaseModel):
         gt=0,
         description="Metrics drain seconds (None = unlimited).",
     )
+    steady_state_timeout_s: float | None = Field(
+        1800.0,
+        gt=0,
+        description="Post-run steady-state detection seconds (None = unlimited).",
+    )
 
 
 class ProfilerEngine(str, Enum):
@@ -943,6 +948,30 @@ class EarlyStoppingConfig(BaseModel):
     ] = Field(True, description="Early-stopping percentile estimates (default on)")
 
 
+class SteadyStateConfig(BaseModel):
+    """Post-run steady-state detection (on by default).
+
+    Once a run finishes, the detector reconstructs per-super-pass TTFT/TPOT from
+    ``events.jsonl`` and reports the steady window it finds, writing
+    ``steady_state.json`` and ``steady_state.txt`` beside the report. It runs only
+    for models whose output tokenizer it can resolve, and never for agentic load
+    patterns (the agentic profile is unsupported). The output is additive -- the
+    Report and ``result_summary.json`` are untouched -- so it is on by default;
+    ``enabled: false`` is the single opt-out, which matters because tokenizing every
+    response is not free. See ``docs/steady_state_diagnostics.md``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--steady-state",  # --no-steady-state is the meaningful opt-out
+            help="Run post-run steady-state detection for supported models",
+        ),
+    ] = Field(True, description="Post-run steady-state detection (default on)")
+
+
 @cyclopts.Parameter(name="*")
 class Settings(WithUpdatesMixin, BaseModel):
     """Test settings."""
@@ -961,6 +990,10 @@ class Settings(WithUpdatesMixin, BaseModel):
     early_stopping: EarlyStoppingConfig = Field(
         default_factory=EarlyStoppingConfig,
         description="MLPerf early-stopping percentile estimates (on by default; enabled: false opts out)",
+    )
+    steady_state: SteadyStateConfig = Field(
+        default_factory=SteadyStateConfig,
+        description="Post-run steady-state detection (on by default; enabled: false opts out)",
     )
     metrics_tokenizer_workers: Annotated[
         int,

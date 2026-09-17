@@ -9,7 +9,7 @@
 """Synthetic benchmark ``events.jsonl`` generator with PLANTED ground truth.
 
 Emits an ``events.jsonl`` whose wire schema matches what
-``scripts/steady_state_diagnostics.py`` parses (``session.start_performance_tracking`` /
+``inference_endpoint.metrics.steady_state_diagnostics`` parses (``session.start_performance_tracking`` /
 ``session.stop_performance_tracking`` / ``sample.issued`` / ``sample.recv_first`` /
 ``sample.complete``), so the diagnostic's steady-state / drift detection can be validated
 against a *known* steady region, warmup ramp, linear drift, staircase level-shift, and
@@ -54,7 +54,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-# Event-type wire constants (mirror scripts/steady_state_diagnostics.py).
+# Event-type wire constants (mirror inference_endpoint.metrics.steady_state_diagnostics).
 EV_START = "session.start_performance_tracking"
 EV_STOP = "session.stop_performance_tracking"
 EV_ISSUED = "sample.issued"

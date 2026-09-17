@@ -62,6 +62,9 @@ from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
     write_profiling_section,
 )
+from inference_endpoint.commands.benchmark.steady_state import (
+    run_for_context as run_steady_state_for_context,
+)
 from inference_endpoint.commands.benchmark.watchdog import (
     RunWatchdog,
     SigintGovernor,
@@ -1246,6 +1249,16 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Emit the accuracy results as a focused artifact under accuracy/. Written
     # after the report artifacts so a write failure here can't discard them.
     write_accuracy_results(ctx.report_dir, accuracy_scores)
+
+    # Steady-state detection over the finished run's event log. Runs last and
+    # out-of-process so a slow or failing diagnostic cannot delay or endanger the
+    # artifacts above. Skipped on abort: a truncated run has no steady window.
+    if not aborted:
+        run_steady_state_for_context(
+            ctx.report_dir,
+            ctx.config,
+            ctx.dataloader.num_samples() if ctx.dataloader is not None else None,
+        )
 
 
 def run_benchmark(

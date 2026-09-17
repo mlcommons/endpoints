@@ -40,14 +40,14 @@ sidecar `config.yaml` + `run_meta.json` (model → tokenizer, dataset size, load
 profile):
 
 ```bash
-uv run scripts/steady_state_diagnostics.py <run_dir>/
+uv run python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>/
 ```
 
 **One flag** — a bare `events.jsonl` with no sidecar; `--model` drives the built-in
 model→tokenizer registry and the workload profile:
 
 ```bash
-uv run scripts/steady_state_diagnostics.py events.jsonl --model kimi-k3
+uv run python -m inference_endpoint.metrics.steady_state_diagnostics events.jsonl --model kimi-k3
 ```
 
 Everything is auto-resolved from the run's config + a **workload profile**
