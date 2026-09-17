@@ -156,6 +156,7 @@ class TestSWEBenchScorerPreflight:
                     "swebench.run",
                     "swebench.cancel",
                     "artifacts.download",
+                    "swebench.routing_headers",
                 ],
             }
 
@@ -183,6 +184,7 @@ class TestSWEBenchScorerPreflight:
                         "swebench.run",
                         "swebench.cancel",
                         "artifacts.download",
+                        "swebench.routing_headers",
                     ],
                 }
             ),
@@ -315,6 +317,7 @@ class TestSWEBenchScorerScore:
         assert "benchmark_config" not in payloads[0]
         assert payloads[0]["endpoint_urls"] == ["http://endpoint-host:30000"]
         assert payloads[0]["endpoint_api_key"] == "secret-key"
+        assert payloads[0]["routing_headers"] == ("X-Session-ID",)
         assert payloads[0]["generation_params"] == {
             "temperature": 0.25,
             "seed": 17,
@@ -323,6 +326,33 @@ class TestSWEBenchScorerScore:
         }
         assert payloads[0]["template"] == "default"
         assert (report_dir / "swe_bench_results.json").exists()
+
+    def test_score_submits_custom_routing_headers(self, report_dir, monkeypatch):
+        payloads: list[dict] = []
+
+        def fake_http_json(url, *, method="GET", payload=None, **kwargs):
+            if method == "POST":
+                payloads.append(payload)
+                return {
+                    "run_id": "run-1",
+                    "status": "succeeded",
+                    "result": {"resolved_instances": 1, "submitted_instances": 1},
+                    "artifacts": [],
+                }
+            raise AssertionError(f"unexpected GET {url}")
+
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+        scorer = _make_scorer(
+            report_dir,
+            routing_headers=("X-Session-ID", "X-SMG-Routing-Key"),
+        )
+
+        scorer.score()
+
+        assert payloads[0]["routing_headers"] == (
+            "X-Session-ID",
+            "X-SMG-Routing-Key",
+        )
 
     def test_score_polls_until_terminal(self, report_dir, monkeypatch):
         calls: list[str] = []
