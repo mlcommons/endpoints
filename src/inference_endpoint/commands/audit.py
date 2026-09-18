@@ -37,7 +37,12 @@ from pathlib import Path
 
 from ..compliance import AuditRunArtifacts, AuditRunSpec, AuditTest, get_audit_test
 from ..compliance.result import AuditResult, write_result
-from ..config.schema import AuditConfig, BenchmarkConfig, DatasetType
+from ..config.schema import (
+    AuditConfig,
+    BenchmarkConfig,
+    DatasetType,
+    SteadyStateConfig,
+)
 from ..exceptions import CLIError, ExecutionError, SetupError
 from .benchmark.execute import (
     BenchmarkResult,
@@ -140,8 +145,17 @@ def _run_phases(
             if spec.test_mode == TestMode.PERF
             else perf_datasets + accuracy_datasets
         )
+        # Steady-state detection is meaningless per audit phase -- TEST04's audit
+        # phase issues one repeated sample -- and finalize_benchmark runs once per
+        # phase, so leaving it on would spawn a detector per phase and emit an
+        # authoritative-looking verdict for a workload it was never validated on.
         phase_config = config.with_updates(
-            report_dir=phase_dir, audit=None, datasets=phase_datasets
+            report_dir=phase_dir,
+            audit=None,
+            datasets=phase_datasets,
+            settings=config.settings.with_updates(
+                steady_state=SteadyStateConfig(enabled=False)
+            ),
         )
 
         bench: BenchmarkResult | None = None

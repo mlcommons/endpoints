@@ -708,14 +708,14 @@ precision for noisy metrics (agentic).</li>
 <tr><td><code>--trend-gate</code></td><td>mk_hamed_rao</td><td>which trend algorithm gates admissibility</td></tr>
 <tr><td><code>--superpass-size N</code></td><td>dataset_size</td><td>samples per super-pass</td></tr>
 </table>
-<p class="small">Zero-config usage: <code>uv run scripts/steady_state_diagnostics.py &lt;run_dir&gt;/</code> auto-detects
+<p class="small">Zero-config usage: <code>python -m inference_endpoint.metrics.steady_state_diagnostics &lt;run_dir&gt;/</code> auto-detects
 model → tokenizer, dataset size, and workload profile from the run's sidecar config. Full structured result
 (<code>steady_state</code>, <code>short_window</code>, <code>trajectories</code>, <code>cov</code>,
 <code>drift</code>) is written with <code>--json</code>.</p>
 
 <hr>
 <p class="small">Companion to <code>docs/steady-state-detection.md</code> (the design spec) and
-<code>scripts/steady_state_diagnostics.md</code> (the operator reference). Plots are from the synthetic
+<code>docs/steady_state_diagnostics.md</code> (the operator reference). Plots are from the synthetic
 throughput × concurrency validation sweep.</p>
 
 </div>

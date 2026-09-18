@@ -196,6 +196,7 @@ def _make_benchmark_context(
     dataloader: Dataset | None = None,
     rt_settings: RuntimeSettings | None = None,
     eval_configs: list[AccuracyConfiguration] | None = None,
+    tokenizer_name: str | None = None,
 ) -> BenchmarkContext:
     dataloader = dataloader or _make_loaded_dataset()
     rt_settings = rt_settings or RuntimeSettings(
@@ -214,7 +215,7 @@ def _make_benchmark_context(
         config=config,
         test_mode=test_mode,
         report_dir=report_dir,
-        tokenizer_name=None,
+        tokenizer_name=tokenizer_name,
         dataloader=dataloader,
         rt_settings=rt_settings,
         total_samples=dataloader.num_samples(),
@@ -3695,30 +3696,84 @@ class TestRunBenchmarkAuditDispatch:
 class TestSteadyStateHook:
     """finalize_benchmark hands eligible runs to the steady-state detector."""
 
-    @pytest.mark.unit
-    def test_writes_the_detector_sidecar_for_an_allowlisted_model(self, tmp_path):
+    @staticmethod
+    def _eligible_ctx(tmp_path, **kwargs):
         config = OfflineConfig(
             **{**_OFFLINE_KWARGS, "model_params": {"name": "gpt-oss-120b"}}
         )
-        ctx = _make_benchmark_context(
-            config=config, report_dir=tmp_path, dataloader=_make_loaded_dataset(3)
+        return _make_benchmark_context(
+            config=config,
+            report_dir=tmp_path,
+            dataloader=_make_loaded_dataset(3),
+            tokenizer_name="openai/gpt-oss-120b",
+            **kwargs,
         )
 
-        finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+    @staticmethod
+    def _forbid_spawn(monkeypatch, reason):
+        def explode(cmd, **kwargs):
+            raise AssertionError(f"detector must not be spawned for {reason}")
 
+        monkeypatch.setattr(subprocess, "run", explode)
+
+    @pytest.mark.unit
+    def test_eligible_run_reaches_the_detector(self, tmp_path, monkeypatch):
+        (tmp_path / "events.jsonl").write_text("")
+        spawned = []
+
+        def fake_run(cmd, **kwargs):
+            spawned.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        finalize_benchmark(
+            self._eligible_ctx(tmp_path), _make_benchmark_result(tmp_path)
+        )
+
+        assert spawned, "finalize_benchmark never reached the detector"
+        assert "--tokenizer" in spawned[0]
+        assert "openai/gpt-oss-120b" in spawned[0]
         assert json.loads((tmp_path / "run_meta.json").read_text()) == {
             "dataset_size": 3
         }
 
     @pytest.mark.unit
-    def test_other_models_never_spawn_the_detector(self, tmp_path, monkeypatch):
-        ctx = _make_benchmark_context(
-            config=OfflineConfig(**_OFFLINE_KWARGS), report_dir=tmp_path
+    def test_accuracy_only_runs_are_skipped(self, tmp_path, monkeypatch):
+        """An accuracy-only run has no performance phase to find a window in."""
+        (tmp_path / "events.jsonl").write_text("")
+        self._forbid_spawn(monkeypatch, "an accuracy-only run")
+
+        finalize_benchmark(
+            self._eligible_ctx(tmp_path, test_mode=TestMode.ACC),
+            _make_benchmark_result(tmp_path),
         )
 
-        def explode(cmd, **kwargs):
-            raise AssertionError("must not spawn for a non-allowlisted model")
+        assert not (tmp_path / "run_meta.json").exists()
 
-        monkeypatch.setattr(subprocess, "run", explode)
+    @pytest.mark.unit
+    def test_aborted_runs_are_skipped(self, tmp_path, monkeypatch):
+        """A truncated run has no steady window; the guard exists for this."""
+        (tmp_path / "events.jsonl").write_text("")
+        self._forbid_spawn(monkeypatch, "an aborted run")
+        bench = dataclasses.replace(
+            _make_benchmark_result(tmp_path), user_interrupted=True
+        )
+
+        finalize_benchmark(self._eligible_ctx(tmp_path), bench)
+
+        assert not (tmp_path / "run_meta.json").exists()
+
+    @pytest.mark.unit
+    def test_other_models_never_spawn_the_detector(self, tmp_path, monkeypatch):
+        (tmp_path / "events.jsonl").write_text("")
+        self._forbid_spawn(monkeypatch, "a non-allowlisted model")
+        ctx = _make_benchmark_context(
+            config=OfflineConfig(**_OFFLINE_KWARGS),
+            report_dir=tmp_path,
+            tokenizer_name="some/tokenizer",
+        )
 
         finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+        assert not (tmp_path / "run_meta.json").exists()

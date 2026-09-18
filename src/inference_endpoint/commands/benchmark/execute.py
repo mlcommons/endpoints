@@ -1252,12 +1252,16 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
 
     # Steady-state detection over the finished run's event log. Runs last and
     # out-of-process so a slow or failing diagnostic cannot delay or endanger the
-    # artifacts above. Skipped on abort: a truncated run has no steady window.
-    if not aborted:
+    # artifacts above. Skipped on abort (a truncated run has no steady window) and
+    # for accuracy-only runs (no performance phase to find one in).
+    if not aborted and not ctx.accuracy_only:
         run_steady_state_for_context(
             ctx.report_dir,
             ctx.config,
-            ctx.dataloader.num_samples() if ctx.dataloader is not None else None,
+            tokenizer_name=ctx.tokenizer_name,
+            dataset_size=(
+                ctx.dataloader.num_samples() if ctx.dataloader is not None else None
+            ),
         )
 
 
