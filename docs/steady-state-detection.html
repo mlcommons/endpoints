@@ -1,0 +1,723 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Steady-State Detection — How It Works</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --fg:#1b1f24; --mut:#5a6470; --border:#e2e6ea;
+    --grid:#e6eaee; --accent:#1f6feb; --code:#f0f2f4; --codefg:#24292f;
+    --ok:#1a7f37; --okbg:#eaf5ec; --warn:#9a6700; --warnbg:#fdf6e3; --bad:#cf222e; --badbg:#fbeced;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0d1117; --card:#161b22; --fg:#e6edf3; --mut:#9aa5b1; --border:#2b333d;
+      --grid:#242c35; --accent:#589bff; --code:#1c2128; --codefg:#d1d9e0;
+      --ok:#3fb950; --okbg:#132b19; --warn:#d29922; --warnbg:#2a2313; --bad:#f85149; --badbg:#2a1517;
+    }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:940px;margin:0 auto;padding:40px 22px 100px}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .1em}
+  h2{font-size:22px;margin:2.4em 0 .5em;padding-top:.4em;border-top:1px solid var(--border)}
+  h3{font-size:17px;margin:1.6em 0 .3em}
+  p,li{color:var(--fg)}
+  .sub{color:var(--mut);font-size:16px;margin-top:0}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  code{background:var(--code);color:var(--codefg);padding:.1em .35em;border-radius:4px;
+    font:13.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre{background:var(--code);color:var(--codefg);padding:14px 16px;border-radius:8px;overflow:auto;
+    border:1px solid var(--border);font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre code{background:none;padding:0}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin:18px 0}
+  figure{margin:20px 0;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 12px 6px}
+  figure svg{width:100%;height:auto;display:block}
+  figcaption{color:var(--mut);font-size:13.5px;margin:6px 4px 4px;padding-top:6px;border-top:1px dashed var(--border)}
+  .chart text{fill:var(--fg)}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14.5px}
+  th,td{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--code);font-weight:600}
+  .note,.warn,.ok,.bad{border-radius:10px;padding:12px 16px;margin:16px 0;border:1px solid}
+  .note{background:var(--card);border-color:var(--accent)}
+  .ok{background:var(--okbg);border-color:var(--ok)}
+  .warn{background:var(--warnbg);border-color:var(--warn)}
+  .bad{background:var(--badbg);border-color:var(--bad)}
+  .tag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.03em;padding:2px 8px;border-radius:20px;
+    background:var(--accent);color:#fff;vertical-align:middle}
+  .kv{color:var(--mut);font-size:13.5px}
+  .flow{list-style:none;margin:20px 0;padding:0;counter-reset:st}
+  .flow li{position:relative;background:var(--card);border:1px solid var(--border);border-radius:10px;
+    padding:12px 16px 12px 54px;margin:0 0 30px;counter-increment:st}
+  .flow li::before{content:counter(st);position:absolute;left:14px;top:50%;transform:translateY(-50%);
+    width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;font-size:13px;
+    display:flex;align-items:center;justify-content:center}
+  .flow li:not(:last-child)::after{content:"";position:absolute;left:27px;bottom:-24px;width:2px;height:24px;background:var(--border)}
+  .flow b{font-size:15px}
+  .flow .kv{display:block}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:8px 0}
+  .grp{display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 10px 6px;border:1px dashed var(--border);border-radius:8px}
+  .grp .row{display:flex;gap:5px}
+  .chip{width:30px;height:26px;border-radius:5px;background:var(--code);border:1px solid var(--border);
+    display:flex;align-items:center;justify-content:center;font-size:11px;font-family:ui-monospace,monospace;color:var(--mut)}
+  .grp small{color:var(--mut);font-size:11px}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:680px){.two{grid-template-columns:1fr}}
+  .toc{columns:2;font-size:14px;color:var(--mut)} .toc a{display:block;margin:2px 0}
+  @media(max-width:680px){.toc{columns:1}}
+  hr{border:0;border-top:1px solid var(--border);margin:2em 0}
+  .small{font-size:13.5px;color:var(--mut)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Steady-State Detection</h1>
+<p class="sub">How <code>steady_state_diagnostics.py</code> decides whether a benchmark run
+reached a stable operating point — end to end, with worked examples and the math for each gate.</p>
+
+<div class="note">
+<b>The problem in one sentence.</b> A load-generator run ramps up, (hopefully) settles into a
+flat operating point, and may later degrade. We want to find the <em>first stable plateau</em>,
+report throughput/latency over exactly that window with an honest confidence interval, and refuse
+to certify a plateau that is real but <em>too brief to trust</em>.
+</div>
+
+<div class="warn">
+<b>Scope — single-turn, non-agentic only.</b> This detector targets <b>single-turn</b> inference
+workloads; the current validation set is <b>DeepSeek-R1</b> and <b>GPT-OSS</b>. It is
+<b>not ready for multi-turn agentic</b> workloads: the agentic per-super-pass throughput signal
+(NATL) is experimental, unvalidated, and prints a NOT-YET-SUPPORTED banner. Do not use agentic
+output for submission decisions.
+</div>
+
+<h2>Contents</h2>
+<div class="toc">
+<a href="#vocab">0 · Vocabulary</a>
+<a href="#pipe">1 · The pipeline</a>
+<a href="#bucket">2 · Bucketing into super-passes</a>
+<a href="#metrics">3 · Reconstructing TTFT / TPOT / latency</a>
+<a href="#warmup">4 · Adaptive warmup crop</a>
+<a href="#gate">5 · The admissibility gate (trend + CoV)</a>
+<a href="#segment">6 · Plateau segmentation &amp; first-plateau rule</a>
+<a href="#anomaly">7 · Level-shift (staircase) detection</a>
+<a href="#tps">8 · Throughput &amp; batch-means CI</a>
+<a href="#minduration">9 · Minimum-duration gate</a>
+<a href="#e2e">10 · End-to-end worked example</a>
+<a href="#validation">11 · Validation sweep</a>
+<a href="#output">12 · Output &amp; flags reference</a>
+</div>
+
+<h2 id="vocab">0 · Vocabulary</h2>
+<table>
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td><b>super-pass</b></td><td>A contiguous block of <code>dataset_size</code> samples in <em>issue order</em> —
+one analysis <b>window</b>. The atomic unit of the analysis — every metric becomes a
+per-super-pass series. Think of it as one "batch" for batch-means statistics.</td></tr>
+<tr><td><b>metric series</b></td><td>The per-super-pass series of one metric percentile,
+e.g. <code>tpot_p50</code> = [p50 of super-pass 0, p50 of super-pass 1, …].</td></tr>
+<tr><td><b>gated metrics</b></td><td>The two that must be steady for a window to qualify:
+<code>tpot_p50</code>, <code>tpot_p90</code> (decode-rate steadiness). <b>TTFT is not gated</b> — its
+high-concurrency tail variance is structural (prefill/ISL skew + queue), so it's tracked as a diagnostic
+and raises a soft drift warning, but never hard-fails a window. <code>p99</code>, sample latency, warm-turn
+TTFT are diagnostic too.</td></tr>
+<tr><td><b>plateau</b></td><td>A maximal run of super-passes that is trend-flat and low-variance for
+every gated metric. A run can contain several (a staircase).</td></tr>
+</table>
+
+<h2 id="pipe">1 · The pipeline</h2>
+<p>This is a <b>post-run, offline</b> analysis — a cold-path step that runs <em>after</em> a benchmark
+finishes, reading the recorded <code>events.jsonl</code>. It never touches the hot path. One pass over
+the log, then a fixed sequence of transforms. Each stage below links to its section.</p>
+<ol class="flow">
+<li><b>Parse &amp; bucket</b> <span class="kv">Group performance-tracked samples into super-passes by issue order. → <a href="#bucket">§2</a></span></li>
+<li><b>Reconstruct metrics</b> <span class="kv">Per sample: TTFT, TPOT, e2e latency, output tokens. → <a href="#metrics">§3</a></span></li>
+<li><b>Adaptive warmup crop</b> <span class="kv">Drop leading super-passes still climbing toward the steady TPOT level. → <a href="#warmup">§4</a></span></li>
+<li><b>Build metric series</b> <span class="kv">Per-super-pass percentile series for every tracked metric.</span></li>
+<li><b>Segment into plateaus</b> <span class="kv">Grow admissible windows left-to-right; each must pass the trend + CoV gate. → <a href="#gate">§5</a>, <a href="#segment">§6</a></span></li>
+<li><b>Pick the reported plateau</b> <span class="kv">The first plateau that also clears the min-duration gate (§9); flag any later level shift. → <a href="#anomaly">§7</a></span></li>
+<li><b>Summarize + CI</b> <span class="kv">TTFT/TPOT percentiles, per-user &amp; system TPS with batch-means intervals. → <a href="#tps">§8</a></span></li>
+<li><b>Minimum-duration gate</b> <span class="kv">Reject (or warn) if the window is too brief in wall-time to certify. → <a href="#minduration">§9</a></span></li>
+</ol>
+
+<h2 id="bucket">2 · Bucketing into super-passes</h2>
+<p>The parser tracks only events between <code>start_performance_tracking</code> and
+<code>stop_performance_tracking</code>. Each <code>sample.issued</code> is assigned to super-pass
+<code>issue_counter // dataset_size</code> — so super-passes are <em>issue-order</em> blocks, not
+wall-clock windows. Retries refresh a sample's issue time but never re-bucket it or double-count TTFT.</p>
+
+<div class="card">
+<div class="small">Example: <code>dataset_size = 4</code>. Samples issued in order A,B,C,D,E,F,G,H,I →</div>
+<div class="chips">
+  <div class="grp"><div class="row"><span class="chip">A</span><span class="chip">B</span><span class="chip">C</span><span class="chip">D</span></div><small>super-pass 0</small></div>
+  <div class="grp"><div class="row"><span class="chip">E</span><span class="chip">F</span><span class="chip">G</span><span class="chip">H</span></div><small>super-pass 1</small></div>
+  <div class="grp"><div class="row"><span class="chip">I</span><span class="chip" style="opacity:.35">·</span><span class="chip" style="opacity:.35">·</span><span class="chip" style="opacity:.35">·</span></div><small>super-pass 2 (partial)</small></div>
+</div>
+</div>
+<p class="small">Each super-pass keeps: first/last issue timestamp (its <em>offered-load span</em>), last event
+timestamp (drain-inclusive), and the raw per-sample TTFT / TPOT / latency / token-count arrays.</p>
+
+<h2 id="metrics">3 · Reconstructing TTFT / TPOT / latency</h2>
+<p>From the three timestamps each sample emits (<code>issued</code>, <code>recv_first</code>,
+<code>complete</code>) plus its output text:</p>
+<table>
+<tr><th>Metric</th><th>Definition</th><th>Captures</th></tr>
+<tr><td><b>TTFT</b></td><td><code>recv_first − issued</code></td><td>prefill + queue wait (interactivity)</td></tr>
+<tr><td><b>TPOT</b></td><td><code>(complete − recv_first) / tokens(output after the first chunk)</code></td><td>steady decode rate</td></tr>
+<tr><td><b>e2e latency</b></td><td><code>complete − issued</code></td><td>whole-request time (drives the relaxation term, §9)</td></tr>
+</table>
+<p class="small">TPOT needs a tokenizer to count output tokens, so <code>--model</code> (or <code>--tokenizer</code>)
+is required. Token counts use plain tokenization; the live aggregator uses the chat-template path, so
+absolute TPOT ms can differ for reasoning models — but CoV and trend tests are scale-invariant, so the
+steady/drift <em>verdicts</em> are unaffected.</p>
+
+<h2 id="warmup">4 · Adaptive warmup crop</h2>
+<p>The start of every run is a ramp: connections opening, caches filling, autoscale settling. A fixed
+crop either wastes good data or leaves ramp contamination. Instead the crop is <em>data-driven</em>:</p>
+<ol>
+<li>Take the driver series (<code>tpot_p50</code> — TPOT ramps <em>up</em> to steady, monotone and clean).</li>
+<li>Estimate the steady level as the median of the <em>back half</em> of the run.</li>
+<li>Drop leading super-passes whose driver value is more than <b>±5%</b> off that level — in either direction.</li>
+<li>Cap the crop at 50% of the run so it can never eat everything.</li>
+</ol>
+
+<figure><svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" class="chart">
+<text x="52" y="16" font-size="13" font-weight="600" fill="var(--fg)">Adaptive warmup: crop the ramp, keep the plateau</text>
+<rect x="181.6" y="30" width="518.4" height="230" fill="#2ea043" opacity="0.12"/>
+<text x="440.8" y="44" font-size="10" text-anchor="middle" fill="#2ea043">steady plateau (reported)</text>
+<rect x="52" y="58.8" width="648" height="19.2" fill="#2ea043" opacity="0.10"/>
+<line x1="52" y1="68.3" x2="700" y2="68.3" stroke="#2ea043" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="698" y="55.8" font-size="9" text-anchor="end" fill="#2ea043">steady ±5% band</text>
+<line x1="52" y1="260.0" x2="700" y2="260.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="263.0" font-size="9" text-anchor="end" fill="var(--mut)">0</text>
+<line x1="52" y1="221.7" x2="700" y2="221.7" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="224.7" font-size="9" text-anchor="end" fill="var(--mut)">1</text>
+<line x1="52" y1="183.3" x2="700" y2="183.3" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="186.3" font-size="9" text-anchor="end" fill="var(--mut)">2</text>
+<line x1="52" y1="145.0" x2="700" y2="145.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="148.0" font-size="9" text-anchor="end" fill="var(--mut)">3</text>
+<line x1="52" y1="106.7" x2="700" y2="106.7" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="109.7" font-size="9" text-anchor="end" fill="var(--mut)">4</text>
+<line x1="52" y1="68.3" x2="700" y2="68.3" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="71.3" font-size="9" text-anchor="end" fill="var(--mut)">5</text>
+<line x1="52" y1="30.0" x2="700" y2="30.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="33.0" font-size="9" text-anchor="end" fill="var(--mut)">6</text>
+<text x="52.0" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">0</text>
+<text x="95.2" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">1</text>
+<text x="138.4" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">2</text>
+<text x="181.6" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">3</text>
+<text x="224.8" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">4</text>
+<text x="268.0" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">5</text>
+<text x="311.2" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">6</text>
+<text x="354.4" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">7</text>
+<text x="397.6" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">8</text>
+<text x="440.8" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">9</text>
+<text x="484.0" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">10</text>
+<text x="527.2" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">11</text>
+<text x="570.4" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">12</text>
+<text x="613.6" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">13</text>
+<text x="656.8" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">14</text>
+<text x="700.0" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">15</text>
+<text x="376.0" y="296" font-size="10" text-anchor="middle" fill="var(--mut)">super-pass index (issue order)</text>
+<text transform="translate(13,145.0) rotate(-90)" font-size="10" text-anchor="middle" fill="var(--mut)">TPOT p50 (ms)</text>
+<line x1="181.6" y1="30" x2="181.6" y2="260" stroke="#cf222e" stroke-width="1.6" stroke-dasharray="5 4"/>
+<text x="185.6" y="254.0" font-size="10" fill="#cf222e">warmup crop (drop 0..2)</text>
+<polyline points="52.0,122.0 95.2,102.8 138.4,87.5 181.6,74.1 224.8,67.6 268.0,69.5 311.2,68.3 354.4,67.2 397.6,69.1 440.8,68.0 484.0,68.7 527.2,68.3 570.4,67.6 613.6,69.1 656.8,68.3 700.0,68.0" fill="none" stroke="#1f6feb" stroke-width="2.2"/>
+<circle cx="52.0" cy="122.0" r="3.2" fill="#1f6feb"/>
+<circle cx="95.2" cy="102.8" r="3.2" fill="#1f6feb"/>
+<circle cx="138.4" cy="87.5" r="3.2" fill="#1f6feb"/>
+<circle cx="181.6" cy="74.1" r="3.2" fill="#1f6feb"/>
+<circle cx="224.8" cy="67.6" r="3.2" fill="#1f6feb"/>
+<circle cx="268.0" cy="69.5" r="3.2" fill="#1f6feb"/>
+<circle cx="311.2" cy="68.3" r="3.2" fill="#1f6feb"/>
+<circle cx="354.4" cy="67.2" r="3.2" fill="#1f6feb"/>
+<circle cx="397.6" cy="69.1" r="3.2" fill="#1f6feb"/>
+<circle cx="440.8" cy="68.0" r="3.2" fill="#1f6feb"/>
+<circle cx="484.0" cy="68.7" r="3.2" fill="#1f6feb"/>
+<circle cx="527.2" cy="68.3" r="3.2" fill="#1f6feb"/>
+<circle cx="570.4" cy="67.6" r="3.2" fill="#1f6feb"/>
+<circle cx="613.6" cy="69.1" r="3.2" fill="#1f6feb"/>
+<circle cx="656.8" cy="68.3" r="3.2" fill="#1f6feb"/>
+<circle cx="700.0" cy="68.0" r="3.2" fill="#1f6feb"/>
+</svg><figcaption><b>Worked example.</b> Back-half median ≈ 5.0 ms → band [4.75, 5.25].
+Super-passes 0,1,2 (3.6, 4.1, 4.5 ms) are below the band; super-pass 3 (4.85) is the first inside it, so
+<b>warmup = 3</b> and the reported window starts at index 3. All later indices are <em>post-warmup relative</em>.</figcaption></figure>
+
+<h2 id="gate">5 · The admissibility gate (trend + CoV)</h2>
+<div class="note"><b>Gate on TPOT only.</b> Admissibility uses <code>tpot_p50</code> and
+<code>tpot_p90</code> — decode-rate steadiness. <b>TTFT is not a hard gate:</b> at high concurrency its
+tail is dominated by prefill time (tracking input-length skew) + queue wait, so its variance is
+<em>structural</em> (the TTFT tail <code>ttft_p90</code> CoV stays high regardless of super-pass size)
+rather than un-steadiness (the TTFT tail <code>ttft_p90</code> CoV floors at 0.3–0.9 regardless of
+super-pass size, while <code>tpot</code> CoV is ~0.01–0.03). <b>This is empirical:</b> on
+<code>events.jsonl</code> logs from GPT-OSS and
+DeepSeek-R1 across a range of concurrencies, gating on the TTFT tail fragmented runs whose decode was
+genuinely steady, while TPOT-only recovers them. TTFT stays a diagnostic and raises the soft drift
+warning (§7). The gate below therefore runs over the TPOT pair; the same trend + CoV logic applies.</div>
+<p>A window <code>[lo, hi)</code> is <b>admissible</b> iff, for <em>every</em> gated metric, its
+per-super-pass series is (a) <b>trend-flat</b> and (b) within the <b>loosest CoV bound</b>. Two
+independent tests, because either can miss what the other catches.</p>
+
+<h3>5a · Trend test — Mann–Kendall with Hamed–Rao correction</h3>
+<p>Mann–Kendall is a rank-based (non-parametric) monotonic-trend test. For a metric series
+<code>x₀…xₙ₋₁</code> it computes</p>
+<pre><code>S = Σ_{i&lt;j} sign(x_j − x_i)     # +1 per rising pair, −1 per falling pair</code></pre>
+<p>then a tie-corrected variance <code>Var(S)</code>, a continuity-corrected
+<code>z = (S∓1)/√Var(S)</code>, and a two-sided p-value. Verdict is <code>up</code>/<code>down</code>
+only when significant at α = 0.05, else <code>steady</code>.</p>
+
+<div class="two">
+<div class="card"><b>Flat window</b> — <code>[5.0, 5.02, 4.98, 5.01, 4.99, 5.0]</code><br>
+<span class="small">Rising and falling pairs roughly cancel → <code>S ≈ 0</code> → <code>z ≈ 0</code> →
+<span class="tag" style="background:var(--ok)">steady</span></span></div>
+<div class="card"><b>Rising window</b> — <code>[4.0, 4.3, 4.6, 4.9, 5.2]</code><br>
+<span class="small">Every one of the 10 pairs is positive → <code>S = 10</code> (max) → large <code>z</code> →
+<span class="tag" style="background:var(--bad)">up</span></span></div>
+</div>
+
+<div class="card"><b>The score, worked through (rising window).</b>
+<pre><code>x = [4.0, 4.3, 4.6, 4.9, 5.2]     n = 5,  pairs = n(n−1)/2 = 10
+
+S   = Σ_{i&lt;j} sign(x_j − x_i)
+    = +10        # all 10 pairs rising, none falling or tied
+
+Var(S) = n(n−1)(2n+5)/18          # no ties
+       = 5·4·15 / 18 = 16.67
+z   = (S − 1)/√Var(S)             # continuity correction: S→S−1 since S&gt;0
+    = 9 / 4.08 = 2.20
+p   = 2·(1 − Φ(2.20)) = 0.028     # two-sided; 0.028 &lt; α = 0.05  → up</code></pre>
+<span class="small">Flat window: rising and falling pairs cancel → <code>S ≈ 0</code> → <code>z ≈ 0</code> →
+<code>p ≈ 1</code> → <span class="tag" style="background:var(--ok)">steady</span>. Hamed–Rao then
+inflates <code>Var(S)</code> when the series is autocorrelated, shrinking <code>z</code> so serial
+correlation can't masquerade as trend.</span></div>
+
+<div class="note"><b>Why Hamed–Rao?</b> Neighboring super-passes are positively autocorrelated (a slow drift
+persists). Plain Mann–Kendall would under-count that correlation, shrink the variance, and cry "trend"
+on noise. The Hamed–Rao correction <em>inflates</em> <code>Var(S)</code> by the rank-autocorrelation, so
+only drift that survives the run's own persistence is called a trend. This is the default gate
+(<code>mk_hamed_rao</code>); four other algorithms (plain MK, Newey–West, Theil–Sen, slope-vs-scatter) run
+alongside as a corroborating panel shown in the diagnostics.</p></div>
+
+<h3>5b · Variance test — the CoV ensemble</h3>
+<p>Trend-flat is not enough: a window can be flat <em>on average</em> but jittery. So each metric series must
+also satisfy CoV = σ/μ ≤ bound. Rather than one bound, an <b>ensemble</b> <code>{0.03, 0.05, 0.08}</code>
+is used; admissibility only requires the <em>loosest</em> (0.08), while the diagnostics table shows which
+metrics clear the tighter ones. A window with fewer than 2 points is reported <em>inconclusive</em>, never
+PASS — so a micro-window can't masquerade as steady.</p>
+<div class="card small">
+Flat window <code>[5.02, 4.98, 5.01, 4.99, 5.00]</code>: μ = 5.0, σ ≈ 0.0158 → <b>CoV ≈ 0.0032</b> → clears all three bounds. ✔<br>
+Jittery window <code>[4.8, 4.9, 5.0, 5.1, 5.2]</code>: μ = 5.0, σ ≈ 0.158 → <b>CoV ≈ 0.032</b> → clears 0.05/0.08, fails 0.03 — and its Mann–Kendall verdict is <code>up</code>, so it's inadmissible regardless. ✗
+</div>
+
+<h3>5c · Effect-size floor on trend breaks</h3>
+<p>The rank trend test is <em>significance</em>-only, and with enough super-passes it flags a
+practically negligible drift — a couple percent end-to-end — as a "trend." Left unchecked that
+<b>over-fragments</b> a genuinely steady run into many sub-window plateaus, none long enough to clear the
+duration floor (§9). So during segmentation a window breaks on trend only when the drift is <b>both
+significant and practically large</b>: <code>|rel_drift| ≥ 0.05</code> end-to-end (OLS total change over the
+window median). Below that it's within noise and the window holds — <b>CoV still guards genuine variance</b>,
+so a truly choppy run still fragments; only over-sensitive trend breaks are relaxed.</p>
+<div class="note"><b>Measured on the corpus.</b> Fragmenting breaks had <code>|rel_drift| ≤ 0.03</code>; real
+drifts and level shifts ran <b>0.10–0.26</b> — a clean gap, so 0.05 separates them. With this floor a
+falsely-fragmented 15-min run collapses from 6 plateaus back to one 871s plateau and is reported, while a
+genuinely drifting run keeps its CoV/large-drift breaks and stays rejected.</div>
+
+<h2 id="segment">6 · Plateau segmentation &amp; the first-plateau rule</h2>
+<p>The gate <em>implicitly segments</em> the run. Segmentation grows a window from the left: from each
+start index, extend <code>hi</code> as far as the window stays admissible; the maximal admissible span is
+one plateau; then resume past it. A window straddling a staircase jump has high CoV and reads as a trend,
+so it breaks there — exactly the boundary we want.</p>
+<div class="note"><b>The first plateau is the reported steady state</b> — deliberately, even though a longest-
+or lowest-variance rule might pick a later one. Empirically the later steps of a staircase are
+<em>degradation</em> (a skewed long-output workload piling up, a worker going unhealthy), so the first
+healthy plateau is the representative number and the later steps are anomalies to flag, not to report.
+<br><br><em>One exception:</em> the min-duration gate (§9) can skip a first plateau that is too brief to
+certify and report the next admissible one instead.</p>
+
+<h2 id="anomaly">7 · Level-shift (staircase) detection</h2>
+<p>Reporting the first plateau must not silently hide that the run got worse. Alongside segmentation, a
+level-shift detector fires when two or more plateaus differ in pooled TPOT by more than the CoV band
+<em>and</em> a <b>Pettitt</b> change-point test (rank-based, pairs naturally with Mann–Kendall) confirms a
+single significant break in the per-super-pass TPOT means.</p>
+
+<figure><svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" class="chart">
+<text x="52" y="16" font-size="13" font-weight="600" fill="var(--fg)">Level shift (staircase): first plateau reported, later step flagged</text>
+<rect x="52.0" y="30" width="299.1" height="230" fill="#2ea043" opacity="0.12"/>
+<text x="201.5" y="44" font-size="10" text-anchor="middle" fill="#2ea043">1st plateau = steady state</text>
+<rect x="351.1" y="30" width="348.9" height="230" fill="#d29922" opacity="0.12"/>
+<text x="525.5" y="44" font-size="10" text-anchor="middle" fill="#d29922">2nd plateau = anomaly (+20%)</text>
+<line x1="52" y1="260.0" x2="700" y2="260.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="263.0" font-size="9" text-anchor="end" fill="var(--mut)">0</text>
+<line x1="52" y1="227.1" x2="700" y2="227.1" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="230.1" font-size="9" text-anchor="end" fill="var(--mut)">1</text>
+<line x1="52" y1="194.3" x2="700" y2="194.3" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="197.3" font-size="9" text-anchor="end" fill="var(--mut)">2</text>
+<line x1="52" y1="161.4" x2="700" y2="161.4" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="164.4" font-size="9" text-anchor="end" fill="var(--mut)">3</text>
+<line x1="52" y1="128.6" x2="700" y2="128.6" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="131.6" font-size="9" text-anchor="end" fill="var(--mut)">4</text>
+<line x1="52" y1="95.7" x2="700" y2="95.7" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="98.7" font-size="9" text-anchor="end" fill="var(--mut)">5</text>
+<line x1="52" y1="62.9" x2="700" y2="62.9" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="65.9" font-size="9" text-anchor="end" fill="var(--mut)">6</text>
+<line x1="52" y1="30.0" x2="700" y2="30.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="46" y="33.0" font-size="9" text-anchor="end" fill="var(--mut)">7</text>
+<text x="52.0" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">0</text>
+<text x="101.8" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">1</text>
+<text x="151.7" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">2</text>
+<text x="201.5" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">3</text>
+<text x="251.4" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">4</text>
+<text x="301.2" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">5</text>
+<text x="351.1" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">6</text>
+<text x="400.9" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">7</text>
+<text x="450.8" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">8</text>
+<text x="500.6" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">9</text>
+<text x="550.5" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">10</text>
+<text x="600.3" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">11</text>
+<text x="650.2" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">12</text>
+<text x="700.0" y="275" font-size="9" text-anchor="middle" fill="var(--mut)">13</text>
+<text x="376.0" y="296" font-size="10" text-anchor="middle" fill="var(--mut)">super-pass index (issue order)</text>
+<text transform="translate(13,145.0) rotate(-90)" font-size="10" text-anchor="middle" fill="var(--mut)">TPOT p50 (ms)</text>
+<line x1="351.1" y1="30" x2="351.1" y2="260" stroke="#8250df" stroke-width="1.6" stroke-dasharray="5 4"/>
+<text x="355.1" y="42.0" font-size="10" fill="#8250df">Pettitt change-point</text>
+<polyline points="52.0,95.7 101.8,95.1 151.7,96.4 201.5,95.4 251.4,96.0 301.2,95.7 351.1,62.9 400.9,61.9 450.8,63.5 500.6,62.5 550.5,63.2 600.3,62.9 650.2,62.2 700.0,63.5" fill="none" stroke="#1f6feb" stroke-width="2.2"/>
+<circle cx="52.0" cy="95.7" r="3.2" fill="#1f6feb"/>
+<circle cx="101.8" cy="95.1" r="3.2" fill="#1f6feb"/>
+<circle cx="151.7" cy="96.4" r="3.2" fill="#1f6feb"/>
+<circle cx="201.5" cy="95.4" r="3.2" fill="#1f6feb"/>
+<circle cx="251.4" cy="96.0" r="3.2" fill="#1f6feb"/>
+<circle cx="301.2" cy="95.7" r="3.2" fill="#1f6feb"/>
+<circle cx="351.1" cy="62.9" r="3.2" fill="#1f6feb"/>
+<circle cx="400.9" cy="61.9" r="3.2" fill="#1f6feb"/>
+<circle cx="450.8" cy="63.5" r="3.2" fill="#1f6feb"/>
+<circle cx="500.6" cy="62.5" r="3.2" fill="#1f6feb"/>
+<circle cx="550.5" cy="63.2" r="3.2" fill="#1f6feb"/>
+<circle cx="600.3" cy="62.9" r="3.2" fill="#1f6feb"/>
+<circle cx="650.2" cy="62.2" r="3.2" fill="#1f6feb"/>
+<circle cx="700.0" cy="63.5" r="3.2" fill="#1f6feb"/>
+</svg><figcaption>First plateau (super-passes 0–5, ≈5.0 ms) is reported as the steady state.
+The +20% step at index 6 is confirmed by the Pettitt change-point and surfaced as
+<code>ANOMALY: level shift at super-pass 6, TPOT +20.0% toward end of run</code> — the headline number is
+unchanged, but the run is honestly labeled as having degraded.</figcaption></figure>
+
+<h2 id="tps">8 · Throughput &amp; batch-means confidence intervals</h2>
+<p>Over the reported window:</p>
+<pre><code>TPS per-user = 1e9 / mean(TPOT_ns)                       # single-stream decode rate
+TPS system   = Σ output_tokens / window offered-load span  # aggregate; issue-span denominator, NOT drain</code></pre>
+<p>The system-TPS denominator is the <em>offered-load span</em> (first issue → last issue), not the
+completion span — the drain after the last issue would inflate the denominator and deflate TPS on
+long-tail workloads.</p>
+<div class="note"><b>Batch-means CI.</b> Raw samples within a super-pass are autocorrelated, so a naïve
+iid interval is far too narrow. Instead each super-pass is one <em>batch</em>: take the per-super-pass
+means <code>m₁…m_k</code>, and
+<code>SE = stdev(mᵢ)/√k</code>, <code>CI = grand_mean ± t₀.₉₅,k₋₁ · SE</code> (Student-t, small-sample
+correct). The interval then reflects super-pass-to-super-pass variability — the thing that actually
+matters — instead of pretending every token is independent.</p>
+
+<h2 id="minduration">9 · Minimum-duration gate</h2>
+<p>Everything so far guarantees a window is <em>statistically</em> flat over ≥ <code>MIN_TREND_N = 4</code>
+super-passes. But 4 super-passes is a <b>count</b> floor, and it is throughput-blind. When concurrency
+approaches the super-pass size (a <code>c16k</code>-scale submission), 4 super-passes drain in
+<em>seconds</em> — and no minutes-scale hiccup (KV-cache eviction, a slow autoscale, a sick worker) can
+possibly be observed in that time. A steady <em>number</em> measured over 2 seconds of a 2-hour run is not
+a steady <em>state</em>.</p>
+
+<figure><svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" class="chart">
+<text x="64" y="16" font-size="13" font-weight="600" fill="var(--fg)">A 4-super-pass window's wall-time vs offered throughput</text>
+<line x1="64.0" y1="26" x2="64.0" y2="354" stroke="var(--grid)" stroke-width="1"/>
+<text x="64.0" y="370" font-size="10" text-anchor="middle" fill="var(--mut)">10^3</text>
+<line x1="215.7" y1="26" x2="215.7" y2="354" stroke="var(--grid)" stroke-width="1"/>
+<text x="215.7" y="370" font-size="10" text-anchor="middle" fill="var(--mut)">10^4</text>
+<line x1="367.3" y1="26" x2="367.3" y2="354" stroke="var(--grid)" stroke-width="1"/>
+<text x="367.3" y="370" font-size="10" text-anchor="middle" fill="var(--mut)">10^5</text>
+<line x1="519.0" y1="26" x2="519.0" y2="354" stroke="var(--grid)" stroke-width="1"/>
+<text x="519.0" y="370" font-size="10" text-anchor="middle" fill="var(--mut)">10^6</text>
+<line x1="64" y1="289.3" x2="610" y2="289.3" stroke="var(--grid)" stroke-width="1"/>
+<text x="56" y="292.3" font-size="10" text-anchor="end" fill="var(--mut)">10^0</text>
+<line x1="64" y1="196.9" x2="610" y2="196.9" stroke="var(--grid)" stroke-width="1"/>
+<text x="56" y="199.9" font-size="10" text-anchor="end" fill="var(--mut)">10^1</text>
+<line x1="64" y1="104.5" x2="610" y2="104.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="56" y="107.5" font-size="10" text-anchor="end" fill="var(--mut)">10^2</text>
+<text x="337.0" y="394" font-size="11" text-anchor="middle" fill="var(--mut)">system TPS (output tok/s)</text>
+<text transform="translate(16,190.0) rotate(-90)" font-size="11" text-anchor="middle" fill="var(--mut)">4-super-pass window (s)</text>
+<line x1="64" y1="32.6" x2="610" y2="32.6" stroke="#cf222e" stroke-width="1.4" stroke-dasharray="5 4"/>
+<text x="68" y="28.6" font-size="10" fill="#cf222e">600 s floor</text>
+<polyline points="80.3,83.3 125.9,110.8 186.3,146.4 231.9,172.5" fill="none" stroke="#0b3d91" stroke-width="2"/>
+<circle cx="80.3" cy="83.3" r="3" fill="#0b3d91"/>
+<circle cx="125.9" cy="110.8" r="3" fill="#0b3d91"/>
+<circle cx="186.3" cy="146.4" r="3" fill="#0b3d91"/>
+<circle cx="231.9" cy="172.5" r="3" fill="#0b3d91"/>
+<polyline points="171.6,138.9 217.2,166.3 277.6,202.1 323.2,228.1" fill="none" stroke="#1f6feb" stroke-width="2"/>
+<circle cx="171.6" cy="138.9" r="3" fill="#1f6feb"/>
+<circle cx="217.2" cy="166.3" r="3" fill="#1f6feb"/>
+<circle cx="277.6" cy="202.1" r="3" fill="#1f6feb"/>
+<circle cx="323.2" cy="228.1" r="3" fill="#1f6feb"/>
+<polyline points="262.9,194.1 308.5,221.6 368.9,257.5 414.6,283.7" fill="none" stroke="#2ea043" stroke-width="2"/>
+<circle cx="262.9" cy="194.1" r="3" fill="#2ea043"/>
+<circle cx="308.5" cy="221.6" r="3" fill="#2ea043"/>
+<circle cx="368.9" cy="257.5" r="3" fill="#2ea043"/>
+<circle cx="414.6" cy="283.7" r="3" fill="#2ea043"/>
+<polyline points="354.2,244.2 399.9,271.7 460.2,307.2 505.9,333.8" fill="none" stroke="#d29922" stroke-width="2"/>
+<circle cx="354.2" cy="244.2" r="3" fill="#d29922"/>
+<circle cx="399.9" cy="271.7" r="3" fill="#d29922"/>
+<circle cx="460.2" cy="307.2" r="3" fill="#d29922"/>
+<circle cx="505.9" cy="333.8" r="3" fill="#d29922"/>
+<polyline points="445.5,212.3 491.2,239.9 551.5,265.7 597.2,289.3" fill="none" stroke="#cf222e" stroke-width="2"/>
+<circle cx="445.5" cy="212.3" r="3" fill="#cf222e"/>
+<circle cx="491.2" cy="239.9" r="3" fill="#cf222e"/>
+<circle cx="551.5" cy="265.7" r="3" fill="#cf222e"/>
+<circle cx="597.2" cy="289.3" r="3" fill="#cf222e"/>
+<path d="M460.2,215.0l1.5,3.4 3.7,.3-2.8,2.4.9,3.6-3.4-2-3.4,2 .9-3.6-2.8-2.4 3.7-.3z" fill="#d29922" stroke="var(--fg)" stroke-width=".5"/>
+<path d="M505.9,241.1l1.5,3.4 3.7,.3-2.8,2.4.9,3.6-3.4-2-3.4,2 .9-3.6-2.8-2.4 3.7-.3z" fill="#d29922" stroke="var(--fg)" stroke-width=".5"/>
+<path d="M445.5,151.8l1.5,3.4 3.7,.3-2.8,2.4.9,3.6-3.4-2-3.4,2 .9-3.6-2.8-2.4 3.7-.3z" fill="#cf222e" stroke="var(--fg)" stroke-width=".5"/>
+<path d="M491.2,179.2l1.5,3.4 3.7,.3-2.8,2.4.9,3.6-3.4-2-3.4,2 .9-3.6-2.8-2.4 3.7-.3z" fill="#cf222e" stroke="var(--fg)" stroke-width=".5"/>
+<path d="M551.5,215.0l1.5,3.4 3.7,.3-2.8,2.4.9,3.6-3.4-2-3.4,2 .9-3.6-2.8-2.4 3.7-.3z" fill="#cf222e" stroke="var(--fg)" stroke-width=".5"/>
+<text x="626" y="36" font-size="10" font-weight="600" fill="var(--fg)">concurrency</text>
+<line x1="626" y1="52" x2="644" y2="52" stroke="#0b3d91" stroke-width="2.4"/>
+<text x="650" y="55" font-size="10" fill="var(--mut)">C=64</text>
+<line x1="626" y1="70" x2="644" y2="70" stroke="#1f6feb" stroke-width="2.4"/>
+<text x="650" y="73" font-size="10" fill="var(--mut)">C=256</text>
+<line x1="626" y1="88" x2="644" y2="88" stroke="#2ea043" stroke-width="2.4"/>
+<text x="650" y="91" font-size="10" fill="var(--mut)">C=1024</text>
+<line x1="626" y1="106" x2="644" y2="106" stroke="#d29922" stroke-width="2.4"/>
+<text x="650" y="109" font-size="10" fill="var(--mut)">C=4096</text>
+<line x1="626" y1="124" x2="644" y2="124" stroke="#cf222e" stroke-width="2.4"/>
+<text x="650" y="127" font-size="10" fill="var(--mut)">C=16384</text>
+<text x="626" y="156" font-size="9" fill="var(--mut)">★ = n≫C (real</text>
+<text x="626" y="168" font-size="9" fill="var(--mut)">steady region)</text>
+</svg><figcaption>Measured on the synthetic sweep: a 4-super-pass window is 170 s at
+C=64 / 1.3k TPS but collapses to <b>0.33 s at C=4096 / 819k TPS</b> — three orders of magnitude below the
+600 s floor (dashed). The count floor alone certifies sub-second windows at scale.</figcaption></figure>
+
+<p>So the window must also clear a <b>minimum wall-time</b>, computed per window as the max of three terms,
+each covering a different regime:</p>
+<pre><code>min_duration = max( T_precision , T_relaxation , T_floor )
+
+  T_precision  = k*·τ_sp (only if k* &gt; MIN_TREND_N),  k* = max( ⌈(1.96·CoV_b / 0.05)²⌉ , MIN_TREND_N )
+  T_relaxation = 5 · p90(sample e2e latency)                                    # queue / KV-eviction transient
+  T_floor      = 600 s                                                          # MLPerf-style min-duration floor</code></pre>
+<p><code>τ_sp</code> = median per-super-pass offered span, <code>CoV_b</code> = CoV of per-super-pass
+<code>tpot_p50</code>. The window's wall-time is its offered-load span (same denominator as system TPS).</p>
+<div class="note"><b>Precision is exempt at the <code>k*</code> floor.</b> When <code>CoV_b</code> is low
+enough that <code>k*</code> clamps to <code>MIN_TREND_N</code>, the metric isn't noisy and the ≥4
+super-passes already meet the trend requirement, so precision is dropped from the <code>max</code>
+entirely. Without this, at exactly 4 super-passes <code>k*·τ_sp = 4·τ_sp ≈ the window's own duration</code>,
+so <em>every</em> minimal plateau would be flagged short regardless of wall-time — a clean 11-min plateau
+rejected on a technicality. Precision only binds once a genuinely noisy metric (<code>k* &gt; 4</code>)
+needs more batches than the floor.</div>
+
+<figure><svg viewBox="0 0 720 320" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" class="chart">
+<text x="16" y="16" font-size="13" font-weight="600" fill="var(--fg)">min_duration = max(precision, relaxation, floor) — which term binds?</text>
+<line x1="150.0" y1="38" x2="150.0" y2="296" stroke="var(--grid)" stroke-width="1"/>
+<text x="150.0" y="310" font-size="9" text-anchor="middle" fill="var(--mut)">1s</text>
+<line x1="277.0" y1="38" x2="277.0" y2="296" stroke="var(--grid)" stroke-width="1"/>
+<text x="277.0" y="310" font-size="9" text-anchor="middle" fill="var(--mut)">10s</text>
+<line x1="404.1" y1="38" x2="404.1" y2="296" stroke="var(--grid)" stroke-width="1"/>
+<text x="404.1" y="310" font-size="9" text-anchor="middle" fill="var(--mut)">100s</text>
+<line x1="531.1" y1="38" x2="531.1" y2="296" stroke="var(--grid)" stroke-width="1"/>
+<text x="531.1" y="310" font-size="9" text-anchor="middle" fill="var(--mut)">1000s</text>
+<line x1="503.0" y1="38" x2="503.0" y2="296" stroke="#8250df" stroke-width="1.2" stroke-dasharray="4 3"/>
+<text x="503.0" y="32" font-size="9" text-anchor="middle" fill="#8250df">600s floor</text>
+<text x="12" y="53.0" font-size="10.5" font-weight="700" fill="var(--fg)">Clean, high-throughput run (C1024, ~102k TPS)</text>
+<rect x="150" y="62.0" width="43.5" height="13" rx="2" fill="#1f6feb" opacity="0.5"/>
+<text x="144" y="72.0" font-size="9.5" text-anchor="end" fill="var(--mut)">precision</text>
+<text x="198.5" y="72.0" font-size="9.5" fill="var(--fg)" font-weight="400">2.2s</text>
+<rect x="150" y="79.0" width="151.6" height="13" rx="2" fill="#d29922" opacity="0.5"/>
+<text x="144" y="89.0" font-size="9.5" text-anchor="end" fill="var(--mut)">relaxation</text>
+<text x="306.6" y="89.0" font-size="9.5" fill="var(--fg)" font-weight="400">16s</text>
+<rect x="150" y="96.0" width="353.0" height="13" rx="2" fill="#2ea043" opacity="0.95"/>
+<text x="144" y="106.0" font-size="9.5" text-anchor="end" fill="var(--mut)">floor</text>
+<text x="508.0" y="106.0" font-size="9.5" fill="var(--fg)" font-weight="700">600s  ◀ min_duration</text>
+<line x1="210.6" y1="62.0" x2="210.6" y2="113.0" stroke="#cf222e" stroke-width="2"/>
+<text x="214.6" y="124.0" font-size="9.5" fill="#cf222e" font-weight="600">window=3s ≪ min → REJECT</text>
+<text x="12" y="152.0" font-size="10.5" font-weight="700" fill="var(--fg)">Long-tail reasoning run (DeepSeek-R1)</text>
+<rect x="150" y="161.0" width="264.2" height="13" rx="2" fill="#1f6feb" opacity="0.5"/>
+<text x="144" y="171.0" font-size="9.5" text-anchor="end" fill="var(--mut)">precision</text>
+<text x="419.2" y="171.0" font-size="9.5" fill="var(--fg)" font-weight="400">120s</text>
+<rect x="150" y="178.0" width="424.0" height="13" rx="2" fill="#d29922" opacity="0.95"/>
+<text x="144" y="188.0" font-size="9.5" text-anchor="end" fill="var(--mut)">relaxation</text>
+<text x="579.0" y="188.0" font-size="9.5" fill="var(--fg)" font-weight="700">2175s  ◀ min_duration</text>
+<rect x="150" y="195.0" width="353.0" height="13" rx="2" fill="#2ea043" opacity="0.5"/>
+<text x="144" y="205.0" font-size="9.5" text-anchor="end" fill="var(--mut)">floor</text>
+<text x="508.0" y="205.0" font-size="9.5" fill="var(--fg)" font-weight="400">600s</text>
+</svg><figcaption>Which term binds depends on the workload. <b>Clean, high-throughput
+runs</b> → the 600 s floor dominates (precision and relaxation are tiny). <b>Long-tail reasoning runs</b>
+(DeepSeek-R1) → relaxation dominates: a p90 request lifetime of several minutes alone lifts it to tens of minutes (×5). Precision
+binds only when the metric is noisy (high <code>CoV_b</code> → large <code>k*</code>, e.g. agentic).</figcaption></figure>
+
+<p class="small">Why <code>k*</code> floors at <code>MIN_TREND_N</code> rather than a bigger constant: the
+batch-means CI already widens honestly when <code>CoV_b</code> is high, so <code>k*</code> self-raises
+where it matters; a larger floor would only over-penalize clean runs. The ×5 relaxation multiple is a
+literature-derived safety margin (relaxation time ≈ 1/(μ(1−ρ))), not fit from data.</p>
+
+<figure><svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" class="chart">
+<text x="64" y="16" font-size="13" font-weight="600" fill="var(--fg)">Super-passes needed to reach the 10-min floor</text>
+<line x1="64.0" y1="26" x2="64.0" y2="354" stroke="var(--grid)" stroke-width="1"/>
+<text x="64.0" y="370" font-size="10" text-anchor="middle" fill="var(--mut)">10^3</text>
+<line x1="215.7" y1="26" x2="215.7" y2="354" stroke="var(--grid)" stroke-width="1"/>
+<text x="215.7" y="370" font-size="10" text-anchor="middle" fill="var(--mut)">10^4</text>
+<line x1="367.3" y1="26" x2="367.3" y2="354" stroke="var(--grid)" stroke-width="1"/>
+<text x="367.3" y="370" font-size="10" text-anchor="middle" fill="var(--mut)">10^5</text>
+<line x1="519.0" y1="26" x2="519.0" y2="354" stroke="var(--grid)" stroke-width="1"/>
+<text x="519.0" y="370" font-size="10" text-anchor="middle" fill="var(--mut)">10^6</text>
+<line x1="64" y1="307.1" x2="610" y2="307.1" stroke="var(--grid)" stroke-width="1"/>
+<text x="56" y="310.1" font-size="10" text-anchor="end" fill="var(--mut)">10^1</text>
+<line x1="64" y1="213.4" x2="610" y2="213.4" stroke="var(--grid)" stroke-width="1"/>
+<text x="56" y="216.4" font-size="10" text-anchor="end" fill="var(--mut)">10^2</text>
+<line x1="64" y1="119.7" x2="610" y2="119.7" stroke="var(--grid)" stroke-width="1"/>
+<text x="56" y="122.7" font-size="10" text-anchor="end" fill="var(--mut)">10^3</text>
+<line x1="64" y1="26.0" x2="610" y2="26.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="56" y="29.0" font-size="10" text-anchor="end" fill="var(--mut)">10^4</text>
+<text x="337.0" y="394" font-size="11" text-anchor="middle" fill="var(--mut)">system TPS (output tok/s)</text>
+<text transform="translate(16,190.0) rotate(-90)" font-size="11" text-anchor="middle" fill="var(--mut)">super-passes required</text>
+<line x1="64" y1="344.4" x2="610" y2="344.4" stroke="#cf222e" stroke-width="1.4" stroke-dasharray="5 4"/>
+<text x="68" y="340.4" font-size="10" fill="#cf222e">MIN_TREND_N = 4</text>
+<polyline points="80.3,290.6 125.9,265.2 186.3,228.5 231.9,202.4" fill="none" stroke="#0b3d91" stroke-width="2"/>
+<circle cx="80.3" cy="290.6" r="3" fill="#0b3d91"/>
+<circle cx="125.9" cy="265.2" r="3" fill="#0b3d91"/>
+<circle cx="186.3" cy="228.5" r="3" fill="#0b3d91"/>
+<circle cx="231.9" cy="202.4" r="3" fill="#0b3d91"/>
+<polyline points="171.6,236.3 217.2,208.8 277.6,172.4 323.2,145.9" fill="none" stroke="#1f6feb" stroke-width="2"/>
+<circle cx="171.6" cy="236.3" r="3" fill="#1f6feb"/>
+<circle cx="217.2" cy="208.8" r="3" fill="#1f6feb"/>
+<circle cx="277.6" cy="172.4" r="3" fill="#1f6feb"/>
+<circle cx="323.2" cy="145.9" r="3" fill="#1f6feb"/>
+<polyline points="262.9,180.6 308.5,152.7 368.9,116.5 414.6,90.0" fill="none" stroke="#2ea043" stroke-width="2"/>
+<circle cx="262.9" cy="180.6" r="3" fill="#2ea043"/>
+<circle cx="308.5" cy="152.7" r="3" fill="#2ea043"/>
+<circle cx="368.9" cy="116.5" r="3" fill="#2ea043"/>
+<circle cx="414.6" cy="90.0" r="3" fill="#2ea043"/>
+<polyline points="354.2,130.1 399.9,102.5 460.2,67.4 505.9,39.7" fill="none" stroke="#d29922" stroke-width="2"/>
+<circle cx="354.2" cy="130.1" r="3" fill="#d29922"/>
+<circle cx="399.9" cy="102.5" r="3" fill="#d29922"/>
+<circle cx="460.2" cy="67.4" r="3" fill="#d29922"/>
+<circle cx="505.9" cy="39.7" r="3" fill="#d29922"/>
+<polyline points="445.5,140.3 491.2,112.3 551.5,102.1 597.2,74.6" fill="none" stroke="#cf222e" stroke-width="2"/>
+<circle cx="445.5" cy="140.3" r="3" fill="#cf222e"/>
+<circle cx="491.2" cy="112.3" r="3" fill="#cf222e"/>
+<circle cx="551.5" cy="102.1" r="3" fill="#cf222e"/>
+<circle cx="597.2" cy="74.6" r="3" fill="#cf222e"/>
+<text x="626" y="36" font-size="10" font-weight="600" fill="var(--fg)">concurrency</text>
+<line x1="626" y1="52" x2="644" y2="52" stroke="#0b3d91" stroke-width="2.4"/>
+<text x="650" y="55" font-size="10" fill="var(--mut)">C=64</text>
+<line x1="626" y1="70" x2="644" y2="70" stroke="#1f6feb" stroke-width="2.4"/>
+<text x="650" y="73" font-size="10" fill="var(--mut)">C=256</text>
+<line x1="626" y1="88" x2="644" y2="88" stroke="#2ea043" stroke-width="2.4"/>
+<text x="650" y="91" font-size="10" fill="var(--mut)">C=1024</text>
+<line x1="626" y1="106" x2="644" y2="106" stroke="#d29922" stroke-width="2.4"/>
+<text x="650" y="109" font-size="10" fill="var(--mut)">C=4096</text>
+<line x1="626" y1="124" x2="644" y2="124" stroke="#cf222e" stroke-width="2.4"/>
+<text x="650" y="127" font-size="10" fill="var(--mut)">C=16384</text>
+<text x="626" y="156" font-size="9" fill="var(--mut)">★ = n≫C (real</text>
+<text x="626" y="168" font-size="9" fill="var(--mut)">steady region)</text>
+</svg><figcaption>Restated as super-passes: filling the 10-minute floor needs 15
+super-passes at C=64 but <b>~7000 at C=4096 / 819k TPS</b>. The ≥4 count floor (dashed) is orders of
+magnitude short at scale — which is the whole reason a time floor exists.</figcaption></figure>
+
+<h3>Behavior: skip short plateaus, reject only if none qualify</h3>
+<p>By default the gate is <b>part of window selection</b>. Segmentation is walked in order and the
+<b>first plateau that clears <code>min_duration</code> is reported</b> — any earlier plateau too brief to
+certify is <em>skipped</em>, not reported. This is a deliberate exception to the first-plateau rule (§6): a
+plateau that is real but seconds long is not a steady state, so the reporter moves on. The headline notes
+the skip, and the level-shift baseline (§7) moves to the reported plateau so only degradations <em>after</em>
+it are flagged.</p>
+<pre><code>=== STEADY STATE (headline) ===
+  window: super-passes 12..27 (post-warmup), 6400 samples
+  note: skipped 2 earlier plateau(s) below min-duration; reporting plateau 3 of 5
+  TPS per-user:    198.4 tok/s/user  CI [197.9, 198.9]
+  ...</code></pre>
+<div class="warn"><b>The tension this creates.</b> If the only long-enough plateau is a later, <em>degraded</em>
+step, it gets reported (with the skip note) rather than the short healthy one — the duration requirement wins.
+The <code>plateau_index</code> / <code>skipped_short</code> metadata keeps that honest, and a consumer that
+prefers the first healthy plateau can read them and decide.</div>
+<p>Only when <b>no</b> admissible plateau is long enough does the run report <code>not found</code>, naming
+the longest candidate:</p>
+<pre><code>=== STEADY STATE (headline) ===
+  not found: all 6 admissible plateau(s) too short: longest 15s &lt; 600s required (floor-dominated); pass --no-min-duration to override</code></pre>
+<p><code>--no-min-duration</code> disables selection-time enforcement: the <b>first</b> plateau is reported as
+usual, with a <b>"Window too short"</b> advisory when it is below <code>min_duration</code>.</p>
+<pre><code>=== STEADY STATE (headline) ===
+  window: super-passes 0..3 (post-warmup), 1600 samples
+  TPS per-user:    199.6 tok/s/user  CI [198.7, 200.5]
+  TPS system:   174112.3 tok/s        CI [149863.2, 198361.4]
+  ...
+  WARNING: Window too short -- 3s steady vs 600s desired (floor-dominated); the steady number is a best-effort estimate over too little wall-time</code></pre>
+<p>Either way the full breakdown (<code>window_duration_s</code>, <code>min_duration_s</code>, dominant
+term, <code>k*</code>, <code>CoV_b</code>, <code>τ_sp</code>, <code>L_p90</code>) is in the JSON under
+<code>steady_state.short_window</code>.</p>
+
+<h2 id="e2e">10 · End-to-end worked example</h2>
+<p>A real high-concurrency run — gpt-oss-120b, <code>C=7168</code>, ~633k system TPS (13&nbsp;GB
+<code>events.jsonl</code>):</p>
+<table>
+<tr><th>Stage</th><th>Result</th></tr>
+<tr><td>Bucket</td><td>70 super-passes (size 6396), warmup = 1 → 69 post-warmup</td></tr>
+<tr><td>Gate + segment</td><td><b>one plateau, super-passes 0–68</b> (the whole run). TPOT is flat
+(<code>tpot_p50</code> 9.58 ms → p99 9.95 ms), so no break. TTFT is <em>not</em> gated: its tail is huge
+and spread (p50 1274 ms, p90 4286 ms) but doesn't fragment the window.</td></tr>
+<tr><td>Throughput</td><td>per-user 104.3 tok/s (CI [104.1, 104.7]); system 633 262 tok/s (CI [624k, 642k])</td></tr>
+<tr><td>Min-duration</td><td><code>CoV_b</code>≈0 → <code>k*</code>=4 (floor) → <b>T_precision exempt</b>;
+floor 600 s binds. Whole-run offered span = <b>853 s</b> ≥ 600 s.</td></tr>
+<tr><td><b>Verdict</b></td><td><span class="tag" style="background:var(--ok)">FOUND</span>
+853 s of steady TPOT. Plus a soft <code>WARNING: ttft_p90 … drifting UP</code> — TTFT climbs across the
+run (queue building), surfaced but not fatal.</td></tr>
+</table>
+<p class="note" style="display:block">Under the earlier all-metric gate this same run was <b>rejected</b>: TTFT-tail
+noise chopped the 853 s plateau into 10 pieces (longest 123 s &lt; 600 s). Gating on TPOT — the metric that
+is actually steady — recovers it. A run <em>does</em> still reject when its whole-run offered span can't reach
+the floor, or (like DeepSeek-R1) when relaxation demands tens of minutes it doesn't have.</p>
+<p class="small">On synthetic runs with planted plateaus the detector recovers the true steady TPOT to within
+0.1% at up to <b>1.64M TPS</b> (see §11).</p>
+
+<h2 id="validation">11 · Validation sweep</h2>
+<p>The min-duration formula and the detector were calibrated against a synthetic throughput × concurrency
+sweep — planted steady plateaus at known service rates, spanning ~1k to ~3.3M output tok/s. Findings:</p>
+<ul>
+<li><b>Accuracy.</b> Wherever a genuine steady region exists, the detector recovers the planted steady
+TPOT to <b>&lt;0.1%</b>, validated up to <b>1.64M TPS</b> on 550k-sample runs (no memory/time blowup).</li>
+<li><b>The ramp-trap.</b> When <code>n_samples ≈ concurrency</code>, each slot issues ~1 sample and the run
+never leaves the ramp; the naïve gate reports a confident but <b>~3× wrong</b> steady value with
+<code>found = true</code>. The duration floor (600 s vs a &lt;2 s wall) is exactly what rejects it.</li>
+<li><b>Regimes.</b> Floor binds for clean/fast runs, relaxation for long-tail (a reasoning workload needs tens of minutes),
+precision for noisy metrics (agentic).</li>
+</ul>
+
+<h2 id="output">12 · Output &amp; flags reference</h2>
+<h3>The headline block</h3>
+<table>
+<tr><th>Line</th><th>Meaning</th></tr>
+<tr><td><code>window: super-passes a..b</code></td><td>the steady plateau, post-warmup indices, + pooled sample count</td></tr>
+<tr><td><code>note: skipped N earlier plateau(s) …</code></td><td>a later plateau is reported because earlier ones failed the min-duration gate (§9)</td></tr>
+<tr><td><code>TPS per-user … CI […]</code></td><td>1/mean(TPOT); batch-means 95% interval</td></tr>
+<tr><td><code>TPS system … CI […]</code></td><td>aggregate tokens ÷ offered span; batch-means interval</td></tr>
+<tr><td><code>not found: …</code></td><td>no admissible plateau, <em>or</em> the min-duration reject</td></tr>
+<tr><td><code>WARNING: Window too short …</code></td><td>min-duration advisory (only with <code>--no-min-duration</code>)</td></tr>
+<tr><td><code>WARNING: … drifting UP …</code></td><td>a watched metric (TPOT or TTFT) climbs over the run <em>after</em> the window (slow global drift — TTFT's main role now that it doesn't hard-gate)</td></tr>
+<tr><td><code>ANOMALY: level shift …</code></td><td>a confirmed later plateau (degradation); headline still = first plateau</td></tr>
+</table>
+
+<h3>Flags that change the algorithm</h3>
+<table>
+<tr><th>Flag</th><th>Default</th><th>Effect</th></tr>
+<tr><td><code>--no-min-duration</code></td><td>gate on (skip short, reject if none)</td><td>downgrade §9 to a warning on the first plateau</td></tr>
+<tr><td><code>--warmup auto|N</code></td><td>auto</td><td>data-driven crop vs a fixed super-pass count</td></tr>
+<tr><td><code>--cov-bounds</code></td><td>0.03,0.05,0.08</td><td>the CoV ensemble</td></tr>
+<tr><td><code>--trend-gate</code></td><td>mk_hamed_rao</td><td>which trend algorithm gates admissibility</td></tr>
+<tr><td><code>--superpass-size N</code></td><td>dataset_size</td><td>samples per super-pass</td></tr>
+</table>
+<p class="small">Zero-config usage: <code>uv run scripts/steady_state_diagnostics.py &lt;run_dir&gt;/</code> auto-detects
+model → tokenizer, dataset size, and workload profile from the run's sidecar config. Full structured result
+(<code>steady_state</code>, <code>short_window</code>, <code>trajectories</code>, <code>cov</code>,
+<code>drift</code>) is written with <code>--json</code>.</p>
+
+<hr>
+<p class="small">Companion to <code>docs/steady-state-detection.md</code> (the design spec) and
+<code>scripts/steady_state_diagnostics.md</code> (the operator reference). Plots are from the synthetic
+throughput × concurrency validation sweep.</p>
+
+</div>
+</body>
+</html>
