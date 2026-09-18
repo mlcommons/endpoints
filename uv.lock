@@ -2,33 +2,33 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
-    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
     "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
-    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
-    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
     "python_full_version >= '4' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
-    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
-    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
     "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
-    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
-    "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
-    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
-    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
     "python_full_version >= '4' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
+    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
+    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
+    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
+    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
+    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
+    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
+    "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
     "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
+    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev'",
+    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev' and extra != 'extra-18-inference-endpoint-performance' and extra != 'extra-18-inference-endpoint-test'",
     "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra != 'extra-18-inference-endpoint-bfcl' and extra != 'extra-18-inference-endpoint-dev'",
 ]
 supported-markers = [
@@ -176,15 +176,15 @@ wheels = [
 
 [[package]]
 name = "anyio"
-version = "4.13.0"
+version = "4.14.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idna" },
     { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev') or (extra == 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-performance') or (extra == 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-test')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/19/14/2c5dd9f512b66549ae92767a9c7b330ae88e1932ca57876909410251fe13/anyio-4.13.0.tar.gz", hash = "sha256:334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc", size = 231622, upload-time = "2026-03-24T12:59:09.671Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/61/cc/a381afa6efea9f496eff839d4a6a1aed3bfafc7b3ab4b0d1b243a12573dd/anyio-4.14.2.tar.gz", hash = "sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f", size = 260176, upload-time = "2026-07-12T20:29:07.082Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/42/e921fccf5015463e32a3cf6ee7f980a6ed0f395ceeaa45060b61d86486c2/anyio-4.13.0-py3-none-any.whl", hash = "sha256:08b310f9e24a9594186fd75b4f73f4a4152069e3853f1ed8bfbf58369f4ad708", size = 114353, upload-time = "2026-03-24T12:59:08.246Z" },
+    { url = "https://files.pythonhosted.org/packages/da/35/f2287558c17e29fafc8ef3daf819bb9834061cfa43bff8014f7df7f63bdc/anyio-4.14.2-py3-none-any.whl", hash = "sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494", size = 125813, upload-time = "2026-07-12T20:29:05.763Z" },
 ]
 
 [[package]]
@@ -908,18 +908,18 @@ name = "filelock"
 version = "3.20.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
     "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "python_full_version >= '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/58/46/0028a82567109b5ef6e4d2a1f04a583fb513e6cf9527fcdd09afd817deeb/filelock-3.20.0.tar.gz", hash = "sha256:711e943b4ec6be42e1d4e6690b48dc175c822967466bb31c0c293f34334c13f4", size = 18922, upload-time = "2025-10-08T18:03:50.056Z" }
 wheels = [
@@ -932,12 +932,12 @@ version = "3.25.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/94/b8/00651a0f559862f3bb7d6f7477b192afe3f583cc5e26403b44e59a55ab34/filelock-3.25.2.tar.gz", hash = "sha256:b64ece2b38f4ca29dd3e810287aa8c48182bbecd1ae6e9ae126c9b35f1382694", size = 40480, upload-time = "2026-03-11T20:45:38.487Z" }
@@ -1307,6 +1307,7 @@ name = "inference-endpoint"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "colorama" },
     { name = "cyclopts" },
     { name = "datasets" },
@@ -1383,6 +1384,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'test'", specifier = "==3.14.3" },
+    { name = "anyio", specifier = "==4.14.2" },
     { name = "bfcl-eval", marker = "extra == 'bfcl'", specifier = "==2026.3.23" },
     { name = "colorama", specifier = "==0.4.6" },
     { name = "coverage", marker = "extra == 'test'", specifier = "==7.13.4" },
@@ -2011,18 +2013,18 @@ name = "numpy"
 version = "1.26.4"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
     "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "python_full_version >= '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/65/6e/09db70a523a96d25e115e71cc56a6f9031e7b8cd166c1ac8438307c14058/numpy-1.26.4.tar.gz", hash = "sha256:2a02aba9ed12e4ac4eb3ea9421c420301a0c6460d9830d74a9df87efa4912010", size = 15786129, upload-time = "2024-02-06T00:26:44.495Z" }
 wheels = [
@@ -2040,12 +2042,12 @@ version = "2.4.4"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d7/9f/b8cef5bffa569759033adda9481211426f12f53299629b410340795c2514/numpy-2.4.4.tar.gz", hash = "sha256:2d390634c5182175533585cc89f3608a4682ccb173cc9bb940b2881c8d6f8fa0", size = 20731587, upload-time = "2026-03-29T13:22:01.298Z" }
@@ -2306,14 +2308,14 @@ name = "pandas"
 version = "2.3.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
     "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "python_full_version >= '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 dependencies = [
     { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.14' and extra == 'extra-18-inference-endpoint-bfcl') or (extra == 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-dev') or (extra == 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-performance') or (extra == 'extra-18-inference-endpoint-bfcl' and extra == 'extra-18-inference-endpoint-test')" },
@@ -2361,12 +2363,12 @@ version = "3.0.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 dependencies = [
@@ -3777,9 +3779,9 @@ name = "torch"
 version = "2.2.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
+    "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
 ]
 dependencies = [
     { name = "filelock", version = "3.20.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform != 'linux'" },
@@ -3801,15 +3803,15 @@ name = "torch"
 version = "2.10.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
     "python_full_version >= '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "python_full_version >= '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and python_full_version < '4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 dependencies = [
     { name = "cuda-bindings", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
