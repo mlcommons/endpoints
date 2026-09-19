@@ -71,7 +71,10 @@ overrides**:
 
 **Profiles:** `concurrency` and `poisson` share the standard issue-time window + **TPOT
 gate** (TTFT is diagnostic, not a gate); `offline` uses the same gate but its
-window/throughput are completion-based (partial support); `agentic` computes **NATL**
+window and throughput are measured on the issue span, which collapses to ~0 when
+every query is issued at t=0 -- so an offline run always reports the window too
+short unless `--no-min-duration` is passed, and it is **not run automatically**;
+`agentic` computes **NATL**
 (per-trajectory throughput) over trajectory
 super-passes and prints a prominent **NOT-YET-SUPPORTED** banner — agentic steady-state is
 experimental and must not be used for submissions.

@@ -575,12 +575,13 @@ class TestRunAuditGuards:
         assert config.settings.steady_state.model_copy.call_args.kwargs["update"] == {
             "enabled": False
         }
-        # model_copy(update=...) bypasses pydantic validation, so pin the field
-        # name against the real model: a rename must fail here, not silently
-        # no-op and leave audit phases running the detector.
-        assert (
-            SteadyStateConfig().model_copy(update={"enabled": False}).enabled is False
-        )
+        # model_dump(), not attribute access: model_copy(update=...) bypasses
+        # validation and stuffs unknown keys straight into __dict__, so `.enabled`
+        # reads back False even on a model whose real field was renamed -- the
+        # rename this pin exists to catch.
+        assert SteadyStateConfig().model_copy(
+            update={"enabled": False}
+        ).model_dump() == {"enabled": False}
         assert (
             config.settings.with_updates.call_args.kwargs["steady_state"]
             is config.settings.steady_state.model_copy.return_value

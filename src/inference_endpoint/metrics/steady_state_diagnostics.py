@@ -288,10 +288,10 @@ PROFILES: dict[str, Profile] = {
         "tpot_p50",
         4096,
         False,
-        "offline: issue-time throughput degenerate (all issued at t=0); the window and "
-        "drain are completion-based (partial support -- system TPS is unreliable). The "
-        "min-duration gate is measured on the issue span, which collapses to ~0 here, so "
-        "a window is always reported too short: diagnostic only, not an automatic verdict.",
+        "offline: issue-time throughput is degenerate (all issued at t=0), so system "
+        "TPS is unreliable and the min-duration gate -- which measures the issue span -- "
+        "collapses to ~0 and always reports the window too short. Diagnostic only: not "
+        "run automatically, and a hand-run needs --no-min-duration to report a window.",
     ),
     "agentic": Profile(
         "agentic",
@@ -377,6 +377,7 @@ def read_run_config(
     """Best-effort model / load-pattern / dataset-size from a run's sidecar files."""
     out: dict = {
         "model": None,
+        "tokenizer_name": None,
         "load_pattern": None,
         "dataset_size": None,
         "num_trajectories": None,
@@ -389,7 +390,10 @@ def read_run_config(
             cfg = {}
         if isinstance(cfg, dict):
             mp = cfg.get("model_params") or {}
-            out["model"] = mp.get("name") or mp.get("tokenizer_name")
+            # Kept separate: collapsing them hides an explicit tokenizer override
+            # behind the always-present model name.
+            out["model"] = mp.get("name")
+            out["tokenizer_name"] = mp.get("tokenizer_name")
             lp = (
                 (cfg.get("settings") or {}).get("load_pattern")
                 or cfg.get("load_pattern")
@@ -1949,11 +1953,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     events, cfg_path, meta_path = find_run_files(args.target)
     cfg = read_run_config(cfg_path, meta_path)
 
-    # tokenizer: explicit flag > model registry > config tokenizer path
+    # tokenizer: explicit flag > config tokenizer override > model registry >
+    # slash-containing model name
     model = args.model or cfg["model"]
     reg = resolve_tokenizer(model) if model else None
     if args.tokenizer:
         tokenizer, trust = args.tokenizer, args.trust_remote_code
+    elif cfg["tokenizer_name"]:
+        tokenizer, trust = cfg["tokenizer_name"], args.trust_remote_code
     elif reg is not None:
         tokenizer, trust = reg
     elif model and "/" in model:

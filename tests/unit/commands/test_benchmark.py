@@ -178,6 +178,9 @@ class _InlinePerformanceScorer(Scorer, scorer_id="_test_inline_performance"):
 # Hermetic local tokenizer: finalize's full-run-OSL pass tokenizes for real, and a
 # HF repo id would make these unit tests network- and cache-dependent.
 _CHAR_TOKENIZER = str(Path(__file__).parents[2] / "assets" / "tokenizers" / "char")
+_CHAR_CHAT_TOKENIZER = str(
+    Path(__file__).parents[2] / "assets" / "tokenizers" / "char_chat"
+)
 
 _OFFLINE_KWARGS = {
     "endpoint_config": {"endpoints": ["http://test:8000"]},
@@ -3776,12 +3779,22 @@ class TestSteadyStateHook:
     def test_other_models_never_spawn_the_detector(self, tmp_path, monkeypatch):
         (tmp_path / "events.jsonl").write_text("")
         self._forbid_spawn(monkeypatch, "a non-allowlisted model")
+        # Concurrency, so the model allowlist is what rejects this run -- an
+        # offline config would be rejected by the load pattern first, and the
+        # test would pass with the allowlist deleted.
         ctx = _make_benchmark_context(
-            config=OfflineConfig(**_OFFLINE_KWARGS),
+            config=OnlineConfig(
+                **_OFFLINE_KWARGS,
+                settings={
+                    "load_pattern": {"type": "concurrency", "target_concurrency": 8}
+                },
+            ),
             report_dir=tmp_path,
-            tokenizer_name=_CHAR_TOKENIZER,
+            tokenizer_name=_CHAR_CHAT_TOKENIZER,
         )
 
         finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
 
-        assert not (tmp_path / "run_meta.json").exists()
+        # The _forbid_spawn mock above is what proves the model was rejected; an
+        # unvalidated workload still records its sidecar for a hand re-run.
+        assert not (tmp_path / "steady_state.json").exists()

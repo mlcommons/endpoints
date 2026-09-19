@@ -8,6 +8,7 @@ detector subprocess, and the best-effort contract: no failure mode here may
 propagate out of finalize.
 """
 
+import dataclasses
 import json
 import logging
 import subprocess
@@ -134,6 +135,17 @@ class TestCaveatFilter:
         line = steady_state_diagnostics.format_profile_caveat(profile)
 
         assert line.startswith(steady_state._CAVEAT_PREFIX)
+
+    def test_a_wrapped_note_is_collapsed_to_one_line(self):
+        """The consumer matches the prefix per line, so a multi-line caveat would
+        lose everything after the first line."""
+        profile = steady_state_diagnostics.profile_for_load_pattern("poisson")
+        wrapped = dataclasses.replace(profile, note="first line\nsecond line")
+
+        line = steady_state_diagnostics.format_profile_caveat(wrapped)
+
+        assert "\n" not in line
+        assert "second line" in line
 
     def test_keeps_only_the_detectors_own_caveats(self):
         caveat = "[profile: offline] system TPS is unreliable"
@@ -271,20 +283,23 @@ class TestDetectSteadyState:
         assert "PyTorch" not in caplog.text
 
     @pytest.mark.parametrize(
-        ("kwargs", "expected_reason"),
+        ("kwargs", "expected_reason", "keeps_sidecar"),
         [
-            ({"config": _config("llama-3.1-8b")}, "not a validated workload"),
-            ({"config": _agentic_config()}, "not a validated workload"),
+            # An unvalidated workload still has good metadata for this run, and
+            # its message points at a hand re-run that reads the sidecar.
+            ({"config": _config("llama-3.1-8b")}, "not a validated workload", True),
+            ({"config": _agentic_config()}, "not a validated workload", True),
             (
                 {"config": _config(**{"steady_state": {"enabled": False}})},
                 "disabled by configuration",
+                False,
             ),
-            ({"tokenizer_name": None}, "no tokenizer"),
-            ({"dataset_size": None}, "dataset size unknown"),
+            ({"tokenizer_name": None}, "no tokenizer", False),
+            ({"dataset_size": None}, "dataset size unknown", False),
         ],
     )
     def test_skipped_runs_say_why_and_leave_no_artifacts(
-        self, tmp_path, monkeypatch, caplog, kwargs, expected_reason
+        self, tmp_path, monkeypatch, caplog, kwargs, expected_reason, keeps_sidecar
     ):
         report_dir = _report_dir(tmp_path)
 
@@ -298,9 +313,15 @@ class TestDetectSteadyState:
         assert result is None
         assert expected_reason in caplog.text
         assert not (report_dir / "steady_state.txt").exists()
-        assert not (
-            report_dir / "run_meta.json"
-        ).exists(), "a skipped run must not leave a sidecar nothing will read"
+        assert not (report_dir / "steady_state.json").exists()
+        if keeps_sidecar:
+            assert json.loads((report_dir / "run_meta.json").read_text()) == {
+                "dataset_size": _DATASET_SIZE
+            }
+        else:
+            assert not (
+                report_dir / "run_meta.json"
+            ).exists(), "a skipped run must not leave a sidecar nothing will read"
 
     def test_missing_events_file_skips(self, tmp_path, monkeypatch, caplog):
         def explode(cmd, **kw):
@@ -404,11 +425,15 @@ class TestBestEffortContract:
         report_dir = _report_dir(tmp_path)
 
         def run(cmd, **kw):
+            # A killed or failing child can leave a half-written verdict: it
+            # writes the JSON non-atomically.
+            (report_dir / "steady_state.json").write_text('{"truncated": ')
             if outcome == "timeout":
                 raise subprocess.TimeoutExpired(cmd, 1.0)
             if outcome == "interrupt":
                 raise KeyboardInterrupt
             if outcome == "silent":
+                (report_dir / "steady_state.json").unlink()
                 return _completed(cmd, 0, stdout="headline\n")
             return _completed(cmd, 2, stderr="failed")
 
@@ -426,17 +451,69 @@ class TestBestEffortContract:
             subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
         )
 
-        _detect(report_dir, config=_config("llama-3.1-8b"))
+        _detect(report_dir, tokenizer_name=None)
 
         assert not (report_dir / "run_meta.json").exists()
 
-    def test_a_failed_run_keeps_its_own_fresh_sidecar(self, tmp_path, monkeypatch):
-        """The detector ran, so run_meta.json describes THIS run and stays usable
-        for a by-hand retry."""
+    def test_an_unvalidated_workload_still_gets_a_fresh_sidecar(
+        self, tmp_path, monkeypatch
+    ):
+        """Its caveat tells the user to hand-run the detector, which reads the
+        sidecar -- so this run's metadata must replace the stale one, not vanish."""
         report_dir = _report_dir(tmp_path)
         monkeypatch.setattr(
-            subprocess, "run", lambda cmd, **kw: _completed(cmd, 2, stderr="failed")
+            subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
         )
+
+        _detect(report_dir, config=_config("llama-3.1-8b"))
+
+        assert json.loads((report_dir / "run_meta.json").read_text()) == {
+            "dataset_size": _DATASET_SIZE
+        }
+
+    def test_an_unclearable_stale_verdict_aborts_rather_than_republishing(
+        self, tmp_path, monkeypatch
+    ):
+        """Success is an existence test, so a verdict we could not delete would
+        be reported as this run's result."""
+        report_dir = _report_dir(tmp_path)
+        monkeypatch.setattr(
+            subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
+        )
+        real_unlink = Path.unlink
+
+        def failing_unlink(self, **kwargs):
+            if self.name == "steady_state.json":
+                raise OSError("read-only file system")
+            return real_unlink(self, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+        assert _detect(report_dir) is None
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            pytest.param("failure", id="nonzero-exit"),
+            pytest.param("timeout", id="timeout"),
+            pytest.param("interrupt", id="interrupt"),
+        ],
+    )
+    def test_a_failed_run_keeps_its_own_fresh_sidecar(
+        self, tmp_path, monkeypatch, outcome
+    ):
+        """The detector ran, so run_meta.json describes THIS run and stays usable
+        for a by-hand retry -- on every failure path, not just a non-zero exit."""
+        report_dir = _report_dir(tmp_path)
+
+        def run(cmd, **kw):
+            if outcome == "timeout":
+                raise subprocess.TimeoutExpired(cmd, 1.0)
+            if outcome == "interrupt":
+                raise KeyboardInterrupt
+            return _completed(cmd, 2, stderr="failed")
+
+        monkeypatch.setattr(subprocess, "run", run)
 
         _detect(report_dir)
 

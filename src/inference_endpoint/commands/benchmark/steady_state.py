@@ -99,12 +99,16 @@ def _write_best_effort(path: Path, text: str) -> None:
         logger.warning("Steady-state detection could not write %s: %s", path.name, e)
 
 
-def _discard(report_dir: Path, names: tuple[str, ...]) -> None:
+def _discard(report_dir: Path, names: tuple[str, ...]) -> bool:
+    """Remove artifacts, reporting whether the directory is now genuinely clear."""
+    cleared = True
     for name in names:
         try:
             (report_dir / name).unlink(missing_ok=True)
         except OSError as e:
             logger.warning("Steady-state detection could not remove %s: %s", name, e)
+            cleared = False
+    return cleared
 
 
 def write_run_meta(report_dir: Path, dataset_size: int) -> None:
@@ -114,6 +118,9 @@ def write_run_meta(report_dir: Path, dataset_size: int) -> None:
     ``python -m inference_endpoint.metrics.steady_state_diagnostics <report_dir>``
     works against the finished directory with no arguments.
     """
+    # Cleared first: a failed overwrite would otherwise leave the previous run's
+    # size in place, and a wrong sidecar is worse than a missing one.
+    _discard(report_dir, ("run_meta.json",))
     _write_best_effort(
         report_dir / "run_meta.json",
         json.dumps({"dataset_size": dataset_size}, indent=2),
@@ -169,10 +176,19 @@ def detect_steady_state(
         skip("dataset size unknown")
         return None
     if not is_eligible(model_name=config.model_params.name, load_pattern=load_pattern):
-        skip(
-            f"not a validated workload (model={config.model_params.name}, "
-            f"load_pattern={load_pattern.value})"
+        logger.info(
+            "Steady-state detection skipped: not a validated workload "
+            "(model=%s, load_pattern=%s); re-run by hand against %s for a "
+            "diagnostic pass",
+            config.model_params.name,
+            load_pattern.value,
+            report_dir,
         )
+        # Unlike the other skips, this run's metadata is known good -- it is the
+        # workload that is unvalidated, not the inputs. Leave the sidecar so the
+        # hand re-run suggested above works with no arguments.
+        _discard(report_dir, _VERDICT_ARTIFACTS)
+        write_run_meta(report_dir, dataset_size)
         return None
     if not (report_dir / "events.jsonl").is_file():
         skip(f"no events.jsonl in {report_dir}")
@@ -181,7 +197,14 @@ def detect_steady_state(
     # Clear the previous run's verdict before spawning: the success check below is
     # an existence test, so a child that exits 0 without writing would otherwise
     # republish a stale verdict as this run's.
-    _discard(report_dir, _VERDICT_ARTIFACTS)
+    if not _discard(report_dir, _VERDICT_ARTIFACTS):
+        # The success check below is an existence test, so an uncleared stale
+        # verdict would be republished as this run's result.
+        logger.warning(
+            "Steady-state detection skipped: could not clear stale artifacts in %s",
+            report_dir,
+        )
+        return None
     write_run_meta(report_dir, dataset_size)
     verdict = report_dir / "steady_state.json"
 

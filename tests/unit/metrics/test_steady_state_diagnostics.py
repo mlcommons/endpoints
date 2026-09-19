@@ -818,6 +818,10 @@ def test_profile_for_load_pattern():
     assert mod.profile_for_load_pattern("concurrency").name == "concurrency"
     # Unmapped patterns must not inherit a validated profile: a workload nobody
     # classified gets an explicitly unsupported one, so the benchmark gate skips it.
+    # The sentinel is a resolution failure, not a workload a user can ask for.
+    parser_choices = [name for name in mod.PROFILES if name != "unknown"]
+    assert set(parser_choices) == {"concurrency", "poisson", "offline", "agentic"}
+
     unknown = mod.profile_for_load_pattern("something-unknown")
     assert unknown.name == "unknown"
     assert unknown.supported is False
