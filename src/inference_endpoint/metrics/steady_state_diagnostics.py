@@ -1953,14 +1953,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     events, cfg_path, meta_path = find_run_files(args.target)
     cfg = read_run_config(cfg_path, meta_path)
 
-    # tokenizer: explicit flag > config tokenizer override > model registry >
-    # slash-containing model name
+    # tokenizer: --tokenizer > --model's registry entry > the config's
+    # tokenizer_name > the config model's registry entry > a slash-containing
+    # model name. Explicit flags outrank the run's config either way.
     model = args.model or cfg["model"]
     reg = resolve_tokenizer(model) if model else None
+    flag_reg = resolve_tokenizer(args.model) if args.model else None
+    # A config tokenizer_name is often a cluster path that will not load
+    # elsewhere, so prefer the registry's portable id when it names a known model.
+    cfg_tok = cfg["tokenizer_name"]
+    cfg_reg = resolve_tokenizer(cfg_tok) if cfg_tok else None
     if args.tokenizer:
         tokenizer, trust = args.tokenizer, args.trust_remote_code
-    elif cfg["tokenizer_name"]:
-        tokenizer, trust = cfg["tokenizer_name"], args.trust_remote_code
+    elif flag_reg is not None:
+        tokenizer, trust = flag_reg
+    elif cfg_reg is not None:
+        tokenizer, trust = cfg_reg
+    elif cfg_tok:
+        tokenizer, trust = cfg_tok, args.trust_remote_code
     elif reg is not None:
         tokenizer, trust = reg
     elif model and "/" in model:

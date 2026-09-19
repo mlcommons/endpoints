@@ -298,7 +298,7 @@ class TestDetectSteadyState:
             ({"dataset_size": None}, "dataset size unknown", False),
         ],
     )
-    def test_skipped_runs_say_why_and_leave_no_artifacts(
+    def test_skipped_runs_say_why_and_leave_the_right_artifacts(
         self, tmp_path, monkeypatch, caplog, kwargs, expected_reason, keeps_sidecar
     ):
         report_dir = _report_dir(tmp_path)
@@ -490,6 +490,9 @@ class TestBestEffortContract:
         monkeypatch.setattr(Path, "unlink", failing_unlink)
 
         assert _detect(report_dir) is None
+        assert not (
+            report_dir / "run_meta.json"
+        ).exists(), "aborting must not leave the previous run's super-pass size behind"
 
     @pytest.mark.parametrize(
         "outcome",
@@ -541,6 +544,9 @@ class TestBestEffortContract:
             _detect(report_dir)
 
         assert artifact in caplog.text
+        assert not (
+            report_dir / artifact
+        ).exists(), "a failed write must not leave the previous run's file in place"
 
 
 class TestRunMeta:

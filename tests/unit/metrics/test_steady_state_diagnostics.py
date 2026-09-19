@@ -818,10 +818,6 @@ def test_profile_for_load_pattern():
     assert mod.profile_for_load_pattern("concurrency").name == "concurrency"
     # Unmapped patterns must not inherit a validated profile: a workload nobody
     # classified gets an explicitly unsupported one, so the benchmark gate skips it.
-    # The sentinel is a resolution failure, not a workload a user can ask for.
-    parser_choices = [name for name in mod.PROFILES if name != "unknown"]
-    assert set(parser_choices) == {"concurrency", "poisson", "offline", "agentic"}
-
     unknown = mod.profile_for_load_pattern("something-unknown")
     assert unknown.name == "unknown"
     assert unknown.supported is False
@@ -951,3 +947,32 @@ def test_build_natl_result_flat_and_varied():
     )
     assert r2["across_cov"] > 0.15
     assert r2["found"] is False
+
+
+@pytest.mark.unit
+def test_unknown_profile_is_not_user_selectable(tmp_path, capsys):
+    """The sentinel is a resolution failure, not a workload a user can ask for.
+
+    Asserted through the real parser: re-deriving the production comprehension
+    would pass even if the sentinel were re-admitted to --profile.
+    """
+    events = tmp_path / "events.jsonl"
+    events.write_text("")
+
+    with pytest.raises(SystemExit):
+        mod.main([str(events), "--profile", "unknown", "--dataset-size", "8"])
+
+    assert "invalid choice: 'unknown'" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_every_real_profile_is_user_selectable(tmp_path, capsys):
+    events = tmp_path / "events.jsonl"
+    events.write_text("")
+
+    for name in ("concurrency", "poisson", "offline", "agentic"):
+        with pytest.raises(SystemExit):
+            # No tokenizer resolvable, so it exits on that rather than on the
+            # profile -- which is the point: the profile itself was accepted.
+            mod.main([str(events), "--profile", name, "--dataset-size", "8"])
+        assert "invalid choice" not in capsys.readouterr().err

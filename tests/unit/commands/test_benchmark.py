@@ -3723,7 +3723,10 @@ class TestSteadyStateHook:
     @staticmethod
     def _forbid_spawn(monkeypatch, reason):
         def explode(cmd, **kwargs):
-            raise AssertionError(f"detector must not be spawned for {reason}")
+            # pytest.fail raises BaseException, which detect_steady_state's
+            # best-effort `except Exception` does NOT swallow. An AssertionError
+            # here would be absorbed and logged, and the test would pass.
+            pytest.fail(f"detector must not be spawned for {reason}")
 
         monkeypatch.setattr(subprocess, "run", explode)
 
@@ -3776,9 +3779,10 @@ class TestSteadyStateHook:
         assert not (tmp_path / "run_meta.json").exists()
 
     @pytest.mark.unit
-    def test_other_models_never_spawn_the_detector(self, tmp_path, monkeypatch):
+    def test_other_models_never_spawn_the_detector(self, tmp_path, monkeypatch, caplog):
         (tmp_path / "events.jsonl").write_text("")
         self._forbid_spawn(monkeypatch, "a non-allowlisted model")
+        caplog.set_level(logging.INFO)
         # Concurrency, so the model allowlist is what rejects this run -- an
         # offline config would be rejected by the load pattern first, and the
         # test would pass with the allowlist deleted.
@@ -3795,6 +3799,7 @@ class TestSteadyStateHook:
 
         finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
 
-        # The _forbid_spawn mock above is what proves the model was rejected; an
-        # unvalidated workload still records its sidecar for a hand re-run.
+        # The _forbid_spawn mock proves nothing was spawned; the log proves WHY,
+        # so this still fails if the model allowlist is removed.
+        assert "not a validated workload" in caplog.text
         assert not (tmp_path / "steady_state.json").exists()

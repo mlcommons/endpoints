@@ -175,6 +175,9 @@ def detect_steady_state(
     if dataset_size is None:
         skip("dataset size unknown")
         return None
+    if not (report_dir / "events.jsonl").is_file():
+        skip(f"no events.jsonl in {report_dir}")
+        return None
     if not is_eligible(model_name=config.model_params.name, load_pattern=load_pattern):
         logger.info(
             "Steady-state detection skipped: not a validated workload "
@@ -186,24 +189,18 @@ def detect_steady_state(
         )
         # Unlike the other skips, this run's metadata is known good -- it is the
         # workload that is unvalidated, not the inputs. Leave the sidecar so the
-        # hand re-run suggested above works with no arguments.
-        _discard(report_dir, _VERDICT_ARTIFACTS)
+        # hand re-run suggested above works with no arguments, but only once the
+        # previous verdict is gone: a fresh sidecar beside a stale verdict reads
+        # as though the verdict belongs to this run.
+        if not _discard(report_dir, _VERDICT_ARTIFACTS):
+            return None
         write_run_meta(report_dir, dataset_size)
         return None
-    if not (report_dir / "events.jsonl").is_file():
-        skip(f"no events.jsonl in {report_dir}")
-        return None
-
     # Clear the previous run's verdict before spawning: the success check below is
     # an existence test, so a child that exits 0 without writing would otherwise
     # republish a stale verdict as this run's.
     if not _discard(report_dir, _VERDICT_ARTIFACTS):
-        # The success check below is an existence test, so an uncleared stale
-        # verdict would be republished as this run's result.
-        logger.warning(
-            "Steady-state detection skipped: could not clear stale artifacts in %s",
-            report_dir,
-        )
+        skip(f"could not clear stale artifacts in {report_dir}")
         return None
     write_run_meta(report_dir, dataset_size)
     verdict = report_dir / "steady_state.json"
