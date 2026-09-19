@@ -334,6 +334,22 @@ class TestDetectSteadyState:
 
         assert "events.jsonl" in caplog.text
 
+    def test_a_missing_event_log_is_reported_before_the_workload_verdict(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """events.jsonl is the actionable blocker, and the 're-run by hand'
+        message an unvalidated workload emits would be useless without one."""
+        monkeypatch.setattr(
+            subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
+        )
+
+        with caplog.at_level(logging.INFO):
+            _detect(tmp_path, config=_config("llama-3.1-8b"))
+
+        assert "no events.jsonl" in caplog.text
+        assert "not a validated workload" not in caplog.text
+        assert not (tmp_path / "run_meta.json").exists()
+
     def test_configured_timeout_reaches_the_subprocess(self, tmp_path, monkeypatch):
         report_dir = _report_dir(tmp_path)
         seen = []
@@ -471,28 +487,42 @@ class TestBestEffortContract:
             "dataset_size": _DATASET_SIZE
         }
 
+    @pytest.mark.parametrize(
+        "config",
+        [
+            pytest.param(None, id="eligible-pre-spawn"),
+            pytest.param(_config("llama-3.1-8b"), id="unvalidated-workload"),
+        ],
+    )
     def test_an_unclearable_stale_verdict_aborts_rather_than_republishing(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, config
     ):
         """Success is an existence test, so a verdict we could not delete would
-        be reported as this run's result."""
+        be reported as this run's result. The unvalidated-workload path is the
+        sharper case: it would otherwise write a FRESH sidecar next to the stale
+        verdict, making that verdict look like it belongs to this run."""
         report_dir = _report_dir(tmp_path)
         monkeypatch.setattr(
             subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
         )
         real_unlink = Path.unlink
 
-        def failing_unlink(self, **kwargs):
+        def failing_unlink(self, *args, **kwargs):
             if self.name == "steady_state.json":
                 raise OSError("read-only file system")
-            return real_unlink(self, **kwargs)
+            return real_unlink(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "unlink", failing_unlink)
 
-        assert _detect(report_dir) is None
-        assert not (
-            report_dir / "run_meta.json"
-        ).exists(), "aborting must not leave the previous run's super-pass size behind"
+        assert _detect(report_dir, config=config) is None
+        # Either cleared outright, or left as the earlier run's -- what must not
+        # happen is this run's sidecar being published beside a stale verdict,
+        # which would make that verdict look like it belongs to this run.
+        sidecar = report_dir / "run_meta.json"
+        published = sidecar.exists() and json.loads(sidecar.read_text()) == {
+            "dataset_size": _DATASET_SIZE
+        }
+        assert not published
 
     @pytest.mark.parametrize(
         "outcome",

@@ -57,7 +57,7 @@ overrides**:
 
 ```
 --model <name>            # else auto-detected from config
---tokenizer <hf-id-or-dir># else from `--model`'s registry entry, the config's `tokenizer_name`, or the config model's registry entry / config
+--tokenizer <hf-id-or-dir># else `--model`'s registry entry, then the config's `tokenizer_name` used verbatim, then the config model's registry entry / config
 --dataset-size <N>        # else from run_meta.json / config
 --profile {concurrency,poisson,offline,agentic}   # else from load_pattern
 --superpass-size N  --window-sizes 4,6,8  --warmup auto  --warmup-band 0.05

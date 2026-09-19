@@ -976,3 +976,139 @@ def test_every_real_profile_is_user_selectable(tmp_path, capsys):
             # profile -- which is the point: the profile itself was accepted.
             mod.main([str(events), "--profile", name, "--dataset-size", "8"])
         assert "invalid choice" not in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_profiles_table_is_pinned():
+    """A new profile must be a deliberate addition: it changes what the
+    benchmark gate considers eligible and what --profile accepts."""
+    assert set(mod.PROFILES) == {
+        "concurrency",
+        "poisson",
+        "offline",
+        "agentic",
+        "unknown",
+    }
+
+
+class _TokenizerChosen(Exception):
+    def __init__(self, tokenizer, trust):
+        self.tokenizer = tokenizer
+        self.trust = trust
+
+
+def _resolve_tokenizer_via_main(monkeypatch, tmp_path, *, config_yaml, argv=()):
+    """Run main() far enough to learn which tokenizer it picked.
+
+    Driving the real argument parsing and config read is the point: the
+    precedence lives in main(), and asserting on resolve_tokenizer alone is what
+    let a regression through -- every branch of the chain survived deletion.
+    """
+    (tmp_path / "events.jsonl").write_text("")
+    (tmp_path / "config.yaml").write_text(config_yaml)
+
+    def fake_counter(tokenizer_id, trust_remote_code=False):
+        raise _TokenizerChosen(tokenizer_id, trust_remote_code)
+
+    monkeypatch.setattr(mod, "_make_token_counter", fake_counter)
+
+    with pytest.raises(_TokenizerChosen) as excinfo:
+        mod.main([str(tmp_path), "--dataset-size", "8", *argv])
+    return excinfo.value.tokenizer, excinfo.value.trust
+
+
+_CLUSTER_PATH_CONFIG = """
+model_params:
+  name: /models/gpt-oss-120b
+  tokenizer_name: /models/DeepSeek-V3
+settings:
+  load_pattern:
+    type: concurrency
+"""
+
+_NAME_ONLY_CONFIG = """
+model_params:
+  name: gpt-oss-120b
+settings:
+  load_pattern:
+    type: concurrency
+"""
+
+
+@pytest.mark.unit
+class TestTokenizerPrecedence:
+    def test_explicit_flag_wins(self, tmp_path, monkeypatch):
+        tokenizer, trust = _resolve_tokenizer_via_main(
+            monkeypatch,
+            tmp_path,
+            config_yaml=_CLUSTER_PATH_CONFIG,
+            argv=("--tokenizer", "some/explicit-id"),
+        )
+
+        assert tokenizer == "some/explicit-id"
+        assert trust is False
+
+    def test_model_flag_outranks_the_config(self, tmp_path, monkeypatch):
+        tokenizer, _trust = _resolve_tokenizer_via_main(
+            monkeypatch,
+            tmp_path,
+            config_yaml=_CLUSTER_PATH_CONFIG,
+            argv=("--model", "deepseek-r1"),
+        )
+
+        assert tokenizer == "deepseek-ai/DeepSeek-R1"
+
+    def test_configured_tokenizer_is_used_verbatim(self, tmp_path, monkeypatch):
+        """It must NOT be resolved through MODEL_REGISTRY: that matches loose
+        substrings, so '/models/DeepSeek-V3' would become DeepSeek-R1's
+        tokenizer -- a different model's, silently."""
+        tokenizer, _trust = _resolve_tokenizer_via_main(
+            monkeypatch, tmp_path, config_yaml=_CLUSTER_PATH_CONFIG
+        )
+
+        assert tokenizer == "/models/DeepSeek-V3"
+
+    def test_a_configured_tokenizer_never_enables_remote_code(
+        self, tmp_path, monkeypatch
+    ):
+        """Some registry entries request trust_remote_code. Resolving a config
+        path through the registry would let a run execute Hub code that nobody
+        opted into with --trust-remote-code."""
+        config = _CLUSTER_PATH_CONFIG.replace(
+            "/models/DeepSeek-V3", "/models/Kimi-K2-Instruct"
+        )
+
+        tokenizer, trust = _resolve_tokenizer_via_main(
+            monkeypatch, tmp_path, config_yaml=config
+        )
+
+        assert tokenizer == "/models/Kimi-K2-Instruct"
+        assert trust is False
+
+    def test_falls_back_to_the_model_registry(self, tmp_path, monkeypatch):
+        tokenizer, _trust = _resolve_tokenizer_via_main(
+            monkeypatch, tmp_path, config_yaml=_NAME_ONLY_CONFIG
+        )
+
+        assert tokenizer == "openai/gpt-oss-120b"
+
+    def test_falls_back_to_a_repo_id_shaped_model_name(self, tmp_path, monkeypatch):
+        config = _NAME_ONLY_CONFIG.replace("gpt-oss-120b", "some-org/some-model")
+
+        tokenizer, _trust = _resolve_tokenizer_via_main(
+            monkeypatch, tmp_path, config_yaml=config
+        )
+
+        assert tokenizer == "some-org/some-model"
+
+    def test_an_unresolvable_tokenizer_is_a_clean_error(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        config = _NAME_ONLY_CONFIG.replace("gpt-oss-120b", "mystery-model")
+        (tmp_path / "events.jsonl").write_text("")
+        (tmp_path / "config.yaml").write_text(config)
+
+        with pytest.raises(SystemExit):
+            mod.main([str(tmp_path), "--dataset-size", "8"])
+
+        assert "could not resolve a tokenizer" in capsys.readouterr().err

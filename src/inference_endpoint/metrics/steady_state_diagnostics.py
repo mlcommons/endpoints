@@ -1954,21 +1954,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     cfg = read_run_config(cfg_path, meta_path)
 
     # tokenizer: --tokenizer > --model's registry entry > the config's
-    # tokenizer_name > the config model's registry entry > a slash-containing
-    # model name. Explicit flags outrank the run's config either way.
+    # tokenizer_name, verbatim > the config model's registry entry > a
+    # slash-containing model name.
+    #
+    # The config's tokenizer_name is used exactly as written and never rewritten
+    # through MODEL_REGISTRY. The registry matches loose substrings and some of
+    # its entries request trust_remote_code, so resolving an explicit path
+    # through it could silently swap in a different model's tokenizer, or enable
+    # remote code the user never asked for. A path that does not load is a clear
+    # error the user can fix; a wrong tokenizer is silently wrong token counts.
     model = args.model or cfg["model"]
     reg = resolve_tokenizer(model) if model else None
-    flag_reg = resolve_tokenizer(args.model) if args.model else None
-    # A config tokenizer_name is often a cluster path that will not load
-    # elsewhere, so prefer the registry's portable id when it names a known model.
+    flag_reg = reg if args.model else None
     cfg_tok = cfg["tokenizer_name"]
-    cfg_reg = resolve_tokenizer(cfg_tok) if cfg_tok else None
     if args.tokenizer:
         tokenizer, trust = args.tokenizer, args.trust_remote_code
     elif flag_reg is not None:
         tokenizer, trust = flag_reg
-    elif cfg_reg is not None:
-        tokenizer, trust = cfg_reg
     elif cfg_tok:
         tokenizer, trust = cfg_tok, args.trust_remote_code
     elif reg is not None:
