@@ -37,12 +37,7 @@ from pathlib import Path
 
 from ..compliance import AuditRunArtifacts, AuditRunSpec, AuditTest, get_audit_test
 from ..compliance.result import AuditResult, write_result
-from ..config.schema import (
-    AuditConfig,
-    BenchmarkConfig,
-    DatasetType,
-    SteadyStateConfig,
-)
+from ..config.schema import AuditConfig, BenchmarkConfig, DatasetType
 from ..exceptions import CLIError, ExecutionError, SetupError
 from .benchmark.execute import (
     BenchmarkResult,
@@ -154,7 +149,9 @@ def _run_phases(
             audit=None,
             datasets=phase_datasets,
             settings=config.settings.with_updates(
-                steady_state=SteadyStateConfig(enabled=False)
+                steady_state=config.settings.steady_state.model_copy(
+                    update={"enabled": False}
+                )
             ),
         )
 

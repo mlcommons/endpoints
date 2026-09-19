@@ -302,6 +302,17 @@ PROFILES: dict[str, Profile] = {
         False,
         "agentic steady-state detection is NOT yet supported and requires further study.",
     ),
+    "unknown": Profile(
+        "unknown",
+        "window",
+        "samples",
+        None,
+        (0.03, 0.05, 0.08),
+        "tpot_p50",
+        4096,
+        False,
+        "unrecognised load pattern: no validated profile for this workload.",
+    ),
 }
 _LOAD_PATTERN_PROFILE: dict[str, str] = {
     "agentic_inference": "agentic",
@@ -313,7 +324,18 @@ _LOAD_PATTERN_PROFILE: dict[str, str] = {
 
 
 def profile_for_load_pattern(lp: str) -> Profile:
-    return PROFILES[_LOAD_PATTERN_PROFILE.get(lp, "concurrency")]
+    """Resolve a load pattern to its profile, failing closed.
+
+    An unmapped pattern resolves to an unsupported profile rather than to a
+    validated one: a workload nobody classified must not inherit a verdict.
+    """
+    return PROFILES[_LOAD_PATTERN_PROFILE.get(lp, "unknown")]
+
+
+def format_profile_caveat(profile: Profile) -> str:
+    """The one caveat line this tool writes to stderr. Parsed by the benchmark's
+    post-processing step, so the shape lives here rather than at both ends."""
+    return f"[profile: {profile.name}] {profile.note}"
 
 
 def find_run_files(target: str) -> tuple[str, str | None, str | None]:
@@ -1941,7 +1963,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else profile_for_load_pattern(cfg["load_pattern"] or "concurrency")
     )
     if profile.note:
-        print(f"[profile: {profile.name}] {profile.note}\n", file=sys.stderr)
+        print(f"{format_profile_caveat(profile)}\n", file=sys.stderr)
 
     cov_bounds = args.cov_bounds or list(profile.cov_bounds)
     warmup_driver = args.warmup_driver or profile.warmup_driver

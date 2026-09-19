@@ -26,8 +26,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from inference_endpoint.config.schema import BenchmarkConfig
-from inference_endpoint.metrics.steady_state_diagnostics import profile_for_load_pattern
+from inference_endpoint.config.schema import BenchmarkConfig, LoadPatternType
+from inference_endpoint.metrics.steady_state_diagnostics import (
+    profile_for_load_pattern,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +37,15 @@ DETECTOR_MODULE = "inference_endpoint.metrics.steady_state_diagnostics"
 
 _STDERR_LOG_CHARS = 500
 
-# The child prints this receipt to stderr on every --json run. It is bookkeeping,
-# not a caveat, and must not be reported as one.
-_RECEIPT_PREFIX = "wrote "
+# The detector's stderr also carries bookkeeping ("wrote <path>") and, because the
+# child imports transformers, third-party warnings. Only lines in the detector's
+# own caveat shape are its reliability notes; see format_profile_caveat.
+_CAVEAT_PREFIX = "[profile: "
+
+# Artifacts this step owns. A run that produces no fresh verdict must leave none
+# behind: report_dir is user-settable and reusable, and a stale verdict sitting
+# beside a newer run's results describes a run that no longer exists.
+_ARTIFACTS = ("steady_state.json", "steady_state.txt")
 
 # Matched as substrings against model_params.name, which typically carries a repo
 # id ("deepseek-ai/DeepSeek-R1") or a cluster path ("/models/gpt-oss-120b").
@@ -48,15 +56,16 @@ _RECEIPT_PREFIX = "wrote "
 _SUPPORTED_MODEL_SUBSTRINGS = ("gpt-oss", "deepseek-r1", "dsr1")
 
 
-def should_run(*, model_name: str, enabled: bool, load_pattern: str) -> bool:
-    """Whether this workload is one the detector may judge.
+def is_eligible(*, model_name: str, load_pattern: LoadPatternType) -> bool:
+    """Whether this workload is one the detector has been validated against.
 
     Workload support is the detector's own call (``Profile.supported``): its
-    agentic profile is unsupported today and would otherwise emit a verdict that
-    must not be trusted. Reading that flag here means the parent's gate and the
-    child's profile selection cannot drift apart.
+    agentic profile is unsupported today, and an unrecognised load pattern
+    resolves to an unsupported profile rather than a validated one. Reading that
+    flag here means the parent's gate and the child's profile selection cannot
+    drift apart.
     """
-    if not enabled or not profile_for_load_pattern(load_pattern).supported:
+    if not profile_for_load_pattern(load_pattern.value).supported:
         return False
     lowered = (model_name or "").lower()
     return any(sub in lowered for sub in _SUPPORTED_MODEL_SUBSTRINGS)
@@ -86,11 +95,12 @@ def _write_best_effort(path: Path, text: str) -> None:
         logger.warning("Steady-state detection could not write %s: %s", path.name, e)
 
 
-def _discard_best_effort(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as e:
-        logger.warning("Steady-state detection could not remove %s: %s", path.name, e)
+def _discard_artifacts(report_dir: Path) -> None:
+    for name in _ARTIFACTS:
+        try:
+            (report_dir / name).unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("Steady-state detection could not remove %s: %s", name, e)
 
 
 def write_run_meta(report_dir: Path, dataset_size: int) -> None:
@@ -107,13 +117,18 @@ def write_run_meta(report_dir: Path, dataset_size: int) -> None:
 
 
 def _detector_caveats(stderr: str | None) -> str:
-    """The detector's reliability notes, minus its own 'wrote <path>' receipt."""
+    """The detector's own reliability notes, and nothing else.
+
+    Matches the detector's caveat shape rather than excluding known noise: the
+    child also prints a 'wrote <path>' receipt, and anything transformers emits
+    lands on the same channel. Neither is something the detector said.
+    """
     lines = [
-        line
+        line.strip()
         for line in (stderr or "").splitlines()
-        if line.strip() and not line.strip().startswith(_RECEIPT_PREFIX)
+        if line.strip().startswith(_CAVEAT_PREFIX)
     ]
-    return "\n".join(lines).strip()
+    return "\n".join(lines)
 
 
 def detect_steady_state(
@@ -134,29 +149,29 @@ def detect_steady_state(
     and a run that produced valid performance artifacts must not be failed by a
     diagnostic.
     """
+    load_pattern = config.settings.load_pattern.type
+
+    def skip(reason: str) -> None:
+        logger.info("Steady-state detection skipped: %s", reason)
+        _discard_artifacts(report_dir)
+
+    if not config.settings.steady_state.enabled:
+        skip("disabled by configuration")
+        return None
     if tokenizer_name is None:
-        logger.info("Steady-state detection skipped: the run resolved no tokenizer")
+        skip("the run resolved no tokenizer")
         return None
-
     if dataset_size is None:
-        logger.info("Steady-state detection skipped: dataset size unknown")
+        skip("dataset size unknown")
         return None
-
-    load_pattern = config.settings.load_pattern.type.value
-    if not should_run(
-        model_name=config.model_params.name,
-        enabled=config.settings.steady_state.enabled,
-        load_pattern=load_pattern,
-    ):
-        logger.info(
-            "Steady-state detection not applicable (model=%s, load_pattern=%s)",
-            config.model_params.name,
-            load_pattern,
+    if not is_eligible(model_name=config.model_params.name, load_pattern=load_pattern):
+        skip(
+            f"not a validated workload (model={config.model_params.name}, "
+            f"load_pattern={load_pattern.value})"
         )
         return None
-
     if not (report_dir / "events.jsonl").is_file():
-        logger.info("Steady-state detection skipped: no events.jsonl in %s", report_dir)
+        skip(f"no events.jsonl in {report_dir}")
         return None
 
     write_run_meta(report_dir, dataset_size)
@@ -176,14 +191,15 @@ def detect_steady_state(
         # The run's artifacts are already on disk; a ^C aimed at a slow
         # diagnostic must not downgrade the run to interrupted.
         logger.warning("Steady-state detection cancelled by interrupt")
-        _discard_best_effort(verdict)
+        _discard_artifacts(report_dir)
         return None
-    except Exception as e:  # noqa: BLE001 - diagnostic; never fail a finished run
-        logger.warning("Steady-state detection skipped: %s", e)
-        _discard_best_effort(verdict)
+    except Exception:  # noqa: BLE001 - diagnostic; never fail a finished run
+        # exc_info so a programming error here stays distinguishable from an
+        # environment failure instead of silently disabling the feature.
+        logger.warning("Steady-state detection skipped", exc_info=True)
+        _discard_artifacts(report_dir)
         return None
 
-    caveats = _detector_caveats(proc.stderr)
     if proc.returncode != 0:
         logger.warning(
             "Steady-state detection failed (exit %s): %s",
@@ -192,9 +208,10 @@ def detect_steady_state(
             (proc.stderr or "").strip()[-_STDERR_LOG_CHARS:],
         )
         # The child writes its JSON non-atomically, so a kill can truncate it.
-        _discard_best_effort(verdict)
+        _discard_artifacts(report_dir)
         return None
 
+    caveats = _detector_caveats(proc.stderr)
     if caveats:
         # e.g. "offline: system TPS is unreliable" -- without this the numbers in
         # steady_state.json look more trustworthy than the detector claims.
@@ -204,6 +221,10 @@ def detect_steady_state(
     if stdout_text or caveats:
         body = f"{stdout_text}\n{caveats}\n" if caveats else f"{stdout_text}\n"
         _write_best_effort(report_dir / "steady_state.txt", body)
+
+    if not verdict.is_file():
+        logger.warning("Steady-state detection produced no %s", verdict.name)
+        return None
 
     logger.info("Steady-state detection complete: %s", verdict)
     return verdict

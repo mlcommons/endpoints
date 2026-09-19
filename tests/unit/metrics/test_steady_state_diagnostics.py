@@ -816,7 +816,11 @@ def test_profile_for_load_pattern():
     assert mod.profile_for_load_pattern("max_throughput").name == "offline"
     assert mod.profile_for_load_pattern("offline").name == "offline"
     assert mod.profile_for_load_pattern("concurrency").name == "concurrency"
-    assert mod.profile_for_load_pattern("something-unknown").name == "concurrency"
+    # Unmapped patterns must not inherit a validated profile: a workload nobody
+    # classified gets an explicitly unsupported one, so the benchmark gate skips it.
+    unknown = mod.profile_for_load_pattern("something-unknown")
+    assert unknown.name == "unknown"
+    assert unknown.supported is False
 
 
 def test_find_run_files_from_dir_and_events(tmp_path):
