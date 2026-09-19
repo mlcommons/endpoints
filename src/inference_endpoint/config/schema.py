@@ -953,8 +953,7 @@ class SteadyStateConfig(BaseModel):
 
     Once a run finishes, the detector reconstructs per-super-pass TTFT/TPOT from
     ``events.jsonl`` and reports the steady window it finds, writing
-    ``steady_state.json`` and ``steady_state.txt`` beside the report. It runs only
-    only for an explicit allowlist of validated models (gpt-oss, deepseek-r1/dsr1),
+    ``steady_state.json`` and ``steady_state.txt`` beside the report. It runs only for an explicit allowlist of validated models (gpt-oss, deepseek-r1/dsr1),
     and never for agentic or accuracy-only runs. The output is additive -- the
     Report and ``result_summary.json`` are untouched -- so it is on by default;
     ``enabled: false`` is the single opt-out, which matters because tokenizing every

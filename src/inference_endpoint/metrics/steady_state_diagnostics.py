@@ -1790,6 +1790,8 @@ def render_text(result: DiagnosticsResult, cov_bounds: Sequence[float]) -> str:
 def _make_token_counter(
     tokenizer_id: str, trust_remote_code: bool = False
 ) -> Callable[[list[str]], list[int]]:
+    # Deliberately not hoisted: importing transformers costs seconds, and the
+    # --help, argument-validation and agentic paths never tokenize.
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(

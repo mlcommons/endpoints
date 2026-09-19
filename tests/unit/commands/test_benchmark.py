@@ -175,6 +175,10 @@ class _InlinePerformanceScorer(Scorer, scorer_id="_test_inline_performance"):
 
 
 # Reusable minimal config kwargs
+# Hermetic local tokenizer: finalize's full-run-OSL pass tokenizes for real, and a
+# HF repo id would make these unit tests network- and cache-dependent.
+_CHAR_TOKENIZER = str(Path(__file__).parents[2] / "assets" / "tokenizers" / "char")
+
 _OFFLINE_KWARGS = {
     "endpoint_config": {"endpoints": ["http://test:8000"]},
     "model_params": {"name": "test-model"},
@@ -3705,7 +3709,7 @@ class TestSteadyStateHook:
             config=config,
             report_dir=tmp_path,
             dataloader=_make_loaded_dataset(3),
-            tokenizer_name="openai/gpt-oss-120b",
+            tokenizer_name=_CHAR_TOKENIZER,
             **kwargs,
         )
 
@@ -3733,7 +3737,7 @@ class TestSteadyStateHook:
 
         assert spawned, "finalize_benchmark never reached the detector"
         assert "--tokenizer" in spawned[0]
-        assert "openai/gpt-oss-120b" in spawned[0]
+        assert _CHAR_TOKENIZER in spawned[0]
         assert json.loads((tmp_path / "run_meta.json").read_text()) == {
             "dataset_size": 3
         }
@@ -3771,7 +3775,7 @@ class TestSteadyStateHook:
         ctx = _make_benchmark_context(
             config=OfflineConfig(**_OFFLINE_KWARGS),
             report_dir=tmp_path,
-            tokenizer_name="some/tokenizer",
+            tokenizer_name=_CHAR_TOKENIZER,
         )
 
         finalize_benchmark(ctx, _make_benchmark_result(tmp_path))

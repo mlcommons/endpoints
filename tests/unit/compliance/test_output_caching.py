@@ -569,6 +569,12 @@ class TestRunAuditGuards:
 
         # The per-phase config must carry performance datasets only.
         assert config.with_updates.call_args.kwargs["datasets"] == [perf_ds]
+        # Audit phases must not run the steady-state detector: TEST04's audit
+        # phase issues one repeated sample, and finalize runs once per phase.
+        assert (
+            config.settings.with_updates.call_args.kwargs["steady_state"].enabled
+            is False
+        )
 
     @pytest.mark.unit
     def test_rejects_when_no_performance_dataset(self, tmp_path):

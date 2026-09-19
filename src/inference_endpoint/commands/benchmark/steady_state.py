@@ -8,11 +8,14 @@ Runs the detector over a finished run's ``events.jsonl`` and leaves
 out-of-process so that nothing it does -- an unbounded tokenization pass, an
 unhandled input shape -- can touch the run's primary artifacts or fail finalize.
 
-Every input the detector cannot safely guess is pinned here rather than left to
-its own auto-detection: the tokenizer is the one the run itself resolved, and the
-super-pass size is written to ``run_meta.json``. Pinning the tokenizer also keeps
-the child off its internal model registry, whose entries can request
-``trust_remote_code``.
+Every input the detector would otherwise guess is pinned on its command line: the
+tokenizer is the one the run itself resolved, and the super-pass size comes from
+the loaded dataset. Pinning the tokenizer also keeps the child off its internal
+model registry, whose entries can request ``trust_remote_code``.
+
+Which workloads the detector may judge is its own decision, read from
+``Profile.supported``, so enabling a new one is a change in the detector rather
+than here.
 """
 
 from __future__ import annotations
@@ -23,13 +26,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-from inference_endpoint.config.schema import BenchmarkConfig, DatasetType
+from inference_endpoint.config.schema import BenchmarkConfig
+from inference_endpoint.metrics.steady_state_diagnostics import profile_for_load_pattern
 
 logger = logging.getLogger(__name__)
 
 DETECTOR_MODULE = "inference_endpoint.metrics.steady_state_diagnostics"
 
 _STDERR_LOG_CHARS = 500
+
+# The child prints this receipt to stderr on every --json run. It is bookkeeping,
+# not a caveat, and must not be reported as one.
+_RECEIPT_PREFIX = "wrote "
 
 # Matched as substrings against model_params.name, which typically carries a repo
 # id ("deepseek-ai/DeepSeek-R1") or a cluster path ("/models/gpt-oss-120b").
@@ -40,27 +48,23 @@ _STDERR_LOG_CHARS = 500
 _SUPPORTED_MODEL_SUBSTRINGS = ("gpt-oss", "deepseek-r1", "dsr1")
 
 
-def should_run(
-    *,
-    model_name: str,
-    enabled: bool,
-    is_agentic: bool,
-    tokenizer_name: str | None,
-) -> bool:
-    """Whether this run earns a steady-state pass.
+def should_run(*, model_name: str, enabled: bool, load_pattern: str) -> bool:
+    """Whether this workload is one the detector may judge.
 
-    Agentic runs are excluded because the detector's agentic profile is marked
-    unsupported -- it would emit a verdict that must not be trusted. A run whose
-    tokenizer could not be resolved is excluded because the detector would then
-    fall back to guessing one from the model name.
+    Workload support is the detector's own call (``Profile.supported``): its
+    agentic profile is unsupported today and would otherwise emit a verdict that
+    must not be trusted. Reading that flag here means the parent's gate and the
+    child's profile selection cannot drift apart.
     """
-    if not enabled or is_agentic or tokenizer_name is None:
+    if not enabled or not profile_for_load_pattern(load_pattern).supported:
         return False
     lowered = (model_name or "").lower()
     return any(sub in lowered for sub in _SUPPORTED_MODEL_SUBSTRINGS)
 
 
-def build_command(report_dir: Path, *, tokenizer_name: str) -> list[str]:
+def build_command(
+    report_dir: Path, *, tokenizer_name: str, dataset_size: int
+) -> list[str]:
     return [
         sys.executable,
         "-m",
@@ -70,113 +74,136 @@ def build_command(report_dir: Path, *, tokenizer_name: str) -> list[str]:
         str(report_dir / "steady_state.json"),
         "--tokenizer",
         tokenizer_name,
+        "--dataset-size",
+        str(dataset_size),
     ]
 
 
-def _write_text(path: Path, text: str) -> None:
-    """Write an optional artifact without ever failing the run."""
+def _write_best_effort(path: Path, text: str) -> None:
     try:
         path.write_text(text)
     except OSError as e:
         logger.warning("Steady-state detection could not write %s: %s", path.name, e)
 
 
-def write_run_meta(report_dir: Path, dataset_size: int) -> None:
-    """Write the detector's ``run_meta.json`` sidecar.
+def _discard_best_effort(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("Steady-state detection could not remove %s: %s", path.name, e)
 
-    Super-pass size is the one input the detector needs that the run's
-    ``config.yaml`` does not already carry, and it refuses to run without it.
-    Recording it in the run directory also lets the detector be re-run by hand
-    against that directory later with no arguments.
+
+def write_run_meta(report_dir: Path, dataset_size: int) -> None:
+    """Record the super-pass size so the detector can be re-run by hand later.
+
+    The integration pins this on the command line; the sidecar exists so that
+    ``python -m inference_endpoint.metrics.steady_state_diagnostics <report_dir>``
+    works against the finished directory with no arguments.
     """
-    _write_text(
+    _write_best_effort(
         report_dir / "run_meta.json",
         json.dumps({"dataset_size": dataset_size}, indent=2),
     )
 
 
-def _perf_dataset_is_agentic(config: BenchmarkConfig) -> bool:
-    return any(
-        d.agentic_inference is not None
-        for d in config.datasets
-        if d.type == DatasetType.PERFORMANCE
-    )
+def _detector_caveats(stderr: str | None) -> str:
+    """The detector's reliability notes, minus its own 'wrote <path>' receipt."""
+    lines = [
+        line
+        for line in (stderr or "").splitlines()
+        if line.strip() and not line.strip().startswith(_RECEIPT_PREFIX)
+    ]
+    return "\n".join(lines).strip()
 
 
-def run_for_context(
+def detect_steady_state(
     report_dir: Path,
     config: BenchmarkConfig,
     *,
     tokenizer_name: str | None,
     dataset_size: int | None,
-) -> None:
+) -> Path | None:
     """Run the detector for a finished run, best-effort.
 
     ``tokenizer_name`` and ``dataset_size`` are resolved by the run rather than
     read from the config: the former honours the ``model_params.tokenizer_name``
     override, and the latter only exists once the dataset is loaded.
 
-    Every failure path is absorbed: this is additive reporting, and a run that
-    produced valid performance artifacts must not be failed by a diagnostic.
+    Returns the verdict path on success, ``None`` when the run was skipped or the
+    detector failed. Every failure path is absorbed: this is additive reporting,
+    and a run that produced valid performance artifacts must not be failed by a
+    diagnostic.
     """
-    if not should_run(
-        model_name=config.model_params.name,
-        enabled=config.settings.steady_state.enabled,
-        is_agentic=_perf_dataset_is_agentic(config),
-        tokenizer_name=tokenizer_name,
-    ):
-        logger.debug(
-            "Steady-state detection not applicable (model=%s)",
-            config.model_params.name,
-        )
-        return
+    if tokenizer_name is None:
+        logger.info("Steady-state detection skipped: the run resolved no tokenizer")
+        return None
 
     if dataset_size is None:
         logger.info("Steady-state detection skipped: dataset size unknown")
-        return
+        return None
+
+    load_pattern = config.settings.load_pattern.type.value
+    if not should_run(
+        model_name=config.model_params.name,
+        enabled=config.settings.steady_state.enabled,
+        load_pattern=load_pattern,
+    ):
+        logger.info(
+            "Steady-state detection not applicable (model=%s, load_pattern=%s)",
+            config.model_params.name,
+            load_pattern,
+        )
+        return None
 
     if not (report_dir / "events.jsonl").is_file():
         logger.info("Steady-state detection skipped: no events.jsonl in %s", report_dir)
-        return
+        return None
 
     write_run_meta(report_dir, dataset_size)
+    verdict = report_dir / "steady_state.json"
 
-    # tokenizer_name is not None here -- should_run rejected that case.
-    assert tokenizer_name is not None
     try:
         proc = subprocess.run(
-            build_command(report_dir, tokenizer_name=tokenizer_name),
+            build_command(
+                report_dir, tokenizer_name=tokenizer_name, dataset_size=dataset_size
+            ),
             capture_output=True,
             text=True,
             timeout=config.settings.timeouts.steady_state_timeout_s,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as e:
-        logger.warning("Steady-state detection skipped: %s", e)
-        return
     except KeyboardInterrupt:
         # The run's artifacts are already on disk; a ^C aimed at a slow
         # diagnostic must not downgrade the run to interrupted.
         logger.warning("Steady-state detection cancelled by interrupt")
-        return
+        _discard_best_effort(verdict)
+        return None
+    except Exception as e:  # noqa: BLE001 - diagnostic; never fail a finished run
+        logger.warning("Steady-state detection skipped: %s", e)
+        _discard_best_effort(verdict)
+        return None
 
-    notes = (proc.stderr or "").strip()
+    caveats = _detector_caveats(proc.stderr)
     if proc.returncode != 0:
         logger.warning(
             "Steady-state detection failed (exit %s): %s",
             proc.returncode,
-            notes[:_STDERR_LOG_CHARS],
+            # The useful part of a crash -- the exception and message -- is last.
+            (proc.stderr or "").strip()[-_STDERR_LOG_CHARS:],
         )
-        return
+        # The child writes its JSON non-atomically, so a kill can truncate it.
+        _discard_best_effort(verdict)
+        return None
 
-    if notes:
-        # The detector reports profile caveats (e.g. "system TPS is unreliable"
-        # for offline runs) on stderr. Dropping them would leave the numbers in
-        # steady_state.json looking more trustworthy than the detector claims.
-        logger.info("Steady-state detector notes: %s", notes[:_STDERR_LOG_CHARS])
+    if caveats:
+        # e.g. "offline: system TPS is unreliable" -- without this the numbers in
+        # steady_state.json look more trustworthy than the detector claims.
+        logger.info("Steady-state detector caveats: %s", caveats[:_STDERR_LOG_CHARS])
 
-    report = (proc.stdout or "").rstrip("\n")
-    if report or notes:
-        body = f"{report}\n{notes}\n" if notes else f"{report}\n"
-        _write_text(report_dir / "steady_state.txt", body)
-    logger.info("Steady-state detection wrote %s", report_dir / "steady_state.json")
+    stdout_text = (proc.stdout or "").rstrip("\n")
+    if stdout_text or caveats:
+        body = f"{stdout_text}\n{caveats}\n" if caveats else f"{stdout_text}\n"
+        _write_best_effort(report_dir / "steady_state.txt", body)
+
+    logger.info("Steady-state detection complete: %s", verdict)
+    return verdict
