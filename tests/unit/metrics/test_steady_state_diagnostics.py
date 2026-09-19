@@ -991,7 +991,10 @@ def test_profiles_table_is_pinned():
     }
 
 
-class _TokenizerChosen(Exception):
+class _TokenizerChosen(BaseException):
+    """BaseException so that no `except Exception` in the code under test can
+    absorb the probe and turn a real assertion into a silent pass."""
+
     def __init__(self, tokenizer, trust):
         self.tokenizer = tokenizer
         self.trust = trust
@@ -1000,9 +1003,8 @@ class _TokenizerChosen(Exception):
 def _resolve_tokenizer_via_main(monkeypatch, tmp_path, *, config_yaml, argv=()):
     """Run main() far enough to learn which tokenizer it picked.
 
-    Driving the real argument parsing and config read is the point: the
-    precedence lives in main(), and asserting on resolve_tokenizer alone is what
-    let a regression through -- every branch of the chain survived deletion.
+    Drives the real argument parsing and config read, because the precedence
+    lives in main() rather than in resolve_tokenizer.
     """
     (tmp_path / "events.jsonl").write_text("")
     (tmp_path / "config.yaml").write_text(config_yaml)
@@ -1095,15 +1097,16 @@ class TestTokenizerPrecedence:
     def test_falls_back_to_a_repo_id_shaped_model_name(self, tmp_path, monkeypatch):
         config = _NAME_ONLY_CONFIG.replace("gpt-oss-120b", "some-org/some-model")
 
-        tokenizer, _trust = _resolve_tokenizer_via_main(
+        tokenizer, trust = _resolve_tokenizer_via_main(
             monkeypatch, tmp_path, config_yaml=config
         )
 
         assert tokenizer == "some-org/some-model"
+        # This branch uses a config value as the tokenizer, so it is the last
+        # place a configured value could raise trust_remote_code on its own.
+        assert trust is False
 
-    def test_an_unresolvable_tokenizer_is_a_clean_error(
-        self, tmp_path, monkeypatch, capsys
-    ):
+    def test_an_unresolvable_tokenizer_is_a_clean_error(self, tmp_path, capsys):
         config = _NAME_ONLY_CONFIG.replace("gpt-oss-120b", "mystery-model")
         (tmp_path / "events.jsonl").write_text("")
         (tmp_path / "config.yaml").write_text(config)

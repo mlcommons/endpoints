@@ -1994,7 +1994,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     warmup_driver = args.warmup_driver or profile.warmup_driver
     flush = args.tokenize_batch_size or profile.tokenize_batch_size
     window_sizes = args.window_sizes or [4, 6, 8]
-    count_tokens = _make_token_counter(tokenizer, trust)
+    try:
+        count_tokens = _make_token_counter(tokenizer, trust)
+    except (OSError, ValueError, ImportError) as e:
+        # A config's tokenizer_name is used verbatim, so a cluster path recorded
+        # on one machine will not load on another. Every other resolution
+        # failure here is an ap.error with a hint; this one should be too.
+        ap.error(f"could not load tokenizer {tokenizer!r}: {e}; pass --tokenizer")
 
     if profile.metric == "natl":
         sp_traj = args.superpass_size or profile.superpass_size or 32
