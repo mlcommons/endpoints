@@ -42,6 +42,7 @@ from inference_endpoint.config.schema import (
     DatasetType,
     LoadPatternType,
     OutputCachingTestConfig,
+    SteadyStateConfig,
     TestMode,
 )
 from inference_endpoint.exceptions import ExecutionError, SetupError
@@ -574,6 +575,16 @@ class TestRunAuditGuards:
         assert config.settings.steady_state.model_copy.call_args.kwargs["update"] == {
             "enabled": False
         }
+        # model_copy(update=...) bypasses pydantic validation, so pin the field
+        # name against the real model: a rename must fail here, not silently
+        # no-op and leave audit phases running the detector.
+        assert (
+            SteadyStateConfig().model_copy(update={"enabled": False}).enabled is False
+        )
+        assert (
+            config.settings.with_updates.call_args.kwargs["steady_state"]
+            is config.settings.steady_state.model_copy.return_value
+        )
 
     @pytest.mark.unit
     def test_rejects_when_no_performance_dataset(self, tmp_path):

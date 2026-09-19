@@ -287,9 +287,11 @@ PROFILES: dict[str, Profile] = {
         (0.03, 0.05, 0.08),
         "tpot_p50",
         4096,
-        True,
+        False,
         "offline: issue-time throughput degenerate (all issued at t=0); the window and "
-        "drain are completion-based (partial support -- system TPS is unreliable).",
+        "drain are completion-based (partial support -- system TPS is unreliable). The "
+        "min-duration gate is measured on the issue span, which collapses to ~0 here, so "
+        "a window is always reported too short: diagnostic only, not an automatic verdict.",
     ),
     "agentic": Profile(
         "agentic",
@@ -334,8 +336,12 @@ def profile_for_load_pattern(lp: str) -> Profile:
 
 def format_profile_caveat(profile: Profile) -> str:
     """The one caveat line this tool writes to stderr. Parsed by the benchmark's
-    post-processing step, so the shape lives here rather than at both ends."""
-    return f"[profile: {profile.name}] {profile.note}"
+    post-processing step, so the shape lives here rather than at both ends.
+
+    Collapsed to a single line: the consumer matches the prefix per line, so a
+    wrapped note would lose everything after the first line.
+    """
+    return f"[profile: {profile.name}] {' '.join(profile.note.split())}"
 
 
 def find_run_files(target: str) -> tuple[str, str | None, str | None]:
@@ -1907,7 +1913,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument(
         "--profile",
         default=None,
-        choices=list(PROFILES),
+        choices=[name for name in PROFILES if name != "unknown"],
         help="workload profile (auto-selected from the run's load pattern)",
     )
     ap.add_argument(

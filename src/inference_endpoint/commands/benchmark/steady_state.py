@@ -42,10 +42,14 @@ _STDERR_LOG_CHARS = 500
 # own caveat shape are its reliability notes; see format_profile_caveat.
 _CAVEAT_PREFIX = "[profile: "
 
-# Artifacts this step owns. A run that produces no fresh verdict must leave none
-# behind: report_dir is user-settable and reusable, and a stale verdict sitting
-# beside a newer run's results describes a run that no longer exists.
-_ARTIFACTS = ("steady_state.json", "steady_state.txt")
+# Artifacts this step owns. report_dir is user-settable and reusable, so a run
+# that produces no fresh verdict must leave none behind: a stale file describes a
+# run whose sibling artifacts have already been overwritten. run_meta.json is
+# separate because a run that spawns the detector keeps its own fresh copy even
+# when the detector then fails -- a stale one would silently feed the wrong
+# super-pass size to a later hand re-run.
+_VERDICT_ARTIFACTS = ("steady_state.json", "steady_state.txt")
+_ALL_ARTIFACTS = (*_VERDICT_ARTIFACTS, "run_meta.json")
 
 # Matched as substrings against model_params.name, which typically carries a repo
 # id ("deepseek-ai/DeepSeek-R1") or a cluster path ("/models/gpt-oss-120b").
@@ -95,8 +99,8 @@ def _write_best_effort(path: Path, text: str) -> None:
         logger.warning("Steady-state detection could not write %s: %s", path.name, e)
 
 
-def _discard_artifacts(report_dir: Path) -> None:
-    for name in _ARTIFACTS:
+def _discard(report_dir: Path, names: tuple[str, ...]) -> None:
+    for name in names:
         try:
             (report_dir / name).unlink(missing_ok=True)
         except OSError as e:
@@ -153,7 +157,7 @@ def detect_steady_state(
 
     def skip(reason: str) -> None:
         logger.info("Steady-state detection skipped: %s", reason)
-        _discard_artifacts(report_dir)
+        _discard(report_dir, _ALL_ARTIFACTS)
 
     if not config.settings.steady_state.enabled:
         skip("disabled by configuration")
@@ -174,6 +178,10 @@ def detect_steady_state(
         skip(f"no events.jsonl in {report_dir}")
         return None
 
+    # Clear the previous run's verdict before spawning: the success check below is
+    # an existence test, so a child that exits 0 without writing would otherwise
+    # republish a stale verdict as this run's.
+    _discard(report_dir, _VERDICT_ARTIFACTS)
     write_run_meta(report_dir, dataset_size)
     verdict = report_dir / "steady_state.json"
 
@@ -191,13 +199,13 @@ def detect_steady_state(
         # The run's artifacts are already on disk; a ^C aimed at a slow
         # diagnostic must not downgrade the run to interrupted.
         logger.warning("Steady-state detection cancelled by interrupt")
-        _discard_artifacts(report_dir)
+        _discard(report_dir, _VERDICT_ARTIFACTS)
         return None
     except Exception:  # noqa: BLE001 - diagnostic; never fail a finished run
         # exc_info so a programming error here stays distinguishable from an
         # environment failure instead of silently disabling the feature.
         logger.warning("Steady-state detection skipped", exc_info=True)
-        _discard_artifacts(report_dir)
+        _discard(report_dir, _VERDICT_ARTIFACTS)
         return None
 
     if proc.returncode != 0:
@@ -208,7 +216,7 @@ def detect_steady_state(
             (proc.stderr or "").strip()[-_STDERR_LOG_CHARS:],
         )
         # The child writes its JSON non-atomically, so a kill can truncate it.
-        _discard_artifacts(report_dir)
+        _discard(report_dir, _VERDICT_ARTIFACTS)
         return None
 
     caveats = _detector_caveats(proc.stderr)
@@ -224,6 +232,7 @@ def detect_steady_state(
 
     if not verdict.is_file():
         logger.warning("Steady-state detection produced no %s", verdict.name)
+        _discard(report_dir, _VERDICT_ARTIFACTS)
         return None
 
     logger.info("Steady-state detection complete: %s", verdict)

@@ -953,9 +953,9 @@ class SteadyStateConfig(BaseModel):
 
     Once a run finishes, the detector reconstructs per-super-pass TTFT/TPOT from
     ``events.jsonl`` and reports the steady window it finds, writing
-    ``steady_state.json`` and ``steady_state.txt`` beside the report. It runs only for the validated models allowlisted in
-    ``commands/benchmark/steady_state.py``, and never for accuracy-only runs or
-    workloads the detector marks unsupported. The output is additive -- the
+    ``steady_state.json`` and ``steady_state.txt`` beside the report. It runs only
+    for the validated models allowlisted in ``commands/benchmark/steady_state.py``,
+    and never for accuracy-only runs or workloads the detector marks unsupported. The output is additive -- the
     Report and ``result_summary.json`` are untouched -- so it is on by default;
     ``enabled: false`` is the single opt-out, which matters because tokenizing every
     response is not free. See ``docs/steady_state_diagnostics.md``.

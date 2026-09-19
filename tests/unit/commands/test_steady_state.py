@@ -32,14 +32,22 @@ _DATASET_SIZE = 6396
 # The load patterns the detector has a validated profile for. Stated here rather
 # than derived, so adding a pattern forces a decision instead of inheriting one.
 _ELIGIBLE_PATTERNS = {
-    LoadPatternType.MAX_THROUGHPUT,
     LoadPatternType.POISSON,
     LoadPatternType.CONCURRENCY,
 }
 
 
 def _report_dir(tmp_path):
+    """A report dir that already holds an earlier run's artifacts.
+
+    report_dir is user-settable and reusable, so the interesting case is the
+    dirty one: assertions that nothing is left behind are vacuous against a
+    directory that never had anything in it.
+    """
     (tmp_path / "events.jsonl").write_text("")
+    (tmp_path / "steady_state.json").write_text('{"from": "an earlier run"}')
+    (tmp_path / "steady_state.txt").write_text("an earlier run\n")
+    (tmp_path / "run_meta.json").write_text('{"dataset_size": 11}')
     return tmp_path
 
 
@@ -120,8 +128,8 @@ class TestCaveatFilter:
         """Pinned against the detector's own formatter rather than a copy of the
         string, so a change on either side fails here instead of silently
         publishing bookkeeping as a reliability note."""
-        profile = steady_state_diagnostics.profile_for_load_pattern("max_throughput")
-        assert profile.note, "expected the offline profile to carry a caveat"
+        profile = steady_state_diagnostics.profile_for_load_pattern("poisson")
+        assert profile.note, "expected the poisson profile to carry a caveat"
 
         line = steady_state_diagnostics.format_profile_caveat(profile)
 
@@ -146,8 +154,12 @@ class TestCaveatFilter:
 
 
 def _config(model_name="gpt-oss-120b", **settings):
+    """A concurrency run: the detector has a validated profile for it."""
+    settings.setdefault(
+        "load_pattern", {"type": "concurrency", "target_concurrency": 8}
+    )
     return BenchmarkConfig(
-        type=TestType.OFFLINE,
+        type=TestType.ONLINE,
         model_params={"name": model_name},
         endpoint_config={"endpoints": ["http://x"]},
         datasets=[{"path": "D"}],
@@ -177,8 +189,14 @@ def _detect(report_dir, config=None, **overrides):
     return steady_state.detect_steady_state(report_dir, config or _config(), **kwargs)
 
 
-def _succeeding(stdout="headline\n", stderr=""):
-    return lambda cmd, **kw: _completed(cmd, stdout=stdout, stderr=stderr)
+def _succeeding(report_dir, stdout="headline\n", stderr=""):
+    """A child that behaves like the real one: exit 0 AND a verdict on disk."""
+
+    def run(cmd, **kw):
+        (report_dir / "steady_state.json").write_text("{}")
+        return _completed(cmd, stdout=stdout, stderr=stderr)
+
+    return run
 
 
 class TestDetectSteadyState:
@@ -207,7 +225,9 @@ class TestDetectSteadyState:
 
     def test_writes_stdout_to_a_sibling_text_report(self, tmp_path, monkeypatch):
         report_dir = _report_dir(tmp_path)
-        monkeypatch.setattr(subprocess, "run", _succeeding(stdout="HEADLINE\n"))
+        monkeypatch.setattr(
+            subprocess, "run", _succeeding(report_dir, stdout="HEADLINE\n")
+        )
 
         _detect(report_dir)
 
@@ -221,7 +241,9 @@ class TestDetectSteadyState:
         authoritative."""
         report_dir = _report_dir(tmp_path)
         caveat = "[profile: offline] offline: system TPS is unreliable"
-        monkeypatch.setattr(subprocess, "run", _succeeding(stderr=caveat + "\n"))
+        monkeypatch.setattr(
+            subprocess, "run", _succeeding(report_dir, stderr=caveat + "\n")
+        )
 
         with caplog.at_level(logging.INFO):
             _detect(report_dir)
@@ -239,7 +261,7 @@ class TestDetectSteadyState:
             "None of PyTorch, TensorFlow >= 2.0 have been found.\n"
             f"\nwrote {report_dir / 'steady_state.json'}\n"
         )
-        monkeypatch.setattr(subprocess, "run", _succeeding(stderr=noise))
+        monkeypatch.setattr(subprocess, "run", _succeeding(report_dir, stderr=noise))
 
         with caplog.at_level(logging.INFO):
             _detect(report_dir)
@@ -309,7 +331,9 @@ class TestDetectSteadyState:
     def test_a_silent_child_is_not_reported_as_success(self, tmp_path, monkeypatch):
         """Exit 0 without a verdict file is not a result."""
         report_dir = _report_dir(tmp_path)
-        monkeypatch.setattr(subprocess, "run", _succeeding())
+        monkeypatch.setattr(
+            subprocess, "run", lambda cmd, **kw: _completed(cmd, stdout="headline\n")
+        )
 
         assert _detect(report_dir) is None
 
@@ -356,35 +380,69 @@ class TestBestEffortContract:
         assert "steady-state" in caplog.text.lower()
 
     @pytest.mark.parametrize(
-        "outcome",
+        ("outcome", "kwargs"),
         [
-            pytest.param("failure", id="nonzero-exit"),
-            pytest.param("timeout", id="timeout"),
-            pytest.param("skip", id="ineligible"),
+            pytest.param("failure", {}, id="nonzero-exit"),
+            pytest.param("timeout", {}, id="timeout"),
+            pytest.param("interrupt", {}, id="interrupt"),
+            pytest.param("silent", {}, id="exit-0-no-verdict"),
+            pytest.param("skip", {"config": _config("llama-3.1-8b")}, id="ineligible"),
+            pytest.param(
+                "skip",
+                {"config": _config(**{"steady_state": {"enabled": False}})},
+                id="disabled",
+            ),
+            pytest.param("skip", {"tokenizer_name": None}, id="no-tokenizer"),
+            pytest.param("skip", {"dataset_size": None}, id="no-dataset-size"),
         ],
     )
     def test_a_stale_verdict_never_outlives_the_run_it_described(
-        self, tmp_path, monkeypatch, outcome
+        self, tmp_path, monkeypatch, outcome, kwargs
     ):
         """report_dir is user-settable and reusable: a previous run's verdict must
         not sit beside a newer run's results."""
         report_dir = _report_dir(tmp_path)
-        stale_json = report_dir / "steady_state.json"
-        stale_txt = report_dir / "steady_state.txt"
-        stale_json.write_text('{"from": "an earlier run"}')
-        stale_txt.write_text("an earlier run\n")
 
         def run(cmd, **kw):
             if outcome == "timeout":
                 raise subprocess.TimeoutExpired(cmd, 1.0)
+            if outcome == "interrupt":
+                raise KeyboardInterrupt
+            if outcome == "silent":
+                return _completed(cmd, 0, stdout="headline\n")
             return _completed(cmd, 2, stderr="failed")
 
         monkeypatch.setattr(subprocess, "run", run)
-        config = _config("llama-3.1-8b") if outcome == "skip" else _config()
-        _detect(report_dir, config=config)
 
-        assert not stale_json.exists()
-        assert not stale_txt.exists()
+        assert _detect(report_dir, **kwargs) is None
+        assert not (report_dir / "steady_state.json").exists()
+        assert not (report_dir / "steady_state.txt").exists()
+
+    def test_a_skipped_run_clears_the_stale_sidecar_too(self, tmp_path, monkeypatch):
+        """A stale run_meta.json would feed the wrong super-pass size to a later
+        by-hand re-run against this directory."""
+        report_dir = _report_dir(tmp_path)
+        monkeypatch.setattr(
+            subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
+        )
+
+        _detect(report_dir, config=_config("llama-3.1-8b"))
+
+        assert not (report_dir / "run_meta.json").exists()
+
+    def test_a_failed_run_keeps_its_own_fresh_sidecar(self, tmp_path, monkeypatch):
+        """The detector ran, so run_meta.json describes THIS run and stays usable
+        for a by-hand retry."""
+        report_dir = _report_dir(tmp_path)
+        monkeypatch.setattr(
+            subprocess, "run", lambda cmd, **kw: _completed(cmd, 2, stderr="failed")
+        )
+
+        _detect(report_dir)
+
+        assert json.loads((report_dir / "run_meta.json").read_text()) == {
+            "dataset_size": _DATASET_SIZE
+        }
 
     @pytest.mark.parametrize("artifact", ["run_meta.json", "steady_state.txt"])
     def test_unwritable_report_dir_is_absorbed(
@@ -392,7 +450,7 @@ class TestBestEffortContract:
     ):
         """A full disk or read-only mount must not fail a finished run."""
         report_dir = _report_dir(tmp_path)
-        monkeypatch.setattr(subprocess, "run", _succeeding(stdout="out\n"))
+        monkeypatch.setattr(subprocess, "run", _succeeding(report_dir, stdout="out\n"))
         real_write_text = Path.write_text
 
         def failing_write_text(self, *args, **kwargs):

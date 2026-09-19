@@ -3702,8 +3702,12 @@ class TestSteadyStateHook:
 
     @staticmethod
     def _eligible_ctx(tmp_path, **kwargs):
-        config = OfflineConfig(
-            **{**_OFFLINE_KWARGS, "model_params": {"name": "gpt-oss-120b"}}
+        # Concurrency, not offline: the detector has no validated profile for
+        # offline runs (its min-duration gate measures the issue span, which
+        # collapses to ~0 when everything is issued at t=0).
+        config = OnlineConfig(
+            **{**_OFFLINE_KWARGS, "model_params": {"name": "gpt-oss-120b"}},
+            settings={"load_pattern": {"type": "concurrency", "target_concurrency": 8}},
         )
         return _make_benchmark_context(
             config=config,
