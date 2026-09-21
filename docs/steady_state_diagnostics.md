@@ -30,9 +30,20 @@ operator's quick reference.
 
 ## Running it automatically after a benchmark
 
-`finalize_benchmark` can run the detector for you, last and out-of-process, writing
-`steady_state.json` + `steady_state.txt` (and the `run_meta.json` it consumes) into the
-report directory. The `Report` and `result_summary.json` are untouched.
+`finalize_benchmark` can run the detector for you, out-of-process, between the metrics
+drain and the report. It writes `steady_state.json` (the full diagnostics) +
+`steady_state.txt` (and the `run_meta.json` it consumes) into the report directory, and
+puts the compact headline -- window, TPS, TTFT/TPOT, drift -- on the report itself, so it
+appears in `performance/result_summary.json`, `report.txt`, and the console summary.
+
+The per-super-pass trajectories and the CoV/drift tables stay in `steady_state.json`;
+embedding them would dwarf the rest of the summary.
+
+Because the report is rendered after detection, a slow detector delays it — bounded by
+`settings.timeouts.steady_state_timeout_s` (default 1800s). If a `^C` lands during the
+accuracy scoring that follows, the verdict is withdrawn from both the report and the
+directory: that run reports `interrupted` / `complete: false`, and a steady window must
+not describe it.
 
 It is **off by default and opt-in**:
 

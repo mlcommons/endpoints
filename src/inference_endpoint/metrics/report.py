@@ -255,6 +255,15 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # See mlcommons/endpoints#500.
     output_sequence_lengths_full_run: dict[str, Any] | None = None
 
+    # Steady-window headline from the post-run detector, attached at finalize
+    # (see commands/benchmark/steady_state.py). Carries found/reason/window/
+    # tps/ttft/tpot/drifting_up plus the super-pass sizing it was computed over.
+    # The detector's full diagnostics -- per-super-pass trajectories, CoV and
+    # drift tables -- stay in steady_state.json; embedding them would dwarf the
+    # rest of this report. None when detection did not run, which is the
+    # default: it is opt-in.
+    steady_state: dict[str, Any] | None = None
+
     @property
     def n_samples_succeeded(self) -> int:
         return max(0, self.n_samples_completed - self.n_samples_failed)
@@ -437,6 +446,49 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 f.write(json_bytes)
         return json_bytes
 
+    def _display_steady_state(
+        self, fn: Callable[[str], None], newline: str = ""
+    ) -> None:
+        """Render the steady-window headline, or nothing if it was not run.
+
+        Silence means detection never ran. A run that looked and found no
+        window says so, so the two are not confused.
+        """
+        ss = self.steady_state
+        if not ss:
+            return
+        if not ss.get("found"):
+            fn(f"Steady state: not found ({ss.get('reason') or 'no reason given'})")
+            return
+
+        window = ss.get("window") or {}
+        lo, hi = window.get("sp_lo"), window.get("sp_hi")
+        # sp_hi is exclusive in the detector's output; render an inclusive range.
+        span = f"{lo}..{hi - 1}" if isinstance(lo, int) and isinstance(hi, int) else "?"
+        fn(
+            f"Steady state: super-passes {span} (post-warmup), "
+            f"{window.get('n_samples', 0)} samples{newline}"
+        )
+        tps = ss.get("tps") or {}
+        if (per_user := tps.get("per_user")) is not None:
+            fn(f"  TPS per-user: {per_user:.1f} tok/s/user{newline}")
+        if (system := tps.get("system")) is not None:
+            fn(f"  TPS system: {system:.1f} tok/s{newline}")
+        for key in ("ttft", "tpot"):
+            block = ss.get(key)
+            if block:
+                fn(
+                    f"  {key.upper()} p50 {block.get('p50', 0):.2f}ms  "
+                    f"p90 {block.get('p90', 0):.2f}ms{newline}"
+                )
+        short = ss.get("short_window") or {}
+        if short.get("is_short"):
+            fn(f"  WARNING: window shorter than the min-duration target{newline}")
+        if drifting := ss.get("drifting_up"):
+            fn(
+                f"  WARNING: drifting up over the full run: {', '.join(drifting)}{newline}"
+            )
+
     def display(
         self,
         fn: Callable[[str], None] = print,
@@ -491,6 +543,8 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             fn(f"E2E average interactivity: {interactivity:.2f} tokens/s{newline}")
         else:
             fn(f"E2E average interactivity: N/A{newline}")
+
+        self._display_steady_state(fn, newline)
 
         if self.accuracy:
             fn(f"Accuracy:{newline}")

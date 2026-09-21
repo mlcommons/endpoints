@@ -71,6 +71,9 @@ from inference_endpoint.commands.benchmark.steady_state import (
 from inference_endpoint.commands.benchmark.steady_state import (
     discard_artifacts as discard_steady_state_artifacts,
 )
+from inference_endpoint.commands.benchmark.steady_state import (
+    verdict_headline as steady_state_headline,
+)
 from inference_endpoint.commands.benchmark.watchdog import (
     RunWatchdog,
     SigintGovernor,
@@ -1206,11 +1209,29 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # sample_idx_map.json + events.jsonl from here).
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
-    # Clear any previous run's steady-state artifacts up front. report_dir is
-    # reusable, and the paths below can exit through a KeyboardInterrupt that
-    # never reaches the detection call at the end. A stale verdict left beside
-    # this run's report would read as this run's.
+    # Steady-state detection over the finished run's event log, which
+    # _write_scoring_artifacts has just put on disk. Runs here -- after the
+    # metrics drain, before the report is rendered -- so the window it finds
+    # reaches result_summary.json, report.txt, and the console summary rather
+    # than only steady_state.json.
+    #
+    # Stale artifacts are cleared first and unconditionally: report_dir is
+    # reusable, and a run that produces no verdict must leave none behind.
+    #
+    # Requires a run that finished: aborted runs are truncated, accuracy-only
+    # runs have no performance phase, and an incomplete report (drain timeout,
+    # or no report at all) means the event log does not describe the whole run.
     discard_steady_state_artifacts(ctx.report_dir)
+    steady_state: dict[str, Any] | None = None
+    if not aborted and not ctx.accuracy_only and report is not None and report.complete:
+        verdict = detect_steady_state(
+            ctx.report_dir,
+            ctx.config,
+            tokenizer_name=ctx.tokenizer_name,
+            dataset_size=steady_state_dataset_size(ctx.dataloader),
+        )
+        if verdict is not None:
+            steady_state = steady_state_headline(verdict)
 
     # Full-run OSL over every turn, including those issued after the performance
     # window closed, plus accuracy scoring. Both run inside the try/finally so a
@@ -1231,6 +1252,11 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
                 report, complete=False, state="interrupted"
             )
             bench.report = report
+        # Detection ran before this point, so a verdict may already exist for a
+        # run that is now invalid. Withdraw it from both the report and the
+        # directory rather than let it describe a run that did not finish.
+        steady_state = None
+        discard_steady_state_artifacts(ctx.report_dir)
         raise
     finally:
         # Attach the per-dataset accuracy list so result_summary.json, the
@@ -1240,6 +1266,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
                 report,
                 accuracy=accuracy_scores,
                 output_sequence_lengths_full_run=full_run_osl,
+                steady_state=steady_state,
             )
             _write_report_artifacts(ctx, final_report, bench.profiling)
             report = final_report
@@ -1261,22 +1288,6 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Emit the accuracy results as a focused artifact under accuracy/. Written
     # after the report artifacts so a write failure here can't discard them.
     write_accuracy_results(ctx.report_dir, accuracy_scores)
-
-    # Steady-state detection over the finished run's event log. Runs last and
-    # out-of-process. A slow or failing diagnostic cannot endanger the artifacts
-    # above. Stale artifacts were already cleared at the top of this function,
-    # so every path that skips detection leaves none behind.
-    #
-    # Requires a run that finished: aborted runs are truncated, accuracy-only
-    # runs have no performance phase, and an incomplete report (drain timeout,
-    # or no report at all) means the event log does not describe the whole run.
-    if not aborted and not ctx.accuracy_only and report is not None and report.complete:
-        detect_steady_state(
-            ctx.report_dir,
-            ctx.config,
-            tokenizer_name=ctx.tokenizer_name,
-            dataset_size=steady_state_dataset_size(ctx.dataloader),
-        )
 
 
 def run_benchmark(

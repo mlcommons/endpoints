@@ -5,8 +5,13 @@
 
 Runs the detector over a finished run's ``events.jsonl`` and leaves
 ``steady_state.json`` / ``steady_state.txt`` beside the report. The detector runs
-out-of-process. Nothing it does can touch the run's primary artifacts or fail
-finalize.
+out-of-process. Nothing it does can fail finalize.
+
+``finalize_benchmark`` calls this between the metrics drain and the report, so
+``verdict_headline`` can put the steady window on the ``Report`` itself -- and
+therefore into ``result_summary.json``, ``report.txt``, and the console summary.
+The cost of that ordering is that the report waits on the detector, bounded by
+``settings.timeouts.steady_state_timeout_s``.
 
 Every input the detector would otherwise guess is pinned on its command line:
 tokenizer, super-pass size, and profile. Pinning the tokenizer also keeps the
@@ -29,6 +34,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from inference_endpoint.config.schema import BenchmarkConfig, LoadPatternType
 from inference_endpoint.dataset_manager.dataset import Dataset
@@ -155,6 +161,33 @@ def write_run_meta(report_dir: Path, dataset_size: int) -> None:
         report_dir / "run_meta.json",
         json.dumps({"dataset_size": dataset_size}, indent=2),
     )
+
+
+# Top-level detector keys worth carrying next to the headline: they state what
+# the window was measured over. The rest of the blob (per-super-pass
+# trajectories, CoV and drift tables) stays in steady_state.json.
+_HEADLINE_CONTEXT = ("superpass_size", "n_super_passes", "n_post_warmup")
+
+
+def verdict_headline(verdict_path: Path) -> dict[str, Any] | None:
+    """The compact steady-window summary from a verdict file, for the Report.
+
+    Best-effort like everything else here: an unreadable or malformed verdict
+    means the Report simply carries no steady-state block.
+    """
+    try:
+        blob = json.loads(verdict_path.read_text())
+    except (OSError, ValueError):
+        logger.warning(
+            "Steady-state detection: could not read %s", verdict_path, exc_info=True
+        )
+        return None
+    headline = blob.get("steady_state")
+    if not isinstance(headline, dict):
+        logger.warning("Steady-state detection: %s has no verdict", verdict_path)
+        return None
+    context = {k: blob[k] for k in _HEADLINE_CONTEXT if k in blob}
+    return {**context, **headline}
 
 
 def _detector_caveats(stderr: str | None) -> str:

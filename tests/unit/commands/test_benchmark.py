@@ -3838,14 +3838,23 @@ class TestSteadyStateHook:
         assert not (tmp_path / "run_meta.json").exists()
 
     @pytest.mark.unit
-    def test_an_interrupt_mid_finalize_still_clears_a_stale_verdict(
+    def test_an_interrupt_after_detection_withdraws_the_verdict(
         self, tmp_path, monkeypatch
     ):
-        """^C during scoring propagates out of finalize_benchmark, so anything
-        that only runs at the end never runs. The previous run's verdict must
-        still be gone: it would otherwise sit beside this run's interrupted
-        report and read as this run's."""
+        """Detection runs before scoring, so a ^C during scoring lands after a
+        verdict already exists. That run is invalid -- it reports interrupted
+        and complete:false -- so the verdict must be withdrawn from both the
+        report and the directory, not left to describe a run that did not
+        finish."""
         self._seed_stale_artifacts(tmp_path)
+
+        def fake_run(cmd, **kwargs):
+            (tmp_path / "steady_state.json").write_text(
+                json.dumps({"steady_state": {"found": True, "window": {}}})
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout="headline", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
         monkeypatch.setattr(
             execute_mod, "score_accuracy", MagicMock(side_effect=KeyboardInterrupt)
         )
@@ -3855,6 +3864,11 @@ class TestSteadyStateHook:
                 self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
             )
 
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["state"] == "interrupted"
+        assert summary["steady_state"] is None
         assert not (tmp_path / "steady_state.json").exists()
         assert not (tmp_path / "steady_state.txt").exists()
         assert not (tmp_path / "run_meta.json").exists()
@@ -3896,6 +3910,53 @@ class TestSteadyStateHook:
         assert not (tmp_path / "run_meta.json").exists()
         assert not (tmp_path / "steady_state.json").exists()
         assert not (tmp_path / "steady_state.txt").exists()
+
+    @pytest.mark.unit
+    def test_the_verdict_reaches_the_report_not_just_a_sibling_file(
+        self, tmp_path, monkeypatch
+    ):
+        """Detection runs between the metrics drain and the report, so the
+        headline lands in result_summary.json, report.txt, and the console --
+        not only in steady_state.json, which nobody reads by default."""
+        (tmp_path / "events.jsonl").write_text("")
+        verdict = {
+            "superpass_size": 3,
+            "n_super_passes": 9,
+            "steady_state": {
+                "found": True,
+                "reason": None,
+                "window": {
+                    "sp_lo": 1,
+                    "sp_hi": 5,
+                    "n_super_passes": 4,
+                    "n_samples": 17552,
+                },
+                "tps": {"per_user": 302.3, "system": 40960.9},
+                "ttft": {"p50": 86.26, "p90": 156.1},
+                "tpot": {"p50": 3.29, "p90": 3.44},
+                "drifting_up": [],
+            },
+            "trajectories": {"tpot": [1, 2, 3]},
+        }
+
+        def fake_run(cmd, **kwargs):
+            (tmp_path / "steady_state.json").write_text(json.dumps(verdict))
+            return subprocess.CompletedProcess(cmd, 0, stdout="headline", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        finalize_benchmark(
+            self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
+        )
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["steady_state"]["window"]["n_samples"] == 17552
+        # The full diagnostics blob stays in steady_state.json; the summary
+        # carries the headline only.
+        assert "trajectories" not in summary["steady_state"]
+        assert "Steady state:" in (tmp_path / "report.txt").read_text()
 
     @pytest.mark.unit
     def test_any_model_may_opt_in(self, tmp_path, monkeypatch):

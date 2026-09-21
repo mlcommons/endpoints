@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import msgspec.structs
 import pytest
@@ -363,6 +364,84 @@ class TestFromSnapshot:
 # ---------------------------------------------------------------------------
 # Display + JSON serialization
 # ---------------------------------------------------------------------------
+
+
+_STEADY_HEADLINE: dict[str, Any] = {
+    "superpass_size": 4388,
+    "n_super_passes": 12,
+    "found": True,
+    "reason": None,
+    "window": {"sp_lo": 1, "sp_hi": 5, "n_super_passes": 4, "n_samples": 17552},
+    "tps": {"per_user": 302.3, "system": 40960.9},
+    "ttft": {"p50": 86.26, "p90": 156.1},
+    "tpot": {"p50": 3.29, "p90": 3.44},
+    "drifting_up": [],
+}
+
+
+class TestSteadyStateOnReport:
+    """The steady-state headline rides on the Report so result_summary.json,
+    report.txt, and the console all carry it."""
+
+    @staticmethod
+    def _with(**overrides):
+        verdict = {**_STEADY_HEADLINE, **overrides}
+        return msgspec.structs.replace(
+            _build_report(_make_registry()), steady_state=verdict
+        )
+
+    @pytest.mark.unit
+    def test_absent_by_default(self):
+        assert _build_report(_make_registry()).steady_state is None
+
+    @pytest.mark.unit
+    def test_survives_serialization(self):
+        """Unlike accuracy, this is NOT popped from the perf summary -- the
+        steady window is a performance result, not a scoring one."""
+        payload = json.loads(self._with().to_json())
+
+        assert payload["steady_state"]["window"]["n_samples"] == 17552
+
+    @pytest.mark.unit
+    def test_rendered_when_a_window_was_found(self):
+        lines: list[str] = []
+
+        self._with().display(fn=lines.append)
+
+        text = "\n".join(lines)
+        assert "Steady state:" in text
+        assert "super-passes 1..4" in text
+        assert "302.3" in text
+
+    @pytest.mark.unit
+    def test_says_so_when_no_window_was_found(self):
+        """A run that looked and found nothing must not read like a run that
+        never looked."""
+        lines: list[str] = []
+
+        self._with(found=False, reason="window too short").display(fn=lines.append)
+
+        text = "\n".join(lines)
+        assert "Steady state: not found" in text
+        assert "window too short" in text
+
+    @pytest.mark.unit
+    def test_drift_is_surfaced(self):
+        """drifting_up is the detector's own warning that the window it found
+        is degrading; hiding it makes the numbers look better than they are."""
+        lines: list[str] = []
+
+        self._with(drifting_up=["tpot"]).display(fn=lines.append)
+
+        assert "drifting up" in "\n".join(lines)
+
+    @pytest.mark.unit
+    def test_nothing_rendered_when_detection_did_not_run(self):
+        lines: list[str] = []
+
+        _build_report(_make_registry()).display(fn=lines.append)
+
+        assert "Steady state" not in "\n".join(lines)
 
 
 @pytest.mark.unit
