@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -48,12 +49,21 @@ _CAVEAT_PREFIX = "[profile: "
 _VERDICT_ARTIFACTS = ("steady_state.json", "steady_state.txt")
 _ALL_ARTIFACTS = (*_VERDICT_ARTIFACTS, "run_meta.json")
 
-# Substrings matched against model_params.name, which carries a repo id or a
-# cluster path. A policy list, not a capability list: these workloads have been
-# validated. Narrower than the detector's tokenizer registry on purpose:
-# "deepseek-r1" not "deepseek", so other DeepSeek generations cannot inherit an
-# unchecked verdict.
-_SUPPORTED_MODEL_SUBSTRINGS = ("gpt-oss", "deepseek-r1", "dsr1")
+# Matched against model_params.name, which carries a repo id
+# ("deepseek-ai/DeepSeek-R1"), a cluster path ("/models/gpt-oss-120b"), or the id
+# trtllm-serve registers ("deepseek_r1-torch-fp4"). The separator between
+# "deepseek" and "r1" is left open, since every deployment spells it differently,
+# but bounded to non-alphanumerics so an unrelated path segment such as
+# "deepseek-v3/ver1" cannot bridge the two.
+#
+# A policy list, not a capability list: these workloads have been validated.
+# R1 specifically rather than DeepSeek generally, so other generations cannot
+# inherit a verdict nobody checked.
+_SUPPORTED_MODEL_PATTERNS = (
+    re.compile(r"gpt-oss", re.IGNORECASE),
+    re.compile(r"deepseek[^a-z0-9]*r1", re.IGNORECASE),
+    re.compile(r"dsr1", re.IGNORECASE),
+)
 
 
 def is_eligible(*, model_name: str, load_pattern: LoadPatternType) -> bool:
@@ -66,8 +76,7 @@ def is_eligible(*, model_name: str, load_pattern: LoadPatternType) -> bool:
     """
     if not profile_for_load_pattern(load_pattern.value).supported:
         return False
-    lowered = (model_name or "").lower()
-    return any(sub in lowered for sub in _SUPPORTED_MODEL_SUBSTRINGS)
+    return any(p.search(model_name or "") for p in _SUPPORTED_MODEL_PATTERNS)
 
 
 def build_command(

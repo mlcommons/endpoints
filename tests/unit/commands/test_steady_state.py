@@ -63,8 +63,13 @@ class TestEligibility:
             "gpt-oss-120b",
             "openai/gpt-oss-120b",
             "GPT-OSS-120B",
+            # The id trtllm-serve actually registers on the MLPerf DSR1 configs,
+            # taken verbatim from internal/steadystate/gb200_dsr1_c16384.
+            "deepseek_r1-torch-fp4",
             "deepseek-r1",
             "deepseek-ai/DeepSeek-R1",
+            "DeepSeekR1",
+            "/models/DeepSeek_R1-0528",
             "dsr1-fp4",
         ],
     )
@@ -78,8 +83,19 @@ class TestEligibility:
     def test_other_models_are_not(self, model_name):
         assert not _gate(model_name=model_name)
 
-    def test_deepseek_v4_is_not_matched_by_the_deepseek_r1_entry(self):
-        assert not _gate(model_name="deepseek-v4")
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "deepseek-v4",
+            "deepseek_v3-torch-fp4",
+            # The separator between "deepseek" and "r1" is bounded to
+            # non-alphanumerics, so an unrelated path segment cannot bridge them.
+            "/models/deepseek-v3/ver1",
+            "deepseek-v3-0324",
+        ],
+    )
+    def test_other_deepseek_generations_are_not_matched(self, model_name):
+        assert not _gate(model_name=model_name)
 
     @pytest.mark.parametrize("load_pattern", list(LoadPatternType))
     def test_every_load_pattern_has_a_decided_eligibility(self, load_pattern):
@@ -94,14 +110,19 @@ class TestEligibility:
             "no-such-pattern"
         ).supported
 
-    def test_no_allowlisted_model_would_trust_remote_code(self):
+    @pytest.mark.parametrize(
+        "model_name", ["gpt-oss-120b", "deepseek_r1-torch-fp4", "dsr1-fp4"]
+    )
+    def test_no_allowlisted_model_would_trust_remote_code(self, model_name):
         """The integration pins --tokenizer, but if the detector's registry were
         ever consulted, no allowlisted model may select a trust_remote_code entry."""
-        for substring in steady_state._SUPPORTED_MODEL_SUBSTRINGS:
-            resolved = steady_state_diagnostics.resolve_tokenizer(substring)
-            if resolved is not None:
-                _tokenizer_id, trust_remote_code = resolved
-                assert not trust_remote_code, f"{substring} would trust remote code"
+        assert _gate(model_name=model_name), "fixture must be an eligible model"
+
+        resolved = steady_state_diagnostics.resolve_tokenizer(model_name)
+
+        if resolved is not None:
+            _tokenizer_id, trust_remote_code = resolved
+            assert not trust_remote_code, f"{model_name} would trust remote code"
 
 
 class TestCommand:
