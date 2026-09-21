@@ -1257,13 +1257,13 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     write_accuracy_results(ctx.report_dir, accuracy_scores)
 
     # Steady-state detection over the finished run's event log. Runs last and
-    # out-of-process so a slow or failing diagnostic cannot delay or endanger the
-    # artifacts above. Skipped on abort (a truncated run has no steady window) and
-    # for accuracy-only runs (no performance phase to find one in).
+    # out-of-process. A slow or failing diagnostic cannot endanger the artifacts
+    # above. Skipped on abort (no steady window in a truncated run) and for
+    # accuracy-only runs (no performance phase).
     if aborted or ctx.accuracy_only:
-        # These runs never enter detect_steady_state, so its artifact policy
-        # cannot apply: clear here, or a reused report_dir keeps a previous
-        # run's verdict beside this run's results.
+        # These runs never enter detect_steady_state, and its cleanup with
+        # them. Without this, a reused report_dir keeps the previous run's
+        # verdict.
         discard_steady_state_artifacts(ctx.report_dir)
     else:
         detect_steady_state(

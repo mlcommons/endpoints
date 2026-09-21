@@ -183,7 +183,7 @@ src/inference_endpoint/
 │   │   ├── profiling.py       # Profiler-trigger protocol (vLLM /start_profile,/stop_profile) + ProfileController (URL derivation + start/stop/payload lifecycle)
 │   │   ├── watchdog.py        # Perf issue cap, whole-run deadline, and process-wide SIGINT policy
 │   │   ├── accuracy.py        # AccuracyConfiguration + per-dataset scoring (_score_accuracy, OSL/response-count rollups, write_accuracy_results)
-│   │   ├── steady_state.py    # Post-run steady-state detection: model/agentic gate, run_meta.json sidecar, detector subprocess
+│   │   ├── steady_state.py    # Post-run steady-state detection: model + profile gate, run_meta.json, detector subprocess
 │   │   └── pipeline.py        # MetricsPipeline: async context manager for the ZMQ + metrics-aggregator/event-logger subprocess lifecycle (__aenter__/__aexit__/start/drain_and_build_report) + snapshot→Report
 │   ├── audit.py               # run_audit() — compliance audit orchestrator (phases → verify → result)
 │   ├── probe.py               # ProbeConfig + execute_probe()

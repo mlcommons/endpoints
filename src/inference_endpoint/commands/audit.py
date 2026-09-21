@@ -145,19 +145,18 @@ def _run_phases(
             if spec.test_mode == TestMode.PERF
             else perf_datasets + accuracy_datasets
         )
-        # Steady-state detection is meaningless per audit phase -- TEST04's audit
-        # phase issues one repeated sample -- and finalize_benchmark runs once per
-        # phase, so leaving it on would spawn a detector per phase and emit an
-        # authoritative-looking verdict for a workload it was never validated on.
+        # TEST04's audit phase issues one repeated sample. A steady-state
+        # verdict there is meaningless. finalize_benchmark runs once per phase.
+        # Leaving this on would spawn a detector per phase.
         phase_config = config.with_updates(
             report_dir=phase_dir,
             audit=None,
             datasets=phase_datasets,
             settings=config.settings.with_updates(
-                # Rebuilt through model_validate, not model_copy(update=): with
-                # extra='forbid' this validates the value and rejects a renamed
-                # field, where model_copy writes straight into __dict__ and a
-                # rename would silently no-op, re-enabling the detector here.
+                # model_validate, not model_copy(update=). With extra='forbid'
+                # this rejects a renamed field. model_copy writes into
+                # __dict__. A rename would silently no-op and re-enable the
+                # detector.
                 steady_state=SteadyStateConfig.model_validate(
                     {**config.settings.steady_state.model_dump(), "enabled": False}
                 )

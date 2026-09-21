@@ -217,7 +217,7 @@ def _succeeding(report_dir, stdout="headline\n", stderr=""):
 
 
 class TestDetectSteadyState:
-    def test_eligible_run_writes_sidecar_and_spawns_detector(
+    def test_eligible_run_writes_run_meta_and_spawns_detector(
         self, tmp_path, monkeypatch
     ):
         report_dir = _report_dir(tmp_path)
@@ -291,10 +291,10 @@ class TestDetectSteadyState:
         assert "PyTorch" not in caplog.text
 
     @pytest.mark.parametrize(
-        ("kwargs", "expected_reason", "keeps_sidecar"),
+        ("kwargs", "expected_reason", "keeps_run_meta"),
         [
             # An unvalidated workload still has good metadata for this run, and
-            # its message points at a hand re-run that reads the sidecar.
+            # its message points at a hand re-run that reads run_meta.json.
             ({"config": _config("llama-3.1-8b")}, "not a validated workload", True),
             ({"config": _agentic_config()}, "not a validated workload", True),
             (
@@ -307,7 +307,7 @@ class TestDetectSteadyState:
         ],
     )
     def test_skipped_runs_say_why_and_leave_the_right_artifacts(
-        self, tmp_path, monkeypatch, caplog, kwargs, expected_reason, keeps_sidecar
+        self, tmp_path, monkeypatch, caplog, kwargs, expected_reason, keeps_run_meta
     ):
         report_dir = _report_dir(tmp_path)
 
@@ -322,14 +322,14 @@ class TestDetectSteadyState:
         assert expected_reason in caplog.text
         assert not (report_dir / "steady_state.txt").exists()
         assert not (report_dir / "steady_state.json").exists()
-        if keeps_sidecar:
+        if keeps_run_meta:
             assert json.loads((report_dir / "run_meta.json").read_text()) == {
                 "dataset_size": _DATASET_SIZE
             }
         else:
             assert not (
                 report_dir / "run_meta.json"
-            ).exists(), "a skipped run must not leave a sidecar nothing will read"
+            ).exists(), "a skipped run must not leave a run_meta.json nothing will read"
 
     def test_missing_events_file_skips(self, tmp_path, monkeypatch, caplog):
         def explode(cmd, **kw):
@@ -467,7 +467,7 @@ class TestBestEffortContract:
         assert not (report_dir / "steady_state.json").exists()
         assert not (report_dir / "steady_state.txt").exists()
 
-    def test_a_skipped_run_clears_the_stale_sidecar_too(self, tmp_path, monkeypatch):
+    def test_a_skipped_run_clears_stale_run_meta_too(self, tmp_path, monkeypatch):
         """A stale run_meta.json would feed the wrong super-pass size to a later
         by-hand re-run against this directory."""
         report_dir = _report_dir(tmp_path)
@@ -479,11 +479,11 @@ class TestBestEffortContract:
 
         assert not (report_dir / "run_meta.json").exists()
 
-    def test_an_unvalidated_workload_still_gets_a_fresh_sidecar(
+    def test_an_unvalidated_workload_still_gets_fresh_run_meta(
         self, tmp_path, monkeypatch
     ):
-        """Its caveat tells the user to hand-run the detector, which reads the
-        sidecar -- so this run's metadata must replace the stale one, not vanish."""
+        """Its caveat tells the user to hand-run the detector, which reads
+        run_meta.json. This run's metadata must replace the stale one."""
         report_dir = _report_dir(tmp_path)
         monkeypatch.setattr(
             subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
@@ -507,8 +507,8 @@ class TestBestEffortContract:
     ):
         """Success is an existence test, so a verdict we could not delete would
         be reported as this run's result. The unvalidated-workload path is the
-        sharper case: it would otherwise write a FRESH sidecar next to the stale
-        verdict, making that verdict look like it belongs to this run."""
+        sharper case: it would otherwise write a fresh run_meta.json next to the
+        stale steady_state.json, making that verdict look like this run's."""
         report_dir = _report_dir(tmp_path)
         monkeypatch.setattr(
             subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
@@ -523,11 +523,11 @@ class TestBestEffortContract:
         monkeypatch.setattr(Path, "unlink", failing_unlink)
 
         assert _detect(report_dir, config=config) is None
-        # Either cleared outright, or left as the earlier run's -- what must not
-        # happen is this run's sidecar being published beside a stale verdict,
-        # which would make that verdict look like it belongs to this run.
-        sidecar = report_dir / "run_meta.json"
-        published = sidecar.exists() and json.loads(sidecar.read_text()) == {
+        # Either cleared outright, or left as the earlier run's. What must not
+        # happen is this run's run_meta.json being published beside a stale
+        # steady_state.json, making that verdict look like this run's.
+        run_meta = report_dir / "run_meta.json"
+        published = run_meta.exists() and json.loads(run_meta.read_text()) == {
             "dataset_size": _DATASET_SIZE
         }
         assert not published
@@ -540,7 +540,7 @@ class TestBestEffortContract:
             pytest.param("interrupt", id="interrupt"),
         ],
     )
-    def test_a_failed_run_keeps_its_own_fresh_sidecar(
+    def test_a_failed_run_keeps_its_own_fresh_run_meta(
         self, tmp_path, monkeypatch, outcome
     ):
         """The detector ran, so run_meta.json describes THIS run and stays usable
@@ -588,7 +588,8 @@ class TestBestEffortContract:
 
 
 class TestDatasetSize:
-    """num_samples is a Dataset-subclass surface; a raise must not fail a run."""
+    """num_samples is implemented by Dataset subclasses; a raise must not fail
+    a run."""
 
     def test_reports_the_loaded_sample_count(self):
         class _Dataset:

@@ -36,14 +36,14 @@ operator's quick reference.
 ## Run
 
 **Zero-config** — point it at a run directory and it auto-detects everything from the
-sidecar `config.yaml` + `run_meta.json` (model → tokenizer, dataset size, load pattern →
+`config.yaml` + `run_meta.json` in the run directory (model → tokenizer, dataset size, load pattern →
 profile):
 
 ```bash
 uv run python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>/
 ```
 
-**One flag** — a bare `events.jsonl` with no sidecar; `--model` drives the built-in
+**One flag** — a bare `events.jsonl` with neither file alongside it; `--model` drives the built-in
 model→tokenizer registry and the workload profile:
 
 ```bash
