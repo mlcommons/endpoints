@@ -107,7 +107,10 @@ class TestEligibility:
 class TestCommand:
     def test_pins_every_input_the_detector_would_otherwise_guess(self, tmp_path):
         cmd = steady_state.build_command(
-            tmp_path, tokenizer_name=_TOKENIZER, dataset_size=_DATASET_SIZE
+            tmp_path,
+            tokenizer_name=_TOKENIZER,
+            dataset_size=_DATASET_SIZE,
+            load_pattern=LoadPatternType.CONCURRENCY,
         )
 
         assert cmd == [
@@ -121,6 +124,8 @@ class TestCommand:
             _TOKENIZER,
             "--dataset-size",
             str(_DATASET_SIZE),
+            "--profile",
+            "concurrency",
         ]
 
 
@@ -148,7 +153,7 @@ class TestCaveatFilter:
         assert "second line" in line
 
     def test_keeps_only_the_detectors_own_caveats(self):
-        caveat = "[profile: offline] system TPS is unreliable"
+        caveat = "[profile: poisson] usually under-saturated"
         stderr = "\n".join(
             [
                 "None of PyTorch, TensorFlow >= 2.0 have been found.",
@@ -232,7 +237,10 @@ class TestDetectSteadyState:
         }
         assert len(spawned) == 1
         assert spawned[0][0] == steady_state.build_command(
-            report_dir, tokenizer_name=_TOKENIZER, dataset_size=_DATASET_SIZE
+            report_dir,
+            tokenizer_name=_TOKENIZER,
+            dataset_size=_DATASET_SIZE,
+            load_pattern=LoadPatternType.CONCURRENCY,
         )
 
     def test_writes_stdout_to_a_sibling_text_report(self, tmp_path, monkeypatch):
@@ -252,7 +260,7 @@ class TestDetectSteadyState:
         stderr; dropping them would leave an untrustworthy number looking
         authoritative."""
         report_dir = _report_dir(tmp_path)
-        caveat = "[profile: offline] offline: system TPS is unreliable"
+        caveat = "[profile: poisson] poisson: usually under-saturated"
         monkeypatch.setattr(
             subprocess, "run", _succeeding(report_dir, stderr=caveat + "\n")
         )
@@ -577,6 +585,42 @@ class TestBestEffortContract:
         assert not (
             report_dir / artifact
         ).exists(), "a failed write must not leave the previous run's file in place"
+
+
+class TestDatasetSize:
+    """num_samples is a Dataset-subclass surface; a raise must not fail a run."""
+
+    def test_reports_the_loaded_sample_count(self):
+        class _Dataset:
+            def num_samples(self):
+                return 4242
+
+        assert steady_state.dataset_size_of(_Dataset()) == 4242
+
+    def test_no_dataset_is_no_size(self):
+        assert steady_state.dataset_size_of(None) is None
+
+    def test_a_raising_dataset_is_absorbed(self, caplog):
+        class _Broken:
+            def num_samples(self):
+                raise RuntimeError("dataset went away")
+
+        with caplog.at_level(logging.WARNING):
+            assert steady_state.dataset_size_of(_Broken()) is None
+
+        assert "dataset size unavailable" in caplog.text
+
+
+class TestDiscardArtifacts:
+    def test_clears_everything_this_step_owns(self, tmp_path):
+        report_dir = _report_dir(tmp_path)
+
+        steady_state.discard_artifacts(report_dir)
+
+        assert not (report_dir / "steady_state.json").exists()
+        assert not (report_dir / "steady_state.txt").exists()
+        assert not (report_dir / "run_meta.json").exists()
+        assert (report_dir / "events.jsonl").exists(), "must not touch the event log"
 
 
 class TestRunMeta:

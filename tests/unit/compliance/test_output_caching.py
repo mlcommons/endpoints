@@ -408,6 +408,9 @@ def _audit_config(sample_index=0) -> MagicMock:
         test=AuditTestId.OUTPUT_CACHING_TEST, samples=4, sample_index=sample_index
     )
     config.settings.load_pattern.type = LoadPatternType.MAX_THROUGHPUT
+    # Real, not a mock: the phase config rebuilds this through model_validate,
+    # and it lets the assertion compare the actual object the audit hands on.
+    config.settings.steady_state = SteadyStateConfig()
     perf_ds = MagicMock()
     perf_ds.type = DatasetType.PERFORMANCE
     config.datasets = [perf_ds]
@@ -572,20 +575,11 @@ class TestRunAuditGuards:
         assert config.with_updates.call_args.kwargs["datasets"] == [perf_ds]
         # Audit phases must not run the steady-state detector: TEST04's audit
         # phase issues one repeated sample, and finalize runs once per phase.
-        assert config.settings.steady_state.model_copy.call_args.kwargs["update"] == {
-            "enabled": False
-        }
-        # model_dump(), not attribute access: model_copy(update=...) bypasses
-        # validation and stuffs unknown keys straight into __dict__, so `.enabled`
-        # reads back False even on a model whose real field was renamed -- the
-        # rename this pin exists to catch.
-        assert SteadyStateConfig().model_copy(
-            update={"enabled": False}
-        ).model_dump() == {"enabled": False}
-        assert (
-            config.settings.with_updates.call_args.kwargs["steady_state"]
-            is config.settings.steady_state.model_copy.return_value
-        )
+        # A real SteadyStateConfig, compared by value: a renamed field would
+        # make model_validate raise rather than silently no-op.
+        assert config.settings.with_updates.call_args.kwargs[
+            "steady_state"
+        ] == SteadyStateConfig(enabled=False)
 
     @pytest.mark.unit
     def test_rejects_when_no_performance_dataset(self, tmp_path):

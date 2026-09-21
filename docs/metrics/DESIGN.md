@@ -59,12 +59,13 @@ subscriber's last live snapshot and the resulting `Report.complete` is `False`.
 
 ## Files
 
-| File                | Purpose                                                                                                            |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `report.py`         | `Report` Struct + `Report.from_snapshot(dict)`; console `display()` and `to_json()` serializer                     |
-| `metric.py`         | Metric target types (`Throughput`, `QueryLatency`, `TTFT`, `TPOT`) used by rulesets                                |
-| `early_stopping.py` | MLPerf LoadGen early-stopping percentile estimates (pure math); see [docs/early_stopping.md](../early_stopping.md) |
-| `results_plots.py`  | Standardized run-artifact plots (matplotlib-guarded); CLI: `scripts/plot_results.py`                               |
+| File                          | Purpose                                                                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `report.py`                   | `Report` Struct + `Report.from_snapshot(dict)`; console `display()` and `to_json()` serializer                     |
+| `metric.py`                   | Metric target types (`Throughput`, `QueryLatency`, `TTFT`, `TPOT`) used by rulesets                                |
+| `early_stopping.py`           | MLPerf LoadGen early-stopping percentile estimates (pure math); see [docs/early_stopping.md](../early_stopping.md) |
+| `results_plots.py`            | Standardized run-artifact plots (matplotlib-guarded); CLI: `scripts/plot_results.py`                               |
+| `steady_state_diagnostics.py` | Post-run steady-window detector; see [docs/steady_state_diagnostics.md](../steady_state_diagnostics.md)            |
 
 ## Public Interface
 

@@ -949,7 +949,6 @@ def test_build_natl_result_flat_and_varied():
     assert r2["found"] is False
 
 
-@pytest.mark.unit
 def test_unknown_profile_is_not_user_selectable(tmp_path, capsys):
     """The sentinel is a resolution failure, not a workload a user can ask for.
 
@@ -965,7 +964,6 @@ def test_unknown_profile_is_not_user_selectable(tmp_path, capsys):
     assert "invalid choice: 'unknown'" in capsys.readouterr().err
 
 
-@pytest.mark.unit
 def test_every_real_profile_is_user_selectable(tmp_path, capsys):
     events = tmp_path / "events.jsonl"
     events.write_text("")
@@ -978,7 +976,6 @@ def test_every_real_profile_is_user_selectable(tmp_path, capsys):
         assert "invalid choice" not in capsys.readouterr().err
 
 
-@pytest.mark.unit
 def test_profiles_table_is_pinned():
     """A new profile must be a deliberate addition: it changes what the
     benchmark gate considers eligible and what --profile accepts."""
@@ -1037,7 +1034,6 @@ settings:
 """
 
 
-@pytest.mark.unit
 class TestTokenizerPrecedence:
     def test_explicit_flag_wins(self, tmp_path, monkeypatch):
         tokenizer, trust = _resolve_tokenizer_via_main(
@@ -1105,6 +1101,22 @@ class TestTokenizerPrecedence:
         # This branch uses a config value as the tokenizer, so it is the last
         # place a configured value could raise trust_remote_code on its own.
         assert trust is False
+
+    def test_a_tokenizer_that_will_not_load_is_a_clean_error(self, tmp_path, capsys):
+        """A configured tokenizer is used verbatim, so a path recorded on another
+        machine fails here -- as a usage error, not a transformers traceback."""
+        (tmp_path / "events.jsonl").write_text("")
+        (tmp_path / "config.yaml").write_text(
+            _NAME_ONLY_CONFIG.replace(
+                "  name: gpt-oss-120b",
+                "  name: gpt-oss-120b\n  tokenizer_name: /nonexistent/tokenizer",
+            )
+        )
+
+        with pytest.raises(SystemExit):
+            mod.main([str(tmp_path), "--dataset-size", "8"])
+
+        assert "could not load tokenizer" in capsys.readouterr().err
 
     def test_an_unresolvable_tokenizer_is_a_clean_error(self, tmp_path, capsys):
         config = _NAME_ONLY_CONFIG.replace("gpt-oss-120b", "mystery-model")

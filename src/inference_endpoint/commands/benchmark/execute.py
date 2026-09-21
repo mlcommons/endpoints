@@ -62,7 +62,15 @@ from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
     write_profiling_section,
 )
-from inference_endpoint.commands.benchmark.steady_state import detect_steady_state
+from inference_endpoint.commands.benchmark.steady_state import (
+    dataset_size_of as steady_state_dataset_size,
+)
+from inference_endpoint.commands.benchmark.steady_state import (
+    detect_steady_state,
+)
+from inference_endpoint.commands.benchmark.steady_state import (
+    discard_artifacts as discard_steady_state_artifacts,
+)
 from inference_endpoint.commands.benchmark.watchdog import (
     RunWatchdog,
     SigintGovernor,
@@ -1252,14 +1260,17 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # out-of-process so a slow or failing diagnostic cannot delay or endanger the
     # artifacts above. Skipped on abort (a truncated run has no steady window) and
     # for accuracy-only runs (no performance phase to find one in).
-    if not aborted and not ctx.accuracy_only:
+    if aborted or ctx.accuracy_only:
+        # These runs never enter detect_steady_state, so its artifact policy
+        # cannot apply: clear here, or a reused report_dir keeps a previous
+        # run's verdict beside this run's results.
+        discard_steady_state_artifacts(ctx.report_dir)
+    else:
         detect_steady_state(
             ctx.report_dir,
             ctx.config,
             tokenizer_name=ctx.tokenizer_name,
-            dataset_size=(
-                ctx.dataloader.num_samples() if ctx.dataloader is not None else None
-            ),
+            dataset_size=steady_state_dataset_size(ctx.dataloader),
         )
 
 

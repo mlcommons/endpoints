@@ -3752,10 +3752,22 @@ class TestSteadyStateHook:
             "dataset_size": 3
         }
 
+    @staticmethod
+    def _seed_stale_artifacts(tmp_path):
+        """A previous run's output in a reused report dir."""
+        (tmp_path / "events.jsonl").write_text("")
+        (tmp_path / "steady_state.json").write_text('{"from": "an earlier run"}')
+        (tmp_path / "steady_state.txt").write_text("an earlier run\n")
+        (tmp_path / "run_meta.json").write_text('{"dataset_size": 11}')
+
     @pytest.mark.unit
     def test_accuracy_only_runs_are_skipped(self, tmp_path, monkeypatch):
-        """An accuracy-only run has no performance phase to find a window in."""
-        (tmp_path / "events.jsonl").write_text("")
+        """An accuracy-only run has no performance phase to find a window in.
+
+        It also never enters detect_steady_state, so the call site has to clear
+        a previous run's artifacts itself.
+        """
+        self._seed_stale_artifacts(tmp_path)
         self._forbid_spawn(monkeypatch, "an accuracy-only run")
 
         finalize_benchmark(
@@ -3764,11 +3776,17 @@ class TestSteadyStateHook:
         )
 
         assert not (tmp_path / "run_meta.json").exists()
+        assert not (tmp_path / "steady_state.json").exists()
+        assert not (tmp_path / "steady_state.txt").exists()
 
     @pytest.mark.unit
     def test_aborted_runs_are_skipped(self, tmp_path, monkeypatch):
-        """A truncated run has no steady window; the guard exists for this."""
-        (tmp_path / "events.jsonl").write_text("")
+        """A truncated run has no steady window; the guard exists for this.
+
+        Like the accuracy-only case, it bypasses detect_steady_state entirely,
+        so a previous run's verdict must be cleared at the call site.
+        """
+        self._seed_stale_artifacts(tmp_path)
         self._forbid_spawn(monkeypatch, "an aborted run")
         bench = dataclasses.replace(
             _make_benchmark_result(tmp_path), user_interrupted=True
@@ -3777,6 +3795,8 @@ class TestSteadyStateHook:
         finalize_benchmark(self._eligible_ctx(tmp_path), bench)
 
         assert not (tmp_path / "run_meta.json").exists()
+        assert not (tmp_path / "steady_state.json").exists()
+        assert not (tmp_path / "steady_state.txt").exists()
 
     @pytest.mark.unit
     def test_other_models_never_spawn_the_detector(self, tmp_path, monkeypatch, caplog):

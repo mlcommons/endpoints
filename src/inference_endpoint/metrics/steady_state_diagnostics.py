@@ -1,14 +1,10 @@
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["transformers>=4.40", "pyyaml>=6.0"]
-# ///
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Steady-state / drift diagnostics from a benchmark run's ``events.jsonl``.
 
-Self-contained: no ``inference_endpoint`` import, so it runs anywhere with just a
+Imports nothing else from ``inference_endpoint``, which keeps the benchmark's
+import graph out of this process when it is spawned as a child; it still needs the
 tokenizer available (``python -m inference_endpoint.metrics.steady_state_diagnostics ...``). The event
 wire shapes it parses are defined by the product's ``core/record.py`` (event names,
 ``EventRecord`` fields) and ``core/types.py`` (``TextModelOutput`` array layout); the

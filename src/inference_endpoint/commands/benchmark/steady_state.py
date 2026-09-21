@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 from inference_endpoint.config.schema import BenchmarkConfig, LoadPatternType
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.metrics.steady_state_diagnostics import (
     profile_for_load_pattern,
 )
@@ -76,7 +77,11 @@ def is_eligible(*, model_name: str, load_pattern: LoadPatternType) -> bool:
 
 
 def build_command(
-    report_dir: Path, *, tokenizer_name: str, dataset_size: int
+    report_dir: Path,
+    *,
+    tokenizer_name: str,
+    dataset_size: int,
+    load_pattern: LoadPatternType,
 ) -> list[str]:
     return [
         sys.executable,
@@ -89,6 +94,11 @@ def build_command(
         tokenizer_name,
         "--dataset-size",
         str(dataset_size),
+        # Pinned rather than left to the child's own read of config.yaml: an
+        # unreadable sidecar there falls back to a profile whose caveat is
+        # empty, silently dropping the reliability note this step publishes.
+        "--profile",
+        profile_for_load_pattern(load_pattern.value).name,
     ]
 
 
@@ -109,6 +119,34 @@ def _discard(report_dir: Path, names: tuple[str, ...]) -> bool:
             logger.warning("Steady-state detection could not remove %s: %s", name, e)
             cleared = False
     return cleared
+
+
+def discard_artifacts(report_dir: Path) -> None:
+    """Clear this step's artifacts for a run it will not analyse.
+
+    The caller skips detection outright for aborted and accuracy-only runs, so
+    those runs never enter the function and would otherwise leave a previous
+    run's verdict in a reused report directory.
+    """
+    _discard(report_dir, _ALL_ARTIFACTS)
+
+
+def dataset_size_of(dataset: Dataset | None) -> int | None:
+    """The loaded dataset's sample count, or None if it cannot be determined.
+
+    ``num_samples`` is a Dataset-subclass surface, so a raise here would fail a
+    run whose performance artifacts are already written -- the one thing this
+    step promises never to do.
+    """
+    if dataset is None:
+        return None
+    try:
+        return dataset.num_samples()
+    except Exception:  # noqa: BLE001 - diagnostic input; never fail a finished run
+        logger.warning(
+            "Steady-state detection: dataset size unavailable", exc_info=True
+        )
+        return None
 
 
 def write_run_meta(report_dir: Path, dataset_size: int) -> None:
@@ -205,10 +243,18 @@ def detect_steady_state(
     write_run_meta(report_dir, dataset_size)
     verdict = report_dir / "steady_state.json"
 
+    logger.info(
+        "Running steady-state detection over %s; this tokenizes every response "
+        "(--no-steady-state opts out)",
+        report_dir,
+    )
     try:
         proc = subprocess.run(
             build_command(
-                report_dir, tokenizer_name=tokenizer_name, dataset_size=dataset_size
+                report_dir,
+                tokenizer_name=tokenizer_name,
+                dataset_size=dataset_size,
+                load_pattern=load_pattern,
             ),
             capture_output=True,
             text=True,
@@ -216,8 +262,9 @@ def detect_steady_state(
             check=False,
         )
     except KeyboardInterrupt:
-        # The run's artifacts are already on disk; a ^C aimed at a slow
-        # diagnostic must not downgrade the run to interrupted.
+        # Absorbed so the half-written verdict is removed and no traceback
+        # escapes mid-finalize. The run still exits 130: SigintGovernor has
+        # already recorded the interrupt by the time this fires.
         logger.warning("Steady-state detection cancelled by interrupt")
         _discard(report_dir, _VERDICT_ARTIFACTS)
         return None
@@ -241,12 +288,13 @@ def detect_steady_state(
 
     caveats = _detector_caveats(proc.stderr)
     if caveats:
-        # e.g. "offline: system TPS is unreliable" -- without this the numbers in
-        # steady_state.json look more trustworthy than the detector claims.
+        # e.g. poisson's "usually under-saturated" note -- without this the
+        # numbers in steady_state.json look more trustworthy than the detector
+        # claims.
         logger.info("Steady-state detector caveats: %s", caveats[:_STDERR_LOG_CHARS])
 
     stdout_text = (proc.stdout or "").rstrip("\n")
-    if stdout_text or caveats:
+    if stdout_text:
         body = f"{stdout_text}\n{caveats}\n" if caveats else f"{stdout_text}\n"
         _write_best_effort(report_dir / "steady_state.txt", body)
 

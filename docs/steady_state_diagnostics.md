@@ -3,7 +3,7 @@
 Post-hoc **steady-state / drift diagnostics** for a benchmark run's `events.jsonl`.
 Self-contained (no `inference_endpoint` import) — runs anywhere with a tokenizer via
 `uv`. The full methodology lives in
-[`docs/steady-state-detection.md`](../docs/steady-state-detection.md); this is the
+[`docs/steady-state-detection.md`](steady-state-detection.md); this is the
 operator's quick reference.
 
 ## What it does
@@ -30,7 +30,7 @@ operator's quick reference.
 
 ## Requirements
 
-- `uv` (the script declares its deps inline via a PEP 723 header — `transformers` + `pyyaml`).
+- An installed `inference_endpoint` environment (`uv sync`); `transformers` and `pyyaml` are project dependencies.
 - Network access to fetch the model's tokenizer (or a local tokenizer dir).
 
 ## Run

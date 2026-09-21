@@ -37,7 +37,12 @@ from pathlib import Path
 
 from ..compliance import AuditRunArtifacts, AuditRunSpec, AuditTest, get_audit_test
 from ..compliance.result import AuditResult, write_result
-from ..config.schema import AuditConfig, BenchmarkConfig, DatasetType
+from ..config.schema import (
+    AuditConfig,
+    BenchmarkConfig,
+    DatasetType,
+    SteadyStateConfig,
+)
 from ..exceptions import CLIError, ExecutionError, SetupError
 from .benchmark.execute import (
     BenchmarkResult,
@@ -149,8 +154,12 @@ def _run_phases(
             audit=None,
             datasets=phase_datasets,
             settings=config.settings.with_updates(
-                steady_state=config.settings.steady_state.model_copy(
-                    update={"enabled": False}
+                # Rebuilt through model_validate, not model_copy(update=): with
+                # extra='forbid' this validates the value and rejects a renamed
+                # field, where model_copy writes straight into __dict__ and a
+                # rename would silently no-op, re-enabling the detector here.
+                steady_state=SteadyStateConfig.model_validate(
+                    {**config.settings.steady_state.model_dump(), "enabled": False}
                 )
             ),
         )
