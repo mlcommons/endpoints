@@ -949,17 +949,19 @@ class EarlyStoppingConfig(BaseModel):
 
 
 class SteadyStateConfig(BaseModel):
-    """Post-run steady-state detection (on by default).
+    """Post-run steady-state detection (off by default, opt-in).
 
     After a run finishes, the detector reconstructs per-super-pass TTFT/TPOT
     from ``events.jsonl`` and writes ``steady_state.json`` and
-    ``steady_state.txt`` beside the report. It runs only for the validated
-    models allowlisted in ``commands/benchmark/steady_state.py``. It never runs
-    for accuracy-only runs or workloads the detector marks unsupported.
+    ``steady_state.txt`` beside the report. It never runs for accuracy-only
+    runs, for runs that did not complete, or for load patterns the detector
+    marks unsupported.
 
-    The output is additive. The Report and ``result_summary.json`` are
-    untouched. ``enabled: false`` is the single opt-out. Tokenizing every
-    response is not free. See ``docs/steady_state_diagnostics.md``.
+    Opt-in and use at your own risk. The detector has been validated against a
+    small set of workloads; on anything else the verdict is yours to interpret.
+    It also tokenizes every response, which is not free. The output is additive
+    -- the Report and ``result_summary.json`` are untouched.
+    See ``docs/steady_state_diagnostics.md``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -967,10 +969,10 @@ class SteadyStateConfig(BaseModel):
     enabled: Annotated[
         bool,
         cyclopts.Parameter(
-            alias="--steady-state",  # --no-steady-state is the meaningful opt-out
-            help="Run post-run steady-state detection for supported models",
+            alias="--steady-state",
+            help="Run post-run steady-state detection (unvalidated for most workloads)",
         ),
-    ] = Field(True, description="Post-run steady-state detection (default on)")
+    ] = Field(False, description="Post-run steady-state detection (default off)")
 
 
 @cyclopts.Parameter(name="*")
@@ -994,7 +996,7 @@ class Settings(WithUpdatesMixin, BaseModel):
     )
     steady_state: SteadyStateConfig = Field(
         default_factory=SteadyStateConfig,
-        description="Post-run steady-state detection (on by default; enabled: false opts out)",
+        description="Post-run steady-state detection (off by default; enabled: true opts in)",
     )
     metrics_tokenizer_workers: Annotated[
         int,

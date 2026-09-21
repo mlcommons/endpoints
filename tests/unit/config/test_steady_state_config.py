@@ -25,18 +25,20 @@ _MINIMAL_KWARGS = {
 
 
 class TestSteadyStateConfig:
-    def test_enabled_by_default(self):
-        assert SteadyStateConfig().enabled is True
+    def test_disabled_by_default(self):
+        """Opt-in: the detector is unvalidated for most workloads and tokenizes
+        every response, so a run must ask for it."""
+        assert SteadyStateConfig().enabled is False
 
     def test_settings_exposes_the_block(self):
-        assert Settings().steady_state.enabled is True
+        assert Settings().steady_state.enabled is False
 
-    def test_opt_out_through_benchmark_config(self):
+    def test_opt_in_through_benchmark_config(self):
         cfg = BenchmarkConfig(
             **_MINIMAL_KWARGS,
-            settings={"steady_state": {"enabled": False}},
+            settings={"steady_state": {"enabled": True}},
         )
-        assert cfg.settings.steady_state.enabled is False
+        assert cfg.settings.steady_state.enabled is True
 
     def test_rejects_unknown_keys(self):
         with pytest.raises(ValidationError):

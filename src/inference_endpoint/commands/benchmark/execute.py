@@ -1206,6 +1206,12 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # sample_idx_map.json + events.jsonl from here).
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
+    # Clear any previous run's steady-state artifacts up front. report_dir is
+    # reusable, and the paths below can exit through a KeyboardInterrupt that
+    # never reaches the detection call at the end. A stale verdict left beside
+    # this run's report would read as this run's.
+    discard_steady_state_artifacts(ctx.report_dir)
+
     # Full-run OSL over every turn, including those issued after the performance
     # window closed, plus accuracy scoring. Both run inside the try/finally so a
     # Ctrl-C during the (large) event-log scan still writes an interrupted report
@@ -1258,14 +1264,13 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
 
     # Steady-state detection over the finished run's event log. Runs last and
     # out-of-process. A slow or failing diagnostic cannot endanger the artifacts
-    # above. Skipped on abort (no steady window in a truncated run) and for
-    # accuracy-only runs (no performance phase).
-    if aborted or ctx.accuracy_only:
-        # These runs never enter detect_steady_state, and its cleanup with
-        # them. Without this, a reused report_dir keeps the previous run's
-        # verdict.
-        discard_steady_state_artifacts(ctx.report_dir)
-    else:
+    # above. Stale artifacts were already cleared at the top of this function,
+    # so every path that skips detection leaves none behind.
+    #
+    # Requires a run that finished: aborted runs are truncated, accuracy-only
+    # runs have no performance phase, and an incomplete report (drain timeout,
+    # or no report at all) means the event log does not describe the whole run.
+    if not aborted and not ctx.accuracy_only and report is not None and report.complete:
         detect_steady_state(
             ctx.report_dir,
             ctx.config,

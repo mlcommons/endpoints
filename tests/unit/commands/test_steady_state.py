@@ -52,50 +52,20 @@ def _report_dir(tmp_path):
     return tmp_path
 
 
-def _gate(model_name="gpt-oss-120b", load_pattern=LoadPatternType.CONCURRENCY):
-    return steady_state.is_eligible(model_name=model_name, load_pattern=load_pattern)
+def _gate(load_pattern=LoadPatternType.CONCURRENCY):
+    return steady_state.is_eligible(load_pattern=load_pattern)
 
 
 class TestEligibility:
     @pytest.mark.parametrize(
         "model_name",
-        [
-            "gpt-oss-120b",
-            "openai/gpt-oss-120b",
-            "GPT-OSS-120B",
-            # The id trtllm-serve actually registers on the MLPerf DSR1 configs,
-            # taken verbatim from internal/steadystate/gb200_dsr1_c16384.
-            "deepseek_r1-torch-fp4",
-            "deepseek-r1",
-            "deepseek-ai/DeepSeek-R1",
-            "DeepSeekR1",
-            "/models/DeepSeek_R1-0528",
-            "dsr1-fp4",
-        ],
+        ["gpt-oss-120b", "deepseek_r1-torch-fp4", "meta-llama/Llama-3.1-8B", ""],
     )
-    def test_allowlisted_models_are_eligible(self, model_name):
-        assert _gate(model_name=model_name)
-
-    @pytest.mark.parametrize(
-        "model_name",
-        ["meta-llama/Llama-3.1-8B-Instruct", "Qwen3-VL-235B", "kimi-k3", ""],
-    )
-    def test_other_models_are_not(self, model_name):
-        assert not _gate(model_name=model_name)
-
-    @pytest.mark.parametrize(
-        "model_name",
-        [
-            "deepseek-v4",
-            "deepseek_v3-torch-fp4",
-            # The separator between "deepseek" and "r1" is bounded to
-            # non-alphanumerics, so an unrelated path segment cannot bridge them.
-            "/models/deepseek-v3/ver1",
-            "deepseek-v3-0324",
-        ],
-    )
-    def test_other_deepseek_generations_are_not_matched(self, model_name):
-        assert not _gate(model_name=model_name)
+    def test_the_model_does_not_decide_eligibility(self, model_name):
+        """No allowlist: detection is opt-in per config, so any model that asks
+        for it gets it. Only the load pattern can rule a run out."""
+        assert _gate()
+        assert steady_state.is_eligible(load_pattern=LoadPatternType.CONCURRENCY)
 
     @pytest.mark.parametrize("load_pattern", list(LoadPatternType))
     def test_every_load_pattern_has_a_decided_eligibility(self, load_pattern):
@@ -109,20 +79,6 @@ class TestEligibility:
         assert not steady_state_diagnostics.profile_for_load_pattern(
             "no-such-pattern"
         ).supported
-
-    @pytest.mark.parametrize(
-        "model_name", ["gpt-oss-120b", "deepseek_r1-torch-fp4", "dsr1-fp4"]
-    )
-    def test_no_allowlisted_model_would_trust_remote_code(self, model_name):
-        """The integration pins --tokenizer, but if the detector's registry were
-        ever consulted, no allowlisted model may select a trust_remote_code entry."""
-        assert _gate(model_name=model_name), "fixture must be an eligible model"
-
-        resolved = steady_state_diagnostics.resolve_tokenizer(model_name)
-
-        if resolved is not None:
-            _tokenizer_id, trust_remote_code = resolved
-            assert not trust_remote_code, f"{model_name} would trust remote code"
 
 
 class TestCommand:
@@ -196,6 +152,8 @@ def _config(model_name="gpt-oss-120b", **settings):
     settings.setdefault(
         "load_pattern", {"type": "concurrency", "target_concurrency": 8}
     )
+    # Detection is opt-in. These tests are about what happens once it is on.
+    settings.setdefault("steady_state", {"enabled": True})
     return BenchmarkConfig(
         type=TestType.ONLINE,
         model_params={"name": model_name},
@@ -212,7 +170,8 @@ def _agentic_config(model_name="gpt-oss-120b"):
         endpoint_config={"endpoints": ["http://x"]},
         datasets=[{"path": "D", "agentic_inference": {}}],
         settings={
-            "load_pattern": {"type": "agentic_inference", "target_concurrency": 8}
+            "load_pattern": {"type": "agentic_inference", "target_concurrency": 8},
+            "steady_state": {"enabled": True},
         },
     )
 
@@ -314,10 +273,14 @@ class TestDetectSteadyState:
     @pytest.mark.parametrize(
         ("kwargs", "expected_reason", "keeps_run_meta"),
         [
-            # An unvalidated workload still has good metadata for this run, and
-            # its message points at a hand re-run that reads run_meta.json.
-            ({"config": _config("llama-3.1-8b")}, "not a validated workload", True),
-            ({"config": _agentic_config()}, "not a validated workload", True),
+            # A load pattern the detector cannot profile still has good
+            # metadata for this run, and its message points at a hand re-run
+            # that reads run_meta.json.
+            (
+                {"config": _agentic_config()},
+                "the detector has no profile for",
+                True,
+            ),
             (
                 {"config": _config(**{"steady_state": {"enabled": False}})},
                 "disabled by configuration",
@@ -367,13 +330,13 @@ class TestDetectSteadyState:
         self, tmp_path, monkeypatch, caplog
     ):
         """events.jsonl is the actionable blocker, and the 're-run by hand'
-        message an unvalidated workload emits would be useless without one."""
+        message an unprofiled load pattern emits would be useless without one."""
         monkeypatch.setattr(
             subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
         )
 
         with caplog.at_level(logging.INFO):
-            _detect(tmp_path, config=_config("llama-3.1-8b"))
+            _detect(tmp_path, config=_agentic_config())
 
         assert "no events.jsonl" in caplog.text
         assert "not a validated workload" not in caplog.text
@@ -452,7 +415,7 @@ class TestBestEffortContract:
             pytest.param("timeout", {}, id="timeout"),
             pytest.param("interrupt", {}, id="interrupt"),
             pytest.param("silent", {}, id="exit-0-no-verdict"),
-            pytest.param("skip", {"config": _config("llama-3.1-8b")}, id="ineligible"),
+            pytest.param("skip", {"config": _agentic_config()}, id="ineligible"),
             pytest.param(
                 "skip",
                 {"config": _config(**{"steady_state": {"enabled": False}})},
@@ -510,7 +473,7 @@ class TestBestEffortContract:
             subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
         )
 
-        _detect(report_dir, config=_config("llama-3.1-8b"))
+        _detect(report_dir, config=_agentic_config())
 
         assert json.loads((report_dir / "run_meta.json").read_text()) == {
             "dataset_size": _DATASET_SIZE
@@ -520,7 +483,7 @@ class TestBestEffortContract:
         "config",
         [
             pytest.param(None, id="eligible-pre-spawn"),
-            pytest.param(_config("llama-3.1-8b"), id="unvalidated-workload"),
+            pytest.param(_agentic_config(), id="unvalidated-workload"),
         ],
     )
     def test_an_unclearable_stale_verdict_aborts_rather_than_republishing(

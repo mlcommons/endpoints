@@ -3710,7 +3710,11 @@ class TestSteadyStateHook:
         # collapses to ~0 when everything is issued at t=0).
         config = OnlineConfig(
             **{**_OFFLINE_KWARGS, "model_params": {"name": "gpt-oss-120b"}},
-            settings={"load_pattern": {"type": "concurrency", "target_concurrency": 8}},
+            settings={
+                "load_pattern": {"type": "concurrency", "target_concurrency": 8},
+                # Opt-in: detection is off unless the config asks for it.
+                "steady_state": {"enabled": True},
+            },
         )
         return _make_benchmark_context(
             config=config,
@@ -3742,7 +3746,7 @@ class TestSteadyStateHook:
         monkeypatch.setattr(subprocess, "run", fake_run)
 
         finalize_benchmark(
-            self._eligible_ctx(tmp_path), _make_benchmark_result(tmp_path)
+            self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
         )
 
         assert spawned, "finalize_benchmark never reached the detector"
@@ -3759,6 +3763,101 @@ class TestSteadyStateHook:
         (tmp_path / "steady_state.json").write_text('{"from": "an earlier run"}')
         (tmp_path / "steady_state.txt").write_text("an earlier run\n")
         (tmp_path / "run_meta.json").write_text('{"dataset_size": 11}')
+
+    @staticmethod
+    def _make_report(*, n_pending_tasks: int = 0) -> Report:
+        """A finished report; n_pending_tasks > 0 is the drain-timeout shape."""
+        return Report.from_snapshot(
+            {
+                "counter": 1,
+                "timestamp_ns": 12345,
+                "state": "complete",
+                "n_pending_tasks": n_pending_tasks,
+                "metrics": [
+                    {
+                        "type": "counter",
+                        "name": "tracked_samples_completed",
+                        "value": 3,
+                    },
+                    {"type": "counter", "name": "tracked_samples_issued", "value": 3},
+                    {
+                        "type": "counter",
+                        "name": "tracked_duration_ns",
+                        "value": 1_000_000_000,
+                    },
+                    {"type": "counter", "name": "tracked_samples_failed", "value": 0},
+                ],
+            }
+        )
+
+    @classmethod
+    def _complete_result(cls, tmp_path, **kwargs):
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = cls._make_report(**kwargs)
+        return bench
+
+    @pytest.mark.unit
+    def test_detection_is_off_unless_the_config_asks_for_it(
+        self, tmp_path, monkeypatch
+    ):
+        """Opt-in: the detector is use-at-your-own-risk, so a config that never
+        mentions it must not pay the cost or publish a verdict."""
+        (tmp_path / "events.jsonl").write_text("")
+        self._forbid_spawn(monkeypatch, "a config that did not enable it")
+        ctx = _make_benchmark_context(
+            config=OnlineConfig(
+                **_OFFLINE_KWARGS,
+                settings={
+                    "load_pattern": {"type": "concurrency", "target_concurrency": 8}
+                },
+            ),
+            report_dir=tmp_path,
+            dataloader=_make_loaded_dataset(3),
+            tokenizer_name=_CHAR_TOKENIZER,
+        )
+
+        finalize_benchmark(ctx, self._complete_result(tmp_path))
+
+        assert not (tmp_path / "steady_state.json").exists()
+
+    @pytest.mark.unit
+    def test_a_run_that_never_completed_is_skipped(self, tmp_path, monkeypatch):
+        """Drain timeout: no abort flag is set and the aggregator reported
+        "complete", but metrics work remained, so the event log is a truncated
+        view of the run. A window found in it would not describe the run."""
+        self._seed_stale_artifacts(tmp_path)
+        self._forbid_spawn(monkeypatch, "a run that did not complete")
+
+        finalize_benchmark(
+            self._eligible_ctx(tmp_path),
+            self._complete_result(tmp_path, n_pending_tasks=1),
+        )
+
+        assert not (tmp_path / "steady_state.json").exists()
+        assert not (tmp_path / "steady_state.txt").exists()
+        assert not (tmp_path / "run_meta.json").exists()
+
+    @pytest.mark.unit
+    def test_an_interrupt_mid_finalize_still_clears_a_stale_verdict(
+        self, tmp_path, monkeypatch
+    ):
+        """^C during scoring propagates out of finalize_benchmark, so anything
+        that only runs at the end never runs. The previous run's verdict must
+        still be gone: it would otherwise sit beside this run's interrupted
+        report and read as this run's."""
+        self._seed_stale_artifacts(tmp_path)
+        monkeypatch.setattr(
+            execute_mod, "score_accuracy", MagicMock(side_effect=KeyboardInterrupt)
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            finalize_benchmark(
+                self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
+            )
+
+        assert not (tmp_path / "steady_state.json").exists()
+        assert not (tmp_path / "steady_state.txt").exists()
+        assert not (tmp_path / "run_meta.json").exists()
 
     @pytest.mark.unit
     def test_accuracy_only_runs_are_skipped(self, tmp_path, monkeypatch):
@@ -3799,27 +3898,30 @@ class TestSteadyStateHook:
         assert not (tmp_path / "steady_state.txt").exists()
 
     @pytest.mark.unit
-    def test_other_models_never_spawn_the_detector(self, tmp_path, monkeypatch, caplog):
+    def test_any_model_may_opt_in(self, tmp_path, monkeypatch):
+        """No model allowlist: a config that enables detection gets it, whatever
+        the model. Whether the numbers mean anything is the submitter's call."""
         (tmp_path / "events.jsonl").write_text("")
-        self._forbid_spawn(monkeypatch, "a non-allowlisted model")
-        caplog.set_level(logging.INFO)
-        # Concurrency, so the model allowlist is what rejects this run -- an
-        # offline config would be rejected by the load pattern first, and the
-        # test would pass with the allowlist deleted.
+        spawned = []
+
+        def fake_run(cmd, **kwargs):
+            spawned.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
         ctx = _make_benchmark_context(
             config=OnlineConfig(
-                **_OFFLINE_KWARGS,
+                **{**_OFFLINE_KWARGS, "model_params": {"name": "kimi-k3"}},
                 settings={
-                    "load_pattern": {"type": "concurrency", "target_concurrency": 8}
+                    "load_pattern": {"type": "concurrency", "target_concurrency": 8},
+                    "steady_state": {"enabled": True},
                 },
             ),
             report_dir=tmp_path,
-            tokenizer_name=_CHAR_CHAT_TOKENIZER,
+            dataloader=_make_loaded_dataset(3),
+            tokenizer_name=_CHAR_TOKENIZER,
         )
 
-        finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+        finalize_benchmark(ctx, self._complete_result(tmp_path))
 
-        # The _forbid_spawn mock proves nothing was spawned; the log proves WHY,
-        # so this still fails if the model allowlist is removed.
-        assert "not a validated workload" in caplog.text
-        assert not (tmp_path / "steady_state.json").exists()
+        assert spawned, "an opted-in model must reach the detector"

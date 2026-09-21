@@ -15,13 +15,17 @@ child off its own model registry, whose entries can request
 
 Which workloads the detector may judge is read from ``Profile.supported``.
 Enabling a new one is a change in the detector, not here.
+
+There is no model allowlist. Detection is opt-in per run
+(``settings.steady_state.enabled``) and the detector has been validated against
+a handful of workloads, so a verdict for anything else is the submitter's to
+interpret. See ``docs/steady_state_diagnostics.md``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,34 +53,19 @@ _CAVEAT_PREFIX = "[profile: "
 _VERDICT_ARTIFACTS = ("steady_state.json", "steady_state.txt")
 _ALL_ARTIFACTS = (*_VERDICT_ARTIFACTS, "run_meta.json")
 
-# Matched against model_params.name, which carries a repo id
-# ("deepseek-ai/DeepSeek-R1"), a cluster path ("/models/gpt-oss-120b"), or the id
-# trtllm-serve registers ("deepseek_r1-torch-fp4"). The separator between
-# "deepseek" and "r1" is left open, since every deployment spells it differently,
-# but bounded to non-alphanumerics so an unrelated path segment such as
-# "deepseek-v3/ver1" cannot bridge the two.
-#
-# A policy list, not a capability list: these workloads have been validated.
-# R1 specifically rather than DeepSeek generally, so other generations cannot
-# inherit a verdict nobody checked.
-_SUPPORTED_MODEL_PATTERNS = (
-    re.compile(r"gpt-oss", re.IGNORECASE),
-    re.compile(r"deepseek[^a-z0-9]*r1", re.IGNORECASE),
-    re.compile(r"dsr1", re.IGNORECASE),
-)
 
+def is_eligible(*, load_pattern: LoadPatternType) -> bool:
+    """Whether the detector can analyse this load pattern at all.
 
-def is_eligible(*, model_name: str, load_pattern: LoadPatternType) -> bool:
-    """Whether the detector has been validated against this workload.
+    Support is the detector's own call (``Profile.supported``). Its agentic and
+    offline profiles are unsupported today. An unrecognised load pattern
+    resolves to an unsupported profile, not a validated one. Reading that flag
+    here keeps the parent's gate and the child's profile selection from
+    drifting apart.
 
-    Support is the detector's own call (``Profile.supported``). Its agentic
-    profile is unsupported today. An unrecognised load pattern resolves to an
-    unsupported profile, not a validated one. Reading that flag here keeps the
-    parent's gate and the child's profile selection from drifting apart.
+    The model is not consulted. Detection is opt-in per run.
     """
-    if not profile_for_load_pattern(load_pattern.value).supported:
-        return False
-    return any(p.search(model_name or "") for p in _SUPPORTED_MODEL_PATTERNS)
+    return profile_for_load_pattern(load_pattern.value).supported
 
 
 def build_command(
@@ -125,10 +114,11 @@ def _discard(report_dir: Path, names: tuple[str, ...]) -> bool:
 
 
 def discard_artifacts(report_dir: Path) -> None:
-    """Clear this step's artifacts for a run it will not analyse.
+    """Clear this step's artifacts before a run decides whether to produce any.
 
-    The caller skips detection outright for aborted and accuracy-only runs.
-    Those never enter ``detect_steady_state``. Its cleanup never runs for them.
+    ``finalize_benchmark`` calls this up front. Its later paths can exit
+    through a ``KeyboardInterrupt`` that never reaches the detection call, so
+    cleanup cannot live only at the end.
     """
     _discard(report_dir, _ALL_ARTIFACTS)
 
@@ -217,12 +207,10 @@ def detect_steady_state(
     if not (report_dir / "events.jsonl").is_file():
         skip(f"no events.jsonl in {report_dir}")
         return None
-    if not is_eligible(model_name=config.model_params.name, load_pattern=load_pattern):
+    if not is_eligible(load_pattern=load_pattern):
         logger.info(
-            "Steady-state detection skipped: not a validated workload "
-            "(model=%s, load_pattern=%s); re-run by hand against %s for a "
-            "diagnostic pass",
-            config.model_params.name,
+            "Steady-state detection skipped: the detector has no profile for "
+            "load_pattern=%s; re-run by hand against %s for a diagnostic pass",
             load_pattern.value,
             report_dir,
         )

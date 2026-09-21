@@ -28,6 +28,40 @@ operator's quick reference.
    end of the run (multi-plateau + Pettitt change-point) as an `anomaly`, rather than
    hiding it.
 
+## Running it automatically after a benchmark
+
+`finalize_benchmark` can run the detector for you, last and out-of-process, writing
+`steady_state.json` + `steady_state.txt` (and the `run_meta.json` it consumes) into the
+report directory. The `Report` and `result_summary.json` are untouched.
+
+It is **off by default and opt-in**:
+
+```yaml
+settings:
+  steady_state:
+    enabled: true # or --steady-state on the CLI
+```
+
+> **Use at your own risk.** The methodology has been exercised against a small set of
+> workloads (gpt-oss and DeepSeek-R1 at high concurrency). Nothing stops you enabling it
+> for any model, and nothing validates that the window it reports is meaningful for that
+> model's behaviour — interpreting the verdict is yours. It also tokenizes every response
+> in the run, which is not free.
+
+Enabling it is not sufficient. The run must also:
+
+- be a **performance** run (accuracy-only runs have no window to find),
+- have **completed** — an aborted or interrupted run, or one that hit the metrics drain
+  timeout, is a truncated view of the workload,
+- use a load pattern the detector has a profile for. `concurrency` and `poisson` qualify;
+  `offline` and `agentic` are `supported=False`, as is any unmapped pattern.
+
+A run that clears the opt-in but fails one of these logs why and leaves no verdict
+behind. Whatever the outcome, no failure in this step can fail a run that already
+produced valid performance artifacts.
+
+Deadline: `settings.timeouts.steady_state_timeout_s`.
+
 ## Requirements
 
 - An installed `inference_endpoint` environment (`uv sync`); `transformers` and `pyyaml` are project dependencies.
