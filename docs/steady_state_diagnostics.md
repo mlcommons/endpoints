@@ -35,11 +35,18 @@ operator's quick reference.
 `finalize_benchmark` can run the detector for you, out-of-process, between the metrics
 drain and the report. It writes `steady_state.json` (the full diagnostics) +
 `steady_state.txt` (and the `run_meta.json` it consumes) into the report directory, and
-puts the compact headline -- window, TPS, TTFT/TPOT, drift -- on the report itself, so it
-appears in `performance/result_summary.json`, `report.txt`, and the console summary.
+puts the compact headline on the report itself, so it appears in
+`performance/result_summary.json`, `report.txt`, and the console summary. The headline
+is a typed struct (`SteadyStateHeadline` in `metrics/report.py`) carrying the window and
+how it was chosen, TPS with its batch-means intervals, TTFT/TPOT percentiles in
+nanoseconds, the min-duration evidence, any level-shift anomaly, the drift verdicts, and
+the workload profile's reliability note. Every field is optional: the detector's output
+is read from a file that may be truncated or come from a different version, so a missing
+value is normal rather than exceptional.
 
-The per-super-pass trajectories and the CoV/drift tables stay in `steady_state.json`;
-embedding them would dwarf the rest of the summary.
+The per-super-pass trajectories, the CoV/drift tables and the latency histograms stay in
+`steady_state.json`; on a real run the histograms alone were two thirds of the block,
+and embedding them would dwarf the rest of the summary.
 
 Because the report is rendered after detection, a slow detector delays it — bounded by
 `settings.timeouts.steady_state_timeout_s` (default 600s). For scale: detection took 94s
