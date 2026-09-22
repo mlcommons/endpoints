@@ -193,6 +193,38 @@ def _numeric_block(value: object, keys: tuple[str, ...]) -> dict[str, float] | N
     return block or None
 
 
+# Kept from the detector's window block: all small scalars, and between them
+# the grounds for trusting the verdict -- which plateau was reported, how many
+# there were, and how many earlier ones were rejected as too brief.
+_WINDOW_KEYS = (
+    "sp_lo",
+    "sp_hi",
+    "n_samples",
+    "n_super_passes",
+    "plateau_index",
+    "n_plateaus",
+    "skipped_short",
+)
+
+
+def _short_window(value: object) -> dict[str, Any] | None:
+    """Whether the window cleared the min-duration gate, and by how much.
+
+    ``is_short`` alone says only pass or fail; the durations say how close it
+    was and which term bound it. The tuning scalars (kstar, cov_b, tau_sp_s,
+    l_p90_s) stay in steady_state.json.
+    """
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, Any] = {"is_short": bool(value.get("is_short"))}
+    for key in ("window_duration_s", "min_duration_s"):
+        if (number := _finite(value.get(key))) is not None:
+            out[key] = number
+    if isinstance(dominant := value.get("dominant"), str):
+        out["dominant"] = dominant
+    return out
+
+
 def _anomaly(value: object) -> dict[str, Any] | None:
     """The detector's level-shift warning, or None if there isn't one.
 
@@ -240,8 +272,9 @@ def verdict_headline(
         logger.warning("Steady-state detection: %s has no verdict", verdict_path)
         return None
 
-    window = _numeric_block(headline.get("window"), ("sp_lo", "sp_hi", "n_samples"))
+    window = _numeric_block(headline.get("window"), _WINDOW_KEYS)
     short_window = headline.get("short_window")
+    trend = headline.get("global_trend")
     reason = headline.get("reason")
     out: dict[str, Any] = {
         "found": bool(headline.get("found")),
@@ -250,9 +283,7 @@ def verdict_headline(
         "tps": _numeric_block(headline.get("tps"), ("per_user", "system")),
         "ttft": _numeric_block(headline.get("ttft"), ("p50", "p90")),
         "tpot": _numeric_block(headline.get("tpot"), ("p50", "p90")),
-        "short_window": {"is_short": bool(short_window.get("is_short"))}
-        if isinstance(short_window, dict)
-        else None,
+        "short_window": _short_window(short_window),
         # Metric names only. A bare string here would otherwise be iterated
         # character by character downstream and printed as "t, p, o, t".
         "drifting_up": [
@@ -262,6 +293,11 @@ def verdict_headline(
         else [],
     }
     out["anomaly"] = _anomaly(headline.get("anomaly"))
+    out["global_trend"] = (
+        {k: v for k, v in trend.items() if isinstance(v, str)}
+        if isinstance(trend, dict)
+        else None
+    )
     if load_pattern is not None:
         profile = profile_for_load_pattern(load_pattern.value)
         note = " ".join(profile.note.split())

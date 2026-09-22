@@ -42,6 +42,8 @@ from ..utils import monotime_to_datetime
 
 logger = logging.getLogger(__name__)
 
+_NS_TO_MS: Final[float] = 1e-6
+
 # Aggregator series name -> result_summary.json field. Single source of truth for the
 # summary's latency sections: ``Report.from_snapshot`` builds its fields from this, and
 # ``scripts/early_stopping_estimate_from_events.py`` uses it to key its post-hoc output the same way.
@@ -502,7 +504,12 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             p50 = self._number(block.get("p50"))
             p90 = self._number(block.get("p90"))
             if p50 is not None and p90 is not None:
-                fn(f"  {key.upper()} p50 {p50:.2f}ms  p90 {p90:.2f}ms{newline}")
+                # The detector stores these in nanoseconds, as Report's own
+                # ttft/tpot series do (rendered with the same 1e-6 scale).
+                fn(
+                    f"  {key.upper()} p50 {p50 * _NS_TO_MS:.2f}ms  "
+                    f"p90 {p90 * _NS_TO_MS:.2f}ms{newline}"
+                )
         anomaly = ss.get("anomaly")
         if isinstance(anomaly, dict) and anomaly.get("detected"):
             delta = self._number(anomaly.get("delta_pct"))

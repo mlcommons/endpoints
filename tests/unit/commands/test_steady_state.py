@@ -770,6 +770,69 @@ class TestVerdictHeadline:
                 usable = usable and math.isfinite(raw)
                 assert (block or {}).get(key) is None or usable
 
+    def test_the_evidence_for_the_window_survives(self, tmp_path):
+        """is_short alone says whether the window cleared the gate, not by how
+        much, and skipped_short says whether earlier plateaus were rejected.
+        Those are the grounds for trusting the numbers, and they cost bytes."""
+        path = self._write(
+            tmp_path,
+            {
+                "steady_state": {
+                    "found": True,
+                    "window": {
+                        "sp_lo": 0,
+                        "sp_hi": 11,
+                        "n_samples": 47484,
+                        "n_super_passes": 11,
+                        "plateau_index": 0,
+                        "n_plateaus": 1,
+                        "skipped_short": 2,
+                    },
+                    "short_window": {
+                        "is_short": False,
+                        "window_duration_s": 3241.9,
+                        "min_duration_s": 1742.5,
+                        "dominant": "relaxation",
+                        "kstar": 99,
+                    },
+                    "global_trend": {"tpot_p50": "steady", "ttft_p90": "up"},
+                }
+            },
+        )
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        assert got["window"]["skipped_short"] == 2
+        assert got["window"]["n_plateaus"] == 1
+        assert got["short_window"]["window_duration_s"] == 3241.9
+        assert got["short_window"]["min_duration_s"] == 1742.5
+        assert got["short_window"]["dominant"] == "relaxation"
+        assert got["global_trend"] == {"tpot_p50": "steady", "ttft_p90": "up"}
+
+    def test_the_bulky_evidence_stays_in_the_verdict_file(self, tmp_path):
+        """Histograms were two thirds of the block on a real run, and plateaus
+        is a full segmentation table. result_summary.json is not their home."""
+        path = self._write(
+            tmp_path,
+            {
+                "steady_state": {
+                    "found": True,
+                    "ttft": {"p50": 1.0, "p90": 2.0, "histogram": [{"lo": 0, "hi": 1}]},
+                    "short_window": {"is_short": False, "kstar": 99},
+                    "anomaly": {"detected": True, "plateaus": [[0, 5]], "pettitt": {}},
+                }
+            },
+        )
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        assert "histogram" not in got["ttft"]
+        assert "kstar" not in got["short_window"]
+        assert "plateaus" not in got["anomaly"]
+        assert "pettitt" not in got["anomaly"]
+
     def test_the_level_shift_anomaly_survives_to_the_report(self, tmp_path):
         """The detector treats a level shift after the plateau as a first-class
         warning. Dropping it makes a degrading run print a clean headline."""

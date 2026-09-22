@@ -373,8 +373,9 @@ _STEADY_HEADLINE: dict[str, Any] = {
     "reason": None,
     "window": {"sp_lo": 1, "sp_hi": 5, "n_super_passes": 4, "n_samples": 17552},
     "tps": {"per_user": 302.3, "system": 40960.9},
-    "ttft": {"p50": 86.26, "p90": 156.1},
-    "tpot": {"p50": 3.29, "p90": 3.44},
+    # nanoseconds, as the detector emits them
+    "ttft": {"p50": 86_260_000.0, "p90": 156_100_000.0},
+    "tpot": {"p50": 3_290_000.0, "p90": 3_440_000.0},
     "drifting_up": [],
 }
 
@@ -525,6 +526,23 @@ class TestSteadyStateOnReport:
         assert absent not in text
         if value == [None, 1, "tpot"]:
             assert "drifting up over the rest of the run: tpot" in text
+
+    @pytest.mark.unit
+    def test_latencies_render_in_milliseconds(self):
+        """The detector stores TTFT/TPOT in nanoseconds, like Report's own
+        ttft/tpot series (rendered with scale_factor 1e-6). Values taken from a
+        real DSR1 run so a fixture that happens to look like ms cannot hide the
+        scale being wrong by a million."""
+        lines: list[str] = []
+
+        self._with(
+            ttft={"p50": 220520473.0, "p90": 293652176.0},
+            tpot={"p50": 36570133.85, "p90": 36776479.54},
+        ).display(fn=lines.append)
+
+        text = "\n".join(lines)
+        assert "TTFT p50 220.52ms  p90 293.65ms" in text
+        assert "TPOT p50 36.57ms  p90 36.78ms" in text
 
     @pytest.mark.unit
     def test_a_level_shift_is_surfaced(self):
