@@ -1205,42 +1205,47 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         report = msgspec.structs.replace(report, complete=False, state="interrupted")
         bench.report = report
 
+    # Clear any previous run's steady-state artifacts before anything else.
+    # report_dir is user-settable and reusable, and every step below can exit
+    # through a KeyboardInterrupt, so a stale verdict left here would end up
+    # beside this run's results and read as this run's.
+    discard_steady_state_artifacts(ctx.report_dir)
+
     # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
     # sample_idx_map.json + events.jsonl from here).
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
-    # Steady-state detection over the finished run's event log, which
-    # _write_scoring_artifacts has just put on disk. Runs here -- after the
-    # metrics drain, before the report is rendered -- so the window it finds
-    # reaches result_summary.json, report.txt, and the console summary rather
-    # than only steady_state.json.
-    #
-    # Stale artifacts are cleared first and unconditionally: report_dir is
-    # reusable, and a run that produces no verdict must leave none behind.
-    #
-    # Requires a run that finished: aborted runs are truncated, accuracy-only
-    # runs have no performance phase, and an incomplete report (drain timeout,
-    # or no report at all) means the event log does not describe the whole run.
-    discard_steady_state_artifacts(ctx.report_dir)
-    steady_state: dict[str, Any] | None = None
-    if not aborted and not ctx.accuracy_only and report is not None and report.complete:
-        verdict = detect_steady_state(
-            ctx.report_dir,
-            ctx.config,
-            tokenizer_name=ctx.tokenizer_name,
-            dataset_size=steady_state_dataset_size(ctx.dataloader),
-        )
-        if verdict is not None:
-            steady_state = steady_state_headline(verdict)
-
-    # Full-run OSL over every turn, including those issued after the performance
-    # window closed, plus accuracy scoring. Both run inside the try/finally so a
-    # Ctrl-C during the (large) event-log scan still writes an interrupted report
-    # instead of losing it. Skipped on abort: a partial tail would report as
-    # complete.
+    # Steady-state detection, full-run OSL, and accuracy scoring. All three run
+    # inside the try/finally so a Ctrl-C during any of them still writes an
+    # interrupted report instead of losing it. Scoring is skipped on abort: a
+    # partial tail would report as complete.
     full_run_osl: dict[str, Any] | None = None
     accuracy_scores: list[dict[str, Any]] = []
+    steady_state: dict[str, Any] | None = None
     try:
+        # Detection runs after the metrics drain and before the report is
+        # rendered, so the window it finds reaches result_summary.json,
+        # report.txt, and the console summary -- not only steady_state.json.
+        #
+        # It needs a run that finished: aborted runs are truncated, accuracy-only
+        # runs have no performance phase, and an incomplete report (drain
+        # timeout, or no report at all) means the event log does not describe
+        # the whole run.
+        if (
+            not aborted
+            and not ctx.accuracy_only
+            and report is not None
+            and report.complete
+        ):
+            verdict = detect_steady_state(
+                ctx.report_dir,
+                ctx.config,
+                tokenizer_name=ctx.tokenizer_name,
+                dataset_size=steady_state_dataset_size(ctx.dataloader),
+            )
+            if verdict is not None:
+                steady_state = steady_state_headline(verdict)
+
         if aborted:
             logger.warning("Run aborted — skipping accuracy scoring on partial data")
         else:
@@ -1252,9 +1257,9 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
                 report, complete=False, state="interrupted"
             )
             bench.report = report
-        # Detection ran before this point, so a verdict may already exist for a
-        # run that is now invalid. Withdraw it from both the report and the
-        # directory rather than let it describe a run that did not finish.
+        # Detection may already have produced a verdict for a run that is now
+        # invalid. Withdraw it from both the report and the directory rather
+        # than let it describe a run that did not finish.
         steady_state = None
         discard_steady_state_artifacts(ctx.report_dir)
         raise

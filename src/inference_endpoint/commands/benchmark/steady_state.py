@@ -284,12 +284,15 @@ def detect_steady_state(
             check=False,
         )
     except KeyboardInterrupt:
-        # Absorbed to remove the half-written verdict and keep a traceback out
-        # of finalize. The run still exits 130. SigintGovernor recorded the
-        # interrupt before this fired.
+        # Re-raised, not absorbed. Detection runs before the report is written,
+        # so swallowing the user's first ^C would carry on into the slowest part
+        # of finalize; their second ^C then hits SigintGovernor's
+        # _force_exit_process_group and the run loses every artifact. Propagating
+        # reaches finalize_benchmark's handler, which marks the report
+        # interrupted and still writes it.
         logger.warning("Steady-state detection cancelled by interrupt")
         _discard(report_dir, _VERDICT_ARTIFACTS)
-        return None
+        raise
     except Exception:  # noqa: BLE001 - diagnostic; never fail a finished run
         # exc_info keeps a programming error distinguishable from an environment
         # failure. Without it the feature could be silently disabled.

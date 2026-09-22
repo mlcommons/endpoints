@@ -3959,6 +3959,33 @@ class TestSteadyStateHook:
         assert "Steady state:" in (tmp_path / "report.txt").read_text()
 
     @pytest.mark.unit
+    def test_an_interrupt_during_detection_still_writes_the_report(
+        self, tmp_path, monkeypatch
+    ):
+        """The detector re-raises ^C so finalize can mark the run invalid. That
+        only helps if detection sits inside the try/finally that writes the
+        artifacts -- outside it, the interrupt escapes and the run loses
+        everything, which is the failure the re-raise exists to prevent."""
+        self._seed_stale_artifacts(tmp_path)
+
+        def interrupt(cmd, **kwargs):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(subprocess, "run", interrupt)
+
+        with pytest.raises(KeyboardInterrupt):
+            finalize_benchmark(
+                self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
+            )
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["state"] == "interrupted"
+        assert summary["steady_state"] is None
+        assert not (tmp_path / "steady_state.json").exists()
+
+    @pytest.mark.unit
     def test_any_model_may_opt_in(self, tmp_path, monkeypatch):
         """No model allowlist: a config that enables detection gets it, whatever
         the model. Whether the numbers mean anything is the submitter's call."""

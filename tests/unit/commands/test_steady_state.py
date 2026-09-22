@@ -296,7 +296,10 @@ class TestDetectSteadyState:
         report_dir = _report_dir(tmp_path)
 
         def explode(cmd, **kw):
-            raise AssertionError(f"detector must not be spawned: {expected_reason}")
+            # pytest.fail raises BaseException; detect_steady_state's
+            # `except Exception` would swallow an AssertionError and the
+            # surviving log assertion would still pass.
+            pytest.fail(f"detector must not be spawned: {expected_reason}")
 
         monkeypatch.setattr(subprocess, "run", explode)
         with caplog.at_level(logging.INFO):
@@ -317,7 +320,7 @@ class TestDetectSteadyState:
 
     def test_missing_events_file_skips(self, tmp_path, monkeypatch, caplog):
         def explode(cmd, **kw):
-            raise AssertionError("detector needs events.jsonl; must not be spawned")
+            pytest.fail("detector needs events.jsonl; must not be spawned")
 
         monkeypatch.setattr(subprocess, "run", explode)
 
@@ -389,7 +392,6 @@ class TestBestEffortContract:
         [
             pytest.param(subprocess.TimeoutExpired("cmd", 60.0), id="timeout"),
             pytest.param(OSError("no interpreter"), id="spawn-oserror"),
-            pytest.param(KeyboardInterrupt(), id="interrupt"),
             pytest.param(TypeError("bad argv"), id="unexpected"),
         ],
     )
@@ -407,6 +409,30 @@ class TestBestEffortContract:
             assert _detect(report_dir) is None
 
         assert "steady-state" in caplog.text.lower()
+
+    def test_an_interrupt_propagates_instead_of_being_absorbed(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A ^C during detection must reach finalize_benchmark.
+
+        Detection runs before the report is written. Swallowing the first ^C
+        would carry on into the slowest part of finalize; the user's second one
+        then force-kills the process group and the run loses every artifact.
+        The half-written verdict still has to go.
+        """
+        report_dir = _report_dir(tmp_path)
+
+        def run(cmd, **kw):
+            (report_dir / "steady_state.json").write_text('{"truncated": ')
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(subprocess, "run", run)
+
+        with caplog.at_level(logging.WARNING), pytest.raises(KeyboardInterrupt):
+            _detect(report_dir)
+
+        assert not (report_dir / "steady_state.json").exists()
+        assert "interrupt" in caplog.text.lower()
 
     @pytest.mark.parametrize(
         ("outcome", "kwargs"),
@@ -447,7 +473,13 @@ class TestBestEffortContract:
 
         monkeypatch.setattr(subprocess, "run", run)
 
-        assert _detect(report_dir, **kwargs) is None
+        # An interrupt propagates (finalize_benchmark needs it to mark the run
+        # invalid); every other outcome returns None. The verdict goes either way.
+        if outcome == "interrupt":
+            with pytest.raises(KeyboardInterrupt):
+                _detect(report_dir, **kwargs)
+        else:
+            assert _detect(report_dir, **kwargs) is None
         assert not (report_dir / "steady_state.json").exists()
         assert not (report_dir / "steady_state.txt").exists()
 
@@ -540,7 +572,11 @@ class TestBestEffortContract:
 
         monkeypatch.setattr(subprocess, "run", run)
 
-        _detect(report_dir)
+        if outcome == "interrupt":
+            with pytest.raises(KeyboardInterrupt):
+                _detect(report_dir)
+        else:
+            _detect(report_dir)
 
         assert json.loads((report_dir / "run_meta.json").read_text()) == {
             "dataset_size": _DATASET_SIZE
@@ -606,6 +642,86 @@ class TestDiscardArtifacts:
         assert not (report_dir / "steady_state.txt").exists()
         assert not (report_dir / "run_meta.json").exists()
         assert (report_dir / "events.jsonl").exists(), "must not touch the event log"
+
+
+class TestVerdictHeadline:
+    """The headline lifted out of steady_state.json and onto the Report.
+
+    This is the trust boundary: everything downstream formats these values into
+    the run's primary artifacts.
+    """
+
+    @staticmethod
+    def _write(tmp_path, blob):
+        path = tmp_path / "steady_state.json"
+        path.write_text(json.dumps(blob))
+        return path
+
+    def test_lifts_the_headline_and_its_sizing_context(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            {
+                "superpass_size": 4388,
+                "n_super_passes": 12,
+                "n_post_warmup": 11,
+                "steady_state": {"found": True, "window": {"n_samples": 17552}},
+            },
+        )
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        assert got["found"] is True
+        assert got["superpass_size"] == 4388
+        assert got["n_post_warmup"] == 11
+
+    def test_leaves_the_bulk_diagnostics_behind(self, tmp_path):
+        """trajectories/cov/drift/per_super_pass would dwarf result_summary.json."""
+        path = self._write(
+            tmp_path,
+            {
+                "steady_state": {"found": True},
+                "trajectories": {"tpot": [1, 2, 3]},
+                "cov": {"tpot": {}},
+                "drift": {"tpot": {}},
+                "per_super_pass": [{"i": 0}],
+            },
+        )
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        assert set(got) == {"found"}
+
+    def test_missing_sizing_context_is_omitted_not_defaulted(self, tmp_path):
+        path = self._write(tmp_path, {"steady_state": {"found": False}})
+
+        got = steady_state.verdict_headline(path)
+
+        assert got == {"found": False}
+
+    def test_an_absent_file_is_absorbed(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING):
+            assert steady_state.verdict_headline(tmp_path / "nope.json") is None
+
+        assert "could not read" in caplog.text
+
+    def test_truncated_json_is_absorbed(self, tmp_path, caplog):
+        path = tmp_path / "steady_state.json"
+        path.write_text('{"steady_state": {"found": tru')
+
+        with caplog.at_level(logging.WARNING):
+            assert steady_state.verdict_headline(path) is None
+
+        assert "could not read" in caplog.text
+
+    @pytest.mark.parametrize("blob", [{}, {"steady_state": None}, {"steady_state": []}])
+    def test_a_blob_without_a_verdict_is_not_one(self, tmp_path, blob, caplog):
+        """The agentic/NATL --json output has this shape: real JSON, no verdict."""
+        with caplog.at_level(logging.WARNING):
+            assert steady_state.verdict_headline(self._write(tmp_path, blob)) is None
+
+        assert "no verdict" in caplog.text
 
 
 class TestRunMeta:

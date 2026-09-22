@@ -436,6 +436,30 @@ class TestSteadyStateOnReport:
         assert "drifting up" in "\n".join(lines)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            # The detector emits `"ttft": summarize(ttft) if ttft else None`, so a
+            # null block is a legitimate output, not corruption.
+            ("ttft", None),
+            ("tpot", {"p50": None, "p90": 1.0}),
+            ("tps", {"per_user": None, "system": None}),
+            ("tps", {"per_user": "fast", "system": 1.0}),
+            ("window", {"sp_lo": None, "sp_hi": None, "n_samples": None}),
+            ("drifting_up", [None]),
+        ],
+    )
+    def test_a_malformed_verdict_never_costs_the_run_its_report(self, field, value):
+        """display() is the first statement of _write_report_artifacts, before
+        result_summary.json is written. A diagnostic that cannot be rendered must
+        not take the performance report down with it."""
+        lines: list[str] = []
+
+        self._with(**{field: value}).display(fn=lines.append)
+
+        assert lines, "the rest of the report must still render"
+
+    @pytest.mark.unit
     def test_nothing_rendered_when_detection_did_not_run(self):
         lines: list[str] = []
 

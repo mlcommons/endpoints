@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from collections.abc import Callable, Iterable
@@ -38,6 +39,8 @@ from inference_endpoint.evaluation.accuracy_results import (
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
+
+logger = logging.getLogger(__name__)
 
 # Aggregator series name -> result_summary.json field. Single source of truth for the
 # summary's latency sections: ``Report.from_snapshot`` builds its fields from this, and
@@ -446,6 +449,18 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 f.write(json_bytes)
         return json_bytes
 
+    @staticmethod
+    def _number(value: object) -> float | None:
+        """``value`` as a float, or None if it is not a usable number.
+
+        The headline comes from the detector's JSON, where a field can
+        legitimately be null (an empty TTFT series) or, if that file is damaged,
+        any type at all. bool is excluded because ``True`` would render 1.00.
+        """
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        return float(value)
+
     def _display_steady_state(
         self, fn: Callable[[str], None], newline: str = ""
     ) -> None:
@@ -458,7 +473,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         if not ss:
             return
         if not ss.get("found"):
-            fn(f"Steady state: not found ({ss.get('reason') or 'no reason given'})")
+            fn(
+                f"Steady state: not found "
+                f"({ss.get('reason') or 'no reason given'}){newline}"
+            )
             return
 
         window = ss.get("window") or {}
@@ -470,23 +488,27 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             f"{window.get('n_samples', 0)} samples{newline}"
         )
         tps = ss.get("tps") or {}
-        if (per_user := tps.get("per_user")) is not None:
+        if (per_user := self._number(tps.get("per_user"))) is not None:
             fn(f"  TPS per-user: {per_user:.1f} tok/s/user{newline}")
-        if (system := tps.get("system")) is not None:
+        if (system := self._number(tps.get("system"))) is not None:
             fn(f"  TPS system: {system:.1f} tok/s{newline}")
         for key in ("ttft", "tpot"):
             block = ss.get(key)
-            if block:
-                fn(
-                    f"  {key.upper()} p50 {block.get('p50', 0):.2f}ms  "
-                    f"p90 {block.get('p90', 0):.2f}ms{newline}"
-                )
+            block = block if isinstance(block, dict) else {}
+            p50 = self._number(block.get("p50"))
+            p90 = self._number(block.get("p90"))
+            if p50 is not None and p90 is not None:
+                fn(f"  {key.upper()} p50 {p50:.2f}ms  p90 {p90:.2f}ms{newline}")
         short = ss.get("short_window") or {}
         if short.get("is_short"):
             fn(f"  WARNING: window shorter than the min-duration target{newline}")
-        if drifting := ss.get("drifting_up"):
+        drifting = [str(m) for m in ss.get("drifting_up") or []]
+        if drifting:
+            # "rest of the run", not "full run": the trend starts at plateau
+            # onset over the post-warmup series, matching the detector's wording.
             fn(
-                f"  WARNING: drifting up over the full run: {', '.join(drifting)}{newline}"
+                f"  WARNING: drifting up over the rest of the run: "
+                f"{', '.join(drifting)}{newline}"
             )
 
     def display(
@@ -544,7 +566,12 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         else:
             fn(f"E2E average interactivity: N/A{newline}")
 
-        self._display_steady_state(fn, newline)
+        try:
+            self._display_steady_state(fn, newline)
+        except Exception:  # noqa: BLE001 - a diagnostic must never fail a run
+            # display() runs before result_summary.json is written, so anything
+            # escaping here would cost a finished run its performance report.
+            logger.warning("Steady-state section could not be rendered", exc_info=True)
 
         if self.accuracy:
             fn(f"Accuracy:{newline}")
