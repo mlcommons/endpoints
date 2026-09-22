@@ -940,6 +940,47 @@ def test_pyxis_srun_step_retries_prelaunch_failure_from_stderr(monkeypatch, tmp_
     assert delays == [2]
 
 
+def test_pyxis_srun_step_retries_allocation_confirmation_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLURM_JOB_ID", "791888")
+    monkeypatch.setenv("SLURMD_NODENAME", "nvl72d169-T18")
+    status_path = tmp_path / ".mlperf_srun_status"
+    calls = 0
+    delays: list[float] = []
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=(
+                    "srun: error: Unable to confirm allocation for job 791888: "
+                    "Socket timed out on send/recv operation\n"
+                    "srun: Check SLURM_JOB_ID environment variable. "
+                    "Expired or invalid job 791888\n"
+                ),
+            )
+        status_path.write_text("finished:0\n")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(pyxis_env_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(pyxis_env_mod.time, "sleep", delays.append)
+
+    result = pyxis_env_mod.run_srun_step(
+        argv=["true"],
+        status_path=status_path,
+        timeout_s=30,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.stdout == "ok\n"
+    assert calls == 2
+    assert delays == [2]
+
+
 def test_pyxis_environment_does_not_retry_non_retryable_prelaunch_failure(
     monkeypatch, tmp_path
 ):
@@ -1056,7 +1097,14 @@ def test_pyxis_environment_mounts_persistent_tmp_on_every_step(monkeypatch, tmp_
     assert not persistent_tmp.exists()
 
 
-def test_pyxis_environment_extracts_submission(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "preamble",
+    [
+        "",
+        "srun: lua: Checking requeue policy with options:\n",
+    ],
+)
+def test_pyxis_environment_extracts_submission(monkeypatch, tmp_path, preamble):
     class Submitted(Exception):
         pass
 
@@ -1075,7 +1123,10 @@ def test_pyxis_environment_extracts_submission(monkeypatch, tmp_path):
         output = (
             "ok\n"
             if calls == 1
-            else "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndiff --git a/a b/a\n"
+            else (
+                f"{preamble}COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n"
+                "diff --git a/a b/a\n"
+            )
         )
         _finish_srun_step(command, 0)
         return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
