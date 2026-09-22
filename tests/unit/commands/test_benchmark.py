@@ -3228,7 +3228,7 @@ class TestSetupBenchmark:
                 ]
             )
         )
-        # fake dataset, 3 trajectory: 
+        # fake dataset, 3 trajectory:
         # traj1: user1 -> assistant1 -> user2 ==== totally 2 issued samples
         # traj2: user1 ==== totally 1 issued sample
         # traj3: user1 -> assistant1 -> user2 -> assistant2 -> user3 ==== totally 3 issued samples
