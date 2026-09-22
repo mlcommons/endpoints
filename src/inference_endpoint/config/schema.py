@@ -957,10 +957,13 @@ class SteadyStateConfig(BaseModel):
     runs, for runs that did not complete, or for load patterns the detector
     marks unsupported.
 
+    The steady-window headline is attached to the report, so it appears in
+    ``performance/result_summary.json``, ``report.txt``, and the console
+    summary. The detector's full diagnostics stay in ``steady_state.json``.
+
     Opt-in and use at your own risk. The detector has been validated against a
     small set of workloads; on anything else the verdict is yours to interpret.
-    It also tokenizes every response, which is not free. The output is additive
-    -- the Report and ``result_summary.json`` are untouched.
+    It also tokenizes every response, which is not free.
     See ``docs/steady_state_diagnostics.md``.
     """
 

@@ -1,8 +1,9 @@
 # `steady_state_diagnostics.py`
 
 Post-hoc **steady-state / drift diagnostics** for a benchmark run's `events.jsonl`.
-Self-contained (no `inference_endpoint` import) — runs anywhere with a tokenizer via
-`uv`. The full methodology lives in
+Imports nothing else from `inference_endpoint`, so it can be reasoned about (and
+re-run) on its own, but it lives in the package and needs an installed environment
+— see Requirements below. The full methodology lives in
 [`docs/steady-state-detection.md`](steady-state-detection.md); this is the
 operator's quick reference.
 

@@ -1245,7 +1245,9 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
                 dataset_size=steady_state_dataset_size(ctx.dataloader),
             )
             if verdict is not None:
-                steady_state = steady_state_headline(verdict)
+                steady_state = steady_state_headline(
+                    verdict, load_pattern=ctx.config.settings.load_pattern.type
+                )
 
         if aborted:
             logger.warning("Run aborted — skipping accuracy scoring on partial data")

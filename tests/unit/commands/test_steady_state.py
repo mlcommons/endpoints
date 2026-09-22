@@ -770,6 +770,70 @@ class TestVerdictHeadline:
                 usable = usable and math.isfinite(raw)
                 assert (block or {}).get(key) is None or usable
 
+    def test_the_level_shift_anomaly_survives_to_the_report(self, tmp_path):
+        """The detector treats a level shift after the plateau as a first-class
+        warning. Dropping it makes a degrading run print a clean headline."""
+        path = self._write(
+            tmp_path,
+            {
+                "steady_state": {
+                    "found": True,
+                    "anomaly": {
+                        "detected": True,
+                        "change_point_sp": 7,
+                        "delta_pct": 12.5,
+                        "plateaus": [[0, 5], [5, 9]],
+                    },
+                }
+            },
+        )
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        assert got["anomaly"] == {
+            "detected": True,
+            "change_point_sp": 7,
+            "delta_pct": 12.5,
+        }
+
+    @pytest.mark.parametrize(
+        "anomaly", ["yes", None, {"detected": False}, {"detected": "maybe"}]
+    )
+    def test_an_unusable_anomaly_is_dropped(self, tmp_path, anomaly):
+        path = self._write(
+            tmp_path, {"steady_state": {"found": True, "anomaly": anomaly}}
+        )
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        assert got["anomaly"] is None
+
+    def test_the_profile_caveat_rides_along(self, tmp_path):
+        """poisson is supported but carries a reliability note. Scraping it from
+        the child's stderr only reaches steady_state.txt; the report is the
+        artifact a submitter actually reads."""
+        path = self._write(tmp_path, {"steady_state": {"found": True}})
+
+        got = steady_state.verdict_headline(path, load_pattern=LoadPatternType.POISSON)
+
+        assert got is not None
+        assert got["profile"] == "poisson"
+        assert got["profile_caveat"]
+        assert "\n" not in got["profile_caveat"]
+
+    def test_a_profile_without_a_note_carries_none(self, tmp_path):
+        path = self._write(tmp_path, {"steady_state": {"found": True}})
+
+        got = steady_state.verdict_headline(
+            path, load_pattern=LoadPatternType.CONCURRENCY
+        )
+
+        assert got is not None
+        assert got["profile"] == "concurrency"
+        assert got["profile_caveat"] is None
+
     def test_a_healthy_verdict_passes_through_intact(self, tmp_path):
         headline = {
             "found": True,

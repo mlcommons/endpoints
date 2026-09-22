@@ -527,6 +527,42 @@ class TestSteadyStateOnReport:
             assert "drifting up over the rest of the run: tpot" in text
 
     @pytest.mark.unit
+    def test_a_level_shift_is_surfaced(self):
+        """A window followed by a detected level shift must not read as clean."""
+        lines: list[str] = []
+
+        self._with(
+            anomaly={"detected": True, "change_point_sp": 7, "delta_pct": 12.5}
+        ).display(fn=lines.append)
+
+        text = "\n".join(lines)
+        assert "ANOMALY" in text
+        assert "super-pass 7" in text
+        assert "12.5" in text
+
+    @pytest.mark.unit
+    def test_no_anomaly_line_when_none_was_detected(self):
+        lines: list[str] = []
+
+        self._with(anomaly={"detected": False, "delta_pct": 0.0}).display(
+            fn=lines.append
+        )
+
+        assert "ANOMALY" not in "\n".join(lines)
+
+    @pytest.mark.unit
+    def test_the_profile_caveat_is_shown_with_the_numbers(self):
+        """Without it, a poisson verdict reads as trustworthy as a concurrency
+        one, which is the opposite of what the detector claims."""
+        lines: list[str] = []
+
+        self._with(profile="poisson", profile_caveat="usually under-saturated").display(
+            fn=lines.append
+        )
+
+        assert "usually under-saturated" in "\n".join(lines)
+
+    @pytest.mark.unit
     def test_nothing_rendered_when_detection_did_not_run(self):
         lines: list[str] = []
 

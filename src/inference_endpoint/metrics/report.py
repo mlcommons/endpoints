@@ -503,9 +503,21 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             p90 = self._number(block.get("p90"))
             if p50 is not None and p90 is not None:
                 fn(f"  {key.upper()} p50 {p50:.2f}ms  p90 {p90:.2f}ms{newline}")
+        anomaly = ss.get("anomaly")
+        if isinstance(anomaly, dict) and anomaly.get("detected"):
+            delta = self._number(anomaly.get("delta_pct"))
+            shift = f" TPOT {delta:+.1f}%" if delta is not None else ""
+            fn(
+                f"  ANOMALY: level shift at super-pass "
+                f"{anomaly.get('change_point_sp')},{shift} toward end of run "
+                f"(likely degradation){newline}"
+            )
         short = ss.get("short_window") or {}
         if short.get("is_short"):
             fn(f"  WARNING: window shorter than the min-duration target{newline}")
+        caveat = ss.get("profile_caveat")
+        if isinstance(caveat, str) and caveat:
+            fn(f"  NOTE ({ss.get('profile', '?')} profile): {caveat}{newline}")
         # Filtered, not coerced: str() on a bare string would iterate it
         # character by character and print "t, p, o, t".
         raw_drifting = ss.get("drifting_up")

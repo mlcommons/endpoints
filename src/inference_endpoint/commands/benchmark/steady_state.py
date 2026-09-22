@@ -193,7 +193,24 @@ def _numeric_block(value: object, keys: tuple[str, ...]) -> dict[str, float] | N
     return block or None
 
 
-def verdict_headline(verdict_path: Path) -> dict[str, Any] | None:
+def _anomaly(value: object) -> dict[str, Any] | None:
+    """The detector's level-shift warning, or None if there isn't one.
+
+    Only the fields the report renders are kept; ``plateaus`` is a full
+    segmentation table and belongs in steady_state.json.
+    """
+    if not isinstance(value, dict) or value.get("detected") is not True:
+        return None
+    return {
+        "detected": True,
+        "change_point_sp": value.get("change_point_sp"),
+        "delta_pct": _finite(value.get("delta_pct")),
+    }
+
+
+def verdict_headline(
+    verdict_path: Path, *, load_pattern: LoadPatternType | None = None
+) -> dict[str, Any] | None:
     """The compact steady-window summary from a verdict file, for the Report.
 
     This is the trust boundary. The detector's JSON is arbitrary input --
@@ -201,6 +218,12 @@ def verdict_headline(verdict_path: Path) -> dict[str, Any] | None:
     and everything downstream formats these values into the run's primary
     artifacts. So the shape is narrowed to known keys here and anything that
     cannot be rendered is dropped, rather than each consumer guarding again.
+
+    ``load_pattern`` supplies the workload profile's reliability note. That note
+    is a property of the profile, not of the verdict file, and the detector only
+    emits it on stderr -- where it reaches steady_state.txt but not the report a
+    submitter actually reads. Computing it here from the same profile table the
+    child uses avoids both the omission and a stderr text contract.
 
     Best-effort like the rest of this module: an unreadable or malformed
     verdict means the Report carries no steady-state block.
@@ -238,6 +261,12 @@ def verdict_headline(verdict_path: Path) -> dict[str, Any] | None:
         if isinstance(headline.get("drifting_up"), list)
         else [],
     }
+    out["anomaly"] = _anomaly(headline.get("anomaly"))
+    if load_pattern is not None:
+        profile = profile_for_load_pattern(load_pattern.value)
+        note = " ".join(profile.note.split())
+        out["profile"] = profile.name
+        out["profile_caveat"] = note or None
     context = {k: blob[k] for k in _HEADLINE_CONTEXT if k in blob}
     return {**context, **out}
 
