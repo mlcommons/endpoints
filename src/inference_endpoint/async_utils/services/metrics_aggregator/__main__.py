@@ -189,6 +189,12 @@ async def main() -> None:
         ),
     )
     parser.add_argument(
+        "--metrics-isl",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Collect input sequence length (ISL) metrics (default: enabled).",
+    )
+    parser.add_argument(
         "--streaming",
         action="store_true",
         default=False,
@@ -280,6 +286,7 @@ async def main() -> None:
                     args.publish_interval if args.tokenizer_workers > 0 else None
                 ),
                 streaming=args.streaming,
+                enable_isl=args.metrics_isl,
                 shutdown_event=shutdown_event,
                 drain_timeout_s=args.drain_timeout,
             )

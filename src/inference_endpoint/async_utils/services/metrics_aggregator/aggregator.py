@@ -135,6 +135,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         streaming: bool = False,
         shutdown_event: asyncio.Event | None = None,
         drain_timeout_s: float | None = None,
+        enable_isl: bool = True,
         **kwargs,
     ):
         # drain_timeout_s is injected (not derived) because the right
@@ -179,17 +180,21 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
 
         # Pre-register all metrics on the registry. Tests can introspect via
         # registry.has_counter / has_series.
-        self._register_metrics(streaming, sig_figs, n_histogram_buckets)
+        self._register_metrics(streaming, enable_isl, sig_figs, n_histogram_buckets)
 
         self._table = MetricsTable(self._registry)
-        self._register_triggers(streaming)
+        self._register_triggers(streaming, enable_isl)
 
     # ------------------------------------------------------------------
     # Registration helpers
     # ------------------------------------------------------------------
 
     def _register_metrics(
-        self, streaming: bool, sig_figs: int, n_histogram_buckets: int
+        self,
+        streaming: bool,
+        enable_isl: bool,
+        sig_figs: int,
+        n_histogram_buckets: int,
     ) -> None:
         """Register all counters and series on the registry."""
         for key in MetricCounterKey:
@@ -204,13 +209,14 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             sig_figs=sig_figs,
             n_histogram_buckets=n_histogram_buckets,
         )
-        self._registry.register_series(
-            MetricSeriesKey.ISL.value,
-            hdr_low=TOKEN_HDR_LOW,
-            hdr_high=TOKEN_HDR_HIGH,
-            sig_figs=sig_figs,
-            n_histogram_buckets=n_histogram_buckets,
-        )
+        if enable_isl:
+            self._registry.register_series(
+                MetricSeriesKey.ISL.value,
+                hdr_low=TOKEN_HDR_LOW,
+                hdr_high=TOKEN_HDR_HIGH,
+                sig_figs=sig_figs,
+                n_histogram_buckets=n_histogram_buckets,
+            )
         self._registry.register_series(
             MetricSeriesKey.OSL.value,
             hdr_low=TOKEN_HDR_LOW,
@@ -246,18 +252,19 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 dtype=float,
             )
 
-    def _register_triggers(self, streaming: bool) -> None:
+    def _register_triggers(self, streaming: bool, enable_isl: bool) -> None:
         """Register metric triggers on the table.
 
         Streaming-only triggers (TTFT, chunk_delta, TPOT) are only registered
-        when ``streaming=True``.
+        when ``streaming=True``; the ISL trigger only when ``enable_isl=True``.
         """
         table = self._table
         registry = self._registry
         queue = self._token_queue
 
-        # Always registered
-        table.add_trigger(SampleField.ISSUED_NS, IslTrigger(registry, queue))
+        # Latency and OSL are always registered; ISL is opt-out.
+        if enable_isl:
+            table.add_trigger(SampleField.ISSUED_NS, IslTrigger(registry, queue))
         table.add_trigger(SampleField.COMPLETE_NS, SampleLatencyTrigger(registry))
         table.add_trigger(SampleField.COMPLETE_NS, OslTrigger(registry, queue))
 
