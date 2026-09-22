@@ -105,6 +105,7 @@ settings:
   early_stopping:  # MLPerf early-stopping percentile estimates (on by default; enabled: false opts out)
     enabled: true  # Early-stopping percentile estimates (default on)
   metrics_tokenizer_workers: 4  # In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT (default: 4; 0 = defer everything to the end-of-run drain).
+  metrics_isl: true  # Collect input sequence length (ISL) metrics (default: true).
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000

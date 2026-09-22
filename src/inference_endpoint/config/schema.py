@@ -973,6 +973,16 @@ class Settings(WithUpdatesMixin, BaseModel):
             "(default: 4; 0 = defer everything to the end-of-run drain)."
         ),
     )
+    metrics_isl: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--metrics-isl",
+            help="Collect input sequence length (ISL) metrics",
+        ),
+    ] = Field(
+        True,
+        description="Collect input sequence length (ISL) metrics (default: true).",
+    )
 
     @model_validator(mode="after")
     def _min_issue_duration_requires_qps(self) -> Self:
