@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any
 
 import msgspec.structs
 import pytest
@@ -44,7 +43,13 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     snapshot_to_dict,
 )
 from inference_endpoint.metrics.report import (
+    LatencyBlock,
+    LevelShift,
     Report,
+    ShortWindow,
+    SteadyStateHeadline,
+    TpsBlock,
+    WindowBlock,
     format_duration,
     series_metric_dict,
 )
@@ -370,18 +375,16 @@ class TestFromSnapshot:
 # ---------------------------------------------------------------------------
 
 
-_STEADY_HEADLINE: dict[str, Any] = {
-    "superpass_size": 4388,
-    "n_super_passes": 12,
-    "found": True,
-    "reason": None,
-    "window": {"sp_lo": 1, "sp_hi": 5, "n_super_passes": 4, "n_samples": 17552},
-    "tps": {"per_user": 302.3, "system": 40960.9},
+_STEADY_HEADLINE = SteadyStateHeadline(
+    superpass_size=4388,
+    n_super_passes=12,
+    found=True,
+    window=WindowBlock(sp_lo=1, sp_hi=5, n_super_passes=4, n_samples=17552),
+    tps=TpsBlock(per_user=302.3, system=40960.9),
     # nanoseconds, as the detector emits them
-    "ttft": {"p50": 86_260_000.0, "p90": 156_100_000.0},
-    "tpot": {"p50": 3_290_000.0, "p90": 3_440_000.0},
-    "drifting_up": [],
-}
+    ttft=LatencyBlock(p50=86_260_000.0, p90=156_100_000.0),
+    tpot=LatencyBlock(p50=3_290_000.0, p90=3_440_000.0),
+)
 
 
 class TestSteadyStateOnReport:
@@ -390,9 +393,9 @@ class TestSteadyStateOnReport:
 
     @staticmethod
     def _with(**overrides):
-        verdict = {**_STEADY_HEADLINE, **overrides}
         return msgspec.structs.replace(
-            _build_report(_make_registry()), steady_state=verdict
+            _build_report(_make_registry()),
+            steady_state=msgspec.structs.replace(_STEADY_HEADLINE, **overrides),
         )
 
     @pytest.mark.unit
@@ -436,102 +439,9 @@ class TestSteadyStateOnReport:
         is degrading; hiding it makes the numbers look better than they are."""
         lines: list[str] = []
 
-        self._with(drifting_up=["tpot"]).display(fn=lines.append)
+        self._with(drifting_up=("tpot",)).display(fn=lines.append)
 
         assert "drifting up" in "\n".join(lines)
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("field", "value"),
-        [
-            # The detector emits `"ttft": summarize(ttft) if ttft else None`, so a
-            # null block is a legitimate output, not corruption.
-            ("ttft", None),
-            ("tpot", {"p50": None, "p90": 1.0}),
-            ("tps", {"per_user": "fast", "system": 1.0}),
-            # bool is an int subclass: True would otherwise render as "1.0".
-            ("tps", {"per_user": True, "system": 1.0}),
-            ("window", {"sp_lo": None, "sp_hi": None, "n_samples": None}),
-            ("drifting_up", [None]),
-        ],
-    )
-    def test_an_unusable_field_is_skipped_not_fatal(self, field, value):
-        """One bad field must cost only that line.
-
-        The assertion is on the LAST line the section emits. Checking earlier
-        content would also pass if the section blew up partway and the outer
-        guard swallowed it -- which is exactly the difference between skipping
-        a field and abandoning the verdict.
-        """
-        verdict = {**_STEADY_HEADLINE, field: value, "short_window": {"is_short": True}}
-        report = msgspec.structs.replace(
-            _build_report(_make_registry()), steady_state=verdict
-        )
-        lines: list[str] = []
-
-        report.display(fn=lines.append)
-
-        text = "\n".join(lines)
-        assert "Steady state:" in text, "the headline must still render"
-        assert (
-            "window shorter than the min-duration target" in text
-        ), "the section must run to completion, not abort at the bad field"
-        if field == "tps" and value.get("per_user") is True:
-            assert (
-                "TPS per-user" not in text
-            ), "a bool must not be rendered as a throughput number"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "verdict",
-        [
-            # `ss` itself is not a mapping, so the first .get() raises and no
-            # per-field guard can reach it. Shapes the field guards DO handle
-            # belong in the boundary tests -- asserting them here would pass
-            # with those guards removed.
-            "a bare string",
-            ["a", "list"],
-            42,
-        ],
-    )
-    def test_a_verdict_that_is_not_a_mapping_never_costs_the_run_its_report(
-        self, verdict
-    ):
-        """display() is the first statement of _write_report_artifacts, before
-        result_summary.json is written, so anything escaping here costs a
-        finished run its performance report."""
-        report = msgspec.structs.replace(
-            _build_report(_make_registry()), steady_state=verdict
-        )
-        lines: list[str] = []
-
-        report.display(fn=lines.append)
-
-        assert any(
-            "Samples" in ln or "Version" in ln for ln in lines
-        ), "the rest of the report must still render"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("value", "absent"),
-        [
-            ("tpot", "t, p, o, t"),
-            ([None, 1, "tpot"], "None"),
-            ({"tpot": 1}, "tpot"),
-        ],
-    )
-    def test_drift_names_are_filtered_not_coerced(self, value, absent):
-        """str() on a bare string iterates it character by character, which
-        prints a confident-looking warning about metrics that do not exist.
-        Rendering nothing beats rendering nonsense."""
-        lines: list[str] = []
-
-        self._with(drifting_up=value).display(fn=lines.append)
-
-        text = "\n".join(lines)
-        assert absent not in text
-        if value == [None, 1, "tpot"]:
-            assert "drifting up over the rest of the run: tpot" in text
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -557,12 +467,12 @@ class TestSteadyStateOnReport:
         lines: list[str] = []
 
         self._with(
-            short_window={
-                "is_short": False,
-                "window_duration_s": 3241.87875902,
-                "min_duration_s": 1742.469683785,
-                "dominant": "relaxation",
-            }
+            short_window=ShortWindow(
+                is_short=False,
+                window_duration_s=3241.87875902,
+                min_duration_s=1742.469683785,
+                dominant="relaxation",
+            )
         ).display(fn=lines.append)
 
         text = "\n".join(lines)
@@ -575,12 +485,12 @@ class TestSteadyStateOnReport:
         lines: list[str] = []
 
         self._with(
-            short_window={
-                "is_short": True,
-                "window_duration_s": 120.0,
-                "min_duration_s": 600.0,
-                "dominant": "floor",
-            }
+            short_window=ShortWindow(
+                is_short=True,
+                window_duration_s=120.0,
+                min_duration_s=600.0,
+                dominant="floor",
+            )
         ).display(fn=lines.append)
 
         text = "\n".join(lines)
@@ -597,8 +507,8 @@ class TestSteadyStateOnReport:
         lines: list[str] = []
 
         self._with(
-            ttft={"p50": 220520473.0, "p90": 293652176.0},
-            tpot={"p50": 36570133.85, "p90": 36776479.54},
+            ttft=LatencyBlock(p50=220520473.0, p90=293652176.0),
+            tpot=LatencyBlock(p50=36570133.85, p90=36776479.54),
         ).display(fn=lines.append)
 
         text = "\n".join(lines)
@@ -611,7 +521,7 @@ class TestSteadyStateOnReport:
         lines: list[str] = []
 
         self._with(
-            anomaly={"detected": True, "change_point_sp": 7, "delta_pct": 12.5}
+            anomaly=LevelShift(detected=True, change_point_sp=7, delta_pct=12.5)
         ).display(fn=lines.append)
 
         text = "\n".join(lines)
@@ -626,7 +536,7 @@ class TestSteadyStateOnReport:
         lines: list[str] = []
 
         self._with(
-            anomaly={"detected": True, "change_point_sp": 7, "delta_pct": -12.5}
+            anomaly=LevelShift(detected=True, change_point_sp=7, delta_pct=-12.5)
         ).display(fn=lines.append)
 
         text = "\n".join(lines)
@@ -637,7 +547,7 @@ class TestSteadyStateOnReport:
     def test_no_anomaly_line_when_none_was_detected(self):
         lines: list[str] = []
 
-        self._with(anomaly={"detected": False, "delta_pct": 0.0}).display(
+        self._with(anomaly=LevelShift(detected=False, delta_pct=0.0)).display(
             fn=lines.append
         )
 
@@ -654,6 +564,26 @@ class TestSteadyStateOnReport:
         )
 
         assert "usually under-saturated" in "\n".join(lines)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ["a bare string", ["a", "list"], 42, {"k": 1}])
+    def test_a_headline_of_the_wrong_type_never_costs_the_run_its_report(self, verdict):
+        """steady_state is a public field on the struct, so nothing stops a
+        caller setting it to something that is not a SteadyStateHeadline.
+        display() is the first statement of _write_report_artifacts, before
+        result_summary.json is written, so anything escaping the section costs a
+        finished run its performance report. This is the last-resort guard --
+        the producer's own checks are pinned in test_steady_state.py."""
+        report = msgspec.structs.replace(
+            _build_report(_make_registry()), steady_state=verdict
+        )
+        lines: list[str] = []
+
+        report.display(fn=lines.append)
+
+        assert any(
+            "Samples" in ln or "Version" in ln for ln in lines
+        ), "the rest of the report must still render"
 
     @pytest.mark.unit
     def test_nothing_rendered_when_detection_did_not_run(self):

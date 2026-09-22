@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import msgspec.structs
 import pytest
 from inference_endpoint.commands.benchmark import steady_state
 from inference_endpoint.config.schema import (
@@ -23,6 +24,7 @@ from inference_endpoint.config.schema import (
     TestType,
 )
 from inference_endpoint.metrics import steady_state_diagnostics
+from inference_endpoint.metrics.report import LevelShift
 
 pytestmark = pytest.mark.unit
 
@@ -644,6 +646,23 @@ class TestDiscardArtifacts:
         assert (report_dir / "events.jsonl").exists(), "must not touch the event log"
 
 
+def _as_dict(block):
+    """A headline sub-struct as a plain dict of its set fields, or None.
+
+    Lets the drop/keep cases below state one expected mapping per case rather
+    than one assertion per field.
+    """
+    if block is None:
+        return None
+    if isinstance(block, tuple):
+        return list(block)
+    return {
+        f.name: v
+        for f in msgspec.structs.fields(block)
+        if (v := getattr(block, f.name)) is not None
+    }
+
+
 _HEADLINE_CONTEXT_KEYS = ("superpass_size", "n_super_passes", "n_post_warmup")
 
 
@@ -675,9 +694,9 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert got["found"] is True
-        assert got["superpass_size"] == 4388
-        assert got["n_post_warmup"] == 11
+        assert got.found is True
+        assert got.superpass_size == 4388
+        assert got.n_post_warmup == 11
 
     def test_leaves_the_bulk_diagnostics_behind(self, tmp_path):
         """trajectories/cov/drift/per_super_pass would dwarf result_summary.json."""
@@ -695,7 +714,10 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert not {"trajectories", "cov", "drift", "per_super_pass"} & set(got)
+        # A typed headline cannot carry them: the fields do not exist.
+        assert not {"trajectories", "cov", "drift", "per_super_pass"} & {
+            f.name for f in msgspec.structs.fields(got)
+        }
 
     def test_missing_sizing_context_is_omitted_not_defaulted(self, tmp_path):
         """Absent context keys stay absent rather than arriving as a zero that
@@ -705,8 +727,8 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert got["found"] is False
-        assert not set(_HEADLINE_CONTEXT_KEYS) & set(got)
+        assert got.found is False
+        assert all(getattr(got, k) is None for k in _HEADLINE_CONTEXT_KEYS)
 
     def test_an_absent_file_is_absorbed(self, tmp_path, caplog):
         with caplog.at_level(logging.WARNING):
@@ -767,7 +789,7 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert got[field] == expected
+        assert _as_dict(getattr(got, field)) == expected
 
     @pytest.mark.parametrize(
         ("raw", "expected"),
@@ -789,7 +811,7 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert got.get("superpass_size") == expected
+        assert got.superpass_size == expected
 
     @pytest.mark.parametrize(
         ("change_point", "expected"),
@@ -813,7 +835,7 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert got["anomaly"]["change_point_sp"] == expected
+        assert (got.anomaly.change_point_sp if got.anomaly else None) == expected
 
     def test_the_confidence_intervals_and_tail_percentiles_survive(self, tmp_path):
         """A throughput figure without its interval is harder to judge, and p99
@@ -845,12 +867,13 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert got["tps"]["per_user_ci"] == [27.2, 27.6]
-        assert got["tps"]["system_ci"] == [55769.0, 56291.1]
-        assert got["ttft"]["p99"] == 3.0
-        assert got["ttft"]["mean"] == 1.5
-        assert got["ttft"]["count"] == 47484
-        assert "histogram" not in got["ttft"], "the bulky part still stays behind"
+        assert got.tps is not None and got.ttft is not None
+        assert got.tps.per_user_ci == [27.2, 27.6]
+        assert got.tps.system_ci == [55769.0, 56291.1]
+        assert got.ttft.p99 == 3.0
+        assert got.ttft.mean == 1.5
+        assert got.ttft.count == 47484
+        assert not hasattr(got.ttft, "histogram"), "the bulky part stays behind"
 
     def test_the_evidence_for_the_window_survives(self, tmp_path):
         """is_short alone says whether the window cleared the gate, not by how
@@ -885,12 +908,13 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert got["window"]["skipped_short"] == 2
-        assert got["window"]["n_plateaus"] == 1
-        assert got["short_window"]["window_duration_s"] == 3241.9
-        assert got["short_window"]["min_duration_s"] == 1742.5
-        assert got["short_window"]["dominant"] == "relaxation"
-        assert got["global_trend"] == {"tpot_p50": "steady", "ttft_p90": "up"}
+        assert got.window is not None and got.short_window is not None
+        assert got.window.skipped_short == 2
+        assert got.window.n_plateaus == 1
+        assert got.short_window.window_duration_s == 3241.9
+        assert got.short_window.min_duration_s == 1742.5
+        assert got.short_window.dominant == "relaxation"
+        assert got.global_trend == {"tpot_p50": "steady", "ttft_p90": "up"}
 
     def test_the_bulky_evidence_stays_in_the_verdict_file(self, tmp_path):
         """Histograms were two thirds of the block on a real run, and plateaus
@@ -910,10 +934,11 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert "histogram" not in got["ttft"]
-        assert "kstar" not in got["short_window"]
-        assert "plateaus" not in got["anomaly"]
-        assert "pettitt" not in got["anomaly"]
+        # The headline is typed, so the bulky fields have nowhere to land.
+        for block in (got.ttft, got.short_window, got.anomaly):
+            assert block is not None
+            names = {f.name for f in msgspec.structs.fields(block)}
+            assert not names & {"histogram", "kstar", "plateaus", "pettitt"}
 
     def test_the_level_shift_anomaly_survives_to_the_report(self, tmp_path):
         """The detector treats a level shift after the plateau as a first-class
@@ -936,11 +961,9 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert got["anomaly"] == {
-            "detected": True,
-            "change_point_sp": 7,
-            "delta_pct": 12.5,
-        }
+        assert got.anomaly == LevelShift(
+            detected=True, change_point_sp=7, delta_pct=12.5
+        )
 
     @pytest.mark.parametrize(
         "anomaly", ["yes", None, {"detected": False}, {"detected": "maybe"}]
@@ -953,7 +976,7 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert got["anomaly"] is None
+        assert got.anomaly is None
 
     def test_the_profile_caveat_rides_along(self, tmp_path):
         """poisson is supported but carries a reliability note. Scraping it from
@@ -964,9 +987,9 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path, load_pattern=LoadPatternType.POISSON)
 
         assert got is not None
-        assert got["profile"] == "poisson"
-        assert got["profile_caveat"]
-        assert "\n" not in got["profile_caveat"]
+        assert got.profile == "poisson"
+        assert got.profile_caveat
+        assert "\n" not in got.profile_caveat
 
     def test_a_profile_without_a_note_carries_none(self, tmp_path):
         path = self._write(tmp_path, {"steady_state": {"found": True}})
@@ -976,8 +999,8 @@ class TestVerdictHeadline:
         )
 
         assert got is not None
-        assert got["profile"] == "concurrency"
-        assert got["profile_caveat"] is None
+        assert got.profile == "concurrency"
+        assert got.profile_caveat is None
 
     def test_a_healthy_verdict_passes_through_intact(self, tmp_path):
         headline = {
@@ -996,11 +1019,12 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert got["superpass_size"] == 4388
-        assert got["window"]["n_samples"] == 17552
-        assert got["tps"]["per_user"] == 302.3
-        assert got["drifting_up"] == ["tpot"]
-        assert got["short_window"]["is_short"] is False
+        assert got.superpass_size == 4388
+        assert got.window is not None and got.window.n_samples == 17552
+        assert got.tps is not None and got.tps.per_user == 302.3
+        assert got.drifting_up == ("tpot",)
+        assert got.short_window is not None
+        assert got.short_window.is_short is False
 
     @pytest.mark.parametrize("blob", [{}, {"steady_state": None}, {"steady_state": []}])
     def test_a_blob_without_a_verdict_is_not_one(self, tmp_path, blob, caplog):

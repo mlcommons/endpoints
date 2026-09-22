@@ -33,9 +33,6 @@ from inference_endpoint.async_utils.services.metrics_aggregator.aggregator impor
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     build_token_series_dict,
 )
-from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
-    finite_number,
-)
 from inference_endpoint.evaluation.accuracy_results import (
     samples_weighted_average_accuracy,
 )
@@ -204,6 +201,98 @@ def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+class LatencyBlock(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """Percentiles and mean in nanoseconds, plus the sample tally.
+
+    Nanoseconds because that is what the detector and ``Report``'s own
+    ttft/tpot series carry; renderers scale.
+    """
+
+    p50: float | None = None
+    p90: float | None = None
+    p99: float | None = None
+    mean: float | None = None
+    count: int | None = None
+
+
+class TpsBlock(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """Throughput point estimates with their batch-means intervals."""
+
+    per_user: float | None = None
+    system: float | None = None
+    per_user_ci: list[float] | None = None
+    system_ci: list[float] | None = None
+
+
+class WindowBlock(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """Which super-passes the steady window covers, and how it was chosen.
+
+    ``sp_hi`` is exclusive, matching the detector. ``skipped_short`` and
+    ``n_plateaus`` say whether earlier plateaus were rejected as too brief.
+    """
+
+    sp_lo: int | None = None
+    sp_hi: int | None = None
+    n_samples: int | None = None
+    n_super_passes: int | None = None
+    plateau_index: int | None = None
+    n_plateaus: int | None = None
+    skipped_short: int | None = None
+
+
+class ShortWindow(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """Whether the window cleared the min-duration gate, and by how much."""
+
+    is_short: bool = False
+    window_duration_s: float | None = None
+    min_duration_s: float | None = None
+    dominant: str | None = None
+
+
+class LevelShift(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """A plateau after the reported one at a different level.
+
+    ``delta_pct`` > 0 means TPOT rose, i.e. degradation; the detector flags on
+    the absolute change, so it can be negative.
+    """
+
+    detected: bool = False
+    change_point_sp: int | None = None
+    delta_pct: float | None = None
+
+
+class SteadyStateHeadline(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """The steady-window summary carried on the report.
+
+    Every field is optional and defaults to empty: the detector's output is
+    read from a file that can be truncated or come from a different version, so
+    a missing or unusable value is normal rather than exceptional. Building this
+    is ``commands/benchmark/steady_state.py:verdict_headline``, which is the one
+    place that file is read.
+
+    The bulky parts of the detector's output -- per-super-pass trajectories,
+    CoV/drift tables, the latency histograms -- are not here; they stay in
+    ``steady_state.json``.
+    """
+
+    found: bool = False
+    reason: str | None = None
+    window: WindowBlock | None = None
+    tps: TpsBlock | None = None
+    ttft: LatencyBlock | None = None
+    tpot: LatencyBlock | None = None
+    short_window: ShortWindow | None = None
+    drifting_up: tuple[str, ...] = ()
+    anomaly: LevelShift | None = None
+    global_trend: dict[str, str] | None = None
+    profile: str | None = None
+    profile_caveat: str | None = None
+    # What the window was measured over, from the detector's top level.
+    superpass_size: int | None = None
+    n_super_passes: int | None = None
+    n_post_warmup: int | None = None
+
+
 class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     """Summarized benchmark report."""
 
@@ -288,7 +377,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # drift tables -- stay in steady_state.json; embedding them would dwarf the
     # rest of this report. None when detection did not run, which is the
     # default: it is opt-in.
-    steady_state: dict[str, Any] | None = None
+    steady_state: SteadyStateHeadline | None = None
 
     @property
     def n_samples_succeeded(self) -> int:
@@ -472,99 +561,71 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 f.write(json_bytes)
         return json_bytes
 
-    # ``verdict_headline`` already narrows the headline, but this field is a
-    # plain dict on a public struct, so the renderer stays total on its own.
-    # Same predicate as the boundary rather than a second copy of the rule.
-    _number = staticmethod(finite_number)
-
     def _display_steady_state(
         self, fn: Callable[[str], None], newline: str = ""
     ) -> None:
         """Render the steady-window headline, or nothing if it was not run.
 
         Silence means detection never ran. A run that looked and found no
-        window says so, so the two are not confused.
+        window says so, so the two are not confused. Values arrive already
+        checked (see ``verdict_headline``), so this only decides what to show.
         """
         ss = self.steady_state
-        if not ss:
+        if ss is None:
             return
-        if not ss.get("found"):
-            fn(
-                f"Steady state: not found "
-                f"({ss.get('reason') or 'no reason given'}){newline}"
-            )
+        if not ss.found:
+            fn(f"Steady state: not found ({ss.reason or 'no reason given'}){newline}")
             return
 
-        window = ss.get("window") or {}
-        lo, hi = window.get("sp_lo"), window.get("sp_hi")
+        window = ss.window or WindowBlock()
+        lo, hi = window.sp_lo, window.sp_hi
         # sp_hi is exclusive in the detector's output; render an inclusive range.
-        span = f"{lo}..{hi - 1}" if isinstance(lo, int) and isinstance(hi, int) else "?"
+        span = f"{lo}..{hi - 1}" if lo is not None and hi is not None else "?"
         fn(
             f"Steady state: super-passes {span} (post-warmup), "
-            f"{window.get('n_samples', 0)} samples{newline}"
+            f"{window.n_samples or 0} samples{newline}"
         )
-        tps = ss.get("tps") or {}
-        if (per_user := self._number(tps.get("per_user"))) is not None:
-            fn(f"  TPS per-user: {per_user:.1f} tok/s/user{newline}")
-        if (system := self._number(tps.get("system"))) is not None:
-            fn(f"  TPS system: {system:.1f} tok/s{newline}")
-        for key in ("ttft", "tpot"):
-            block = ss.get(key)
-            block = block if isinstance(block, dict) else {}
-            p50 = self._number(block.get("p50"))
-            p90 = self._number(block.get("p90"))
-            if p50 is not None and p90 is not None:
-                # The detector stores these in nanoseconds, as Report's own
-                # ttft/tpot series do (rendered with the same 1e-6 scale).
+        tps = ss.tps or TpsBlock()
+        if tps.per_user is not None:
+            fn(f"  TPS per-user: {tps.per_user:.1f} tok/s/user{newline}")
+        if tps.system is not None:
+            fn(f"  TPS system: {tps.system:.1f} tok/s{newline}")
+        for name, block in (("TTFT", ss.ttft), ("TPOT", ss.tpot)):
+            if block is not None and block.p50 is not None and block.p90 is not None:
+                # Nanoseconds, as Report's own ttft/tpot series are.
                 fn(
-                    f"  {key.upper()} p50 {p50 * _NS_TO_MS:.2f}ms  "
-                    f"p90 {p90 * _NS_TO_MS:.2f}ms{newline}"
+                    f"  {name} p50 {block.p50 * _NS_TO_MS:.2f}ms  "
+                    f"p90 {block.p90 * _NS_TO_MS:.2f}ms{newline}"
                 )
-        anomaly = ss.get("anomaly")
-        if isinstance(anomaly, dict) and anomaly.get("detected"):
-            delta = self._number(anomaly.get("delta_pct"))
-            # The detector flags on abs(rel), so a shift can be an improvement;
-            # only a rise in TPOT is degradation.
-            shift = f" TPOT {delta:+.1f}%" if delta is not None else ""
-            direction = " (likely degradation)" if delta is None or delta > 0 else ""
+        shift = ss.anomaly
+        if shift is not None and shift.detected:
+            delta = f" TPOT {shift.delta_pct:+.1f}%" if shift.delta_pct else ""
+            # The detector flags on the absolute change, so a shift can be an
+            # improvement; only a rise in TPOT is degradation.
+            worse = shift.delta_pct is None or shift.delta_pct > 0
             fn(
-                f"  ANOMALY: level shift at super-pass "
-                f"{anomaly.get('change_point_sp')},{shift} toward end of "
-                f"run{direction}{newline}"
+                f"  ANOMALY: level shift at super-pass {shift.change_point_sp},"
+                f"{delta} toward end of run"
+                f"{' (likely degradation)' if worse else ''}{newline}"
             )
-        raw_short = ss.get("short_window")
-        short: dict[str, Any] = raw_short if isinstance(raw_short, dict) else {}
-        held = self._number(short.get("window_duration_s"))
-        needed = self._number(short.get("min_duration_s"))
-        if held is not None and needed is not None:
-            bound = short.get("dominant")
-            bound_note = f", {bound}-bound" if isinstance(bound, str) and bound else ""
-            prefix = (
-                "  WARNING: window too short -- " if short.get("is_short") else "  "
-            )
+        short = ss.short_window
+        if short is not None and short.window_duration_s and short.min_duration_s:
+            bound = f", {short.dominant}-bound" if short.dominant else ""
+            prefix = "  WARNING: window too short -- " if short.is_short else "  "
             fn(
-                f"{prefix}{format_duration(held)} steady vs "
-                f"{format_duration(needed)} required{bound_note}{newline}"
+                f"{prefix}{format_duration(short.window_duration_s)} steady vs "
+                f"{format_duration(short.min_duration_s)} required{bound}{newline}"
             )
-        elif short.get("is_short"):
+        elif short is not None and short.is_short:
             fn(f"  WARNING: window shorter than the min-duration target{newline}")
-        caveat = ss.get("profile_caveat")
-        if isinstance(caveat, str) and caveat:
-            fn(f"  NOTE ({ss.get('profile', '?')} profile): {caveat}{newline}")
-        # Filtered, not coerced: str() on a bare string would iterate it
-        # character by character and print "t, p, o, t".
-        raw_drifting = ss.get("drifting_up")
-        drifting = (
-            [m for m in raw_drifting if isinstance(m, str)]
-            if isinstance(raw_drifting, list)
-            else []
-        )
-        if drifting:
+        if ss.profile_caveat:
+            fn(f"  NOTE ({ss.profile or '?'} profile): {ss.profile_caveat}{newline}")
+        if ss.drifting_up:
             # "rest of the run", not "full run": the trend starts at plateau
-            # onset over the post-warmup series, matching the detector's wording.
+            # onset over the post-warmup series, matching the detector.
             fn(
                 f"  WARNING: drifting up over the rest of the run: "
-                f"{', '.join(drifting)}{newline}"
+                f"{', '.join(ss.drifting_up)}{newline}"
             )
 
     def display(

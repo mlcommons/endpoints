@@ -43,6 +43,14 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
 )
 from inference_endpoint.config.schema import BenchmarkConfig, LoadPatternType
 from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.metrics.report import (
+    LatencyBlock,
+    LevelShift,
+    ShortWindow,
+    SteadyStateHeadline,
+    TpsBlock,
+    WindowBlock,
+)
 from inference_endpoint.metrics.steady_state_diagnostics import (
     profile_for_load_pattern,
 )
@@ -193,39 +201,9 @@ def _interval(value: object) -> list[float] | None:
     return None if any(e is None for e in ends) else [e for e in ends if e is not None]
 
 
-def _latency(value: object) -> dict[str, Any] | None:
-    """A latency block: percentiles and mean in ns, plus the sample tally.
-
-    ``count`` is a tally, so it is rendered as an integer rather than the float
-    every other field here is.
-    """
-    block: dict[str, Any] = dict(_numeric_block(value, _LATENCY_KEYS) or {})
-    if "count" in block:
-        block["count"] = int(block["count"])
-    return block or None
-
-
-def _tps(value: object) -> dict[str, Any] | None:
-    """Throughput point estimates with their intervals."""
-    block: dict[str, Any] = dict(_numeric_block(value, _TPS_KEYS) or {})
-    if isinstance(value, dict):
-        for key in _TPS_INTERVAL_KEYS:
-            if (interval := _interval(value.get(key))) is not None:
-                block[key] = interval
-    return block or None
-
-
-def _numeric_block(value: object, keys: tuple[str, ...]) -> dict[str, float] | None:
-    """A mapping narrowed to ``keys`` with usable numbers, or None if empty."""
-    if not isinstance(value, dict):
-        return None
-    block = {k: n for k in keys if (n := finite_number(value.get(k))) is not None}
-    return block or None
-
-
-# Kept from the detector's window block: all small scalars, and between them
-# the grounds for trusting the verdict -- which plateau was reported, how many
-# there were, and how many earlier ones were rejected as too brief.
+# Kept from the detector's window block: all small whole numbers, and between
+# them the grounds for trusting the verdict -- which plateau was reported, how
+# many there were, and how many earlier ones were rejected as too brief.
 _WINDOW_KEYS = (
     "sp_lo",
     "sp_hi",
@@ -237,7 +215,39 @@ _WINDOW_KEYS = (
 )
 
 
-def _short_window(value: object) -> dict[str, Any] | None:
+def _numeric_block(value: object, keys: tuple[str, ...]) -> dict[str, float]:
+    """``keys`` from a mapping, keeping only the usable numbers."""
+    if not isinstance(value, dict):
+        return {}
+    return {k: n for k in keys if (n := finite_number(value.get(k))) is not None}
+
+
+def _latency(value: object) -> LatencyBlock | None:
+    """A latency block: percentiles and mean in ns, plus the sample tally."""
+    block = _numeric_block(value, _LATENCY_KEYS)
+    if not block:
+        return None
+    count = block.pop("count", None)
+    return LatencyBlock(**block, count=int(count) if count is not None else None)
+
+
+def _tps(value: object) -> TpsBlock | None:
+    """Throughput point estimates with their intervals."""
+    block: dict[str, Any] = dict(_numeric_block(value, _TPS_KEYS))
+    if isinstance(value, dict):
+        for key in _TPS_INTERVAL_KEYS:
+            if (interval := _interval(value.get(key))) is not None:
+                block[key] = interval
+    return TpsBlock(**block) if block else None
+
+
+def _window(value: object) -> WindowBlock | None:
+    """The window's extent and how it was selected, all whole numbers."""
+    block = _numeric_block(value, _WINDOW_KEYS)
+    return WindowBlock(**{k: int(v) for k, v in block.items()}) if block else None
+
+
+def _short_window(value: object) -> ShortWindow | None:
     """Whether the window cleared the min-duration gate, and by how much.
 
     ``is_short`` alone says only pass or fail; the durations say how close it
@@ -252,10 +262,10 @@ def _short_window(value: object) -> dict[str, Any] | None:
             out[key] = number
     if isinstance(dominant := value.get("dominant"), str):
         out["dominant"] = dominant
-    return out
+    return ShortWindow(**out)
 
 
-def _anomaly(value: object) -> dict[str, Any] | None:
+def _anomaly(value: object) -> LevelShift | None:
     """The detector's level-shift warning, or None if there isn't one.
 
     Only the fields the report renders are kept; ``plateaus`` is a full
@@ -263,21 +273,20 @@ def _anomaly(value: object) -> dict[str, Any] | None:
     """
     if not isinstance(value, dict) or value.get("detected") is not True:
         return None
-    return {
-        "detected": True,
-        # Checked, not copied: this one is interpolated into a line of
-        # report.txt, so an unusable value would be printed rather than just
-        # sit in the JSON.
-        "change_point_sp": (
+    return LevelShift(
+        detected=True,
+        # Checked, not copied: this is interpolated into a line of report.txt,
+        # so an unusable value would be printed rather than just stored.
+        change_point_sp=(
             int(sp) if (sp := finite_number(value.get("change_point_sp"))) else None
         ),
-        "delta_pct": finite_number(value.get("delta_pct")),
-    }
+        delta_pct=finite_number(value.get("delta_pct")),
+    )
 
 
 def verdict_headline(
     verdict_path: Path, *, load_pattern: LoadPatternType | None = None
-) -> dict[str, Any] | None:
+) -> SteadyStateHeadline | None:
     """The compact steady-window summary from a verdict file, for the Report.
 
     This is the only place the detector's JSON is read, so it is the only place
@@ -308,43 +317,43 @@ def verdict_headline(
         logger.warning("Steady-state detection: %s has no verdict", verdict_path)
         return None
 
-    window = _numeric_block(headline.get("window"), _WINDOW_KEYS)
-    short_window = headline.get("short_window")
     trend = headline.get("global_trend")
     reason = headline.get("reason")
-    out: dict[str, Any] = {
-        "found": bool(headline.get("found")),
-        "reason": reason if isinstance(reason, str) else None,
-        "window": {k: int(v) for k, v in window.items()} if window else None,
-        "tps": _tps(headline.get("tps")),
-        "ttft": _latency(headline.get("ttft")),
-        "tpot": _latency(headline.get("tpot")),
-        "short_window": _short_window(short_window),
-        # Metric names only. A bare string here would otherwise be iterated
-        # character by character downstream and printed as "t, p, o, t".
-        "drifting_up": [
-            m for m in headline.get("drifting_up") or [] if isinstance(m, str)
-        ]
-        if isinstance(headline.get("drifting_up"), list)
-        else [],
-    }
-    out["anomaly"] = _anomaly(headline.get("anomaly"))
-    out["global_trend"] = (
-        {k: v for k, v in trend.items() if isinstance(v, str)}
-        if isinstance(trend, dict)
-        else None
-    )
+    profile_name: str | None = None
+    caveat: str | None = None
     if load_pattern is not None:
         profile = profile_for_load_pattern(load_pattern.value)
-        note = " ".join(profile.note.split())
-        out["profile"] = profile.name
-        out["profile_caveat"] = note or None
+        profile_name = profile.name
+        caveat = " ".join(profile.note.split()) or None
+    raw_drifting = headline.get("drifting_up")
     context = {
         k: int(n)
         for k in _HEADLINE_CONTEXT
         if (n := finite_number(blob.get(k))) is not None
     }
-    return {**context, **out}
+    return SteadyStateHeadline(
+        found=bool(headline.get("found")),
+        reason=reason if isinstance(reason, str) else None,
+        window=_window(headline.get("window")),
+        tps=_tps(headline.get("tps")),
+        ttft=_latency(headline.get("ttft")),
+        tpot=_latency(headline.get("tpot")),
+        short_window=_short_window(headline.get("short_window")),
+        # Metric names only. A bare string here would otherwise be iterated
+        # character by character downstream and printed as "t, p, o, t".
+        drifting_up=tuple(m for m in raw_drifting if isinstance(m, str))
+        if isinstance(raw_drifting, list)
+        else (),
+        anomaly=_anomaly(headline.get("anomaly")),
+        global_trend=(
+            {k: v for k, v in trend.items() if isinstance(v, str)}
+            if isinstance(trend, dict)
+            else None
+        ),
+        profile=profile_name,
+        profile_caveat=caveat,
+        **context,
+    )
 
 
 def _detector_caveats(stderr: str | None) -> str:
