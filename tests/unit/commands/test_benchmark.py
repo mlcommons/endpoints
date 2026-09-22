@@ -3986,6 +3986,32 @@ class TestSteadyStateHook:
         assert not (tmp_path / "steady_state.json").exists()
 
     @pytest.mark.unit
+    def test_an_interrupt_copying_the_event_log_still_writes_the_report(
+        self, tmp_path, monkeypatch
+    ):
+        """_write_scoring_artifacts copies the whole run's events.jsonl out of
+        tmpfs -- the longest step in finalize, and a natural place to ^C. It has
+        to be inside the try/finally too, or a completed run still loses
+        result_summary.json and report.txt."""
+        (tmp_path / "events.jsonl").write_text("")
+        monkeypatch.setattr(
+            execute_mod,
+            "_write_scoring_artifacts",
+            MagicMock(side_effect=KeyboardInterrupt),
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            finalize_benchmark(
+                self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
+            )
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["state"] == "interrupted"
+        assert summary["complete"] is False
+
+    @pytest.mark.unit
     def test_any_model_may_opt_in(self, tmp_path, monkeypatch):
         """No model allowlist: a config that enables detection gets it, whatever
         the model. Whether the numbers mean anything is the submitter's call."""

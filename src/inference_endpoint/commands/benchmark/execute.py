@@ -1211,18 +1211,19 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # beside this run's results and read as this run's.
     discard_steady_state_artifacts(ctx.report_dir)
 
-    # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
-    # sample_idx_map.json + events.jsonl from here).
-    _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
-
-    # Steady-state detection, full-run OSL, and accuracy scoring. All three run
-    # inside the try/finally so a Ctrl-C during any of them still writes an
-    # interrupted report instead of losing it. Scoring is skipped on abort: a
+    # Everything from here to the finally runs inside the try so a Ctrl-C at any
+    # point still writes an interrupted report instead of losing it. That
+    # includes the event-log copy, which is the longest step in finalize and so
+    # the likeliest place to be interrupted. Scoring is skipped on abort: a
     # partial tail would report as complete.
     full_run_osl: dict[str, Any] | None = None
     accuracy_scores: list[dict[str, Any]] = []
     steady_state: dict[str, Any] | None = None
     try:
+        # Scoring artifacts + event log from tmpfs to disk (scorers and the
+        # steady-state detector both read events.jsonl from here).
+        _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
+
         # Detection runs after the metrics drain and before the report is
         # rendered, so the window it finds reaches result_summary.json,
         # report.txt, and the console summary -- not only steady_state.json.

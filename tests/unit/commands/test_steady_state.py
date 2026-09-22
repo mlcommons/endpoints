@@ -11,6 +11,7 @@ propagate out of finalize.
 import dataclasses
 import json
 import logging
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -644,6 +645,9 @@ class TestDiscardArtifacts:
         assert (report_dir / "events.jsonl").exists(), "must not touch the event log"
 
 
+_HEADLINE_CONTEXT_KEYS = ("superpass_size", "n_super_passes", "n_post_warmup")
+
+
 class TestVerdictHeadline:
     """The headline lifted out of steady_state.json and onto the Report.
 
@@ -691,14 +695,18 @@ class TestVerdictHeadline:
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        assert set(got) == {"found"}
+        assert not {"trajectories", "cov", "drift", "per_super_pass"} & set(got)
 
     def test_missing_sizing_context_is_omitted_not_defaulted(self, tmp_path):
+        """Absent context keys stay absent rather than arriving as a zero that
+        reads like a measurement."""
         path = self._write(tmp_path, {"steady_state": {"found": False}})
 
         got = steady_state.verdict_headline(path)
 
-        assert got == {"found": False}
+        assert got is not None
+        assert got["found"] is False
+        assert not set(_HEADLINE_CONTEXT_KEYS) & set(got)
 
     def test_an_absent_file_is_absorbed(self, tmp_path, caplog):
         with caplog.at_level(logging.WARNING):
@@ -714,6 +722,76 @@ class TestVerdictHeadline:
             assert steady_state.verdict_headline(path) is None
 
         assert "could not read" in caplog.text
+
+    @pytest.mark.parametrize("raw", ["null", "[1, 2]", '"hi"', "3"])
+    def test_a_non_object_verdict_file_is_absorbed(self, tmp_path, raw, caplog):
+        """Valid JSON, wrong top-level type. json.loads succeeds, so this lands
+        past the OSError/ValueError arm and would otherwise raise AttributeError
+        out of a finished run."""
+        path = tmp_path / "steady_state.json"
+        path.write_text(raw)
+
+        with caplog.at_level(logging.WARNING):
+            assert steady_state.verdict_headline(path) is None
+
+        assert "no verdict" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("tps", {"per_user": "fast", "system": 1.0}),
+            ("tps", {"per_user": True, "system": 1.0}),
+            ("tps", {"per_user": float("nan"), "system": float("inf")}),
+            ("ttft", {"p50": None, "p90": "slow"}),
+            ("window", {"sp_lo": "a", "sp_hi": 5, "n_samples": None}),
+            ("drifting_up", "tpot"),
+            ("drifting_up", [None, 1, "tpot"]),
+            ("short_window", "yes"),
+        ],
+    )
+    def test_unusable_values_are_dropped_at_the_boundary(self, tmp_path, field, value):
+        """This is the only place the detector's JSON is checked. Everything
+        downstream formats these values into the run's primary artifacts, so a
+        value that cannot be rendered must not get past here."""
+        path = tmp_path / "steady_state.json"
+        path.write_text(json.dumps({"steady_state": {"found": True, field: value}}))
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        if field == "drifting_up":
+            # Only real metric names survive; a bare string must not be
+            # exploded into characters downstream.
+            assert got["drifting_up"] == (["tpot"] if isinstance(value, list) else [])
+        else:
+            block = got.get(field)
+            for key, raw in value.items() if isinstance(value, dict) else []:
+                usable = isinstance(raw, int | float) and not isinstance(raw, bool)
+                usable = usable and math.isfinite(raw)
+                assert (block or {}).get(key) is None or usable
+
+    def test_a_healthy_verdict_passes_through_intact(self, tmp_path):
+        headline = {
+            "found": True,
+            "reason": None,
+            "window": {"sp_lo": 1, "sp_hi": 5, "n_samples": 17552},
+            "tps": {"per_user": 302.3, "system": 40960.9},
+            "ttft": {"p50": 86.26, "p90": 156.1},
+            "tpot": {"p50": 3.29, "p90": 3.44},
+            "short_window": {"is_short": False},
+            "drifting_up": ["tpot"],
+        }
+        path = tmp_path / "steady_state.json"
+        path.write_text(json.dumps({"superpass_size": 4388, "steady_state": headline}))
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        assert got["superpass_size"] == 4388
+        assert got["window"]["n_samples"] == 17552
+        assert got["tps"]["per_user"] == 302.3
+        assert got["drifting_up"] == ["tpot"]
+        assert got["short_window"]["is_short"] is False
 
     @pytest.mark.parametrize("blob", [{}, {"steady_state": None}, {"steady_state": []}])
     def test_a_blob_without_a_verdict_is_not_one(self, tmp_path, blob, caplog):

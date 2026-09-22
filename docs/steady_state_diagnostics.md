@@ -69,7 +69,10 @@ Enabling it is not sufficient. The run must also:
 
 A run that clears the opt-in but fails one of these logs why and leaves no verdict
 behind. Whatever the outcome, no failure in this step can fail a run that already
-produced valid performance artifacts.
+produced valid performance artifacts — with one deliberate exception: pressing
+`Ctrl-C` during detection propagates, so the run is marked interrupted and its
+artifacts are still written. Absorbing it would mean the first `Ctrl-C` appeared
+to do nothing and the second killed the process before anything was saved.
 
 Deadline: `settings.timeouts.steady_state_timeout_s`.
 

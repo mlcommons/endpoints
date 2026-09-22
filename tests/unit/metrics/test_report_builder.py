@@ -443,21 +443,88 @@ class TestSteadyStateOnReport:
             # null block is a legitimate output, not corruption.
             ("ttft", None),
             ("tpot", {"p50": None, "p90": 1.0}),
-            ("tps", {"per_user": None, "system": None}),
             ("tps", {"per_user": "fast", "system": 1.0}),
+            # bool is an int subclass: True would otherwise render as "1.0".
+            ("tps", {"per_user": True, "system": 1.0}),
             ("window", {"sp_lo": None, "sp_hi": None, "n_samples": None}),
             ("drifting_up", [None]),
         ],
     )
-    def test_a_malformed_verdict_never_costs_the_run_its_report(self, field, value):
-        """display() is the first statement of _write_report_artifacts, before
-        result_summary.json is written. A diagnostic that cannot be rendered must
-        not take the performance report down with it."""
+    def test_an_unusable_field_is_skipped_not_fatal(self, field, value):
+        """One bad field must cost only that line.
+
+        The assertion is on the LAST line the section emits. Checking earlier
+        content would also pass if the section blew up partway and the outer
+        guard swallowed it -- which is exactly the difference between skipping
+        a field and abandoning the verdict.
+        """
+        verdict = {**_STEADY_HEADLINE, field: value, "short_window": {"is_short": True}}
+        report = msgspec.structs.replace(
+            _build_report(_make_registry()), steady_state=verdict
+        )
         lines: list[str] = []
 
-        self._with(**{field: value}).display(fn=lines.append)
+        report.display(fn=lines.append)
 
-        assert lines, "the rest of the report must still render"
+        text = "\n".join(lines)
+        assert "Steady state:" in text, "the headline must still render"
+        assert (
+            "window shorter than the min-duration target" in text
+        ), "the section must run to completion, not abort at the bad field"
+        if field == "tps" and value.get("per_user") is True:
+            assert (
+                "TPS per-user" not in text
+            ), "a bool must not be rendered as a throughput number"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            # Shapes no per-field guard can rescue: the containers themselves
+            # are the wrong type, so .get() raises before any formatting.
+            {"found": True, "window": "not-a-mapping"},
+            {"found": True, "window": {}, "tps": "not-a-mapping"},
+            {"found": True, "window": {}, "short_window": "not-a-mapping"},
+        ],
+    )
+    def test_a_structurally_broken_verdict_never_costs_the_run_its_report(
+        self, verdict
+    ):
+        """display() is the first statement of _write_report_artifacts, before
+        result_summary.json is written, so anything escaping here costs a
+        finished run its performance report."""
+        report = msgspec.structs.replace(
+            _build_report(_make_registry()), steady_state=verdict
+        )
+        lines: list[str] = []
+
+        report.display(fn=lines.append)
+
+        assert any(
+            "Samples" in ln or "Version" in ln for ln in lines
+        ), "the rest of the report must still render"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("value", "absent"),
+        [
+            ("tpot", "t, p, o, t"),
+            ([None, 1, "tpot"], "None"),
+            ({"tpot": 1}, "tpot"),
+        ],
+    )
+    def test_drift_names_are_filtered_not_coerced(self, value, absent):
+        """str() on a bare string iterates it character by character, which
+        prints a confident-looking warning about metrics that do not exist.
+        Rendering nothing beats rendering nonsense."""
+        lines: list[str] = []
+
+        self._with(drifting_up=value).display(fn=lines.append)
+
+        text = "\n".join(lines)
+        assert absent not in text
+        if value == [None, 1, "tpot"]:
+            assert "drifting up over the rest of the run: tpot" in text
 
     @pytest.mark.unit
     def test_nothing_rendered_when_detection_did_not_run(self):

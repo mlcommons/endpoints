@@ -5,7 +5,9 @@
 
 Runs the detector over a finished run's ``events.jsonl`` and leaves
 ``steady_state.json`` / ``steady_state.txt`` beside the report. The detector runs
-out-of-process. Nothing it does can fail finalize.
+out-of-process. Nothing it does can fail finalize, with one deliberate
+exception: a ``KeyboardInterrupt`` propagates, because the user asking to stop
+is not a diagnostic failure.
 
 ``finalize_benchmark`` calls this between the metrics drain and the report, so
 ``verdict_headline`` can put the steady window on the ``Report`` itself -- and
@@ -31,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -169,11 +172,38 @@ def write_run_meta(report_dir: Path, dataset_size: int) -> None:
 _HEADLINE_CONTEXT = ("superpass_size", "n_super_passes", "n_post_warmup")
 
 
+def _finite(value: object) -> float | None:
+    """``value`` as a float, or None if it cannot be rendered as a number.
+
+    bools are rejected because ``True`` would otherwise reach the report as
+    1.0; NaN and infinity because JSON admits the bare ``NaN``/``Infinity``
+    tokens and they would render as "inf tok/s".
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _numeric_block(value: object, keys: tuple[str, ...]) -> dict[str, float] | None:
+    """A mapping narrowed to ``keys`` with usable numbers, or None if empty."""
+    if not isinstance(value, dict):
+        return None
+    block = {k: n for k in keys if (n := _finite(value.get(k))) is not None}
+    return block or None
+
+
 def verdict_headline(verdict_path: Path) -> dict[str, Any] | None:
     """The compact steady-window summary from a verdict file, for the Report.
 
-    Best-effort like everything else here: an unreadable or malformed verdict
-    means the Report simply carries no steady-state block.
+    This is the trust boundary. The detector's JSON is arbitrary input --
+    truncated by a kill, or simply a different shape after a detector change --
+    and everything downstream formats these values into the run's primary
+    artifacts. So the shape is narrowed to known keys here and anything that
+    cannot be rendered is dropped, rather than each consumer guarding again.
+
+    Best-effort like the rest of this module: an unreadable or malformed
+    verdict means the Report carries no steady-state block.
     """
     try:
         blob = json.loads(verdict_path.read_text())
@@ -182,12 +212,34 @@ def verdict_headline(verdict_path: Path) -> dict[str, Any] | None:
             "Steady-state detection: could not read %s", verdict_path, exc_info=True
         )
         return None
-    headline = blob.get("steady_state")
+    headline = blob.get("steady_state") if isinstance(blob, dict) else None
     if not isinstance(headline, dict):
         logger.warning("Steady-state detection: %s has no verdict", verdict_path)
         return None
+
+    window = _numeric_block(headline.get("window"), ("sp_lo", "sp_hi", "n_samples"))
+    short_window = headline.get("short_window")
+    reason = headline.get("reason")
+    out: dict[str, Any] = {
+        "found": bool(headline.get("found")),
+        "reason": reason if isinstance(reason, str) else None,
+        "window": {k: int(v) for k, v in window.items()} if window else None,
+        "tps": _numeric_block(headline.get("tps"), ("per_user", "system")),
+        "ttft": _numeric_block(headline.get("ttft"), ("p50", "p90")),
+        "tpot": _numeric_block(headline.get("tpot"), ("p50", "p90")),
+        "short_window": {"is_short": bool(short_window.get("is_short"))}
+        if isinstance(short_window, dict)
+        else None,
+        # Metric names only. A bare string here would otherwise be iterated
+        # character by character downstream and printed as "t, p, o, t".
+        "drifting_up": [
+            m for m in headline.get("drifting_up") or [] if isinstance(m, str)
+        ]
+        if isinstance(headline.get("drifting_up"), list)
+        else [],
+    }
     context = {k: blob[k] for k in _HEADLINE_CONTEXT if k in blob}
-    return {**context, **headline}
+    return {**context, **out}
 
 
 def _detector_caveats(stderr: str | None) -> str:
@@ -219,8 +271,10 @@ def detect_steady_state(
     only exists once the dataset is loaded.
 
     Returns the verdict path on success, ``None`` on skip or failure. Every
-    failure path is absorbed. A run that produced valid performance artifacts
-    must not be failed by a diagnostic.
+    failure path is absorbed: a run that produced valid performance artifacts
+    must not be failed by a diagnostic. ``KeyboardInterrupt`` is the exception
+    and propagates, so the caller can mark the run interrupted and still write
+    its artifacts.
     """
     load_pattern = config.settings.load_pattern.type
 

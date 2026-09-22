@@ -453,13 +453,17 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     def _number(value: object) -> float | None:
         """``value`` as a float, or None if it is not a usable number.
 
-        The headline comes from the detector's JSON, where a field can
-        legitimately be null (an empty TTFT series) or, if that file is damaged,
-        any type at all. bool is excluded because ``True`` would render 1.00.
+        ``verdict_headline`` already narrows the headline, but this field is a
+        plain dict on a public struct, so the renderer stays total on its own:
+        a field can legitimately be null (an empty TTFT series) or, if written
+        by something else, any type at all. bools are excluded because ``True``
+        would render as 1.00, NaN and infinity because they would render as
+        "nan"/"inf".
         """
         if isinstance(value, bool) or not isinstance(value, int | float):
             return None
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
 
     def _display_steady_state(
         self, fn: Callable[[str], None], newline: str = ""
@@ -502,7 +506,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         short = ss.get("short_window") or {}
         if short.get("is_short"):
             fn(f"  WARNING: window shorter than the min-duration target{newline}")
-        drifting = [str(m) for m in ss.get("drifting_up") or []]
+        # Filtered, not coerced: str() on a bare string would iterate it
+        # character by character and print "t, p, o, t".
+        raw_drifting = ss.get("drifting_up")
+        drifting = (
+            [m for m in raw_drifting if isinstance(m, str)]
+            if isinstance(raw_drifting, list)
+            else []
+        )
         if drifting:
             # "rest of the run", not "full run": the trend starts at plateau
             # onset over the post-warmup series, matching the detector's wording.
