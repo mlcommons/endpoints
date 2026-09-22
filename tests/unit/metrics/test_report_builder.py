@@ -382,8 +382,8 @@ _STEADY_HEADLINE = SteadyStateHeadline(
     window=WindowBlock(sp_lo=1, sp_hi=5, n_super_passes=4, n_samples=17552),
     tps=TpsBlock(per_user=302.3, system=40960.9),
     # nanoseconds, as the detector emits them
-    ttft=LatencyBlock(p50=86_260_000.0, p90=156_100_000.0),
-    tpot=LatencyBlock(p50=3_290_000.0, p90=3_440_000.0),
+    ttft=LatencyBlock(p50_ns=86_260_000.0, p90_ns=156_100_000.0),
+    tpot=LatencyBlock(p50_ns=3_290_000.0, p90_ns=3_440_000.0),
 )
 
 
@@ -507,8 +507,8 @@ class TestSteadyStateOnReport:
         lines: list[str] = []
 
         self._with(
-            ttft=LatencyBlock(p50=220520473.0, p90=293652176.0),
-            tpot=LatencyBlock(p50=36570133.85, p90=36776479.54),
+            ttft=LatencyBlock(p50_ns=220520473.0, p90_ns=293652176.0),
+            tpot=LatencyBlock(p50_ns=36570133.85, p90_ns=36776479.54),
         ).display(fn=lines.append)
 
         text = "\n".join(lines)

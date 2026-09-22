@@ -10,7 +10,6 @@ from accidentally falling through the plain-text tokenizer path.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
@@ -54,20 +53,6 @@ class PromptInput:
 TokenizationInput: TypeAlias = (  # noqa: UP040 - mypy version lacks PEP 695.
     TokenIdsInput | TextInput | MessageInput | PromptInput
 )
-
-
-def finite_number(value: object) -> float | None:
-    """``value`` as a float, or None if it cannot be rendered as a number.
-
-    Shared by the steady-state boundary and the report renderer so one rule
-    decides what is renderable. bools are rejected because ``True`` would reach
-    a report as 1.0; NaN and infinity because JSON admits the bare ``NaN`` and
-    ``Infinity`` tokens and they would render as "nan"/"inf tok/s".
-    """
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
 
 
 def extract_tpot_tokenization_input(

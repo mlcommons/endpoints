@@ -719,9 +719,10 @@ class TestVerdictHeadline:
             f.name for f in msgspec.structs.fields(got)
         }
 
-    def test_missing_sizing_context_is_omitted_not_defaulted(self, tmp_path):
-        """Absent context keys stay absent rather than arriving as a zero that
-        reads like a measurement."""
+    def test_missing_sizing_context_is_null_not_zero(self, tmp_path):
+        """Absent context arrives as null rather than a zero that reads like a
+        measurement. The headline is a struct, so the fields are always present
+        -- what matters is that nothing invents a value for them."""
         path = self._write(tmp_path, {"steady_state": {"found": False}})
 
         got = steady_state.verdict_headline(path)
@@ -768,7 +769,7 @@ class TestVerdictHeadline:
             ("tps", {"per_user": True, "system": 1.0}, {"system": 1.0}),
             ("tps", {"per_user": float("nan"), "system": float("inf")}, None),
             ("ttft", {"p50": None, "p90": "slow"}, None),
-            ("ttft", {"p50": 1.5, "p90": "slow"}, {"p50": 1.5}),
+            ("ttft", {"p50": 1.5, "p90": "slow"}, {"p50_ns": 1.5}),
             ("window", {"sp_lo": "a", "sp_hi": 5, "n_samples": None}, {"sp_hi": 5}),
             ("drifting_up", "tpot", []),
             ("drifting_up", [None, 1, "tpot"], ["tpot"]),
@@ -868,10 +869,10 @@ class TestVerdictHeadline:
 
         assert got is not None
         assert got.tps is not None and got.ttft is not None
-        assert got.tps.per_user_ci == [27.2, 27.6]
-        assert got.tps.system_ci == [55769.0, 56291.1]
-        assert got.ttft.p99 == 3.0
-        assert got.ttft.mean == 1.5
+        assert got.tps.per_user_ci == (27.2, 27.6)
+        assert got.tps.system_ci == (55769.0, 56291.1)
+        assert got.ttft.p99_ns == 3.0
+        assert got.ttft.mean_ns == 1.5
         assert got.ttft.count == 47484
         assert not hasattr(got.ttft, "histogram"), "the bulky part stays behind"
 

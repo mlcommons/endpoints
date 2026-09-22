@@ -56,6 +56,7 @@ from inference_endpoint.commands.benchmark.profiling import (
     _render_profile_status,
     write_profiling_section,
 )
+from inference_endpoint.commands.benchmark.steady_state import DETECTOR_MODULE
 from inference_endpoint.commands.benchmark.watchdog import SigintGovernor
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -3746,9 +3747,13 @@ class TestSteadyStateHook:
             self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
         )
 
-        assert spawned, "finalize_benchmark never reached the detector"
-        assert "--tokenizer" in spawned[0]
-        assert _CHAR_TOKENIZER in spawned[0]
+        # Not spawned[0]: finalize also shells out for the git SHA, and which
+        # call lands first depends on whether an earlier test warmed the version
+        # cache -- so indexing made this pass in a full run and fail under -k.
+        detector = [c for c in spawned if DETECTOR_MODULE in c]
+        assert detector, f"the detector was never spawned; got {spawned}"
+        assert "--tokenizer" in detector[0]
+        assert _CHAR_TOKENIZER in detector[0]
         assert json.loads((tmp_path / "run_meta.json").read_text()) == {
             "dataset_size": 3
         }
@@ -4060,4 +4065,6 @@ class TestSteadyStateHook:
 
         finalize_benchmark(ctx, self._complete_result(tmp_path))
 
-        assert spawned, "an opted-in model must reach the detector"
+        assert any(
+            DETECTOR_MODULE in c for c in spawned
+        ), "an opted-in model must reach the detector"

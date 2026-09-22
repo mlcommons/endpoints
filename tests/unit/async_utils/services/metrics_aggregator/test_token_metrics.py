@@ -1064,10 +1064,10 @@ class TestCountSync:
         assert seen.get("trust_remote_code") is True
 
     def test_trust_remote_code_reaches_the_worker_shards(self):
-        """The shards load their own tokenizer in a separate process, and
-        _init_worker defaults the flag to True -- so dropping it from initargs
-        re-enables remote code there while every other assertion still passes.
-        Pin the plumbing, not just the in-process load."""
+        """The shards load their own tokenizer in a separate process, so a value
+        that never reaches initargs would leave them trusting remote code while
+        the in-process load honoured the request. Pins the plumbing; the
+        companion test below pins that _init_worker cannot silently default."""
         captured: list[tuple] = []
 
         class _Recorder:
@@ -1118,6 +1118,22 @@ class TestCountSync:
                 pass
 
         assert seen.get("trust_remote_code") is False
+
+    def test_init_worker_will_not_default_trust_remote_code(self):
+        """The shard entry point takes the flag as a required argument.
+
+        With a default it would silently fall back to trusting remote code if a
+        future change dropped the value from initargs -- the failure that the
+        initargs test above cannot see, because it inspects the tuple rather
+        than the signature.
+        """
+        import inspect
+
+        param = inspect.signature(token_metrics_module._init_worker).parameters[
+            "trust_remote_code"
+        ]
+
+        assert param.default is inspect.Parameter.empty
 
     def test_count_sync_batch_agrees_with_count_sync(self):
         """The batched post-run path must land on the same numbers as the

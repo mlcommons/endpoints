@@ -50,6 +50,9 @@ from tqdm import tqdm
 from transformers.utils import logging as transformers_logging
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
+from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
+    SessionState,
+)
 from inference_endpoint.commands.benchmark.accuracy import (
     AccuracyConfiguration,
     effective_external_sample_count,
@@ -119,7 +122,7 @@ from inference_endpoint.load_generator.session import (
     PhaseType,
     SessionResult,
 )
-from inference_endpoint.metrics.report import Report
+from inference_endpoint.metrics.report import Report, SteadyStateHeadline
 
 if TYPE_CHECKING:
     from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -1190,6 +1193,23 @@ def _summarize_and_log_metrics(
             logger.debug(f"  ... +{len(collector.errors) - 3} more")
 
 
+def _invalidate(bench: BenchmarkResult, report: Report | None) -> Report | None:
+    """Mark a run's report invalid, and hand back the replacement.
+
+    ``state`` is the aggregator's vocabulary for "this is not a clean result".
+    It reads as an interrupt in the rendered warning, which is accurate for the
+    two abort paths and approximate for an I/O failure -- the alternative is a
+    new state that every consumer of result_summary.json would have to learn.
+    """
+    if report is None:
+        return None
+    report = msgspec.structs.replace(
+        report, complete=False, state=SessionState.INTERRUPTED.value
+    )
+    bench.report = report
+    return report
+
+
 def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     """Score accuracy, aggregate results, write JSON."""
     result = bench.session
@@ -1202,8 +1222,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         or (report is not None and report.state == "interrupted")
     )
     if report is not None and aborted and report.state != "interrupted":
-        report = msgspec.structs.replace(report, complete=False, state="interrupted")
-        bench.report = report
+        report = _invalidate(bench, report)
 
     # Clear any previous run's steady-state artifacts before anything else.
     # report_dir is user-settable and reusable, and every step below can exit
@@ -1218,7 +1237,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # partial tail would report as complete.
     full_run_osl: dict[str, Any] | None = None
     accuracy_scores: list[dict[str, Any]] = []
-    steady_state: dict[str, Any] | None = None
+    steady_state: SteadyStateHeadline | None = None
     try:
         # Scoring artifacts + event log from tmpfs to disk (scorers and the
         # steady-state detector both read events.jsonl from here).
@@ -1231,11 +1250,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             # saw the events. Mark the run invalid before re-raising, or the
             # artifacts would claim completeness while the exit code says
             # otherwise.
-            if report is not None:
-                report = msgspec.structs.replace(
-                    report, complete=False, state="interrupted"
-                )
-                bench.report = report
+            report = _invalidate(bench, report)
             raise
 
         # Detection runs after the metrics drain and before the report is
@@ -1269,11 +1284,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             full_run_osl = full_run_osl_for_report(ctx.report_dir, ctx.tokenizer_name)
             accuracy_scores = score_accuracy(ctx, result)
     except KeyboardInterrupt:
-        if report is not None:
-            report = msgspec.structs.replace(
-                report, complete=False, state="interrupted"
-            )
-            bench.report = report
+        report = _invalidate(bench, report)
         # Detection may already have produced a verdict for a run that is now
         # invalid. Withdraw it from both the report and the directory rather
         # than let it describe a run that did not finish.

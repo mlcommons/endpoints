@@ -202,16 +202,18 @@ def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
 
 
 class LatencyBlock(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
-    """Percentiles and mean in nanoseconds, plus the sample tally.
+    """Percentiles and mean, plus the sample tally.
 
     Nanoseconds because that is what the detector and ``Report``'s own
-    ttft/tpot series carry; renderers scale.
+    ttft/tpot series carry; renderers scale. The unit is in the field names for
+    the same reason it is in ``duration_ns`` and ``sample_latency_ns``: a
+    reader should not have to find this docstring to know the scale.
     """
 
-    p50: float | None = None
-    p90: float | None = None
-    p99: float | None = None
-    mean: float | None = None
+    p50_ns: float | None = None
+    p90_ns: float | None = None
+    p99_ns: float | None = None
+    mean_ns: float | None = None
     count: int | None = None
 
 
@@ -220,8 +222,10 @@ class TpsBlock(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
     per_user: float | None = None
     system: float | None = None
-    per_user_ci: list[float] | None = None
-    system_ci: list[float] | None = None
+    # Tuples, not lists: a two-ended interval has fixed arity, and a list field
+    # would make this frozen struct unhashable.
+    per_user_ci: tuple[float, float] | None = None
+    system_ci: tuple[float, float] | None = None
 
 
 class WindowBlock(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
@@ -591,12 +595,12 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         if tps.system is not None:
             fn(f"  TPS system: {tps.system:.1f} tok/s{newline}")
         for name, block in (("TTFT", ss.ttft), ("TPOT", ss.tpot)):
-            if block is not None and block.p50 is not None and block.p90 is not None:
-                # Nanoseconds, as Report's own ttft/tpot series are.
-                fn(
-                    f"  {name} p50 {block.p50 * _NS_TO_MS:.2f}ms  "
-                    f"p90 {block.p90 * _NS_TO_MS:.2f}ms{newline}"
-                )
+            if block is None or block.p50_ns is None or block.p90_ns is None:
+                continue
+            fn(
+                f"  {name} p50 {block.p50_ns * _NS_TO_MS:.2f}ms  "
+                f"p90 {block.p90_ns * _NS_TO_MS:.2f}ms{newline}"
+            )
         shift = ss.anomaly
         if shift is not None and shift.detected:
             delta = f" TPOT {shift.delta_pct:+.1f}%" if shift.delta_pct else ""
@@ -609,7 +613,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 f"{' (likely degradation)' if worse else ''}{newline}"
             )
         short = ss.short_window
-        if short is not None and short.window_duration_s and short.min_duration_s:
+        if (
+            short is not None
+            and short.window_duration_s is not None
+            and short.min_duration_s is not None
+        ):
             bound = f", {short.dominant}-bound" if short.dominant else ""
             prefix = "  WARNING: window too short -- " if short.is_short else "  "
             fn(

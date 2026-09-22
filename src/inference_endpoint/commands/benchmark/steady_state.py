@@ -33,14 +33,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
-    finite_number,
-)
 from inference_endpoint.config.schema import BenchmarkConfig, LoadPatternType
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.metrics.report import (
@@ -187,18 +185,35 @@ _HEADLINE_CONTEXT = ("superpass_size", "n_super_passes", "n_post_warmup")
 # a tail-latency reader reaches for first.
 _LATENCY_KEYS = ("p50", "p90", "p99", "mean", "count")
 
+# The detector names these without a unit; the report names them with one.
+_LATENCY_FIELD = {k: f"{k}_ns" for k in ("p50", "p90", "p99", "mean")}
+
 # A throughput number without its interval is harder to judge, so the batch-means
 # CIs ride along with the point estimates.
 _TPS_KEYS = ("per_user", "system")
 _TPS_INTERVAL_KEYS = ("per_user_ci", "system_ci")
 
 
-def _interval(value: object) -> list[float] | None:
+def _interval(value: object) -> tuple[float, float] | None:
     """A two-ended confidence interval, or None if it is not one."""
     if not isinstance(value, list) or len(value) != 2:
         return None
-    ends = [finite_number(v) for v in value]
-    return None if any(e is None for e in ends) else [e for e in ends if e is not None]
+    lo, hi = finite_number(value[0]), finite_number(value[1])
+    return None if lo is None or hi is None else (lo, hi)
+
+
+def finite_number(value: object) -> float | None:
+    """``value`` as a float, or None if it cannot be rendered as a number.
+
+    The detector's JSON is arbitrary input, so every number read out of it goes
+    through here. bools are rejected because ``True`` would reach a report as
+    1.0; NaN and infinity because JSON admits the bare ``NaN`` and ``Infinity``
+    tokens and they would render as "nan"/"inf tok/s".
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 # Kept from the detector's window block: all small whole numbers, and between
@@ -228,7 +243,10 @@ def _latency(value: object) -> LatencyBlock | None:
     if not block:
         return None
     count = block.pop("count", None)
-    return LatencyBlock(**block, count=int(count) if count is not None else None)
+    return LatencyBlock(
+        **{_LATENCY_FIELD[k]: v for k, v in block.items()},
+        count=int(count) if count is not None else None,
+    )
 
 
 def _tps(value: object) -> TpsBlock | None:
