@@ -973,6 +973,16 @@ class Settings(WithUpdatesMixin, BaseModel):
             "(default: 4; 0 = defer everything to the end-of-run drain)."
         ),
     )
+    metrics_isl: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--metrics-isl",
+            help="Collect input sequence length (ISL) metrics",
+        ),
+    ] = Field(
+        True,
+        description="Collect input sequence length (ISL) metrics (default: true).",
+    )
 
     @model_validator(mode="after")
     def _min_issue_duration_requires_qps(self) -> Self:
@@ -1315,10 +1325,11 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         MLPerf rounds pin the RNG seeds; this mirrors LoadGen locking the core
         seeds from ``user.conf`` (a submitter cannot substitute their own).
-        If ``submission_ref`` is unset, the config is left unchanged. If it
-        names an unregistered ruleset, a ``type=SUBMISSION`` config errors (a
-        submission cannot silently fall back to default seeds), while any other
-        type is left unchanged so non-submission/placeholder configs still work.
+        If ``submission_ref`` is unset, the config is left unchanged. Naming an
+        unregistered ruleset is always an error, for every test type: declaring
+        a ``submission_ref`` asserts the run is bound to that ruleset's seeds,
+        so a typo that silently fell back to the defaults would produce a run
+        that looks bound while issuing load from seed 42.
 
         The warmup phase is reseeded from the sample-index (dataloader) seed so
         its sample order derives from the same pinned seed as the perf phase.
@@ -1330,18 +1341,19 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         try:
             ruleset = self.submission_ref.get_ruleset_instance()
         except KeyError as e:
-            if self.type == TestType.SUBMISSION:
-                raise ValueError(
-                    f"submission_ref.ruleset {self.submission_ref.ruleset!r} is not "
-                    "registered; a submission must pin official RNG seeds and cannot "
-                    "fall back to defaults."
-                ) from e
-            logger.warning(
-                "submission_ref.ruleset %r is not registered; skipping ruleset "
-                "seed overrides.",
-                self.submission_ref.ruleset,
-            )
-            return
+            # Imported here, not at module scope: ruleset_registry imports the
+            # rulesets package, which imports this module (same reason
+            # SubmissionReference.get_ruleset_instance defers it).
+            from .ruleset_registry import list_rulesets
+
+            # The likely mistake is a near-miss on a cohort-qualified name, so
+            # name the alternatives rather than only the rejected value.
+            raise ValueError(
+                f"submission_ref.ruleset {self.submission_ref.ruleset!r} is not "
+                "registered, so the run cannot be bound to its RNG seeds and "
+                "would silently fall back to the defaults. Registered rulesets: "
+                + ", ".join(sorted(list_rulesets()))
+            ) from e
 
         # A ruleset used as a submission_ref must pin both seeds. ``None`` means
         # "unseeded" in the general ruleset contract (ruleset_base.py), but an

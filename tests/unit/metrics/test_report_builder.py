@@ -93,7 +93,7 @@ class TestSeriesMetricDict:
         assert d["std_dev"] == 0.0
 
 
-def _make_registry(n_samples: int = 50) -> MetricsRegistry:
+def _make_registry(n_samples: int = 50, *, isl: bool = True) -> MetricsRegistry:
     """A registry populated with the metrics ``Report.from_snapshot`` reads.
 
     Only the metrics consumed by ``Report.from_snapshot`` are registered:
@@ -121,14 +121,15 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
         n_histogram_buckets=10,
         percentiles=(50.0, 90.0, 99.0),
     )
-    registry.register_series(
-        MetricSeriesKey.ISL.value,
-        hdr_low=1,
-        hdr_high=10_000_000,
-        sig_figs=3,
-        n_histogram_buckets=10,
-        percentiles=(50.0, 90.0, 99.0),
-    )
+    if isl:
+        registry.register_series(
+            MetricSeriesKey.ISL.value,
+            hdr_low=1,
+            hdr_high=10_000_000,
+            sig_figs=3,
+            n_histogram_buckets=10,
+            percentiles=(50.0, 90.0, 99.0),
+        )
     registry.register_series(
         MetricSeriesKey.OSL.value,
         hdr_low=1,
@@ -156,7 +157,8 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
             registry.record(
                 MetricSeriesKey.SAMPLE_LATENCY_NS.value, 5_000_000 + i * 50_000
             )
-            registry.record(MetricSeriesKey.ISL.value, 50 + i)
+            if isl:
+                registry.record(MetricSeriesKey.ISL.value, 50 + i)
             registry.record(MetricSeriesKey.OSL.value, 100 + i)
 
     return registry
@@ -216,6 +218,14 @@ class TestFromSnapshot:
         assert report.input_sequence_lengths == {}
         assert report.output_sequence_lengths == {}
         assert report.tpot == {}
+
+    def test_isl_series_absent(self):
+        # settings.metrics_isl=false: the aggregator never registers the
+        # series, so the snapshot lacks it entirely (not merely count==0).
+        report = _build_report(_make_registry(n_samples=50, isl=False))
+
+        assert report.input_sequence_lengths == {}
+        assert report.output_sequence_lengths["total"] > 0
 
     def test_with_metrics(self):
         registry = _make_registry(n_samples=50)

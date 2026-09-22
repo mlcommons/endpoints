@@ -102,6 +102,7 @@ def _build_aggregator_args(
     tokenizer_name: str | None,
     drain_timeout_s: float | None,
     tokenizer_workers: int,
+    enable_isl: bool,
     early_stopping: bool,
 ) -> list[str]:
     """CLI args for the metrics_aggregator subprocess."""
@@ -124,6 +125,7 @@ def _build_aggregator_args(
     if drain_timeout_s is not None:
         args.extend(["--drain-timeout", str(drain_timeout_s)])
     args.extend(["--tokenizer-workers", str(tokenizer_workers)])
+    args.append("--metrics-isl" if enable_isl else "--no-metrics-isl")
     return args
 
 
@@ -294,6 +296,7 @@ class MetricsPipeline:
                 tokenizer_name=self._tokenizer_name,
                 drain_timeout_s=timeouts.metrics_drain_timeout_s,
                 tokenizer_workers=self._config.settings.metrics_tokenizer_workers,
+                enable_isl=self._config.settings.metrics_isl,
                 early_stopping=self._config.settings.early_stopping.enabled,
             )
             event_logger_args = _build_event_logger_args(
