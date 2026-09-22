@@ -46,8 +46,13 @@ class TestSteadyStateConfig:
 
 
 class TestSteadyStateTimeout:
-    def test_default_is_thirty_minutes(self):
-        assert Timeouts().steady_state_timeout_s == 1800.0
+    def test_default_is_ten_minutes(self):
+        """Detection sits between the metrics drain and the report, so this
+        budget is wall-clock the report waits for. Measured at 94s over a 1.0GB
+        event log (~57k samples), so this is several times the observed cost
+        without leaving a stalled child able to hold a finished run for half an
+        hour."""
+        assert Timeouts().steady_state_timeout_s == 600.0
 
     def test_none_means_unlimited(self):
         assert Timeouts(steady_state_timeout_s=None).steady_state_timeout_s is None

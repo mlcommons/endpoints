@@ -44,6 +44,24 @@ logger = logging.getLogger(__name__)
 
 _NS_TO_MS: Final[float] = 1e-6
 
+
+def format_duration(seconds: float) -> str:
+    """A duration as ``1h02m03s`` / ``54m01s`` / ``45s``.
+
+    Hand-rolled rather than ``time.strftime``, which wraps past 24h and always
+    pads to a fixed set of fields: a steady window can legitimately run for
+    hours, and "0h00m45s" is worse than "45s" for the short ones.
+    """
+    total = int(seconds)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
 # Aggregator series name -> result_summary.json field. Single source of truth for the
 # summary's latency sections: ``Report.from_snapshot`` builds its fields from this, and
 # ``scripts/early_stopping_estimate_from_events.py`` uses it to key its post-hoc output the same way.
@@ -519,8 +537,21 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 f"{anomaly.get('change_point_sp')},{shift} toward end of run "
                 f"(likely degradation){newline}"
             )
-        short = ss.get("short_window") or {}
-        if short.get("is_short"):
+        raw_short = ss.get("short_window")
+        short: dict[str, Any] = raw_short if isinstance(raw_short, dict) else {}
+        held = self._number(short.get("window_duration_s"))
+        needed = self._number(short.get("min_duration_s"))
+        if held is not None and needed is not None:
+            bound = short.get("dominant")
+            bound_note = f", {bound}-bound" if isinstance(bound, str) and bound else ""
+            prefix = (
+                "  WARNING: window too short -- " if short.get("is_short") else "  "
+            )
+            fn(
+                f"{prefix}{format_duration(held)} steady vs "
+                f"{format_duration(needed)} required{bound_note}{newline}"
+            )
+        elif short.get("is_short"):
             fn(f"  WARNING: window shorter than the min-duration target{newline}")
         caveat = ss.get("profile_caveat")
         if isinstance(caveat, str) and caveat:

@@ -41,7 +41,9 @@ The per-super-pass trajectories and the CoV/drift tables stay in `steady_state.j
 embedding them would dwarf the rest of the summary.
 
 Because the report is rendered after detection, a slow detector delays it — bounded by
-`settings.timeouts.steady_state_timeout_s` (default 1800s). If a `^C` lands during the
+`settings.timeouts.steady_state_timeout_s` (default 600s). For scale: detection took 94s
+over a 1.0 GB `events.jsonl` (~57k samples), and cost grows with the log, so a
+substantially larger run may need this raised. If a `^C` lands during the
 accuracy scoring that follows, the verdict is withdrawn from both the report and the
 directory: that run reports `interrupted` / `complete: false`, and a steady window must
 not describe it.

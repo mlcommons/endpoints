@@ -43,7 +43,11 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     SessionState,
     snapshot_to_dict,
 )
-from inference_endpoint.metrics.report import Report, series_metric_dict
+from inference_endpoint.metrics.report import (
+    Report,
+    format_duration,
+    series_metric_dict,
+)
 
 # 1 hour in ns — same as the aggregator's default bound for time-series.
 _NS_HIGH = 3_600_000_000_000
@@ -526,6 +530,61 @@ class TestSteadyStateOnReport:
         assert absent not in text
         if value == [None, 1, "tpot"]:
             assert "drifting up over the rest of the run: tpot" in text
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("seconds", "expected"),
+        [
+            (3241.87875902, "54m01s"),
+            (1742.469683785, "29m02s"),
+            (45.2, "45s"),
+            (59.9, "59s"),
+            (60.0, "1m00s"),
+            (3661.0, "1h01m01s"),
+            (0.0, "0s"),
+        ],
+    )
+    def test_durations_read_at_a_glance(self, seconds, expected):
+        """3241.87875902 tells a reader nothing without arithmetic."""
+        assert format_duration(seconds) == expected
+
+    @pytest.mark.unit
+    def test_the_window_reports_how_long_it_actually_held(self):
+        """is_short says pass or fail; the durations say by how much and which
+        term bound it, which is what makes the verdict judgeable."""
+        lines: list[str] = []
+
+        self._with(
+            short_window={
+                "is_short": False,
+                "window_duration_s": 3241.87875902,
+                "min_duration_s": 1742.469683785,
+                "dominant": "relaxation",
+            }
+        ).display(fn=lines.append)
+
+        text = "\n".join(lines)
+        assert "54m01s steady" in text
+        assert "29m02s required" in text
+        assert "relaxation" in text
+
+    @pytest.mark.unit
+    def test_a_short_window_still_warns_and_shows_the_shortfall(self):
+        lines: list[str] = []
+
+        self._with(
+            short_window={
+                "is_short": True,
+                "window_duration_s": 120.0,
+                "min_duration_s": 600.0,
+                "dominant": "floor",
+            }
+        ).display(fn=lines.append)
+
+        text = "\n".join(lines)
+        assert "WARNING" in text
+        assert "2m00s steady" in text
+        assert "10m00s required" in text
 
     @pytest.mark.unit
     def test_latencies_render_in_milliseconds(self):

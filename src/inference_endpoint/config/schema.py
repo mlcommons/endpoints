@@ -852,9 +852,13 @@ class Timeouts(WithUpdatesMixin, BaseModel):
         description="Metrics drain seconds (None = unlimited).",
     )
     steady_state_timeout_s: float | None = Field(
-        1800.0,
+        600.0,
         gt=0,
-        description="Post-run steady-state detection seconds (None = unlimited).",
+        description=(
+            "Post-run steady-state detection seconds (None = unlimited). "
+            "Detection runs before the report, so this is wall-clock the "
+            "report waits for; raise it for very large event logs."
+        ),
     )
 
 
