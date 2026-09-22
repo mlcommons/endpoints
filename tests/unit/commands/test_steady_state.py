@@ -650,8 +650,9 @@ _HEADLINE_CONTEXT_KEYS = ("superpass_size", "n_super_passes", "n_post_warmup")
 class TestVerdictHeadline:
     """The headline lifted out of steady_state.json and onto the Report.
 
-    This is the trust boundary: everything downstream formats these values into
-    the run's primary artifacts.
+    This is the only place the detector's JSON is read, so it is the only place
+    the values can be checked; everything downstream formats them into the run's
+    primary artifacts.
     """
 
     @staticmethod
@@ -767,6 +768,89 @@ class TestVerdictHeadline:
 
         assert got is not None
         assert got[field] == expected
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ({"superpass_size": 4388}, 4388),
+            ({"superpass_size": "4388"}, None),
+            ({"superpass_size": None}, None),
+            ({"superpass_size": {"n": 1}}, None),
+            ({"superpass_size": 4388.0}, 4388),
+        ],
+    )
+    def test_the_sizing_numbers_are_checked_like_everything_else(
+        self, tmp_path, raw, expected
+    ):
+        """These are copied out of the file and published in
+        result_summary.json, so they get the same treatment as the rest."""
+        path = self._write(tmp_path, {**raw, "steady_state": {"found": True}})
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        assert got.get("superpass_size") == expected
+
+    @pytest.mark.parametrize(
+        ("change_point", "expected"),
+        [(7, 7), ("seven", None), ({"sp": 7}, None), (None, None), (7.0, 7)],
+    )
+    def test_the_change_point_is_checked_before_it_reaches_a_sentence(
+        self, tmp_path, change_point, expected
+    ):
+        """This one is interpolated into a line of report.txt, so an unchecked
+        value does not just sit in JSON -- it gets printed."""
+        path = self._write(
+            tmp_path,
+            {
+                "steady_state": {
+                    "found": True,
+                    "anomaly": {"detected": True, "change_point_sp": change_point},
+                }
+            },
+        )
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        assert got["anomaly"]["change_point_sp"] == expected
+
+    def test_the_confidence_intervals_and_tail_percentiles_survive(self, tmp_path):
+        """A throughput figure without its interval is harder to judge, and p99
+        is what a tail-latency reader looks for. Both are small scalars -- the
+        reason for narrowing was the histograms, not these."""
+        path = self._write(
+            tmp_path,
+            {
+                "steady_state": {
+                    "found": True,
+                    "tps": {
+                        "per_user": 27.4,
+                        "system": 56030.1,
+                        "per_user_ci": [27.2, 27.6],
+                        "system_ci": [55769.0, 56291.1],
+                    },
+                    "ttft": {
+                        "p50": 1.0,
+                        "p90": 2.0,
+                        "p99": 3.0,
+                        "mean": 1.5,
+                        "count": 47484,
+                        "histogram": [{"lo": 0, "hi": 1}],
+                    },
+                }
+            },
+        )
+
+        got = steady_state.verdict_headline(path)
+
+        assert got is not None
+        assert got["tps"]["per_user_ci"] == [27.2, 27.6]
+        assert got["tps"]["system_ci"] == [55769.0, 56291.1]
+        assert got["ttft"]["p99"] == 3.0
+        assert got["ttft"]["mean"] == 1.5
+        assert got["ttft"]["count"] == 47484
+        assert "histogram" not in got["ttft"], "the bulky part still stays behind"
 
     def test_the_evidence_for_the_window_survives(self, tmp_path):
         """is_short alone says whether the window cleared the gate, not by how

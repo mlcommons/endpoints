@@ -22,6 +22,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
     TokenizationInput,
 )
 from inference_endpoint.commands.benchmark.full_run_osl import (
+    _COUNT_BATCH_SIZE,
     compute_full_run_osl,
     full_run_osl_for_report,
     load_performance_uuids,
@@ -476,3 +477,29 @@ def test_empty_turns_do_not_make_block_partial(tmp_path: Path) -> None:
     assert result["n_empty"] == 1
     assert result["n_missing"] == 0
     assert result["partial"] is False
+
+
+def test_counting_flushes_mid_file_and_keeps_every_turn(tmp_path: Path) -> None:
+    """Above _COUNT_BATCH_SIZE the loop flushes, clears and keeps going. Every
+    test above stays under it, so the clear-and-continue path -- where an
+    off-by-one or a missed reset would drop or double-count turns -- is never
+    taken."""
+    n = _COUNT_BATCH_SIZE + 37
+    events = _write_events(
+        tmp_path / "events.jsonl",
+        [_session(SessionEventType.STARTED)]
+        + [_complete(1, "one") for _ in range(n)]
+        + [_session(SessionEventType.ENDED)],
+    )
+    flushes: list[int] = []
+
+    def counting(items: list[TokenizationInput]) -> list[int]:
+        flushes.append(len(items))
+        return _word_count_batch(items)
+
+    result = compute_full_run_osl(events, counting)
+
+    assert result is not None
+    assert len(flushes) > 1, "the mid-loop flush never fired"
+    assert sum(flushes) == n, "a flush dropped or duplicated turns"
+    assert result["n_turns_counted"] == n

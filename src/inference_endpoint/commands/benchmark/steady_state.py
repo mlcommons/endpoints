@@ -174,6 +174,47 @@ def write_run_meta(report_dir: Path, dataset_size: int) -> None:
 _HEADLINE_CONTEXT = ("superpass_size", "n_super_passes", "n_post_warmup")
 
 
+# Kept from each latency block. The histograms are what made the block bulky --
+# on a real run they were two thirds of it -- not these scalars, and p99 is what
+# a tail-latency reader reaches for first.
+_LATENCY_KEYS = ("p50", "p90", "p99", "mean", "count")
+
+# A throughput number without its interval is harder to judge, so the batch-means
+# CIs ride along with the point estimates.
+_TPS_KEYS = ("per_user", "system")
+_TPS_INTERVAL_KEYS = ("per_user_ci", "system_ci")
+
+
+def _interval(value: object) -> list[float] | None:
+    """A two-ended confidence interval, or None if it is not one."""
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    ends = [finite_number(v) for v in value]
+    return None if any(e is None for e in ends) else [e for e in ends if e is not None]
+
+
+def _latency(value: object) -> dict[str, Any] | None:
+    """A latency block: percentiles and mean in ns, plus the sample tally.
+
+    ``count`` is a tally, so it is rendered as an integer rather than the float
+    every other field here is.
+    """
+    block: dict[str, Any] = dict(_numeric_block(value, _LATENCY_KEYS) or {})
+    if "count" in block:
+        block["count"] = int(block["count"])
+    return block or None
+
+
+def _tps(value: object) -> dict[str, Any] | None:
+    """Throughput point estimates with their intervals."""
+    block: dict[str, Any] = dict(_numeric_block(value, _TPS_KEYS) or {})
+    if isinstance(value, dict):
+        for key in _TPS_INTERVAL_KEYS:
+            if (interval := _interval(value.get(key))) is not None:
+                block[key] = interval
+    return block or None
+
+
 def _numeric_block(value: object, keys: tuple[str, ...]) -> dict[str, float] | None:
     """A mapping narrowed to ``keys`` with usable numbers, or None if empty."""
     if not isinstance(value, dict):
@@ -224,7 +265,12 @@ def _anomaly(value: object) -> dict[str, Any] | None:
         return None
     return {
         "detected": True,
-        "change_point_sp": value.get("change_point_sp"),
+        # Checked, not copied: this one is interpolated into a line of
+        # report.txt, so an unusable value would be printed rather than just
+        # sit in the JSON.
+        "change_point_sp": (
+            int(sp) if (sp := finite_number(value.get("change_point_sp"))) else None
+        ),
         "delta_pct": finite_number(value.get("delta_pct")),
     }
 
@@ -234,11 +280,12 @@ def verdict_headline(
 ) -> dict[str, Any] | None:
     """The compact steady-window summary from a verdict file, for the Report.
 
-    This is the trust boundary. The detector's JSON is arbitrary input --
-    truncated by a kill, or simply a different shape after a detector change --
-    and everything downstream formats these values into the run's primary
-    artifacts. So the shape is narrowed to known keys here and anything that
-    cannot be rendered is dropped, rather than each consumer guarding again.
+    This is the only place the detector's JSON is read, so it is the only place
+    the values can be checked. They are arbitrary input -- a file truncated by a
+    kill, or simply a different shape after a detector change -- and everything
+    downstream formats them into the run's primary artifacts. Every value is
+    checked here and anything unusable is dropped, so a consumer does not have
+    to ask whether a number is really a number.
 
     ``load_pattern`` supplies the workload profile's reliability note. That note
     is a property of the profile, not of the verdict file, and the detector only
@@ -269,9 +316,9 @@ def verdict_headline(
         "found": bool(headline.get("found")),
         "reason": reason if isinstance(reason, str) else None,
         "window": {k: int(v) for k, v in window.items()} if window else None,
-        "tps": _numeric_block(headline.get("tps"), ("per_user", "system")),
-        "ttft": _numeric_block(headline.get("ttft"), ("p50", "p90")),
-        "tpot": _numeric_block(headline.get("tpot"), ("p50", "p90")),
+        "tps": _tps(headline.get("tps")),
+        "ttft": _latency(headline.get("ttft")),
+        "tpot": _latency(headline.get("tpot")),
         "short_window": _short_window(short_window),
         # Metric names only. A bare string here would otherwise be iterated
         # character by character downstream and printed as "t, p, o, t".
@@ -292,7 +339,11 @@ def verdict_headline(
         note = " ".join(profile.note.split())
         out["profile"] = profile.name
         out["profile_caveat"] = note or None
-    context = {k: blob[k] for k in _HEADLINE_CONTEXT if k in blob}
+    context = {
+        k: int(n)
+        for k in _HEADLINE_CONTEXT
+        if (n := finite_number(blob.get(k))) is not None
+    }
     return {**context, **out}
 
 
