@@ -1061,6 +1061,44 @@ class TestCountSync:
 
         assert seen.get("trust_remote_code") is True
 
+    def test_trust_remote_code_reaches_the_worker_shards(self):
+        """The shards load their own tokenizer in a separate process, and
+        _init_worker defaults the flag to True -- so dropping it from initargs
+        re-enables remote code there while every other assertion still passes.
+        Pin the plumbing, not just the in-process load."""
+        captured: list[tuple] = []
+
+        class _Recorder:
+            def __init__(self, *a, **kw):
+                captured.append(kw.get("initargs", ()))
+
+            def submit(self, *a, **kw):
+                raise RuntimeError("not used")
+
+            def shutdown(self, *a, **kw):
+                pass
+
+        # A fast backend is required or _setup_shards returns before spawning.
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplateAndBackend):
+            with patch(
+                "inference_endpoint.async_utils.services.metrics_aggregator"
+                ".token_metrics.ProcessPoolExecutor",
+                _Recorder,
+            ):
+                try:
+                    BatchTokenizer(
+                        "fake",
+                        live_workers=1,
+                        n_workers=1,
+                        cores_per_worker=1,
+                        trust_remote_code=False,
+                    )
+                except Exception:  # noqa: BLE001 - the recorder cannot run tasks
+                    pass
+
+        assert captured, "no shard was constructed"
+        assert all(args[-1] is False for args in captured), captured
+
     def test_trust_remote_code_can_be_refused(self):
         """The opt-out exists so a caller analysing someone else's run directory
         is not forced to execute that run's tokenizer code."""

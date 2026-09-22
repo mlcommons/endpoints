@@ -178,9 +178,6 @@ class _InlinePerformanceScorer(Scorer, scorer_id="_test_inline_performance"):
 # Hermetic local tokenizer: finalize's full-run-OSL pass tokenizes for real, and a
 # HF repo id would make these unit tests network- and cache-dependent.
 _CHAR_TOKENIZER = str(Path(__file__).parents[2] / "assets" / "tokenizers" / "char")
-_CHAR_CHAT_TOKENIZER = str(
-    Path(__file__).parents[2] / "assets" / "tokenizers" / "char_chat"
-)
 
 _OFFLINE_KWARGS = {
     "endpoint_config": {"endpoints": ["http://test:8000"]},
