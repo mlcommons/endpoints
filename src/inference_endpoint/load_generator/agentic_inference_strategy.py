@@ -47,6 +47,36 @@ ActiveConversationState = tuple[str, ConversationTurns, int, int]
 ConversationInstance = tuple[str, str, ConversationTurns, int]
 
 
+def expected_agentic_sample_count(
+    dataset_metadata: ConversationMetadata,
+    num_trajectories_to_issue: int | None,
+    rng_sample_index: random.Random | None = None,
+) -> int:
+    """Return the client-turn count for the requested trajectory instances."""
+    turn_counts = list(dataset_metadata.client_turns_per_conversation.values())
+    if not turn_counts:
+        return 0
+
+    trajectory_count = (
+        num_trajectories_to_issue
+        if num_trajectories_to_issue is not None
+        else len(turn_counts)
+    )
+    if rng_sample_index is None:
+        order: SampleOrder = SequentialSampleOrder(
+            n_samples_in_dataset=len(turn_counts)
+        )
+    else:
+        rng_copy = random.Random()
+        rng_copy.setstate(rng_sample_index.getstate())
+        order = WithoutReplacementSampleOrder(
+            n_samples_in_dataset=len(turn_counts),
+            rng=rng_copy,
+        )
+
+    return sum(turn_counts[next(order)] for _ in range(trajectory_count))
+
+
 class AgenticInferenceStrategy:
     """Event-driven agentic inference strategy. Completion of each turn triggers the next.
 
