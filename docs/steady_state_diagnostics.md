@@ -1,9 +1,10 @@
 # `steady_state_diagnostics.py`
 
 Post-hoc **steady-state / drift diagnostics** for a benchmark run's `events.jsonl`.
-Imports nothing else from `inference_endpoint`, so it can be reasoned about (and
-re-run) on its own, but it lives in the package and needs an installed environment
-— see Requirements below. The full methodology lives in
+Parses the event log itself, but does not re-derive token counting: the tokenization
+rules and the tokenizer come from the metrics aggregator, so a TPOT reconstructed here
+matches the one the live triggers produced. Needs an installed environment — see
+Requirements below. The full methodology lives in
 [`docs/steady-state-detection.md`](steady-state-detection.md); this is the
 operator's quick reference.
 
@@ -43,7 +44,10 @@ embedding them would dwarf the rest of the summary.
 Because the report is rendered after detection, a slow detector delays it — bounded by
 `settings.timeouts.steady_state_timeout_s` (default 600s). For scale: detection took 94s
 over a 1.0 GB `events.jsonl` (~57k samples), and cost grows with the log, so a
-substantially larger run may need this raised. If a `^C` lands during the
+substantially larger run may need this raised. Outputs carrying a separate `reasoning`
+or `tool_calls` field are counted one at a time through the chat template rather than in
+batches, so a chat-completions reasoning model is materially slower than the
+`openai_completions` path that figure was measured on. If a `^C` lands during the
 accuracy scoring that follows, the verdict is withdrawn from both the report and the
 directory: that run reports `interrupted` / `complete: false`, and a steady window must
 not describe it.

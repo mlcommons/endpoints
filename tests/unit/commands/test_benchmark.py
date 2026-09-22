@@ -3983,6 +3983,31 @@ class TestSteadyStateHook:
         assert not (tmp_path / "steady_state.json").exists()
 
     @pytest.mark.unit
+    def test_a_failed_event_log_copy_does_not_report_a_complete_run(
+        self, tmp_path, monkeypatch
+    ):
+        """A full disk during the copy means the scorers never saw the log, so
+        accuracy is empty for a reason that has nothing to do with the run. The
+        report must not then claim completeness -- result_summary.json and the
+        exit code would disagree, and the exit code is the truth."""
+        (tmp_path / "events.jsonl").write_text("")
+        monkeypatch.setattr(
+            execute_mod,
+            "_write_scoring_artifacts",
+            MagicMock(side_effect=OSError("No space left on device")),
+        )
+
+        with pytest.raises(OSError):
+            finalize_benchmark(
+                self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
+            )
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["complete"] is False
+
+    @pytest.mark.unit
     def test_an_interrupt_copying_the_event_log_still_writes_the_report(
         self, tmp_path, monkeypatch
     ):

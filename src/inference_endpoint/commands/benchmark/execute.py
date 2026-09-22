@@ -1222,7 +1222,21 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     try:
         # Scoring artifacts + event log from tmpfs to disk (scorers and the
         # steady-state detector both read events.jsonl from here).
-        _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
+        try:
+            _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
+        except OSError:
+            # Distinct from a scoring failure, which legitimately keeps a
+            # complete report: here the log never reached disk, so accuracy is
+            # empty for a reason unrelated to the run and nothing downstream
+            # saw the events. Mark the run invalid before re-raising, or the
+            # artifacts would claim completeness while the exit code says
+            # otherwise.
+            if report is not None:
+                report = msgspec.structs.replace(
+                    report, complete=False, state="interrupted"
+                )
+                bench.report = report
+            raise
 
         # Detection runs after the metrics drain and before the report is
         # rendered, so the window it finds reaches result_summary.json,

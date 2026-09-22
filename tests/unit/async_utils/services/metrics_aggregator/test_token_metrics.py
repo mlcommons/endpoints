@@ -711,7 +711,9 @@ class TestRayonCaps:
 
         monkeypatch.setattr(token_metrics_module.os, "sched_setaffinity", _no_affinity)
         with patch(_MOCK_TARGET, _FakeTokenizer):
-            token_metrics_module._init_worker("fake", [0, 1, 2, 3, 4, 5, 6, 7])
+            token_metrics_module._init_worker(
+                "fake", [0, 1, 2, 3, 4, 5, 6, 7], trust_remote_code=True
+            )
         assert token_metrics_module.os.environ["RAYON_NUM_THREADS"] == "8"
 
 

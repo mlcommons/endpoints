@@ -55,7 +55,8 @@ import json
 import math
 import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from statistics import NormalDist, median, pstdev
 from typing import Literal, NamedTuple, TypedDict
@@ -1807,14 +1808,18 @@ def render_text(result: DiagnosticsResult, cov_bounds: Sequence[float]) -> str:
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+@contextmanager
 def _make_token_counter(
     tokenizer_id: str, trust_remote_code: bool = False
-) -> Callable[[list[TokenizationInput]], list[int]]:
+) -> Iterator[Callable[[list[TokenizationInput]], list[int]]]:
     """The metrics aggregator's counter, so TPOT here matches the run's report.
 
     Counting with a second tokenizer wrapper would reintroduce the divergence
     the shared rules exist to close: the chat-template path and its baseline
     subtraction live in ``BatchTokenizer``, not in ``AutoTokenizer``.
+
+    A context manager because the tokenizer owns a thread pool, and process
+    shards when sharding is enabled; the caller closes it on every exit path.
     """
     # Deliberately not hoisted: this pulls transformers, which costs ~1.4s, and
     # the --help and argument-validation paths never tokenize.
@@ -1822,13 +1827,13 @@ def _make_token_counter(
         BatchTokenizer,
     )
 
-    tokenizer = BatchTokenizer(
+    with BatchTokenizer(
         tokenizer_id,
         live_workers=1,
         n_workers=0,
         trust_remote_code=trust_remote_code,
-    )
-    return tokenizer.count_sync_batch
+    ) as tokenizer:
+        yield tokenizer.count_sync_batch
 
 
 def _parse_int_list(s: str) -> list[int]:
@@ -1988,52 +1993,62 @@ def main(argv: Sequence[str] | None = None) -> int:
     warmup_driver = args.warmup_driver or profile.warmup_driver
     flush = args.tokenize_batch_size or profile.tokenize_batch_size
     window_sizes = args.window_sizes or [4, 6, 8]
+    # ExitStack + try/finally rather than a bare `with`: the tokenizer must be
+    # closed on every exit path (it owns a thread pool, and process shards when
+    # sharding is enabled), but the load failure has to be reported here, where
+    # the hint about --tokenizer belongs, not from inside the block. try/finally
+    # also states that nothing here suppresses an exception, which `with` on an
+    # ExitStack does not.
+    closer = ExitStack()
     try:
-        count_tokens = _make_token_counter(tokenizer, trust)
+        count_tokens = closer.enter_context(_make_token_counter(tokenizer, trust))
     except (OSError, ValueError, ImportError) as e:
         # A config's tokenizer_name is used verbatim, so a cluster path recorded
         # on one machine will not load on another. Every other resolution
         # failure here is an ap.error with a hint; this one should be too.
         ap.error(f"could not load tokenizer {tokenizer!r}: {e}; pass --tokenizer")
 
-    if profile.metric == "natl":
-        sp_traj = args.superpass_size or profile.superpass_size or 32
-        pairs = build_trajectory_natl(events, count_tokens, flush)
-        natl_result = build_natl_result(pairs, sp_traj, tuple(cov_bounds))
-        print(render_natl(natl_result))
+    try:
+        if profile.metric == "natl":
+            sp_traj = args.superpass_size or profile.superpass_size or 32
+            pairs = build_trajectory_natl(events, count_tokens, flush)
+            natl_result = build_natl_result(pairs, sp_traj, tuple(cov_bounds))
+            print(render_natl(natl_result))
+            if args.json_out:
+                with open(args.json_out, "w") as fh:
+                    json.dump(natl_result, fh, indent=2)
+                print(f"wrote {args.json_out}", file=sys.stderr)
+            print(_agentic_warning())
+            return 0
+
+        # window profiles (concurrency / poisson / offline): super-pass = samples
+        size = args.superpass_size or args.dataset_size or cfg["dataset_size"]
+        if not size or size <= 0:
+            ap.error(
+                "could not resolve dataset/super-pass size; pass --dataset-size or "
+                "--superpass-size"
+            )
+        result = run(
+            events,
+            superpass_size=int(size),
+            count_tokens=count_tokens,
+            window_sizes=window_sizes,
+            warmup=args.warmup,
+            cov_bounds=cov_bounds,
+            trend_gate=args.trend_gate,
+            tokenize_batch_size=flush,
+            warmup_band=args.warmup_band,
+            warmup_driver=warmup_driver,
+            enforce_min_duration=args.enforce_min_duration,
+        )
+        print(render_text(result, cov_bounds))
         if args.json_out:
             with open(args.json_out, "w") as fh:
-                json.dump(natl_result, fh, indent=2)
-            print(f"wrote {args.json_out}", file=sys.stderr)
-        print(_agentic_warning())
+                json.dump(result, fh, indent=2)
+            print(f"\nwrote {args.json_out}", file=sys.stderr)
         return 0
-
-    # window profiles (concurrency / poisson / offline): super-pass = samples
-    size = args.superpass_size or args.dataset_size or cfg["dataset_size"]
-    if not size or size <= 0:
-        ap.error(
-            "could not resolve dataset/super-pass size; pass --dataset-size or "
-            "--superpass-size"
-        )
-    result = run(
-        events,
-        superpass_size=int(size),
-        count_tokens=count_tokens,
-        window_sizes=window_sizes,
-        warmup=args.warmup,
-        cov_bounds=cov_bounds,
-        trend_gate=args.trend_gate,
-        tokenize_batch_size=flush,
-        warmup_band=args.warmup_band,
-        warmup_driver=warmup_driver,
-        enforce_min_duration=args.enforce_min_duration,
-    )
-    print(render_text(result, cov_bounds))
-    if args.json_out:
-        with open(args.json_out, "w") as fh:
-            json.dump(result, fh, indent=2)
-        print(f"\nwrote {args.json_out}", file=sys.stderr)
-    return 0
+    finally:
+        closer.close()
 
 
 if __name__ == "__main__":

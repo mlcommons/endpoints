@@ -33,6 +33,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.aggregator impor
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     build_token_series_dict,
 )
+from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
+    finite_number,
+)
 from inference_endpoint.evaluation.accuracy_results import (
     samples_weighted_average_accuracy,
 )
@@ -469,21 +472,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 f.write(json_bytes)
         return json_bytes
 
-    @staticmethod
-    def _number(value: object) -> float | None:
-        """``value`` as a float, or None if it is not a usable number.
-
-        ``verdict_headline`` already narrows the headline, but this field is a
-        plain dict on a public struct, so the renderer stays total on its own:
-        a field can legitimately be null (an empty TTFT series) or, if written
-        by something else, any type at all. bools are excluded because ``True``
-        would render as 1.00, NaN and infinity because they would render as
-        "nan"/"inf".
-        """
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            return None
-        number = float(value)
-        return number if math.isfinite(number) else None
+    # ``verdict_headline`` already narrows the headline, but this field is a
+    # plain dict on a public struct, so the renderer stays total on its own.
+    # Same predicate as the boundary rather than a second copy of the rule.
+    _number = staticmethod(finite_number)
 
     def _display_steady_state(
         self, fn: Callable[[str], None], newline: str = ""
@@ -531,11 +523,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         anomaly = ss.get("anomaly")
         if isinstance(anomaly, dict) and anomaly.get("detected"):
             delta = self._number(anomaly.get("delta_pct"))
+            # The detector flags on abs(rel), so a shift can be an improvement;
+            # only a rise in TPOT is degradation.
             shift = f" TPOT {delta:+.1f}%" if delta is not None else ""
+            direction = " (likely degradation)" if delta is None or delta > 0 else ""
             fn(
                 f"  ANOMALY: level shift at super-pass "
-                f"{anomaly.get('change_point_sp')},{shift} toward end of run "
-                f"(likely degradation){newline}"
+                f"{anomaly.get('change_point_sp')},{shift} toward end of "
+                f"run{direction}{newline}"
             )
         raw_short = ss.get("short_window")
         short: dict[str, Any] = raw_short if isinstance(raw_short, dict) else {}

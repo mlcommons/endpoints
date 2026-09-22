@@ -33,12 +33,14 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
+    finite_number,
+)
 from inference_endpoint.config.schema import BenchmarkConfig, LoadPatternType
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.metrics.steady_state_diagnostics import (
@@ -172,24 +174,11 @@ def write_run_meta(report_dir: Path, dataset_size: int) -> None:
 _HEADLINE_CONTEXT = ("superpass_size", "n_super_passes", "n_post_warmup")
 
 
-def _finite(value: object) -> float | None:
-    """``value`` as a float, or None if it cannot be rendered as a number.
-
-    bools are rejected because ``True`` would otherwise reach the report as
-    1.0; NaN and infinity because JSON admits the bare ``NaN``/``Infinity``
-    tokens and they would render as "inf tok/s".
-    """
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
 def _numeric_block(value: object, keys: tuple[str, ...]) -> dict[str, float] | None:
     """A mapping narrowed to ``keys`` with usable numbers, or None if empty."""
     if not isinstance(value, dict):
         return None
-    block = {k: n for k in keys if (n := _finite(value.get(k))) is not None}
+    block = {k: n for k in keys if (n := finite_number(value.get(k))) is not None}
     return block or None
 
 
@@ -218,7 +207,7 @@ def _short_window(value: object) -> dict[str, Any] | None:
         return None
     out: dict[str, Any] = {"is_short": bool(value.get("is_short"))}
     for key in ("window_duration_s", "min_duration_s"):
-        if (number := _finite(value.get(key))) is not None:
+        if (number := finite_number(value.get(key))) is not None:
             out[key] = number
     if isinstance(dominant := value.get("dominant"), str):
         out["dominant"] = dominant
@@ -236,7 +225,7 @@ def _anomaly(value: object) -> dict[str, Any] | None:
     return {
         "detected": True,
         "change_point_sp": value.get("change_point_sp"),
-        "delta_pct": _finite(value.get("delta_pct")),
+        "delta_pct": finite_number(value.get("delta_pct")),
     }
 
 

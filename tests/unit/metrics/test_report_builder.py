@@ -485,14 +485,16 @@ class TestSteadyStateOnReport:
     @pytest.mark.parametrize(
         "verdict",
         [
-            # Shapes no per-field guard can rescue: the containers themselves
-            # are the wrong type, so .get() raises before any formatting.
-            {"found": True, "window": "not-a-mapping"},
-            {"found": True, "window": {}, "tps": "not-a-mapping"},
-            {"found": True, "window": {}, "short_window": "not-a-mapping"},
+            # `ss` itself is not a mapping, so the first .get() raises and no
+            # per-field guard can reach it. Shapes the field guards DO handle
+            # belong in the boundary tests -- asserting them here would pass
+            # with those guards removed.
+            "a bare string",
+            ["a", "list"],
+            42,
         ],
     )
-    def test_a_structurally_broken_verdict_never_costs_the_run_its_report(
+    def test_a_verdict_that_is_not_a_mapping_never_costs_the_run_its_report(
         self, verdict
     ):
         """display() is the first statement of _write_report_artifacts, before
@@ -616,6 +618,20 @@ class TestSteadyStateOnReport:
         assert "ANOMALY" in text
         assert "super-pass 7" in text
         assert "12.5" in text
+
+    @pytest.mark.unit
+    def test_a_level_shift_toward_faster_is_not_called_degradation(self):
+        """delta_pct is detected on abs(rel), so a shift can be an improvement.
+        Calling every level shift a degradation misreports half of them."""
+        lines: list[str] = []
+
+        self._with(
+            anomaly={"detected": True, "change_point_sp": 7, "delta_pct": -12.5}
+        ).display(fn=lines.append)
+
+        text = "\n".join(lines)
+        assert "ANOMALY" in text
+        assert "degradation" not in text
 
     @pytest.mark.unit
     def test_no_anomaly_line_when_none_was_detected(self):

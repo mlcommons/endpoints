@@ -11,7 +11,6 @@ propagate out of finalize.
 import dataclasses
 import json
 import logging
-import math
 import subprocess
 import sys
 from pathlib import Path
@@ -737,38 +736,37 @@ class TestVerdictHeadline:
         assert "no verdict" in caplog.text
 
     @pytest.mark.parametrize(
-        ("field", "value"),
+        ("field", "value", "expected"),
         [
-            ("tps", {"per_user": "fast", "system": 1.0}),
-            ("tps", {"per_user": True, "system": 1.0}),
-            ("tps", {"per_user": float("nan"), "system": float("inf")}),
-            ("ttft", {"p50": None, "p90": "slow"}),
-            ("window", {"sp_lo": "a", "sp_hi": 5, "n_samples": None}),
-            ("drifting_up", "tpot"),
-            ("drifting_up", [None, 1, "tpot"]),
-            ("short_window", "yes"),
+            # Each case states the whole expected output for the field, so a
+            # boundary that drops a GOOD value fails too. Re-deriving the rule
+            # inside the assertion would accept that silently.
+            ("tps", {"per_user": "fast", "system": 1.0}, {"system": 1.0}),
+            ("tps", {"per_user": True, "system": 1.0}, {"system": 1.0}),
+            ("tps", {"per_user": float("nan"), "system": float("inf")}, None),
+            ("ttft", {"p50": None, "p90": "slow"}, None),
+            ("ttft", {"p50": 1.5, "p90": "slow"}, {"p50": 1.5}),
+            ("window", {"sp_lo": "a", "sp_hi": 5, "n_samples": None}, {"sp_hi": 5}),
+            ("drifting_up", "tpot", []),
+            ("drifting_up", [None, 1, "tpot"], ["tpot"]),
+            ("short_window", "yes", None),
+            ("short_window", {"is_short": "truthy"}, {"is_short": True}),
         ],
     )
-    def test_unusable_values_are_dropped_at_the_boundary(self, tmp_path, field, value):
+    def test_unusable_values_are_dropped_at_the_boundary(
+        self, tmp_path, field, value, expected
+    ):
         """This is the only place the detector's JSON is checked. Everything
         downstream formats these values into the run's primary artifacts, so a
-        value that cannot be rendered must not get past here."""
+        value that cannot be rendered must not get past here -- and one that can
+        must survive."""
         path = tmp_path / "steady_state.json"
         path.write_text(json.dumps({"steady_state": {"found": True, field: value}}))
 
         got = steady_state.verdict_headline(path)
 
         assert got is not None
-        if field == "drifting_up":
-            # Only real metric names survive; a bare string must not be
-            # exploded into characters downstream.
-            assert got["drifting_up"] == (["tpot"] if isinstance(value, list) else [])
-        else:
-            block = got.get(field)
-            for key, raw in value.items() if isinstance(value, dict) else []:
-                usable = isinstance(raw, int | float) and not isinstance(raw, bool)
-                usable = usable and math.isfinite(raw)
-                assert (block or {}).get(key) is None or usable
+        assert got[field] == expected
 
     def test_the_evidence_for_the_window_survives(self, tmp_path):
         """is_short alone says whether the window cleared the gate, not by how

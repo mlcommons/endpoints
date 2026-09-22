@@ -10,6 +10,7 @@ tokenization rule is not owned here -- it is the metrics aggregator's, and is pi
 that module's tests.
 """
 
+import contextlib
 import json
 
 import pytest
@@ -1142,6 +1143,41 @@ class TestTokenizerPrecedence:
             mod.main([str(tmp_path), "--dataset-size", "8"])
 
         assert "could not load tokenizer" in capsys.readouterr().err
+
+    def test_the_tokenizer_is_closed_on_every_exit_path(self, tmp_path, monkeypatch):
+        """BatchTokenizer owns a thread pool, and process shards when sharding
+        is enabled. The sibling post-run caller (full_run_osl_for_report) closes
+        it with `with`; leaving it to the interpreter here would be a leak the
+        moment n_workers stops being 0."""
+        (tmp_path / "events.jsonl").write_text("")
+        (tmp_path / "config.yaml").write_text(_NAME_ONLY_CONFIG)
+        closed: list[bool] = []
+
+        class _FakeTokenizer:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                closed.append(True)
+                return False
+
+            def count_sync_batch(self, items):
+                return [1] * len(items)
+
+        monkeypatch.setattr(
+            "inference_endpoint.async_utils.services.metrics_aggregator"
+            ".token_metrics.BatchTokenizer",
+            _FakeTokenizer,
+        )
+
+        # An empty event log makes run() bail; the tokenizer must still close.
+        with contextlib.suppress(SystemExit):
+            mod.main([str(tmp_path), "--dataset-size", "8"])
+
+        assert closed == [True]
 
     def test_an_unresolvable_tokenizer_is_a_clean_error(self, tmp_path, capsys):
         config = _NAME_ONLY_CONFIG.replace("gpt-oss-120b", "mystery-model")

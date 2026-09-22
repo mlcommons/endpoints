@@ -171,7 +171,7 @@ def load_reference_backend(
 
 
 def _init_worker(
-    tokenizer_name: str, core_set: list[int], trust_remote_code: bool = True
+    tokenizer_name: str, core_set: list[int], trust_remote_code: bool
 ) -> None:
     """Pin this worker to ``core_set``, then load its token-counting path.
 
