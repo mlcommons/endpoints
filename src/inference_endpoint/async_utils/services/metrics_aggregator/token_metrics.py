@@ -566,6 +566,33 @@ class BatchTokenizer:
             for (index, _), count in zip(indexed_texts, counts, strict=True)
         ]
 
+    def count_sync_batch(self, items: list[TokenizationInput]) -> list[int]:
+        """Count a batch on the calling thread, in input order.
+
+        The text inputs are encoded in a single call rather than one per item:
+        post-run callers walk a whole event log, and a per-item loop turns tens
+        of thousands of texts into tens of thousands of tokenizer calls, which
+        is where the fast backend's batching is lost. Chat-template inputs are
+        counted individually because the template wraps a whole message.
+
+        Dispatch per item is :meth:`count_sync`, so the numbers are identical.
+        """
+        lengths: list[int] = [0] * len(items)
+        text_slots: list[int] = []
+        texts: list[str] = []
+        for i, item in enumerate(items):
+            if type(item) is TextInput:
+                text_slots.append(i)
+                texts.append(item.text)
+            else:
+                lengths[i] = self.count_sync(item)
+        if texts:
+            for slot, length in zip(
+                text_slots, self._encode_lengths_inproc(texts), strict=True
+            ):
+                lengths[slot] = length
+        return lengths
+
     def count_sync(self, item: TokenizationInput) -> int:
         """Count one input on the calling thread.
 

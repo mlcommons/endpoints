@@ -32,6 +32,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
     TokenIdsInput,
     TokenizationInput,
     extract_tokenization_input,
+    extract_tpot_tokenization_input,
 )
 from inference_endpoint.core.record import SampleEventType, SessionEventType
 from inference_endpoint.core.types import PromptData, TextModelOutput
@@ -379,12 +380,7 @@ class TpotTrigger(TokenTrigger):
             return None
         if not isinstance(ev_rec.data, TextModelOutput):
             return None
-        if ev_rec.data.reasoning or ev_rec.data.tool_calls:
-            return MessageInput(*ev_rec.data.as_message_parts_after_first_chunk())
-        text = ev_rec.data.text_after_first_chunk()
-        if text:
-            return TextInput(text)
-        return None
+        return extract_tpot_tokenization_input(ev_rec.data)
 
     def _compute_value(self, token_count, ev_rec, pre_change):
         if token_count <= 0:

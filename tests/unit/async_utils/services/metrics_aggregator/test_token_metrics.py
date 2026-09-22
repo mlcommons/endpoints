@@ -1042,6 +1042,58 @@ class TestCountSync:
 
                 assert tok.count_sync(message) == expected
 
+    def test_count_sync_batch_agrees_with_count_sync(self):
+        """The batched post-run path must land on the same numbers as the
+        per-item one; it exists to amortize the tokenizer call, not to count
+        differently."""
+        items = [
+            TextInput("hello world"),
+            MessageInput("content here", "some reasoning", None),
+            TextInput("another one"),
+        ]
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                assert tok.count_sync_batch(items) == [
+                    tok.count_sync(item) for item in items
+                ]
+
+    def test_count_sync_batch_preserves_order_across_mixed_kinds(self):
+        """Text inputs are grouped into one encode while messages are counted
+        individually, so the results have to be reassembled in input order."""
+        items = [
+            MessageInput("a", "r", None),
+            TextInput("hello world"),
+            MessageInput("b", "r", None),
+            TextInput("x"),
+        ]
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                assert tok.count_sync_batch(items) == [
+                    tok.count_sync(item) for item in items
+                ]
+
+    def test_count_sync_batch_of_nothing_is_nothing(self):
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                assert tok.count_sync_batch([]) == []
+
+    def test_count_sync_batch_makes_one_encode_call_for_the_text_inputs(self):
+        """The point of the batch path: 47k texts must not become 47k calls."""
+        items = [TextInput(f"text {i}") for i in range(50)]
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                calls: list[int] = []
+                real = tok._encode_lengths_inproc
+
+                def counting(texts):
+                    calls.append(len(texts))
+                    return real(texts)
+
+                tok._encode_lengths_inproc = counting  # type: ignore[method-assign]
+                tok.count_sync_batch(items)
+
+                assert calls == [50]
+
     def test_count_sync_counts_plain_text(self):
         """Text inputs take the text path, not the chat template."""
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):

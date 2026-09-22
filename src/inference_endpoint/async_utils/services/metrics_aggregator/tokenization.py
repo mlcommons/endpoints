@@ -55,6 +55,28 @@ TokenizationInput: TypeAlias = (  # noqa: UP040 - mypy version lacks PEP 695.
 )
 
 
+def extract_tpot_tokenization_input(
+    output: TextModelOutput,
+) -> MessageInput | TextInput | None:
+    """The TPOT rule: how one model output is rendered for its token denominator.
+
+    The post-first-chunk counterpart to :func:`extract_tokenization_input`, and
+    the same single-source-of-truth argument applies: TPOT is measured over the
+    output *after* the first chunk, and a second implementation of that rule
+    drifts from this one. The steady-state detector reconstructs TPOT from the
+    event log post-hoc and must land on the same number as the live trigger.
+
+    Returns ``None`` when there is nothing after the first chunk to count --
+    a non-streaming output, or a single-chunk one.
+    """
+    if output.reasoning or output.tool_calls:
+        return MessageInput(*output.as_message_parts_after_first_chunk())
+    text = output.text_after_first_chunk()
+    if text:
+        return TextInput(text)
+    return None
+
+
 def extract_tokenization_input(
     output: TextModelOutput,
 ) -> MessageInput | TextInput | None:
