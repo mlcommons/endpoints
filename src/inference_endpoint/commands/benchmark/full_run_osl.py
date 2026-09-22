@@ -32,8 +32,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics im
     BatchTokenizer,
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
-    MessageInput,
-    TextInput,
+    TokenizationInput,
     extract_tokenization_input,
 )
 from inference_endpoint.core.record import EventRecord, EventType
@@ -50,7 +49,14 @@ _PREFIX_BYTES = 256
 # sample_idx_map.json.
 _PERFORMANCE_PHASE = "performance"
 
-TokenCounter = Callable[[MessageInput | TextInput], int]
+# A batch counter, not a per-item one: this walks a whole event log, and a
+# per-item call turns tens of thousands of turns into tens of thousands of
+# tokenizer calls, losing the fast backend's batching.
+TokenCounter = Callable[[list[TokenizationInput]], list[int]]
+
+# Turns buffered before a flush. Bounds peak memory on long reasoning outputs
+# while keeping the tokenizer call large enough to amortize.
+_COUNT_BATCH_SIZE = 512
 
 
 def _in_population(
@@ -110,6 +116,29 @@ def compute_full_run_osl(
     n_undecodable = 0
     first_error: str | None = None
     seen_uuids: set[str] = set()
+    pending: list[TokenizationInput] = []
+
+    def flush() -> None:
+        """Count the buffer, isolating a turn the tokenizer cannot handle.
+
+        A batch that raises is retried one turn at a time so a single malformed
+        payload costs only itself -- the same guarantee the per-turn try below
+        gives for input preparation.
+        """
+        nonlocal n_errors, first_error
+        if not pending:
+            return
+        try:
+            lengths.extend(count_tokens(pending))
+        except Exception:  # noqa: BLE001 - fall back to per-turn isolation
+            for item in pending:
+                try:
+                    lengths.extend(count_tokens([item]))
+                except Exception as e:  # noqa: BLE001 - one bad turn, not the stat
+                    n_errors += 1
+                    if first_error is None:
+                        first_error = str(e)
+        pending.clear()
 
     with events_path.open("rb") as events_file:
         for line in events_file:
@@ -140,14 +169,18 @@ def compute_full_run_osl(
             # bad turn must not void the whole statistic.
             try:
                 tokenization_input = extract_tokenization_input(record.data)
-                if tokenization_input is None:
-                    n_empty += 1
-                    continue
-                lengths.append(count_tokens(tokenization_input))
             except Exception as e:  # noqa: BLE001 - one bad turn must not void the stat
                 n_errors += 1
                 if first_error is None:
                     first_error = str(e)
+                continue
+            if tokenization_input is None:
+                n_empty += 1
+                continue
+            pending.append(tokenization_input)
+            if len(pending) >= _COUNT_BATCH_SIZE:
+                flush()
+    flush()
 
     # A performance turn whose COMPLETE record never reached the log is invisible
     # to the counters above; reconcile observed UUIDs against the expected
@@ -255,7 +288,7 @@ def full_run_osl_for_report(
         with BatchTokenizer(tokenizer_name, live_workers=1, n_workers=0) as tokenizer:
             return compute_full_run_osl(
                 events_path,
-                tokenizer.count_sync,
+                tokenizer.count_sync_batch,
                 performance_uuids=performance_uuids,
             )
     except Exception as e:  # noqa: BLE001 - optional block; never fail finalize

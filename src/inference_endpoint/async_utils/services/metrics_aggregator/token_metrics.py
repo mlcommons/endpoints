@@ -141,24 +141,38 @@ def _normalize_prompt_messages_for_template(
 _WORKER_TEXT_BACKEND: Any = None
 
 
-def load_reference_tokenizer(tokenizer_name: str) -> Any:
+def load_reference_tokenizer(
+    tokenizer_name: str, trust_remote_code: bool = True
+) -> Any:
     """Load the run's reference tokenizer.
 
-    ``trust_remote_code`` is required for tokenizers that ship custom code (e.g.
-    DeepSeek-R1). The single construction point shared by the perf-window
-    tokenizer, the sharded length-counting workers, and finalize-side accuracy
-    OSL, so every OSL number in a run comes from the same tokenizer.
+    The single construction point shared by the perf-window tokenizer, the
+    sharded length-counting workers, and finalize-side accuracy OSL, so every
+    OSL number in a run comes from the same tokenizer.
+
+    ``trust_remote_code`` defaults on: tokenizers that ship custom code behind
+    the legacy Hugging Face API are common in practice (DeepSeek-R1 among
+    them), and a run whose tokenizer will not load produces no OSL at all. It
+    is a parameter rather than a constant so a caller pointed at a run
+    directory it did not produce -- the steady-state detector run by hand --
+    can decline to execute that run's tokenizer code.
     """
-    return AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+    return AutoTokenizer.from_pretrained(
+        tokenizer_name, trust_remote_code=trust_remote_code
+    )
 
 
-def load_reference_backend(tokenizer_name: str) -> Any | None:
+def load_reference_backend(
+    tokenizer_name: str, trust_remote_code: bool = True
+) -> Any | None:
     """Load the optional fast backend used only for plain-text counting."""
-    tokenizer = load_reference_tokenizer(tokenizer_name)
+    tokenizer = load_reference_tokenizer(tokenizer_name, trust_remote_code)
     return getattr(tokenizer, "backend_tokenizer", None)
 
 
-def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
+def _init_worker(
+    tokenizer_name: str, core_set: list[int], trust_remote_code: bool = True
+) -> None:
     """Pin this worker to ``core_set``, then load its token-counting path.
 
     Affinity is set before the first encode so the Hugging Face rayon pool sizes
@@ -183,7 +197,7 @@ def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
             logger.debug("could not pin tokenizer worker to %s", core_set)
     transformers_logging.set_verbosity_error()
     global _WORKER_TEXT_BACKEND
-    _WORKER_TEXT_BACKEND = load_reference_backend(tokenizer_name)
+    _WORKER_TEXT_BACKEND = load_reference_backend(tokenizer_name, trust_remote_code)
     if _WORKER_TEXT_BACKEND is not None:
         _WORKER_TEXT_BACKEND.encode("warmup", add_special_tokens=False)
 
@@ -256,8 +270,10 @@ class BatchTokenizer:
         live_workers: int,
         cores_per_worker: int = CORES_PER_WORKER,
         n_workers: int = -1,
+        trust_remote_code: bool = True,
     ) -> None:
         self._tokenizer_name = tokenizer_name
+        self._trust_remote_code = trust_remote_code
         # The live lane runs in-process: cap the Hugging Face rayon pool before
         # its first encode. setdefault lets an operator-exported HF cap win.
         os.environ.setdefault("RAYON_NUM_THREADS", str(max(1, live_workers)))
@@ -283,7 +299,7 @@ class BatchTokenizer:
 
     def _load_tokenizer(self) -> None:
         transformers_logging.set_verbosity_error()
-        tok = load_reference_tokenizer(self._tokenizer_name)
+        tok = load_reference_tokenizer(self._tokenizer_name, self._trust_remote_code)
         self._tokenizer = tok
         self._text_backend = getattr(tok, "backend_tokenizer", None)
         # Baseline = tokens from a [user, empty-assistant] pair minus the [user]
@@ -368,7 +384,7 @@ class BatchTokenizer:
                     max_workers=1,
                     mp_context=ctx,
                     initializer=_init_worker,
-                    initargs=(self._tokenizer_name, block),
+                    initargs=(self._tokenizer_name, block, self._trust_remote_code),
                 )
                 procs.append(ex)
             # Force spawn + pin + tokenizer-load now (not on the first batch).

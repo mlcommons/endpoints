@@ -3,15 +3,20 @@
 
 """Tests for the steady-state detector.
 
-The module imports nothing else from ``inference_endpoint``, so these tests pin
-everything it owns: the plain-JSON event parse (wire shapes referenced from
-core/record.py + core/types.py), super-pass bucketing, TTFT/TPOT reconstruction via an
-injected token counter, the trend-detection algorithms, and the CoV table.
+These pin what the module owns: the plain-JSON event parse (wire shapes referenced
+from core/record.py + core/types.py), super-pass bucketing, TTFT/TPOT reconstruction
+via an injected token counter, the trend-detection algorithms, and the CoV table. The
+tokenization rule is not owned here -- it is the metrics aggregator's, and is pinned by
+that module's tests.
 """
 
 import json
 
 import pytest
+from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
+    MessageInput,
+    TextInput,
+)
 from inference_endpoint.metrics import steady_state_diagnostics as mod
 
 pytestmark = pytest.mark.unit
@@ -28,32 +33,58 @@ def _ev(event_type, ts, uuid="", data=None):
     )
 
 
-def _words(texts):
-    """Fake tokenizer: token count == whitespace word count."""
-    return [len(t.split()) for t in texts]
+def _words(items):
+    """Fake tokenizer: token count == whitespace word count.
+
+    Takes the shared ``TokenizationInput`` kinds the detector now produces, so
+    the same rule the metrics aggregator applies live is exercised here.
+    """
+    counts = []
+    for item in items:
+        if isinstance(item, TextInput):
+            counts.append(len(item.text.split()))
+        else:
+            parts = [item.content or "", item.reasoning or ""]
+            if item.tool_calls:
+                parts.append(" ".join(str(tc) for tc in item.tool_calls))
+            counts.append(len(" ".join(parts).split()))
+    return counts
 
 
 # --------------------------------------------------------------------------- #
-# text_after_first_chunk — port of TextModelOutput.text_after_first_chunk over
-# the parsed JSON array [tag, output, reasoning?, tool_calls?].
+# tpot_tokenization_input — the detector's adapter onto the aggregator's rule.
 # --------------------------------------------------------------------------- #
 
 
-def test_text_after_first_chunk_streaming_output_drops_first():
+def _tpot_text(data):
+    """The text the shared rule selects, for the plain-output cases."""
+    item = mod.tpot_tokenization_input(data)
+    return item.text if isinstance(item, TextInput) else ""
+
+
+def test_tpot_input_streaming_output_drops_first():
     data = ["TextModelOutput", ["hello ", "world ", "again"]]
-    assert mod.text_after_first_chunk(data) == "world again"
+    assert _tpot_text(data) == "world again"
 
 
-def test_text_after_first_chunk_reasoning_first_keeps_all_output():
-    # reasoning is a tuple (streaming) -> first chunk lived in reasoning, so all
-    # output chunks are post-first-chunk and are kept.
-    data = ["TextModelOutput", ["out1 ", "out2"], ["think1 ", "think2 "]]
-    assert mod.text_after_first_chunk(data) == "think2 out1 out2"
-
-
-def test_text_after_first_chunk_non_streaming_str_has_no_first_chunk():
+def test_tpot_input_non_streaming_str_has_no_first_chunk():
     data = ["TextModelOutput", "the whole answer"]
-    assert mod.text_after_first_chunk(data) == ""
+    assert mod.tpot_tokenization_input(data) is None
+
+
+def test_tpot_input_reasoning_takes_the_chat_template_path():
+    """Reasoning outputs go through the aggregator's message path, which is the
+    divergence this adapter exists to close -- not a plain concatenation."""
+    data = ["TextModelOutput", ["out1 ", "out2"], ["think1 ", "think2 "]]
+
+    item = mod.tpot_tokenization_input(data)
+
+    assert isinstance(item, MessageInput)
+
+
+def test_tpot_input_of_an_undecodable_payload_is_none():
+    assert mod.tpot_tokenization_input({"not": "an array"}) is None
+    assert mod.tpot_tokenization_input(None) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -311,12 +342,6 @@ def test_run_result_structure(tmp_path):
     assert set(cell["passes"]) == {"0.03", "0.05", "0.08"}
     # p99 is present but marked diagnostic (not gated)
     assert result["cov"]["4"]["ttft_p99"]["gated"] is False
-
-
-def test_text_after_first_chunk_empty_reasoning_str_output_is_first_chunk():
-    # reasoning=[] is falsy -> str output IS the sole first chunk -> excluded.
-    data = ["TextModelOutput", "the whole answer", []]
-    assert mod.text_after_first_chunk(data) == ""
 
 
 def test_retried_sample_counts_ttft_once(tmp_path):

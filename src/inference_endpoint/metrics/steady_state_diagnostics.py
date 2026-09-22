@@ -3,21 +3,21 @@
 
 """Steady-state / drift diagnostics from a benchmark run's ``events.jsonl``.
 
-Imports nothing else from ``inference_endpoint``, which keeps the benchmark's
-import graph out of this process when it is spawned as a child; it still needs the
-tokenizer available (``python -m inference_endpoint.metrics.steady_state_diagnostics ...``). The event
-wire shapes it parses are defined by the product's ``core/record.py`` (event names,
-``EventRecord`` fields) and ``core/types.py`` (``TextModelOutput`` array layout); the
-parse here mirrors them and is pinned by tests/unit/metrics/test_steady_state_diagnostics.py.
+Parses the event log itself -- wire shapes come from ``core/record.py`` (event names,
+``EventRecord`` fields) and ``core/types.py`` (``TextModelOutput`` array layout), and the
+parse is pinned by tests/unit/metrics/test_steady_state_diagnostics.py. Token counting is
+NOT re-derived here: the tokenization rules and the tokenizer itself come from the metrics
+aggregator, so a number reconstructed post-hoc matches the one the live triggers produced.
+That costs ~0.03s of extra import (the expense is transformers, which this needed anyway).
 
 What it reconstructs (per performance-tracked sample):
   - ttft_ns = recv_first.ts - issued.ts
-  - tpot_ns = (complete.ts - recv_first.ts) / tokens(text_after_first_chunk)
-Token counts use plain tokenization of ``text_after_first_chunk``. The live metrics
-aggregator instead tokenizes reasoning/tool-call outputs via the chat-template path
-(``apply_chat_template``), so absolute TPOT ms here can differ from a run's report for
-reasoning models. CoV and the trend tests are scale-invariant, so the steady/drift
-diagnosis is unaffected -- only the absolute TPOT magnitude shifts.
+  - tpot_ns = (complete.ts - recv_first.ts) / tokens(post-first-chunk output)
+Token counts come from ``extract_tpot_tokenization_input`` and the aggregator's
+``BatchTokenizer``, the same rule and tokenizer the live ``TpotTrigger`` uses, so absolute
+TPOT ms here matches the run's report -- including the chat-template path for reasoning
+models and tool calls. CoV and the trend tests are scale-invariant and never depended on
+this, but the absolute magnitude now reaches ``result_summary.json`` and has to agree.
 
 Samples are bucketed into super-passes by issue order (``--superpass-size`` samples per
 super-pass, default = ``--dataset-size``), giving a per-super-pass trajectory for each
@@ -60,7 +60,15 @@ from dataclasses import dataclass, field
 from statistics import NormalDist, median, pstdev
 from typing import Literal, NamedTuple, TypedDict
 
+import msgspec
 import yaml
+
+from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
+    TokenizationInput,
+    extract_tokenization_input,
+    extract_tpot_tokenization_input,
+)
+from inference_endpoint.core.types import TextModelOutput
 
 # --------------------------------------------------------------------------- #
 # Event wire constants (mirror core/record.py category.value topics)
@@ -418,26 +426,11 @@ def read_run_config(
 # --------------------------------------------------------------------------- #
 # NATL (agentic per-trajectory throughput) -- EXPERIMENTAL, see the CLI warning
 # --------------------------------------------------------------------------- #
-def full_output_text(data: object) -> str:
-    """All generated text for a turn (reasoning + output + tool_calls), for OSL counting."""
-    if not isinstance(data, list):
-        return ""
-    parts: list[str] = []
-    reasoning = data[2] if len(data) > 2 else None
-    output = data[1] if len(data) > 1 else ""
-    if reasoning:
-        parts.extend(reasoning if isinstance(reasoning, list) else [reasoning])
-    if output:
-        parts.extend(output if isinstance(output, list) else [output])
-    tool_calls = data[3] if len(data) > 3 else None
-    if tool_calls:
-        parts.append(json.dumps(tool_calls))
-    return "".join(str(p) for p in parts)
 
 
 def build_trajectory_natl(
     events_path: str,
-    count_tokens: Callable[[list[str]], list[int]],
+    count_tokens: Callable[[list[TokenizationInput]], list[int]],
     flush_size: int = 512,
 ) -> list[tuple[int, float]]:
     """Per-trajectory NATL = sum(output tokens) / sum(e2e latency s), keyed by
@@ -447,7 +440,7 @@ def build_trajectory_natl(
     conv_tokens: dict[str, int] = {}
     conv_end_ns: dict[str, int] = {}
     b_conv: list[str] = []
-    b_text: list[str] = []
+    b_text: list[TokenizationInput] = []
     tracking = False
 
     def flush() -> None:
@@ -483,8 +476,8 @@ def build_trajectory_natl(
                 conv, its = iv
                 conv_lat_s[conv] = conv_lat_s.get(conv, 0.0) + (ts - its) / 1e9
                 conv_end_ns[conv] = max(conv_end_ns.get(conv, 0), ts)
-                text = full_output_text(rec.get("data"))
-                if text:
+                text = osl_tokenization_input(rec.get("data"))
+                if text is not None:
                     b_conv.append(conv)
                     b_text.append(text)
                     if len(b_text) >= flush_size:
@@ -539,37 +532,36 @@ def build_natl_result(
 # --------------------------------------------------------------------------- #
 # TextModelOutput.text_after_first_chunk, ported to the parsed JSON array
 # --------------------------------------------------------------------------- #
-def text_after_first_chunk(data: object) -> str:
-    """Return output text excluding the first streamed chunk (the TPOT numerator).
+def _as_output(data: object) -> TextModelOutput | None:
+    """Decode a COMPLETE event payload into the core output struct.
 
-    ``data`` is the COMPLETE event payload: ``[tag, output, reasoning?, tool_calls?]``
-    with trailing defaults omitted (msgspec ``array_like`` + ``omit_defaults``). ``output``
-    and ``reasoning`` are each either a string (non-streaming) or a list of chunks
-    (streaming). Mirrors ``TextModelOutput.text_after_first_chunk`` in core/types.py.
+    The payload is the ``array_like`` encoding of ``TextModelOutput``, so the
+    struct's own accessors -- and therefore the tokenization rules the metrics
+    aggregator applies live -- can be reused instead of re-deriving them from
+    the raw array here.
     """
-    if not isinstance(data, list) or not data:
-        return ""
-    output = data[1] if len(data) > 1 else ""
-    reasoning = data[2] if len(data) > 2 else None
-    parts: list[str] = []
-    if reasoning:
-        if isinstance(reasoning, list) and len(reasoning) > 1:
-            parts.extend(reasoning[1:])
-        # str reasoning is a single (first) chunk -> skip entirely
-    if output:
-        if isinstance(output, str):
-            # Non-streaming output: keep it only if a first chunk already lived in a
-            # (streaming) reasoning trace; otherwise the str output IS the first chunk.
-            if parts or (reasoning and isinstance(reasoning, list)):
-                parts.append(output)
-        elif isinstance(output, list):
-            if parts or reasoning:
-                parts.extend(output)
-            elif len(output) > 1:
-                parts.extend(output[1:])
-    # Tool-call reconstruction is intentionally omitted: tool-call samples use a
-    # chat-template tokenization path this diagnostic does not replicate.
-    return "".join(parts)
+    try:
+        return msgspec.convert(data, type=TextModelOutput)
+    except (msgspec.ValidationError, TypeError):
+        return None
+
+
+def tpot_tokenization_input(data: object) -> TokenizationInput | None:
+    """The TPOT denominator for one COMPLETE event, by the shared rule.
+
+    Delegates to ``extract_tpot_tokenization_input`` so this reconstruction
+    lands on the same number as the live ``TpotTrigger``. A second rule here
+    drifted: it plain-concatenated chunks where the live path renders reasoning
+    through the chat template, and it dropped tool calls entirely.
+    """
+    output = _as_output(data)
+    return extract_tpot_tokenization_input(output) if output is not None else None
+
+
+def osl_tokenization_input(data: object) -> TokenizationInput | None:
+    """The full-output rule for one COMPLETE event, for trajectory NATL."""
+    output = _as_output(data)
+    return extract_tokenization_input(output) if output is not None else None
 
 
 # --------------------------------------------------------------------------- #
@@ -601,7 +593,7 @@ class _PendingRow:
 def build_super_pass_series(
     events_path: str,
     superpass_size: int,
-    count_tokens: Callable[[list[str]], list[int]],
+    count_tokens: Callable[[list[TokenizationInput]], list[int]],
     flush_size: int = TOKENIZE_BATCH_SIZE,
 ) -> list[SuperPassRollup]:
     """Bucket performance-tracked samples into super-passes by issue order.
@@ -618,7 +610,7 @@ def build_super_pass_series(
     tracking = False
     issue_counter = 0
     batch_uuids: list[str] = []
-    batch_texts: list[str] = []
+    batch_texts: list[TokenizationInput] = []
     pending_tpot: dict[str, tuple[int, float]] = {}
 
     def _ensure(idx: int) -> SuperPassRollup:
@@ -703,11 +695,11 @@ def build_super_pass_series(
                 )  # e2e, no recv_first needed
                 if row.recv_first_ns is None:
                     continue
-                text = text_after_first_chunk(rec.get("data"))
-                if text:
+                item = tpot_tokenization_input(rec.get("data"))
+                if item is not None:
                     pending_tpot[uuid] = (row.sp_index, float(ts - row.recv_first_ns))
                     batch_uuids.append(uuid)
-                    batch_texts.append(text)
+                    batch_texts.append(item)
                     if len(batch_texts) >= flush_size:
                         flush_tpot()
     flush_tpot()
@@ -1617,7 +1609,7 @@ def per_super_pass_diagnostics(series: Sequence[SuperPassRollup]) -> list[dict]:
 def run(
     events_path: str,
     superpass_size: int,
-    count_tokens: Callable[[list[str]], list[int]],
+    count_tokens: Callable[[list[TokenizationInput]], list[int]],
     window_sizes: Sequence[int] = (4, 5),
     warmup: int | str = "auto",
     cov_bounds: Sequence[float] = (0.03, 0.05, 0.08),
@@ -1817,20 +1809,26 @@ def render_text(result: DiagnosticsResult, cov_bounds: Sequence[float]) -> str:
 # --------------------------------------------------------------------------- #
 def _make_token_counter(
     tokenizer_id: str, trust_remote_code: bool = False
-) -> Callable[[list[str]], list[int]]:
-    # Deliberately not hoisted: importing transformers costs seconds, and the
-    # --help, argument-validation and agentic paths never tokenize.
-    from transformers import AutoTokenizer
+) -> Callable[[list[TokenizationInput]], list[int]]:
+    """The metrics aggregator's counter, so TPOT here matches the run's report.
 
-    tok = AutoTokenizer.from_pretrained(
-        tokenizer_id, trust_remote_code=trust_remote_code
+    Counting with a second tokenizer wrapper would reintroduce the divergence
+    the shared rules exist to close: the chat-template path and its baseline
+    subtraction live in ``BatchTokenizer``, not in ``AutoTokenizer``.
+    """
+    # Deliberately not hoisted: this pulls transformers, which costs ~1.4s, and
+    # the --help and argument-validation paths never tokenize.
+    from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (  # noqa: E501
+        BatchTokenizer,
     )
 
-    def count(texts: list[str]) -> list[int]:
-        enc = tok(texts, add_special_tokens=False)["input_ids"]
-        return [len(ids) for ids in enc]
-
-    return count
+    tokenizer = BatchTokenizer(
+        tokenizer_id,
+        live_workers=1,
+        n_workers=0,
+        trust_remote_code=trust_remote_code,
+    )
+    return tokenizer.count_sync_batch
 
 
 def _parse_int_list(s: str) -> list[int]:

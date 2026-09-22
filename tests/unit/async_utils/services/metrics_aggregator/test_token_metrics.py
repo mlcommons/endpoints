@@ -73,7 +73,10 @@ class _FakeTokenizer:
 
     @classmethod
     def from_pretrained(cls, name: str, **kwargs: object) -> "_FakeTokenizer":
-        assert kwargs == {"trust_remote_code": True}
+        # The value is policy, pinned by TestCountSync's trust_remote_code
+        # tests; the fake only checks it is passed explicitly rather than
+        # left to the transformers default.
+        assert isinstance(kwargs.get("trust_remote_code"), bool)
         return cls()
 
 
@@ -1041,6 +1044,40 @@ class TestCountSync:
                 expected = (await tok.count_batch_async([message], loop))[0]
 
                 assert tok.count_sync(message) == expected
+
+    def test_trust_remote_code_defaults_on(self):
+        """Many production tokenizers still ship custom code behind the legacy
+        HF API (DeepSeek-R1 among them), so the default must not change."""
+        seen: dict[str, object] = {}
+
+        def spy(name, **kwargs):
+            seen.update(kwargs)
+            return _FakeTokenizerWithTemplate.from_pretrained(name, **kwargs)
+
+        with patch(_MOCK_TARGET) as cls:
+            cls.from_pretrained = spy
+            with BatchTokenizer("fake", n_workers=0, live_workers=1):
+                pass
+
+        assert seen.get("trust_remote_code") is True
+
+    def test_trust_remote_code_can_be_refused(self):
+        """The opt-out exists so a caller analysing someone else's run directory
+        is not forced to execute that run's tokenizer code."""
+        seen: dict[str, object] = {}
+
+        def spy(name, **kwargs):
+            seen.update(kwargs)
+            return _FakeTokenizerWithTemplate.from_pretrained(name, **kwargs)
+
+        with patch(_MOCK_TARGET) as cls:
+            cls.from_pretrained = spy
+            with BatchTokenizer(
+                "fake", n_workers=0, live_workers=1, trust_remote_code=False
+            ):
+                pass
+
+        assert seen.get("trust_remote_code") is False
 
     def test_count_sync_batch_agrees_with_count_sync(self):
         """The batched post-run path must land on the same numbers as the

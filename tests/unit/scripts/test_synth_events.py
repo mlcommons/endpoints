@@ -17,6 +17,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
+    TextInput,
+)
 from inference_endpoint.metrics import steady_state_diagnostics
 
 pytestmark = pytest.mark.unit
@@ -34,9 +37,19 @@ synth = _load("synth_events", "scripts/synth_events.py")
 diag = steady_state_diagnostics
 
 
-def _words(texts):
-    """Fake tokenizer: token count == whitespace word count (matches the emitted chunks)."""
-    return [len(t.split()) for t in texts]
+def _words(items):
+    """Fake tokenizer: token count == whitespace word count (matches the emitted chunks).
+
+    Takes the shared ``TokenizationInput`` kinds the detector now produces.
+    """
+    counts = []
+    for item in items:
+        if isinstance(item, TextInput):
+            counts.append(len(item.text.split()))
+        else:
+            parts = [item.content or "", item.reasoning or ""]
+            counts.append(len(" ".join(parts).split()))
+    return counts
 
 
 def _args(**overrides):
