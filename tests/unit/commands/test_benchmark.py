@@ -683,6 +683,26 @@ class TestCommandHandlers:
         assert lp.use_legacy_loadgen_qps_metrics is False
 
     @pytest.mark.unit
+    def test_metrics_isl_cli_default_and_disable(self):
+        """``--no-metrics-isl`` reaches Settings while the default stays on."""
+        base = [
+            "offline",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+        ]
+        _, bound, _ = benchmark_app.parse_args(base, exit_on_error=False)
+        assert bound.arguments["config"].settings.metrics_isl is True
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--no-metrics-isl"], exit_on_error=False
+        )
+        assert bound.arguments["config"].settings.metrics_isl is False
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("flag", "value"),
         [
@@ -1432,6 +1452,61 @@ class TestAggregatorArgs:
         idx = args.index("--tokenizer-workers")
         expected = str(config.settings.metrics_tokenizer_workers)
         assert args[idx + 1] == expected
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "metrics_isl, expected_flag",
+        [(True, "--metrics-isl"), (False, "--no-metrics-isl")],
+    )
+    async def test_metrics_isl_forwarded_to_aggregator_args(
+        self, tmp_path, metrics_isl, expected_flag
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(metrics_isl=metrics_isl),
+        )
+        ctx = self._make_ctx(config, tmp_path)
+
+        captured: list = []
+
+        async def _capture_launch(service_configs, *, timeout):
+            captured.extend(service_configs)
+            raise KeyboardInterrupt("stop after launch")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(KeyboardInterrupt):
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+        aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
+        args = aggregator_cfg.args
+        assert expected_flag in args
+        # Exactly one spelling of the flag is emitted.
+        assert sum(a.endswith("metrics-isl") for a in args) == 1
 
     @pytest.mark.unit
     @pytest.mark.asyncio

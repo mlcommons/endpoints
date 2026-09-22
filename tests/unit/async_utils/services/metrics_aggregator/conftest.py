@@ -185,6 +185,7 @@ def make_aggregator(
     tokenizer=None,
     live_flush_interval_s: float | None = None,
     streaming: bool = True,
+    enable_isl: bool = True,
     shutdown_event: asyncio.Event | None = None,
     drain_timeout_s: float | None = None,
 ) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
@@ -218,6 +219,7 @@ def make_aggregator(
         tokenizer=tokenizer,
         live_flush_interval_s=live_flush_interval_s,
         streaming=streaming,
+        enable_isl=enable_isl,
         shutdown_event=shutdown_event,
         drain_timeout_s=drain_timeout_s,
     )

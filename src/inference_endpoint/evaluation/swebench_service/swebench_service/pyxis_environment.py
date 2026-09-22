@@ -52,7 +52,11 @@ _RETRYABLE_PRELAUNCH_ERRORS = (
     "failed to connect to any sack sockets",
     "failed to create token",
     "curl: (56) connect tunnel failed",
+    "unable to confirm allocation for job",
 )
+_IGNORABLE_SRUN_PREAMBLE_LINES = {
+    "srun: lua: Checking requeue policy with options:",
+}
 _STEP_SCRIPT = r"""set +e
 status_path=$1
 timeout_s=$2
@@ -183,7 +187,8 @@ def run_srun_step(
         ).strip()
         retryable = _is_retryable_prelaunch_failure(status, output)
         if retryable and attempt < _SRUN_MAX_ATTEMPTS:
-            delay_s = min(2**attempt, 16) + random.uniform(0.0, 1.0)
+            backoff_s = min(2**attempt, 16)
+            delay_s = backoff_s + random.uniform(0.0, backoff_s)
             logger.warning(
                 "Retrying Pyxis pre-launch failure in %.1fs (attempt %d/%d)",
                 delay_s,
@@ -299,6 +304,12 @@ class PyxisEnvironment:
                 "exception_info": "",
             }
         lines = output.get("output", "").lstrip().splitlines(keepends=True)
+        # Some Slurm cli_filter plugins write informational messages to stderr.
+        # run_srun_step merges stderr into stdout so command errors remain visible,
+        # which can place this cluster-generated preamble before mini-swe-agent's
+        # otherwise first-line submission marker.
+        while lines and lines[0].strip() in _IGNORABLE_SRUN_PREAMBLE_LINES:
+            lines.pop(0)
         if (
             lines
             and lines[0].strip() == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
