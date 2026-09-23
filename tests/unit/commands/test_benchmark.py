@@ -756,6 +756,32 @@ class TestCommandHandlers:
         assert bound.arguments["config"].settings.warmup.salt is False
 
     @pytest.mark.unit
+    def test_steady_state_flag_default_and_both_forms_parse(self):
+        """Both `--steady-state` and `--no-steady-state` must parse.
+
+        The field carries an explicit `name=`, not an `alias=`: an alias also
+        exposes the field name, and a bare `--enabled` collides with every other
+        flattened single-field option model.
+        """
+        base = [
+            "offline",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+        ]
+        for args, expected in (
+            ([], False),
+            (["--steady-state"], True),
+            (["--no-steady-state"], False),
+        ):
+            _, bound, _ = benchmark_app.parse_args([*base, *args], exit_on_error=False)
+            settings = bound.arguments["config"].settings
+            assert settings.steady_state.enabled is expected
+
+    @pytest.mark.unit
     def test_loadgen_flag_serialized_only_for_poisson(self):
         """``use_legacy_loadgen_qps_metrics`` is dropped from the serialized
         form for non-poisson patterns (so it does not pollute their YAML

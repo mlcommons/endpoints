@@ -850,6 +850,7 @@ async def _run_benchmark_async(
         config,
         tokenizer_name=ctx.tokenizer_name,
         enable_streaming=ctx.enable_streaming,
+        accuracy_only=ctx.accuracy_only,
         event_log_dir=event_log_dir,
         metrics_output_dir=metrics_output_dir,
         loop=loop,

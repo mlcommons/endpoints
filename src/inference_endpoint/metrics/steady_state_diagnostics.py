@@ -38,8 +38,8 @@ Drifting-Up warning, but it does not gate a window — at high concurrency its t
 is structural (prefill/dataset-ISL skew + queue), not decode un-steadiness. p99 and
 end-to-end latency are diagnostic too (latency's variation tracks the OSL mix).
 
-usage (auto-detects tokenizer, dataset size, and workload profile from the run's
-config.yaml / run_meta.json sidecars; see the model registry + PROFILES below):
+usage (auto-detects the tokenizer and workload profile from the run's config.yaml
+and the super-pass size from its phase_start event; see MODEL_REGISTRY + PROFILES):
   python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>       # 0 flags
   python -m inference_endpoint.metrics.steady_state_diagnostics <events.jsonl> \
       --model kimi-k3                                                          # 1 flag
@@ -67,6 +67,7 @@ from transformers import AutoTokenizer
 # --------------------------------------------------------------------------- #
 EV_START_TRACKING = "session.start_performance_tracking"
 EV_STOP_TRACKING = "session.stop_performance_tracking"
+EV_PHASE_START = "session.phase_start"
 EV_ISSUED = "sample.issued"
 EV_RECV_FIRST = "sample.recv_first"
 EV_COMPLETE = "sample.complete"
@@ -312,9 +313,10 @@ PROFILES: dict[str, Profile] = {
         DEFAULT_COV_BOUNDS,
         "tpot_p50",
         4096,
-        True,
-        "offline: issue-time throughput degenerate (all issued at t=0); the window and "
-        "drain are completion-based (partial support -- system TPS is unreliable).",
+        False,
+        "offline: issue-time throughput degenerate (all issued at t=0), so the "
+        "min-duration gate -- which measures the issue span -- collapses to ~0 and "
+        "system TPS is unreliable. Runnable by hand; not collected during a run.",
     ),
     "agentic": Profile(
         "agentic",
@@ -337,13 +339,19 @@ _LOAD_PATTERN_PROFILE: dict[str, str] = {
 }
 
 
-def profile_for_load_pattern(lp: str) -> Profile:
-    return PROFILES[_LOAD_PATTERN_PROFILE.get(lp, "concurrency")]
+def profile_for_load_pattern(lp: str) -> Profile | None:
+    """The profile for a load pattern, or None if nobody classified it.
+
+    Fails closed: a workload no one has validated the detector against must not
+    inherit a verdict from whichever profile the lookup happens to default to.
+    """
+    name = _LOAD_PATTERN_PROFILE.get(lp)
+    return PROFILES[name] if name is not None else None
 
 
-def find_run_files(target: str) -> tuple[str, str | None, str | None]:
-    """Resolve (events.jsonl, config.yaml|None, run_meta.json|None) from a run dir or an
-    events.jsonl path. A directory is searched in ``./`` and ``./client/``."""
+def find_run_files(target: str) -> tuple[str, str | None]:
+    """Resolve (events.jsonl, config.yaml|None) from a run dir or an events.jsonl
+    path. A directory is searched in ``./`` and ``./client/``."""
     if os.path.isdir(target):
         cands = [
             os.path.join(target, "events.jsonl"),
@@ -358,26 +366,13 @@ def find_run_files(target: str) -> tuple[str, str | None, str | None]:
         events = target
         if not os.path.isfile(events):
             raise FileNotFoundError(f"no such events file: {events}")
-    d = os.path.dirname(events)
-    cfg = os.path.join(d, "config.yaml")
-    meta = os.path.join(d, "run_meta.json")
-    return (
-        events,
-        cfg if os.path.isfile(cfg) else None,
-        meta if os.path.isfile(meta) else None,
-    )
+    cfg = os.path.join(os.path.dirname(events), "config.yaml")
+    return events, (cfg if os.path.isfile(cfg) else None)
 
 
-def read_run_config(
-    config_yaml_path: str | None, run_meta_json_path: str | None
-) -> dict:
-    """Best-effort model / load-pattern / dataset-size from a run's sidecar files."""
-    out: dict = {
-        "model": None,
-        "load_pattern": None,
-        "dataset_size": None,
-        "num_trajectories": None,
-    }
+def read_run_config(config_yaml_path: str | None) -> dict:
+    """Best-effort model / load-pattern / trajectory count from a run's config.yaml."""
+    out: dict = {"model": None, "load_pattern": None, "num_trajectories": None}
     if config_yaml_path and os.path.isfile(config_yaml_path):
         try:
             with open(config_yaml_path) as fh:
@@ -401,15 +396,32 @@ def read_run_config(
                 if nt:
                     out["num_trajectories"] = int(nt)
                     break
-    if run_meta_json_path and os.path.isfile(run_meta_json_path):
-        try:
-            with open(run_meta_json_path) as fh:
-                meta = json.load(fh)
-            if isinstance(meta, dict) and meta.get("dataset_size"):
-                out["dataset_size"] = int(meta["dataset_size"])
-        except Exception:  # malformed JSON -> leave dataset_size None
-            pass
     return out
+
+
+def superpass_size_from_events(events_path: str) -> int | None:
+    """Super-pass size announced by the run's first performance phase.
+
+    ``PhaseData`` rides the ``session.phase_start`` event as
+    ``[tag, phase_type, drain_after, num_turns, num_trajectories]``, so a
+    re-run against a report directory needs no arguments and cannot disagree
+    with the size the run itself bucketed on.
+    """
+    with open(events_path) as f:
+        for line in f:
+            if EV_PHASE_START not in line:
+                continue
+            try:
+                data = json.loads(line).get("data")
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(data, list)
+                and len(data) > 3
+                and data[1] == PERFORMANCE_PHASE
+            ):
+                return int(data[3])
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -1939,7 +1951,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--dataset-size",
         type=int,
         default=None,
-        help="samples per dataset pass (overrides run_meta/config)",
+        help="samples per dataset pass (overrides the phase_start announcement)",
     )
     ap.add_argument(
         "--superpass-size",
@@ -1983,8 +1995,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    events, cfg_path, meta_path = find_run_files(args.target)
-    cfg = read_run_config(cfg_path, meta_path)
+    events, cfg_path = find_run_files(args.target)
+    cfg = read_run_config(cfg_path)
 
     # tokenizer: explicit flag > model registry > config tokenizer path
     model = args.model or cfg["model"]
@@ -2005,6 +2017,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.profile
         else profile_for_load_pattern(cfg["load_pattern"] or "concurrency")
     )
+    if profile is None:
+        ap.error(
+            f"unclassified load pattern {cfg['load_pattern']!r}; pass --profile "
+            f"({', '.join(PROFILES)})"
+        )
     if profile.note:
         print(f"[profile: {profile.name}] {profile.note}\n", file=sys.stderr)
 
@@ -2027,11 +2044,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     # window profiles (concurrency / poisson / offline): super-pass = samples
-    size = args.superpass_size or args.dataset_size or cfg["dataset_size"]
+    size = (
+        args.superpass_size or args.dataset_size or superpass_size_from_events(events)
+    )
     if not size or size <= 0:
         ap.error(
-            "could not resolve dataset/super-pass size; pass --dataset-size or "
-            "--superpass-size"
+            "could not resolve dataset/super-pass size; the log carries no "
+            "performance session.phase_start, so pass --superpass-size"
         )
     result = run(
         events,

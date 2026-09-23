@@ -39,8 +39,10 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
 )
 from inference_endpoint.commands.benchmark.pipeline import (
     MetricsPipeline,
+    _build_aggregator_args,
     _build_report_from_snapshot,
     _load_final_snapshot_from_disk,
+    steady_state_profile,
 )
 from inference_endpoint.config.schema import LoadPatternType
 from inference_endpoint.metrics.report import Report
@@ -248,6 +250,7 @@ def _make_pipe(tmp_path: Path) -> MetricsPipeline:
         MagicMock(),
         tokenizer_name=None,
         enable_streaming=False,
+        accuracy_only=False,
         event_log_dir=tmp_path / "events",
         metrics_output_dir=tmp_path / "metrics",
         loop=asyncio.get_event_loop(),
@@ -362,3 +365,82 @@ async def test_start_failure_kill_interrupt_still_closes_resources(tmp_path):
     mock_publisher.return_value.close.assert_called_once()
     mock_subscriber.return_value.close.assert_called_once()
     mock_context.scoped.return_value.__exit__.assert_called_once()
+
+
+@pytest.mark.unit
+class TestSteadyStateGate:
+    """Which runs get live steady-state collection, decided before they start."""
+
+    @staticmethod
+    def _config(load_pattern: LoadPatternType, enabled: bool = True):
+        return SimpleNamespace(
+            settings=SimpleNamespace(
+                steady_state=SimpleNamespace(enabled=enabled),
+                load_pattern=SimpleNamespace(type=load_pattern),
+            )
+        )
+
+    def _profile(
+        self,
+        load_pattern,
+        *,
+        enabled=True,
+        acc=False,
+        streaming=True,
+        tokenizer="tok",
+    ):
+        return steady_state_profile(
+            self._config(load_pattern, enabled),
+            accuracy_only=acc,
+            enable_streaming=streaming,
+            tokenizer_name=tokenizer,
+        )
+
+    def test_off_by_default_and_when_opted_out(self):
+        assert self._profile(LoadPatternType.CONCURRENCY, enabled=False) is None
+
+    def test_supported_load_patterns_resolve_to_their_profile(self):
+        assert self._profile(LoadPatternType.CONCURRENCY) == "concurrency"
+        assert self._profile(LoadPatternType.POISSON) == "poisson"
+
+    def test_unsupported_load_patterns_are_refused(self):
+        # Offline collapses the min-duration gate (everything issued at t=0);
+        # agentic is not a validated profile.
+        assert self._profile(LoadPatternType.MAX_THROUGHPUT) is None
+        assert self._profile(LoadPatternType.AGENTIC_INFERENCE) is None
+
+    def test_needs_a_performance_phase_a_tokenizer_and_streaming(self):
+        assert self._profile(LoadPatternType.CONCURRENCY, acc=True) is None
+        assert self._profile(LoadPatternType.CONCURRENCY, tokenizer=None) is None
+        # Without streaming there is no TpotTrigger, so the TPOT series the
+        # plateau gate runs on would be empty and every verdict found: false.
+        assert self._profile(LoadPatternType.CONCURRENCY, streaming=False) is None
+
+    def test_flag_reaches_the_aggregator_only_when_eligible(self):
+        args = _build_aggregator_args(
+            socket_dir="/tmp",
+            pub_socket_name="p",
+            metrics_socket_name="m",
+            metrics_output_dir=Path("/tmp"),
+            enable_streaming=True,
+            tokenizer_name="tok",
+            drain_timeout_s=None,
+            tokenizer_workers=1,
+            enable_isl=True,
+            early_stopping=False,
+            steady_state_profile="poisson",
+        )
+        assert args[args.index("--steady-state-profile") + 1] == "poisson"
+        assert "--steady-state-profile" not in _build_aggregator_args(
+            socket_dir="/tmp",
+            pub_socket_name="p",
+            metrics_socket_name="m",
+            metrics_output_dir=Path("/tmp"),
+            enable_streaming=True,
+            tokenizer_name="tok",
+            drain_timeout_s=None,
+            tokenizer_workers=1,
+            enable_isl=True,
+            early_stopping=False,
+            steady_state_profile=None,
+        )

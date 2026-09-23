@@ -862,7 +862,8 @@ def test_profile_for_load_pattern():
     assert mod.profile_for_load_pattern("max_throughput").name == "offline"
     assert mod.profile_for_load_pattern("offline").name == "offline"
     assert mod.profile_for_load_pattern("concurrency").name == "concurrency"
-    assert mod.profile_for_load_pattern("something-unknown").name == "concurrency"
+    # Fails closed: an unclassified workload inherits no verdict.
+    assert mod.profile_for_load_pattern("something-unknown") is None
 
 
 def test_find_run_files_from_dir_and_events(tmp_path):
@@ -870,14 +871,11 @@ def test_find_run_files_from_dir_and_events(tmp_path):
     client.mkdir()
     (client / "events.jsonl").write_text("{}\n")
     (client / "config.yaml").write_text("model_params:\n  name: /models/Kimi-K3\n")
-    (client / "run_meta.json").write_text('{"dataset_size": 613}')
-    ev, cfg, meta = mod.find_run_files(str(tmp_path))
+    ev, cfg = mod.find_run_files(str(tmp_path))
     assert ev.endswith("client/events.jsonl")
     assert cfg is not None and cfg.endswith("config.yaml")
-    assert meta is not None and meta.endswith("run_meta.json")
-    # passing the events path directly resolves the same sidecars
-    ev2, cfg2, meta2 = mod.find_run_files(ev)
-    assert (ev2, cfg2, meta2) == (ev, cfg, meta)
+    # passing the events path directly resolves the same sidecar
+    assert mod.find_run_files(ev) == (ev, cfg)
 
 
 def test_find_run_files_missing_raises(tmp_path):
@@ -899,13 +897,10 @@ def test_read_run_config(tmp_path):
         "    agentic_inference:\n"
         "      num_trajectories_to_issue: 613\n"
     )
-    meta = tmp_path / "run_meta.json"
-    meta.write_text('{"dataset_size": 6396}')
-    c = mod.read_run_config(str(cfg), str(meta))
+    c = mod.read_run_config(str(cfg))
     assert c["model"] == "/models/Kimi-K3"
     assert c["load_pattern"] == "agentic_inference"
     assert c["num_trajectories"] == 613
-    assert c["dataset_size"] == 6396
 
 
 def test_read_run_config_top_level_load_pattern(tmp_path):
@@ -913,10 +908,28 @@ def test_read_run_config_top_level_load_pattern(tmp_path):
     cfg.write_text(
         "load_pattern:\n  type: concurrency\nmodel_params:\n  name: gpt-oss\n"
     )
-    c = mod.read_run_config(str(cfg), None)
+    c = mod.read_run_config(str(cfg))
     assert c["load_pattern"] == "concurrency"
     assert c["model"] == "gpt-oss"
-    assert c["dataset_size"] is None
+
+
+def test_superpass_size_comes_from_the_performance_phase_start(tmp_path):
+    """A hand re-run needs no arguments: the size is on the wire."""
+
+    def phase(kind, turns, ts):
+        return json.dumps(
+            {
+                "event_type": "session.phase_start",
+                "timestamp_ns": ts,
+                "data": ["PhaseData", kind, True, turns, 0],
+            }
+        )
+
+    path = _write_events(
+        tmp_path, [phase("warmup", 99, 1), phase("performance", 613, 2)]
+    )
+    assert mod.superpass_size_from_events(path) == 613
+    assert mod.superpass_size_from_events(_write_events(tmp_path, ["{}"])) is None
 
 
 def _conv_ev(et, ts, uuid, conv, turn=None, data=None):

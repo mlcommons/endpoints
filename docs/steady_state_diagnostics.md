@@ -5,6 +5,20 @@ at `src/inference_endpoint/metrics/steady_state_diagnostics.py`. The full method
 lives in [`steady-state-detection.md`](steady-state-detection.md); this is the
 operator's quick reference.
 
+## Two ways to get a verdict
+
+**During a run** (opt-in): `--steady-state` / `settings.steady_state.enabled: true`.
+The metrics aggregator accumulates the same super-pass series as the run happens --
+reusing the token counts its TPOT trigger already produced -- and computes the
+verdict once the token drain finishes. It lands on `Report.steady_state`, so it
+reaches `result_summary.json`, `report.txt`, and the console summary. Off by
+default, and silently off for accuracy-only runs, runs with no resolvable
+tokenizer, and load patterns whose profile is not `supported` (offline, agentic).
+
+**After a run** (this CLI): replays `events.jsonl` through the same collector and
+the same `compute_steady_state_metrics`, so both reach the same verdict. This is
+the debug/audit path, and it is the only one that prints the drift tables.
+
 ## What it does
 
 1. Buckets performance-tracked samples into **super-passes** by issue order
@@ -29,14 +43,13 @@ operator's quick reference.
 
 ## Requirements
 
-- `uv` (the script declares its deps inline via a PEP 723 header — `transformers` + `pyyaml`).
+- An installed `inference-endpoint` environment.
 - Network access to fetch the model's tokenizer (or a local tokenizer dir).
 
 ## Run
 
 **Zero-config** — point it at a run directory and it auto-detects everything from the
-sidecar `config.yaml` + `run_meta.json` (model → tokenizer, dataset size, load pattern →
-profile):
+sidecar `config.yaml` (model → tokenizer, load pattern → profile):
 
 ```bash
 uv run python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>/
@@ -58,7 +71,7 @@ overrides**:
 ```
 --model <name>            # else auto-detected from config
 --tokenizer <hf-id-or-dir># else from the model registry / config
---dataset-size <N>        # else from run_meta.json / config
+--dataset-size <N>        # else from the performance phase_start event
 --profile {concurrency,poisson,offline,agentic}   # else from load_pattern
 --superpass-size N  --window-sizes 4,6,8  --warmup auto  --warmup-band 0.05
 --warmup-driver tpot_p50  --cov-bounds 0.03,0.05,0.08  --trend-gate mk_hamed_rao

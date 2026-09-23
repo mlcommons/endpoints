@@ -61,6 +61,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.subscriber impor
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.config.schema import LoadPatternType
 from inference_endpoint.metrics.report import Report
+from inference_endpoint.metrics.steady_state_diagnostics import profile_for_load_pattern
 
 if TYPE_CHECKING:
     from inference_endpoint.config.schema import BenchmarkConfig
@@ -92,6 +93,34 @@ def _load_final_snapshot_from_disk(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def steady_state_profile(
+    config: BenchmarkConfig,
+    *,
+    accuracy_only: bool,
+    enable_streaming: bool,
+    tokenizer_name: str | None,
+) -> str | None:
+    """Workload profile for live steady-state collection; None when ineligible.
+
+    Eligibility is read from the detector's own profile table, so this gate and
+    the profile the aggregator is judged on cannot drift. An accuracy-only run
+    has no performance phase to collect; without a tokenizer there is no TPOT to
+    bucket; and without streaming there is no ``TpotTrigger`` at all, so every
+    plateau gate would see an empty TPOT series and every verdict would be
+    ``found: false``. The decision has to be made before the run starts, because
+    collection happens as the run happens.
+    """
+    if (
+        not config.settings.steady_state.enabled
+        or accuracy_only
+        or not enable_streaming
+        or not tokenizer_name
+    ):
+        return None
+    profile = profile_for_load_pattern(config.settings.load_pattern.type.value)
+    return profile.name if profile is not None and profile.supported else None
+
+
 def _build_aggregator_args(
     *,
     socket_dir: str,
@@ -104,6 +133,7 @@ def _build_aggregator_args(
     tokenizer_workers: int,
     enable_isl: bool,
     early_stopping: bool,
+    steady_state_profile: str | None,
 ) -> list[str]:
     """CLI args for the metrics_aggregator subprocess."""
     args: list[str] = [
@@ -124,6 +154,8 @@ def _build_aggregator_args(
         args.extend(["--tokenizer", tokenizer_name])
     if drain_timeout_s is not None:
         args.extend(["--drain-timeout", str(drain_timeout_s)])
+    if steady_state_profile is not None:
+        args.extend(["--steady-state-profile", steady_state_profile])
     args.extend(["--tokenizer-workers", str(tokenizer_workers)])
     args.append("--metrics-isl" if enable_isl else "--no-metrics-isl")
     return args
@@ -209,6 +241,7 @@ class MetricsPipeline:
         *,
         tokenizer_name: str | None,
         enable_streaming: bool,
+        accuracy_only: bool,
         event_log_dir: Path,
         metrics_output_dir: Path,
         loop: asyncio.AbstractEventLoop,
@@ -216,6 +249,7 @@ class MetricsPipeline:
         self._config = config
         self._tokenizer_name = tokenizer_name
         self._enable_streaming = enable_streaming
+        self._accuracy_only = accuracy_only
         self._event_log_dir = event_log_dir
         self._metrics_output_dir = metrics_output_dir
         self._loop = loop
@@ -298,6 +332,12 @@ class MetricsPipeline:
                 tokenizer_workers=self._config.settings.metrics_tokenizer_workers,
                 enable_isl=self._config.settings.metrics_isl,
                 early_stopping=self._config.settings.early_stopping.enabled,
+                steady_state_profile=steady_state_profile(
+                    self._config,
+                    accuracy_only=self._accuracy_only,
+                    enable_streaming=self._enable_streaming,
+                    tokenizer_name=self._tokenizer_name,
+                ),
             )
             event_logger_args = _build_event_logger_args(
                 event_log_dir=self._event_log_dir,
