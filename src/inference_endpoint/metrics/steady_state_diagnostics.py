@@ -74,10 +74,13 @@ from inference_endpoint.core.types import TextModelOutput
 # --------------------------------------------------------------------------- #
 # Event wire constants (mirror core/record.py category.value topics)
 # --------------------------------------------------------------------------- #
-# Detector defaults, named so callers that must render a result alongside the
-# bounds it was computed under cannot drift from the bounds actually used.
+# Detector defaults. Named because two callers have to agree on them: the
+# metrics aggregator, which analyses the series it collected during the run,
+# and this module's CLI, which re-derives a verdict from an archived event log.
+# A hand re-run that asked a different window grid would not be comparable to
+# the verdict the run itself published.
 DEFAULT_COV_BOUNDS: tuple[float, ...] = (0.03, 0.05, 0.08)
-DEFAULT_WINDOW_SIZES: tuple[int, ...] = (4, 5)
+DEFAULT_WINDOW_SIZES: tuple[int, ...] = (4, 6, 8)
 
 EV_START_TRACKING = "session.start_performance_tracking"
 EV_STOP_TRACKING = "session.stop_performance_tracking"
@@ -2121,7 +2124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     cov_bounds = args.cov_bounds or list(profile.cov_bounds)
     warmup_driver = args.warmup_driver or profile.warmup_driver
     flush = args.tokenize_batch_size or profile.tokenize_batch_size
-    window_sizes = args.window_sizes or [4, 6, 8]
+    window_sizes = args.window_sizes or list(DEFAULT_WINDOW_SIZES)
     # ExitStack + try/finally rather than a bare `with`: the tokenizer must be
     # closed on every exit path (it owns a thread pool, and process shards when
     # sharding is enabled), but the load failure has to be reported here, where

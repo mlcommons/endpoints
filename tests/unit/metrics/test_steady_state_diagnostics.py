@@ -1250,6 +1250,17 @@ def test_analyse_needs_no_event_log(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def _counter_context(counter):
+    """Stand in for the real tokenizer-owning context manager in main()."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake(*_args, **_kwargs):
+        yield counter
+
+    return _fake
+
+
 def _replay_into_collector(collector, lines, count_tokens):
     """Drive the collector the way the metrics aggregator drives it.
 
@@ -1446,3 +1457,26 @@ def test_collector_window_end_never_moves_backwards():
     (sp,) = collector.series()
 
     assert sp.last_event_ns == 9000
+
+
+def test_a_hand_re_run_asks_the_same_question_as_the_in_process_pass(
+    tmp_path, monkeypatch
+):
+    """The standalone CLI is how an archived run is re-derived and audited, so
+    its defaults have to be the library's. A different window grid answers a
+    different question and the two verdicts stop being comparable."""
+    lines = _busy_event_stream()
+    path = _write_events(tmp_path, lines)
+    out = tmp_path / "cli.json"
+
+    monkeypatch.setattr(mod, "_make_token_counter", _counter_context(_words))
+    mod.main([path, "--dataset-size", "4", "--tokenizer", "t", "--json", str(out)])
+
+    from_cli = json.loads(out.read_text())
+    in_process = mod.analyse(
+        mod.build_super_pass_series(path, 4, _words), superpass_size=4
+    )
+
+    assert sorted(from_cli["cov"]) == sorted(str(w) for w in mod.DEFAULT_WINDOW_SIZES)
+    assert from_cli["cov"] == json.loads(json.dumps(in_process["cov"]))
+    assert from_cli["drift"] == json.loads(json.dumps(in_process["drift"]))
