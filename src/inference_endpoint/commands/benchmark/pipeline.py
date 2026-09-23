@@ -45,7 +45,7 @@ import logging
 import uuid
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.services.launcher import (
@@ -70,6 +70,12 @@ logger = logging.getLogger(__name__)
 
 _AGGREGATOR_MODULE = "inference_endpoint.async_utils.services.metrics_aggregator"
 _EVENT_LOGGER_MODULE = "inference_endpoint.async_utils.services.event_logger"
+
+
+# Grace added to the aggregator's drain budget when waiting for the service
+# subprocesses to exit: the publisher's 10s ZMQ linger, the steady-state
+# analysis, the atomic final_snapshot.json write, and process teardown.
+_SERVICE_EXIT_GRACE_S: Final[float] = 60.0
 
 
 def _load_final_snapshot_from_disk(path: Path) -> dict[str, Any] | None:
@@ -365,6 +371,20 @@ class MetricsPipeline:
             raise
         self._stack = stack
 
+    @property
+    def _service_exit_timeout_s(self) -> float | None:
+        """How long to wait for the service subprocesses after the run ends.
+
+        The aggregator's own drain budget plus a grace for everything it does
+        after the drain: the publisher's 10s ZMQ linger, the steady-state
+        analysis (13.7s measured at 2M samples), the atomic snapshot write, and
+        process exit. ``None`` when the drain budget is unlimited by
+        configuration -- bounding only the tail would buy nothing and could kill
+        a legitimately slow drain.
+        """
+        drain_s = self._config.settings.timeouts.metrics_drain_timeout_s
+        return None if drain_s is None else drain_s + _SERVICE_EXIT_GRACE_S
+
     async def drain_and_build_report(
         self,
         *,
@@ -390,7 +410,9 @@ class MetricsPipeline:
         publisher.close()
         logger.info("Waiting for services to finish processing...")
         wait_for_services = asyncio.create_task(
-            asyncio.to_thread(self._launcher.wait_for_exit, None)
+            asyncio.to_thread(
+                self._launcher.wait_for_exit, self._service_exit_timeout_s
+            )
         )
         abort_wait: asyncio.Task[bool] | None = None
         try:

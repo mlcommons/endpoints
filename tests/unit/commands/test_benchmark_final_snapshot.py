@@ -457,3 +457,44 @@ class TestSteadyStateGate:
             early_stopping=False,
             steady_state_profile=None,
         )
+
+
+@pytest.mark.unit
+class TestServiceExitBound:
+    """How long the parent waits for the metrics services after the run ends."""
+
+    @staticmethod
+    def _pipe_with_drain_budget(tmp_path: Path, drain_s: float | None):
+        pipe = _make_pipe(tmp_path)
+        setattr(  # noqa: B010 — plain assignment trips the config's declared type
+            pipe,
+            "_config",
+            SimpleNamespace(
+                settings=SimpleNamespace(
+                    timeouts=SimpleNamespace(metrics_drain_timeout_s=drain_s)
+                )
+            ),
+        )
+        return pipe
+
+    def test_bound_is_the_drain_budget_plus_a_finalize_grace(self, tmp_path):
+        # The grace covers what the aggregator does after the drain: ZMQ linger,
+        # the steady-state analysis, the atomic snapshot write, and exit.
+        pipe = self._pipe_with_drain_budget(tmp_path, 120.0)
+        assert pipe._service_exit_timeout_s == 180.0
+
+    def test_an_unlimited_drain_budget_leaves_the_wait_unbounded(self, tmp_path):
+        # Bounding only the tail would buy nothing and could kill a legitimately
+        # slow drain the operator chose not to bound.
+        pipe = self._pipe_with_drain_budget(tmp_path, None)
+        assert pipe._service_exit_timeout_s is None
+
+    @pytest.mark.asyncio
+    async def test_the_bound_reaches_wait_for_exit(self, tmp_path, monkeypatch):
+        pipe = self._pipe_with_drain_budget(tmp_path, 10.0)
+        pipe.publisher = MagicMock(buffered_count=0, pending_count=0)
+        pipe._launcher = MagicMock()
+        pipe.subscriber = MagicMock(latest=None)
+        monkeypatch.setattr(f"{_PIPE}._load_final_snapshot_from_disk", lambda p: None)
+        await pipe.drain_and_build_report()
+        pipe._launcher.wait_for_exit.assert_called_once_with(70.0)
