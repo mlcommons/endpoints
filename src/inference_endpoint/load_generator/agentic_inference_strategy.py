@@ -67,6 +67,9 @@ def expected_agentic_sample_count(
             n_samples_in_dataset=len(turn_counts)
         )
     else:
+        # Mirror the scheduler order so a partial trajectory budget counts the
+        # same conversations without advancing the RNG used for actual
+        # issuance.
         rng_copy = random.Random()
         rng_copy.setstate(rng_sample_index.getstate())
         order = WithoutReplacementSampleOrder(

@@ -179,6 +179,7 @@ def test_expected_sample_count_includes_trajectory_repeats():
 
     # Different trajectory issue counts result in different numbers of samples:
     # the two trajectories contribute two and three client-turn samples per pass.
+    assert expected_agentic_sample_count(_make_dataset_metadata({}), None) == 0
     assert expected_agentic_sample_count(metadata, None) == 5
     assert expected_agentic_sample_count(metadata, 1) == 2
     assert expected_agentic_sample_count(metadata, 2) == 5
