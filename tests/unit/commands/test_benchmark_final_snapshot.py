@@ -409,6 +409,19 @@ class TestSteadyStateGate:
         assert self._profile(LoadPatternType.MAX_THROUGHPUT) is None
         assert self._profile(LoadPatternType.AGENTIC_INFERENCE) is None
 
+    def test_agentic_is_refused_by_name_not_only_by_profile(self, monkeypatch):
+        """An agentic run must behave as it did before steady state existed.
+
+        Belt and braces: even if the profile table ever marked agentic
+        supported, the load pattern alone still refuses collection.
+        """
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.pipeline.profile_for_load_pattern",
+            lambda _pattern: SimpleNamespace(name="agentic", supported=True),
+        )
+        assert self._profile(LoadPatternType.AGENTIC_INFERENCE) is None
+        assert self._profile(LoadPatternType.CONCURRENCY) == "agentic"
+
     def test_needs_a_performance_phase_a_tokenizer_and_streaming(self):
         assert self._profile(LoadPatternType.CONCURRENCY, acc=True) is None
         assert self._profile(LoadPatternType.CONCURRENCY, tokenizer=None) is None

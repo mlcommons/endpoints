@@ -193,9 +193,21 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         # Steady-state collection is opt-in, and the profile name is the opt-in:
         # it carries the CoV bounds and warmup driver the verdict is judged on, and
         # only the parent knows the load pattern they follow from. None = off.
+        # An unsupported profile -- agentic, whose steady-state metric is
+        # per-trajectory NATL and not what this collector produces, or offline --
+        # is refused here as well as by the parent's gate, so neither side alone
+        # can turn collection on for a workload it does not describe.
         self._steady_state_profile = (
             PROFILES[steady_state_profile] if steady_state_profile else None
         )
+        if self._steady_state_profile is not None and not (
+            self._steady_state_profile.supported
+        ):
+            logger.warning(
+                "Steady-state collection refused: profile %r is not supported",
+                steady_state_profile,
+            )
+            self._steady_state_profile = None
         # The bucket size arrives later, on PHASE_START, but TpotTrigger needs the
         # collector at registration time -- before any event.
         self._collector = (

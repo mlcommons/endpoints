@@ -109,12 +109,17 @@ def steady_state_profile(
     plateau gate would see an empty TPOT series and every verdict would be
     ``found: false``. The decision has to be made before the run starts, because
     collection happens as the run happens.
+
+    Agentic is refused by name as well as by profile. Its steady-state metric is
+    per-trajectory NATL, which this collector does not produce, and an agentic
+    run must behave exactly as it did before steady state existed.
     """
     if (
         not config.settings.steady_state.enabled
         or accuracy_only
         or not enable_streaming
         or not tokenizer_name
+        or config.settings.load_pattern.type is LoadPatternType.AGENTIC_INFERENCE
     ):
         return None
     profile = profile_for_load_pattern(config.settings.load_pattern.type.value)

@@ -310,6 +310,31 @@ class TestCollectionGate:
                 agg.close()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("profile", ["agentic", "offline"])
+    async def test_an_unsupported_profile_collects_nothing(self, tmp_path, profile):
+        """The aggregator refuses a profile its collector does not describe.
+
+        Agentic's steady-state metric is per-trajectory NATL, not a super-pass
+        window; offline's min-duration gate collapses when every query is issued
+        at t=0. Refused here as well as by the parent's gate.
+        """
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, _ = make_aggregator(
+                ctx,
+                loop,
+                f"ss_unsupported_{profile}",
+                tokenizer=MockBatchTokenizer(),
+                steady_state_profile=profile,
+            )
+            try:
+                await agg.process(_event_stream())
+                assert agg._collector is None
+                assert agg._steady_state_verdict(n_pending=0) is None
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
     async def test_a_warmup_announcement_never_sizes_the_series(self, tmp_path):
         """Warmup announces first, carrying its own dataset size.
 
