@@ -102,3 +102,14 @@ RUN if [ "${PROVISION_VBENCH}" = "1" ]; then \
     else \
         echo "PROVISION_VBENCH=${PROVISION_VBENCH}: skipping VBench provisioning" ; \
     fi
+
+# OCI image metadata so `docker inspect` self-identifies this image (the endpoints benchmark
+# client, distinct from the lcb-service evaluator image). Declared last so a wording change
+# only rebuilds this tiny config layer, not the apt/uv/DSR1/VBench stages above.
+# push_docker_image.sh additionally stamps dynamic source/revision/version/description
+# annotations on the pushed manifest. The description is deliberately capability-neutral:
+# PROVISION_DSR1 / PROVISION_VBENCH can be 0, so it names the evaluators without asserting
+# they are present in every build.
+LABEL org.opencontainers.image.title="inference-endpoint" \
+      org.opencontainers.image.description="MLPerf inference endpoint benchmarking client (the inference-endpoint CLI); DeepSeek-R1 and VBench accuracy evaluators are provisioned by default, toggled by PROVISION_DSR1 / PROVISION_VBENCH." \
+      org.opencontainers.image.source="https://github.com/mlcommons/endpoints"

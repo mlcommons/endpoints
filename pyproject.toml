@@ -79,7 +79,7 @@ dependencies = [
     "cyclopts==4.10.0",
     "rich==14.3.3",
     # Needed for tokenization and OSL reporting
-    "transformers==5.5.0",
+    "transformers==5.16.1",
     "tiktoken==0.13.0",
     # Required by transformers' apply_chat_template
     "jinja2==3.1.6",
@@ -98,6 +98,10 @@ dependencies = [
     "pytz==2026.1.post1",
     "urllib3==2.7.0",
     "pyyaml==6.0.3",
+    # anyio is pulled in transitively (openai -> httpx -> anyio); pinned here to
+    # force past CVE-2026-63374 / CVE-2026-64847 (both fixed in 4.14.2), which
+    # otherwise fail `uv run pip-audit`.
+    "anyio==4.14.2",
 ]
 
 [project.optional-dependencies]

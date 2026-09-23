@@ -300,6 +300,7 @@ settings:
   timeouts:
     run_timeout_s: null # Whole-run watchdog; null = off
     performance_drain_timeout_s: null # null = unlimited
+    endpoint_response_idle_timeout_s: 300 # Endpoint liveness deadline; use >=300 s, null = off
   load_pattern:
     type: "max_throughput"
     target_qps: 10.0
