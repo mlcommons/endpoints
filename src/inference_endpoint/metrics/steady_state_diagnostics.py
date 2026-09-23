@@ -71,6 +71,11 @@ EV_ISSUED = "sample.issued"
 EV_RECV_FIRST = "sample.recv_first"
 EV_COMPLETE = "sample.complete"
 
+# PhaseType.PERFORMANCE.value. Duplicated rather than imported: the aggregator
+# and this module both need it, and importing load_generator.session would drag
+# the load generator into the metrics import graph for one string.
+PERFORMANCE_PHASE = "performance"
+
 # Below this many super-passes a trend test is statistically meaningless.
 MIN_TREND_N = 4
 
@@ -591,13 +596,124 @@ class _PendingRow:
     recv_first_ns: int | None = None
 
 
+class SuperPassCollector:
+    """Buckets performance-tracked samples into super-passes by issue order.
+
+    The one implementation of that bucketing. Two producers drive it: the metrics
+    aggregator, calling the hooks live from its event router, and
+    :func:`build_super_pass_series`, replaying an archived ``events.jsonl``. Both
+    therefore emit the same ``list[SuperPassRollup]`` and reach the same verdict.
+
+    Callers must report only tracked samples: an event for a sample that never
+    entered a bucket is ignored, and so is everything before the bucket size is
+    known.
+
+    Token counts arrive long after the sample completes -- at the aggregator's
+    drain flush. Callers read :meth:`sp_index_of` while the sample is still in
+    flight and hand that index back to :meth:`add_tpot`, which is what keeps this
+    from holding a uuid map that grows for the length of the run.
+    """
+
+    __slots__ = ("_issue_counter", "_rows", "_series", "superpass_size")
+
+    def __init__(self, superpass_size: int = 0) -> None:
+        # 0 = not yet known; on_issued ignores samples until announce_phase lands.
+        self.superpass_size = superpass_size
+        self._series: list[SuperPassRollup] = []
+        self._rows: dict[str, _PendingRow] = {}
+        self._issue_counter = 0
+
+    def announce_phase(self, num_turns: int) -> None:
+        """Latch the bucket size from a phase announcement.
+
+        Ignored once bucketing has begun, so a phase announced after the
+        performance one -- accuracy, or a second performance phase -- cannot
+        re-size a series already built.
+        """
+        if num_turns > 0 and not self._series:
+            self.superpass_size = num_turns
+
+    def series(self) -> list[SuperPassRollup]:
+        return self._series
+
+    def sp_index_of(self, sample_uuid: str) -> int | None:
+        """The bucket of an in-flight sample, or None if it is not tracked."""
+        row = self._rows.get(sample_uuid)
+        return None if row is None else row.sp_index
+
+    def on_issued(self, sample_uuid: str, ts_ns: int) -> None:
+        if not self.superpass_size:
+            return
+        existing = self._rows.get(sample_uuid)
+        if existing is not None:
+            existing.issue_ns = ts_ns  # retry: refresh issue ts only
+            sp = self._series[existing.sp_index]
+            sp.last_issue_ns = max(sp.last_issue_ns, ts_ns)
+            sp.last_event_ns = max(sp.last_event_ns, ts_ns)
+            return
+        sp_idx = self._issue_counter // self.superpass_size
+        self._issue_counter += 1
+        self._rows[sample_uuid] = _PendingRow(sp_index=sp_idx, issue_ns=ts_ns)
+        while len(self._series) <= sp_idx:
+            self._series.append(SuperPassRollup(index=len(self._series)))
+        sp = self._series[sp_idx]
+        sp.n_issued += 1
+        if sp.first_issue_ns < 0:
+            sp.first_issue_ns = ts_ns
+        sp.last_issue_ns = max(sp.last_issue_ns, ts_ns)
+        sp.last_event_ns = max(sp.last_event_ns, ts_ns)
+
+    def on_recv_first(self, sample_uuid: str, ts_ns: int, turn: int | None) -> None:
+        row = self._rows.get(sample_uuid)
+        if row is None:
+            return
+        sp = self._series[row.sp_index]
+        sp.last_event_ns = max(sp.last_event_ns, ts_ns)
+        # First recv_first only: a retried sample re-emits recv_first and must not
+        # contribute a second TTFT to the super-pass.
+        if row.recv_first_ns is not None:
+            return
+        row.recv_first_ns = ts_ns
+        ttft = float(ts_ns - row.issue_ns)
+        sp.ttft_ns.append(ttft)
+        # Warm-turn TTFT excludes the cold first turn of each agentic trajectory
+        # (turn 1 = no KV-cache hit). turn is None for single-turn workloads ->
+        # treated as warm (kept).
+        if turn is None or turn > 1:
+            sp.ttft_warm_ns.append(ttft)
+
+    def on_complete(self, sample_uuid: str, ts_ns: int) -> tuple[int, float] | None:
+        """Release the sample; return ``(super-pass, TPOT numerator ns)`` if streamed.
+
+        The numerator is what a caller that tokenizes the output itself needs to
+        finish the TPOT division later, via :meth:`add_tpot`. None when the sample
+        was untracked or never streamed a first chunk.
+        """
+        row = self._rows.pop(sample_uuid, None)
+        if row is None:
+            return None
+        sp = self._series[row.sp_index]
+        sp.last_event_ns = max(sp.last_event_ns, ts_ns)
+        sp.latency_ns.append(float(ts_ns - row.issue_ns))  # e2e, no recv_first needed
+        if row.recv_first_ns is None:
+            return None
+        return row.sp_index, float(ts_ns - row.recv_first_ns)
+
+    def add_tpot(self, sp_index: int, tpot_ns: float, token_count: int) -> None:
+        """Attach a resolved TPOT and its token count to an earlier bucket."""
+        sp = self._series[sp_index]
+        sp.tpot_ns.append(tpot_ns)
+        sp.osl.append(float(token_count))
+        sp.out_tokens += token_count
+
+
 def build_super_pass_series(
     events_path: str,
     superpass_size: int,
     count_tokens: Callable[[list[str]], list[int]],
     flush_size: int = TOKENIZE_BATCH_SIZE,
 ) -> list[SuperPassRollup]:
-    """Bucket performance-tracked samples into super-passes by issue order.
+    """Replay an ``events.jsonl`` through a :class:`SuperPassCollector`.
 
     ``count_tokens`` maps a batch of texts to token counts; injected so the parse is
     testable without a real tokenizer and the tokenizer is swappable. ``flush_size``
@@ -606,29 +722,20 @@ def build_super_pass_series(
     """
     if superpass_size <= 0:
         raise ValueError("superpass_size must be positive")
-    series: list[SuperPassRollup] = []
-    rows: dict[str, _PendingRow] = {}
+    collector = SuperPassCollector(superpass_size)
     tracking = False
-    issue_counter = 0
-    batch_uuids: list[str] = []
+    # Buffered by batch position, not by uuid: a retried sample completes twice and
+    # would collide on a uuid key, losing the first completion or raising.
+    pending: list[tuple[int, float]] = []
     batch_texts: list[str] = []
-    pending_tpot: dict[str, tuple[int, float]] = {}
-
-    def _ensure(idx: int) -> SuperPassRollup:
-        while len(series) <= idx:
-            series.append(SuperPassRollup(index=len(series)))
-        return series[idx]
 
     def flush_tpot() -> None:
         if batch_texts:
             counts = count_tokens(batch_texts)
-            for uuid, cnt in zip(batch_uuids, counts, strict=True):
-                sp_idx, delta = pending_tpot.pop(uuid)
+            for (sp_idx, delta), cnt in zip(pending, counts, strict=True):
                 if cnt > 0:
-                    series[sp_idx].tpot_ns.append(delta / cnt)
-                    series[sp_idx].osl.append(float(cnt))
-                    series[sp_idx].out_tokens += cnt
-        batch_uuids.clear()
+                    collector.add_tpot(sp_idx, delta / cnt, cnt)
+        pending.clear()
         batch_texts.clear()
 
     with open(events_path) as f:
@@ -641,71 +748,31 @@ def build_super_pass_series(
             except json.JSONDecodeError:
                 continue  # skip a truncated/partial line (e.g. last line of a killed run)
             et = rec.get("event_type")
-            ts = rec.get("timestamp_ns")  # may be absent on a truncated/partial event
             if et == EV_START_TRACKING:
                 tracking = True
-            elif et == EV_STOP_TRACKING:
+                continue
+            if et == EV_STOP_TRACKING:
                 tracking = False
-            elif et == EV_ISSUED:
-                uuid = rec.get("sample_uuid")
-                if not tracking or not uuid or ts is None:
-                    continue
-                existing = rows.get(uuid)
-                if existing is not None:
-                    existing.issue_ns = ts  # retry: refresh issue ts only
-                    sp = series[existing.sp_index]
-                    sp.last_issue_ns = max(sp.last_issue_ns, ts)
-                    sp.last_event_ns = max(sp.last_event_ns, ts)
-                    continue
-                sp_idx = issue_counter // superpass_size
-                issue_counter += 1
-                rows[uuid] = _PendingRow(sp_index=sp_idx, issue_ns=ts)
-                sp = _ensure(sp_idx)
-                sp.n_issued += 1
-                if sp.first_issue_ns < 0:
-                    sp.first_issue_ns = ts
-                sp.last_issue_ns = max(sp.last_issue_ns, ts)
-                sp.last_event_ns = max(sp.last_event_ns, ts)
+                continue
+            ts = rec.get("timestamp_ns")  # may be absent on a truncated/partial event
+            uuid = rec.get("sample_uuid")
+            if ts is None or not uuid:
+                continue
+            if et == EV_ISSUED:
+                if tracking:
+                    collector.on_issued(uuid, ts)
             elif et == EV_RECV_FIRST:
-                row = rows.get(rec.get("sample_uuid"))
-                if row is not None and ts is not None:
-                    series[row.sp_index].last_event_ns = max(
-                        series[row.sp_index].last_event_ns, ts
-                    )
-                    # First recv_first only: a retried sample re-emits recv_first and
-                    # must not contribute a second TTFT to the super-pass.
-                    if row.recv_first_ns is None:
-                        row.recv_first_ns = ts
-                        ttft = float(ts - row.issue_ns)
-                        sp = series[row.sp_index]
-                        sp.ttft_ns.append(ttft)
-                        # Warm-turn TTFT excludes the cold first turn of each agentic
-                        # trajectory (turn 1 = no KV-cache hit). turn is None for
-                        # single-turn workloads -> treated as warm (kept).
-                        turn = rec.get("turn")
-                        if turn is None or turn > 1:
-                            sp.ttft_warm_ns.append(ttft)
+                collector.on_recv_first(uuid, ts, rec.get("turn"))
             elif et == EV_COMPLETE:
-                uuid = rec.get("sample_uuid")
-                row = rows.pop(uuid, None)
-                if row is None or ts is None:
-                    continue
-                sp = series[row.sp_index]
-                sp.last_event_ns = max(sp.last_event_ns, ts)
-                sp.latency_ns.append(
-                    float(ts - row.issue_ns)
-                )  # e2e, no recv_first needed
-                if row.recv_first_ns is None:
-                    continue
-                text = text_after_first_chunk(rec.get("data"))
-                if text:
-                    pending_tpot[uuid] = (row.sp_index, float(ts - row.recv_first_ns))
-                    batch_uuids.append(uuid)
+                streamed = collector.on_complete(uuid, ts)
+                text = text_after_first_chunk(rec.get("data")) if streamed else ""
+                if text and streamed is not None:
+                    pending.append(streamed)
                     batch_texts.append(text)
                     if len(batch_texts) >= flush_size:
                         flush_tpot()
     flush_tpot()
-    return series
+    return collector.series()
 
 
 # --------------------------------------------------------------------------- #

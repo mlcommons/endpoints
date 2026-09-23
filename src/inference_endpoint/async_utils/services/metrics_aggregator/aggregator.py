@@ -32,6 +32,12 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
+from inference_endpoint.core.types import PhaseData
+from inference_endpoint.metrics.steady_state_diagnostics import (
+    PERFORMANCE_PHASE,
+    PROFILES,
+    SuperPassCollector,
+)
 
 from .metrics_table import (
     ChunkDeltaTrigger,
@@ -136,6 +142,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         shutdown_event: asyncio.Event | None = None,
         drain_timeout_s: float | None = None,
         enable_isl: bool = True,
+        steady_state_profile: str | None = None,
         **kwargs,
     ):
         # drain_timeout_s is injected (not derived) because the right
@@ -181,6 +188,18 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         # Pre-register all metrics on the registry. Tests can introspect via
         # registry.has_counter / has_series.
         self._register_metrics(streaming, enable_isl, sig_figs, n_histogram_buckets)
+
+        # Steady-state collection is opt-in, and the profile name is the opt-in:
+        # it carries the CoV bounds and warmup driver the verdict is judged on, and
+        # only the parent knows the load pattern they follow from. None = off.
+        self._steady_state_profile = (
+            PROFILES[steady_state_profile] if steady_state_profile else None
+        )
+        # The bucket size arrives later, on PHASE_START, but TpotTrigger needs the
+        # collector at registration time -- before any event.
+        self._collector = (
+            SuperPassCollector() if self._steady_state_profile is not None else None
+        )
 
         self._table = MetricsTable(self._registry)
         self._register_triggers(streaming, enable_isl)
@@ -272,7 +291,9 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         if streaming:
             table.add_trigger(SampleField.RECV_FIRST_NS, TtftTrigger(registry))
             table.add_trigger(SampleField.LAST_RECV_NS, ChunkDeltaTrigger(registry))
-            table.add_trigger(SampleField.COMPLETE_NS, TpotTrigger(registry, queue))
+            table.add_trigger(
+                SampleField.COMPLETE_NS, TpotTrigger(registry, queue, self._collector)
+            )
 
     @property
     def table(self) -> MetricsTable:
@@ -297,6 +318,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         saw_shutdown = False
         table = self._table
         registry = self._registry
+        collector = self._collector
 
         self._total_processed += len(records)
         if self._total_processed - self._last_log_count >= 10000:
@@ -335,6 +357,17 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                         "tagged state=interrupted"
                     )
                     self._interrupted = True
+                elif ev == SessionEventType.PHASE_START:
+                    # Performance phases only: warmup announces first, with its
+                    # own dataset size, and the standalone parse reads the same
+                    # phase. announce_phase adds the second guard -- a series
+                    # already being bucketed cannot be re-sized.
+                    if (
+                        collector is not None
+                        and isinstance(record.data, PhaseData)
+                        and record.data.phase_type == PERFORMANCE_PHASE
+                    ):
+                        collector.announce_phase(record.data.num_turns)
                 else:
                     if ev == SessionEventType.STARTED:
                         if self._session_start_ns is not None:
@@ -417,15 +450,29 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_ISSUED.value)
                 if table.get_row(uuid) is not None:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value)
+                    # is_tracking as well as the row: set_field returns early for an
+                    # ISSUED outside the tracking window WITHOUT dropping the
+                    # in-flight row, so a sample re-issued after
+                    # STOP_PERFORMANCE_TRACKING still has one. The event-log parse
+                    # skips it, and a bucket whose last_issue_ns came from outside
+                    # the window reports a different system TPS.
+                    if collector is not None and table.is_tracking:
+                        collector.on_issued(uuid, ts)
             elif ev == SampleEventType.RECV_FIRST:
                 table.set_field(uuid, SampleField.RECV_FIRST_NS, ts, record)
                 table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
+                if collector is not None:
+                    collector.on_recv_first(uuid, ts, record.turn)
             elif ev == SampleEventType.RECV_NON_FIRST:
                 table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
             elif ev == SampleEventType.COMPLETE:
                 # Check if tracked before set_field (which removes the row)
                 is_tracked = table.get_row(uuid) is not None
                 table.set_field(uuid, SampleField.COMPLETE_NS, ts, record)
+                # After set_field: TpotTrigger fires from there and reads the
+                # sample's super-pass, which on_complete then releases.
+                if collector is not None:
+                    collector.on_complete(uuid, ts)
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_COMPLETED.value)
                 if is_tracked:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_COMPLETED.value)
