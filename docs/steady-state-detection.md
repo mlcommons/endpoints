@@ -175,14 +175,15 @@ standalone. Both paths call the same pure-function core.
                      v
   +--------------------------------------+
   |  live metrics aggregator (hot path)  |
-  |  writes final_snapshot.json [total]  |
+  |  rolls up super-passes as it routes  |
+  |  events; writes final_snapshot.json  |
   +--------------------------------------+
                      |
-                     |  run ends (COMPLETE); cold path begins
+                     |  run ends (COMPLETE); token drain finishes
                      v
   +--------------------------------------+
-  |  steady-state post-process           |
-  |  reads the event log, off hot path   |
+  |  analyse(series) -- off the hot path |
+  |  writes steady_state.json            |
   +--------------------------------------+
                      |
                      |  steady_state block
@@ -190,24 +191,30 @@ standalone. Both paths call the same pure-function core.
   +--------------------------------------+
   |  Report { total, steady_state }      |
   +--------------------------------------+
+
+  ad-hoc:  events.jsonl -> build_super_pass_series -> analyse(series)
 ```
 
-- **Automatic path.** The run-completion path in
-  `src/inference_endpoint/commands/benchmark/execute.py` (finalize) — or the
-  dispatch in `src/inference_endpoint/commands/benchmark/cli.py`, mirroring how it
-  already dispatches `src/inference_endpoint/commands/audit.py` — invokes the
-  steady-state builder over the durable event log after the live aggregator has
-  written `final_snapshot.json`. The builder returns a `steady_state` result that
-  `src/inference_endpoint/metrics/report.py` attaches next to `total`. This is
-  gated by a new settings field in `src/inference_endpoint/config/schema.py`,
-  following the existing `early_stopping.enabled` flag.
-- **Ad-hoc path.** A new script re-runs the identical core over any recorded
-  `events.jsonl`, mirroring `scripts/early_stopping_estimate_from_events.py`. This
-  is the tool used to analyze historical runs and to iterate on parameters
-  without re-running a benchmark.
+- **Automatic path.** The metrics aggregator accumulates the per-super-pass series
+  as it routes events, reusing the token counts its TPOT trigger already computes.
+  Once the token drain completes — TPOT counts land there, so the series is only
+  whole at that point — it runs the analysis and writes `steady_state.json` beside
+  the report, just before its final snapshot. `finalize_benchmark` in
+  `src/inference_endpoint/commands/benchmark/execute.py` reads that verdict and
+  attaches the headline next to `total`. Gated by a settings field in
+  `src/inference_endpoint/config/schema.py`, following the existing
+  `early_stopping.enabled` flag; because collection happens during the run, the
+  decision is made before it starts.
+- **Ad-hoc path.** `python -m inference_endpoint.metrics.steady_state_diagnostics`
+  reconstructs the same series from any recorded `events.jsonl` and runs the
+  identical core over it. This is the tool for analyzing historical runs, auditing
+  a submission, and iterating on parameters without re-running a benchmark. It is
+  a first-class path, not a fallback.
 
-The builder never reads the live snapshot; the durable event log is the source of
-truth, consistent with the existing early-stopping recomputation path.
+Both paths produce a `list[SuperPassRollup]` and both call `analyse()`, so they
+reach the same verdict and emit the same schema — an equivalence covered by tests
+that drive one event stream through the aggregator and parse the log of that same
+stream. Neither reads the live snapshot.
 
 ## 5.3 The analysis pipeline
 

@@ -21,7 +21,6 @@ import io
 import json
 import logging
 import random
-import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,7 +55,6 @@ from inference_endpoint.commands.benchmark.profiling import (
     _render_profile_status,
     write_profiling_section,
 )
-from inference_endpoint.commands.benchmark.steady_state import DETECTOR_MODULE
 from inference_endpoint.commands.benchmark.watchdog import SigintGovernor
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -202,6 +200,7 @@ def _make_benchmark_context(
     rt_settings: RuntimeSettings | None = None,
     eval_configs: list[AccuracyConfiguration] | None = None,
     tokenizer_name: str | None = None,
+    steady_state_collecting: bool = False,
 ) -> BenchmarkContext:
     dataloader = dataloader or _make_loaded_dataset()
     rt_settings = rt_settings or RuntimeSettings(
@@ -223,6 +222,7 @@ def _make_benchmark_context(
         tokenizer_name=tokenizer_name,
         dataloader=dataloader,
         rt_settings=rt_settings,
+        steady_state_collecting=steady_state_collecting,
         total_samples=dataloader.num_samples(),
         eval_configs=eval_configs or [],
     )
@@ -1436,6 +1436,95 @@ class TestAggregatorArgs:
         idx = args.index("--tokenizer-workers")
         expected = str(config.settings.metrics_tokenizer_workers)
         assert args[idx + 1] == expected
+
+    @staticmethod
+    async def _launch_and_capture_aggregator_args(ctx, tmp_path):
+        """The args _run_benchmark_async hands the aggregator subprocess."""
+        captured: list = []
+
+        async def _capture_launch(service_configs, *, timeout):
+            captured.extend(service_configs)
+            raise KeyboardInterrupt("stop after launch")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(KeyboardInterrupt):
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+        return next(c for c in captured if "metrics_aggregator" in c.module).args
+
+    def _steady_state_ctx(self, tmp_path, *, model_name, enabled):
+        # Concurrency, not offline: the detector has no validated profile for
+        # offline runs (its min-duration gate measures the issue span, which
+        # collapses to ~0 when everything is issued at t=0).
+        config = OnlineConfig(
+            **{**_OFFLINE_KWARGS, "model_params": {"name": model_name}},
+            settings={
+                "load_pattern": {"type": "concurrency", "target_concurrency": 8},
+                "steady_state": {"enabled": enabled},
+            },
+        )
+        ctx = self._make_ctx(config, tmp_path)
+        ctx.tokenizer_name = "gpt2"
+        return ctx
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model_name", ["gpt-oss-120b", "kimi-k3"])
+    async def test_an_opted_in_run_asks_the_aggregator_to_collect(
+        self, tmp_path, model_name
+    ):
+        """The aggregator rolls super-passes up as the run happens, so the size
+        and the destination have to be settled before it launches. No model
+        allowlist: whatever the model, a config that enables detection gets it.
+        """
+        ctx = self._steady_state_ctx(tmp_path, model_name=model_name, enabled=True)
+
+        args = await self._launch_and_capture_aggregator_args(ctx, tmp_path)
+
+        idx = args.index("--steady-state-superpass-size")
+        assert args[idx + 1] == str(ctx.dataloader.num_samples())
+        idx = args.index("--steady-state-out")
+        assert args[idx + 1] == str(tmp_path / "steady_state.json")
+        assert json.loads((tmp_path / "run_meta.json").read_text()) == {
+            "dataset_size": ctx.dataloader.num_samples()
+        }
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_collection_is_off_unless_the_config_asks_for_it(self, tmp_path):
+        """Opt-in: the detector is use-at-your-own-risk, so a config that never
+        mentions it must not pay the roll-up cost or publish a verdict."""
+        ctx = self._steady_state_ctx(tmp_path, model_name="gpt-oss-120b", enabled=False)
+
+        args = await self._launch_and_capture_aggregator_args(ctx, tmp_path)
+
+        assert "--steady-state-superpass-size" not in args
+        assert "--steady-state-out" not in args
+        assert not (tmp_path / "run_meta.json").exists()
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -3699,7 +3788,12 @@ class TestRunBenchmarkAuditDispatch:
 
 
 class TestSteadyStateHook:
-    """finalize_benchmark hands eligible runs to the steady-state detector."""
+    """finalize_benchmark publishes the verdict the aggregator collected.
+
+    The aggregator writes steady_state.json during its drain, before its final
+    snapshot. finalize decides whether the run earned it: a truncated or
+    interrupted run is not described by the window found in it.
+    """
 
     @staticmethod
     def _eligible_ctx(tmp_path, **kwargs):
@@ -3714,6 +3808,7 @@ class TestSteadyStateHook:
                 "steady_state": {"enabled": True},
             },
         )
+        kwargs.setdefault("steady_state_collecting", True)
         return _make_benchmark_context(
             config=config,
             report_dir=tmp_path,
@@ -3723,48 +3818,38 @@ class TestSteadyStateHook:
         )
 
     @staticmethod
-    def _forbid_spawn(monkeypatch, reason):
-        def explode(cmd, **kwargs):
-            # pytest.fail raises BaseException, which detect_steady_state's
-            # best-effort `except Exception` does NOT swallow. An AssertionError
-            # here would be absorbed and logged, and the test would pass.
-            pytest.fail(f"detector must not be spawned for {reason}")
+    def _seed_collected_artifacts(tmp_path, verdict=None):
+        """What a collected run leaves in the report dir.
 
-        monkeypatch.setattr(subprocess, "run", explode)
+        The aggregator writes the verdict and its prose rendering; run_meta.json
+        records the size it was collected at, for a by-hand re-run of the
+        standalone detector.
+        """
+        (tmp_path / "events.jsonl").write_text("")
+        (tmp_path / "steady_state.json").write_text(
+            json.dumps(verdict or {"steady_state": {"found": True, "window": {}}})
+        )
+        (tmp_path / "steady_state.txt").write_text("headline\n")
+        (tmp_path / "run_meta.json").write_text('{"dataset_size": 3}')
 
     @pytest.mark.unit
-    def test_eligible_run_reaches_the_detector(self, tmp_path, monkeypatch):
-        (tmp_path / "events.jsonl").write_text("")
-        spawned = []
-
-        def fake_run(cmd, **kwargs):
-            spawned.append(cmd)
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
+    def test_a_verdict_this_run_did_not_collect_is_not_published(self, tmp_path):
+        """The verdict is identified by existence, so one left behind by a
+        previous run in a reused report dir -- and not cleared, because the
+        clear failed -- would otherwise be lifted into this run's report as if
+        this run had produced it. A wrong steady window in result_summary.json
+        is worse than a missing one."""
+        self._seed_collected_artifacts(tmp_path)
 
         finalize_benchmark(
-            self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
+            self._eligible_ctx(tmp_path, steady_state_collecting=False),
+            self._complete_result(tmp_path),
         )
 
-        # Not spawned[0]: finalize also shells out for the git SHA, and which
-        # call lands first depends on whether an earlier test warmed the version
-        # cache -- so indexing made this pass in a full run and fail under -k.
-        detector = [c for c in spawned if DETECTOR_MODULE in c]
-        assert detector, f"the detector was never spawned; got {spawned}"
-        assert "--tokenizer" in detector[0]
-        assert _CHAR_TOKENIZER in detector[0]
-        assert json.loads((tmp_path / "run_meta.json").read_text()) == {
-            "dataset_size": 3
-        }
-
-    @staticmethod
-    def _seed_stale_artifacts(tmp_path):
-        """A previous run's output in a reused report dir."""
-        (tmp_path / "events.jsonl").write_text("")
-        (tmp_path / "steady_state.json").write_text('{"from": "an earlier run"}')
-        (tmp_path / "steady_state.txt").write_text("an earlier run\n")
-        (tmp_path / "run_meta.json").write_text('{"dataset_size": 11}')
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["steady_state"] is None
 
     @staticmethod
     def _make_report(*, n_pending_tasks: int = 0) -> Report:
@@ -3799,64 +3884,90 @@ class TestSteadyStateHook:
         return bench
 
     @pytest.mark.unit
-    def test_detection_is_off_unless_the_config_asks_for_it(
-        self, tmp_path, monkeypatch
-    ):
-        """Opt-in: the detector is use-at-your-own-risk, so a config that never
-        mentions it must not pay the cost or publish a verdict."""
-        (tmp_path / "events.jsonl").write_text("")
-        self._forbid_spawn(monkeypatch, "a config that did not enable it")
-        ctx = _make_benchmark_context(
-            config=OnlineConfig(
-                **_OFFLINE_KWARGS,
-                settings={
-                    "load_pattern": {"type": "concurrency", "target_concurrency": 8}
+    def test_the_verdict_reaches_the_report_not_just_a_sibling_file(self, tmp_path):
+        """Reading the verdict in finalize is what puts the steady window in
+        result_summary.json, report.txt, and the console summary -- rather than
+        only in steady_state.json, which nobody reads by default."""
+        self._seed_collected_artifacts(
+            tmp_path,
+            {
+                "superpass_size": 3,
+                "n_super_passes": 9,
+                "steady_state": {
+                    "found": True,
+                    "reason": None,
+                    "window": {
+                        "sp_lo": 1,
+                        "sp_hi": 5,
+                        "n_super_passes": 4,
+                        "n_samples": 17552,
+                    },
+                    "tps": {"per_user": 302.3, "system": 40960.9},
+                    "ttft": {"p50": 86.26, "p90": 156.1},
+                    "tpot": {"p50": 3.29, "p90": 3.44},
+                    "drifting_up": [],
                 },
-            ),
-            report_dir=tmp_path,
-            dataloader=_make_loaded_dataset(3),
-            tokenizer_name=_CHAR_TOKENIZER,
+                "trajectories": {"tpot": [1, 2, 3]},
+            },
         )
 
-        finalize_benchmark(ctx, self._complete_result(tmp_path))
+        finalize_benchmark(
+            self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
+        )
 
-        assert not (tmp_path / "steady_state.json").exists()
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["steady_state"]["window"]["n_samples"] == 17552
+        # The full diagnostics blob stays in steady_state.json; the summary
+        # carries the headline only.
+        assert "trajectories" not in summary["steady_state"]
+        assert "Steady state:" in (tmp_path / "report.txt").read_text()
 
     @pytest.mark.unit
-    def test_a_run_that_never_completed_is_skipped(self, tmp_path, monkeypatch):
+    def test_a_run_with_no_verdict_reports_none(self, tmp_path):
+        """Collection is best-effort and opt-in, so most runs have no verdict.
+        That must read as an absent block, not as a failed finalize."""
+        (tmp_path / "events.jsonl").write_text("")
+
+        finalize_benchmark(
+            self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
+        )
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["steady_state"] is None
+
+    @pytest.mark.unit
+    def test_a_run_that_never_completed_withdraws_the_verdict(self, tmp_path):
         """Drain timeout: no abort flag is set and the aggregator reported
-        "complete", but metrics work remained, so the event log is a truncated
+        "complete", but metrics work remained, so the aggregator saw a truncated
         view of the run. A window found in it would not describe the run."""
-        self._seed_stale_artifacts(tmp_path)
-        self._forbid_spawn(monkeypatch, "a run that did not complete")
+        self._seed_collected_artifacts(tmp_path)
 
         finalize_benchmark(
             self._eligible_ctx(tmp_path),
             self._complete_result(tmp_path, n_pending_tasks=1),
         )
 
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["steady_state"] is None
         assert not (tmp_path / "steady_state.json").exists()
         assert not (tmp_path / "steady_state.txt").exists()
-        assert not (tmp_path / "run_meta.json").exists()
 
     @pytest.mark.unit
-    def test_an_interrupt_after_detection_withdraws_the_verdict(
+    def test_an_interrupt_after_collection_withdraws_the_verdict(
         self, tmp_path, monkeypatch
     ):
-        """Detection runs before scoring, so a ^C during scoring lands after a
-        verdict already exists. That run is invalid -- it reports interrupted
+        """The verdict already exists when scoring starts, so a ^C during
+        scoring lands after it. That run is invalid -- it reports interrupted
         and complete:false -- so the verdict must be withdrawn from both the
         report and the directory, not left to describe a run that did not
         finish."""
-        self._seed_stale_artifacts(tmp_path)
-
-        def fake_run(cmd, **kwargs):
-            (tmp_path / "steady_state.json").write_text(
-                json.dumps({"steady_state": {"found": True, "window": {}}})
-            )
-            return subprocess.CompletedProcess(cmd, 0, stdout="headline", stderr="")
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        self._seed_collected_artifacts(tmp_path)
         monkeypatch.setattr(
             execute_mod, "score_accuracy", MagicMock(side_effect=KeyboardInterrupt)
         )
@@ -3873,119 +3984,61 @@ class TestSteadyStateHook:
         assert summary["steady_state"] is None
         assert not (tmp_path / "steady_state.json").exists()
         assert not (tmp_path / "steady_state.txt").exists()
-        assert not (tmp_path / "run_meta.json").exists()
 
     @pytest.mark.unit
-    def test_accuracy_only_runs_are_skipped(self, tmp_path, monkeypatch):
-        """An accuracy-only run has no performance phase to find a window in.
-
-        It also never enters detect_steady_state, so the call site has to clear
-        a previous run's artifacts itself.
-        """
-        self._seed_stale_artifacts(tmp_path)
-        self._forbid_spawn(monkeypatch, "an accuracy-only run")
+    def test_accuracy_only_runs_publish_no_verdict(self, tmp_path):
+        """An accuracy-only run has no performance phase to find a window in,
+        so anything sitting in a reused report dir belongs to an earlier run."""
+        self._seed_collected_artifacts(tmp_path)
 
         finalize_benchmark(
             self._eligible_ctx(tmp_path, test_mode=TestMode.ACC),
             _make_benchmark_result(tmp_path),
         )
 
-        assert not (tmp_path / "run_meta.json").exists()
         assert not (tmp_path / "steady_state.json").exists()
         assert not (tmp_path / "steady_state.txt").exists()
 
     @pytest.mark.unit
-    def test_aborted_runs_are_skipped(self, tmp_path, monkeypatch):
-        """A truncated run has no steady window; the guard exists for this.
-
-        Like the accuracy-only case, it bypasses detect_steady_state entirely,
-        so a previous run's verdict must be cleared at the call site.
-        """
-        self._seed_stale_artifacts(tmp_path)
-        self._forbid_spawn(monkeypatch, "an aborted run")
+    def test_aborted_runs_publish_no_verdict(self, tmp_path):
+        """A truncated run has no steady window; the guard exists for this."""
+        self._seed_collected_artifacts(tmp_path)
         bench = dataclasses.replace(
             _make_benchmark_result(tmp_path), user_interrupted=True
         )
 
         finalize_benchmark(self._eligible_ctx(tmp_path), bench)
 
-        assert not (tmp_path / "run_meta.json").exists()
         assert not (tmp_path / "steady_state.json").exists()
         assert not (tmp_path / "steady_state.txt").exists()
 
     @pytest.mark.unit
-    def test_the_verdict_reaches_the_report_not_just_a_sibling_file(
-        self, tmp_path, monkeypatch
-    ):
-        """Detection runs between the metrics drain and the report, so the
-        headline lands in result_summary.json, report.txt, and the console --
-        not only in steady_state.json, which nobody reads by default."""
-        (tmp_path / "events.jsonl").write_text("")
-        verdict = {
-            "superpass_size": 3,
-            "n_super_passes": 9,
-            "steady_state": {
-                "found": True,
-                "reason": None,
-                "window": {
-                    "sp_lo": 1,
-                    "sp_hi": 5,
-                    "n_super_passes": 4,
-                    "n_samples": 17552,
-                },
-                "tps": {"per_user": 302.3, "system": 40960.9},
-                "ttft": {"p50": 86.26, "p90": 156.1},
-                "tpot": {"p50": 3.29, "p90": 3.44},
-                "drifting_up": [],
-            },
-            "trajectories": {"tpot": [1, 2, 3]},
+    @pytest.mark.parametrize(
+        "make_bench",
+        [
+            pytest.param(
+                lambda cls, tmp_path: cls._complete_result(tmp_path, n_pending_tasks=1),
+                id="drain-timeout",
+            ),
+            pytest.param(
+                lambda cls, tmp_path: dataclasses.replace(
+                    _make_benchmark_result(tmp_path), user_interrupted=True
+                ),
+                id="aborted",
+            ),
+        ],
+    )
+    def test_a_withdrawn_verdict_keeps_the_super_pass_size(self, tmp_path, make_bench):
+        """A run that aborted or drained incompletely is exactly the one worth
+        re-running the standalone detector against by hand, and that reads
+        run_meta.json."""
+        self._seed_collected_artifacts(tmp_path)
+
+        finalize_benchmark(self._eligible_ctx(tmp_path), make_bench(self, tmp_path))
+
+        assert json.loads((tmp_path / "run_meta.json").read_text()) == {
+            "dataset_size": 3
         }
-
-        def fake_run(cmd, **kwargs):
-            (tmp_path / "steady_state.json").write_text(json.dumps(verdict))
-            return subprocess.CompletedProcess(cmd, 0, stdout="headline", stderr="")
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-
-        finalize_benchmark(
-            self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
-        )
-
-        summary = json.loads(
-            (tmp_path / "performance" / "result_summary.json").read_text()
-        )
-        assert summary["steady_state"]["window"]["n_samples"] == 17552
-        # The full diagnostics blob stays in steady_state.json; the summary
-        # carries the headline only.
-        assert "trajectories" not in summary["steady_state"]
-        assert "Steady state:" in (tmp_path / "report.txt").read_text()
-
-    @pytest.mark.unit
-    def test_an_interrupt_during_detection_still_writes_the_report(
-        self, tmp_path, monkeypatch
-    ):
-        """The detector re-raises ^C so finalize can mark the run invalid. That
-        only helps if detection sits inside the try/finally that writes the
-        artifacts -- outside it, the interrupt escapes and the run loses
-        everything, which is the failure the re-raise exists to prevent."""
-        self._seed_stale_artifacts(tmp_path)
-
-        def interrupt(cmd, **kwargs):
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(subprocess, "run", interrupt)
-
-        with pytest.raises(KeyboardInterrupt):
-            finalize_benchmark(
-                self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
-            )
-
-        summary = json.loads(
-            (tmp_path / "performance" / "result_summary.json").read_text()
-        )
-        assert summary["state"] == "interrupted"
-        assert summary["steady_state"] is None
-        assert not (tmp_path / "steady_state.json").exists()
 
     @pytest.mark.unit
     def test_a_failed_event_log_copy_does_not_report_a_complete_run(
@@ -4037,34 +4090,3 @@ class TestSteadyStateHook:
         )
         assert summary["state"] == "interrupted"
         assert summary["complete"] is False
-
-    @pytest.mark.unit
-    def test_any_model_may_opt_in(self, tmp_path, monkeypatch):
-        """No model allowlist: a config that enables detection gets it, whatever
-        the model. Whether the numbers mean anything is the submitter's call."""
-        (tmp_path / "events.jsonl").write_text("")
-        spawned = []
-
-        def fake_run(cmd, **kwargs):
-            spawned.append(cmd)
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        ctx = _make_benchmark_context(
-            config=OnlineConfig(
-                **{**_OFFLINE_KWARGS, "model_params": {"name": "kimi-k3"}},
-                settings={
-                    "load_pattern": {"type": "concurrency", "target_concurrency": 8},
-                    "steady_state": {"enabled": True},
-                },
-            ),
-            report_dir=tmp_path,
-            dataloader=_make_loaded_dataset(3),
-            tokenizer_name=_CHAR_TOKENIZER,
-        )
-
-        finalize_benchmark(ctx, self._complete_result(tmp_path))
-
-        assert any(
-            DETECTOR_MODULE in c for c in spawned
-        ), "an opted-in model must reach the detector"

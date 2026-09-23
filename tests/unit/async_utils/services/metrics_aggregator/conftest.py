@@ -197,6 +197,7 @@ def make_aggregator(
     shutdown_event: asyncio.Event | None = None,
     drain_timeout_s: float | None = None,
     steady_state_superpass_size: int | None = None,
+    steady_state_out=None,
 ) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
     """Construct an aggregator wired to a real SUB socket and a mocked publisher.
 
@@ -231,5 +232,6 @@ def make_aggregator(
         shutdown_event=shutdown_event,
         drain_timeout_s=drain_timeout_s,
         steady_state_superpass_size=steady_state_superpass_size,
+        steady_state_out=steady_state_out,
     )
     return agg, registry, publisher

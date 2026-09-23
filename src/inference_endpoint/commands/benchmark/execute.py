@@ -66,13 +66,16 @@ from inference_endpoint.commands.benchmark.profiling import (
     write_profiling_section,
 )
 from inference_endpoint.commands.benchmark.steady_state import (
+    collected_verdict as collected_steady_state_verdict,
+)
+from inference_endpoint.commands.benchmark.steady_state import (
+    collection_plan as steady_state_collection_plan,
+)
+from inference_endpoint.commands.benchmark.steady_state import (
     dataset_size_of as steady_state_dataset_size,
 )
 from inference_endpoint.commands.benchmark.steady_state import (
-    detect_steady_state,
-)
-from inference_endpoint.commands.benchmark.steady_state import (
-    discard_artifacts as discard_steady_state_artifacts,
+    discard_verdict as discard_steady_state_verdict,
 )
 from inference_endpoint.commands.benchmark.steady_state import (
     verdict_headline as steady_state_headline,
@@ -208,6 +211,11 @@ class BenchmarkContext:
     total_samples: int
     eval_configs: list[AccuracyConfiguration] = field(default_factory=list)
     affinity_plan: AffinityPlan | None = None
+    # Set when the run asks the metrics aggregator to collect a steady-state
+    # series. finalize publishes a verdict only for a run that collected one:
+    # the verdict is identified by existence, so an unclearable file from a
+    # previous run would otherwise be published as this run's.
+    steady_state_collecting: bool = False
 
     @property
     def collect_responses(self) -> bool:
@@ -840,12 +848,24 @@ async def _run_benchmark_async(
     event_log_dir = tmpfs_dir / "events"
     metrics_output_dir = ctx.report_dir / "metrics"
 
+    # Before the pipeline starts: the aggregator collects as the run happens,
+    # so this cannot wait for finalize. It also clears the previous run's
+    # artifacts, whatever it decides.
+    steady_state_plan = steady_state_collection_plan(
+        config,
+        ctx.report_dir,
+        tokenizer_name=ctx.tokenizer_name,
+        dataset_size=steady_state_dataset_size(ctx.dataloader),
+        accuracy_only=ctx.accuracy_only,
+    )
+    ctx.steady_state_collecting = steady_state_plan is not None
     pipe = MetricsPipeline(
         config,
         tokenizer_name=ctx.tokenizer_name,
         enable_streaming=ctx.enable_streaming,
         event_log_dir=event_log_dir,
         metrics_output_dir=metrics_output_dir,
+        steady_state_plan=steady_state_plan,
         loop=loop,
     )
     report: Report | None = None
@@ -1224,12 +1244,6 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     if report is not None and aborted and report.state != "interrupted":
         report = _invalidate(bench, report)
 
-    # Clear any previous run's steady-state artifacts before anything else.
-    # report_dir is user-settable and reusable, and every step below can exit
-    # through a KeyboardInterrupt, so a stale verdict left here would end up
-    # beside this run's results and read as this run's.
-    discard_steady_state_artifacts(ctx.report_dir)
-
     # Everything from here to the finally runs inside the try so a Ctrl-C at any
     # point still writes an interrupted report instead of losing it. That
     # includes the event-log copy, which is the longest step in finalize and so
@@ -1253,30 +1267,27 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             report = _invalidate(bench, report)
             raise
 
-        # Detection runs after the metrics drain and before the report is
-        # rendered, so the window it finds reaches result_summary.json,
-        # report.txt, and the console summary -- not only steady_state.json.
+        # The aggregator wrote the verdict during the drain, before its final
+        # snapshot. Reading it here is what puts the steady window on the
+        # Report itself -- and so into result_summary.json, report.txt, and the
+        # console summary -- rather than only in steady_state.json.
         #
-        # It needs a run that finished: aborted runs are truncated, accuracy-only
-        # runs have no performance phase, and an incomplete report (drain
-        # timeout, or no report at all) means the event log does not describe
-        # the whole run.
+        # It only counts for a run that finished: aborted runs are truncated,
+        # and an incomplete report (drain timeout, or no report at all) means
+        # the aggregator did not see the whole run.
         if (
-            not aborted
-            and not ctx.accuracy_only
+            ctx.steady_state_collecting
+            and not aborted
             and report is not None
             and report.complete
         ):
-            verdict = detect_steady_state(
-                ctx.report_dir,
-                ctx.config,
-                tokenizer_name=ctx.tokenizer_name,
-                dataset_size=steady_state_dataset_size(ctx.dataloader),
-            )
+            verdict = collected_steady_state_verdict(ctx.report_dir)
             if verdict is not None:
                 steady_state = steady_state_headline(
                     verdict, load_pattern=ctx.config.settings.load_pattern.type
                 )
+        else:
+            discard_steady_state_verdict(ctx.report_dir)
 
         if aborted:
             logger.warning("Run aborted — skipping accuracy scoring on partial data")
@@ -1285,11 +1296,11 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             accuracy_scores = score_accuracy(ctx, result)
     except KeyboardInterrupt:
         report = _invalidate(bench, report)
-        # Detection may already have produced a verdict for a run that is now
-        # invalid. Withdraw it from both the report and the directory rather
-        # than let it describe a run that did not finish.
+        # The aggregator may already have produced a verdict for a run that is
+        # now invalid. Withdraw it from both the report and the directory
+        # rather than let it describe a run that did not finish.
         steady_state = None
-        discard_steady_state_artifacts(ctx.report_dir)
+        discard_steady_state_verdict(ctx.report_dir)
         raise
     finally:
         # Attach the per-dataset accuracy list so result_summary.json, the

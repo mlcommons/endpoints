@@ -1,24 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Post-run steady-state detection.
+"""Steady-state detection: the run's side of it.
 
-Runs the detector over a finished run's ``events.jsonl`` and leaves
-``steady_state.json`` / ``steady_state.txt`` beside the report. The detector runs
-out-of-process. Nothing it does can fail finalize, with one deliberate
-exception: a ``KeyboardInterrupt`` propagates, because the user asking to stop
-is not a diagnostic failure.
+The metrics aggregator does the detecting. It already timestamps every sample
+event and already tokenizes each output for its TPOT trigger, so it rolls
+super-passes up as the run happens and writes ``steady_state.json`` /
+``steady_state.txt`` beside the report before its final snapshot lands.
 
-``finalize_benchmark`` calls this between the metrics drain and the report, so
-``verdict_headline`` can put the steady window on the ``Report`` itself -- and
-therefore into ``result_summary.json``, ``report.txt``, and the console summary.
-The cost of that ordering is that the report waits on the detector, bounded by
-``settings.timeouts.steady_state_timeout_s``.
+This module decides whether that should happen (``collection_plan``, consulted
+before the run starts, since collection is not something finalize can ask for
+after the fact) and turns the verdict into the compact headline the Report
+carries (``verdict_headline``).
 
-Every input the detector would otherwise guess is pinned on its command line:
-tokenizer, super-pass size, and profile. Pinning the tokenizer also keeps the
-child off its own model registry, whose entries can request
-``trust_remote_code``.
+The standalone detector remains the way to re-derive a verdict from an archived
+run, re-run it with different windows, or check a submission after the fact::
+
+    python -m inference_endpoint.metrics.steady_state_diagnostics <report_dir>
+
+``run_meta.json`` exists for that: it records the super-pass size so a hand
+re-run needs no arguments.
 
 Which workloads the detector may judge is read from ``Profile.supported``.
 Enabling a new one is a change in the detector, not here.
@@ -34,8 +35,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -55,18 +54,10 @@ from inference_endpoint.metrics.steady_state_diagnostics import (
 
 logger = logging.getLogger(__name__)
 
-DETECTOR_MODULE = "inference_endpoint.metrics.steady_state_diagnostics"
-
-_STDERR_LOG_CHARS = 500
-
-# stderr also carries the child's 'wrote <path>' receipt and transformers
-# warnings. Only this shape is a reliability note. See format_profile_caveat.
-_CAVEAT_PREFIX = "[profile: "
-
 # Artifacts this step owns. report_dir is reusable. A run that produces no
-# verdict must leave none behind. run_meta.json is listed separately: a run that
-# spawned the detector keeps its own fresh copy even on failure. A stale one
-# would feed the wrong super-pass size to a hand re-run.
+# verdict must leave none behind. run_meta.json is listed separately: a run
+# that opted into collection keeps its own fresh copy, so a hand re-run never
+# reads a previous run's super-pass size.
 _VERDICT_ARTIFACTS = ("steady_state.json", "steady_state.txt")
 _ALL_ARTIFACTS = (*_VERDICT_ARTIFACTS, "run_meta.json")
 
@@ -83,32 +74,6 @@ def is_eligible(*, load_pattern: LoadPatternType) -> bool:
     The model is not consulted. Detection is opt-in per run.
     """
     return profile_for_load_pattern(load_pattern.value).supported
-
-
-def build_command(
-    report_dir: Path,
-    *,
-    tokenizer_name: str,
-    dataset_size: int,
-    load_pattern: LoadPatternType,
-) -> list[str]:
-    return [
-        sys.executable,
-        "-m",
-        DETECTOR_MODULE,
-        str(report_dir),
-        "--json",
-        str(report_dir / "steady_state.json"),
-        "--tokenizer",
-        tokenizer_name,
-        "--dataset-size",
-        str(dataset_size),
-        # Pinned, not left to the child's read of config.yaml. An unreadable
-        # config.yaml falls back to a profile with no caveat, silently dropping
-        # the note this step publishes.
-        "--profile",
-        profile_for_load_pattern(load_pattern.value).name,
-    ]
 
 
 def _write_best_effort(path: Path, text: str) -> None:
@@ -130,14 +95,24 @@ def _discard(report_dir: Path, names: tuple[str, ...]) -> bool:
     return cleared
 
 
-def discard_artifacts(report_dir: Path) -> None:
-    """Clear this step's artifacts before a run decides whether to produce any.
+def discard_artifacts(report_dir: Path) -> bool:
+    """Clear this step's artifacts, reporting whether the directory is now clear.
 
-    ``finalize_benchmark`` calls this up front. Its later paths can exit
-    through a ``KeyboardInterrupt`` that never reaches the detection call, so
-    cleanup cannot live only at the end.
+    Called before the run starts, so the aggregator never writes its verdict
+    next to a previous run's. The return value matters: a verdict that survives
+    this is one the run cannot overwrite, and publishing it would report a
+    previous run's steady window as this one's.
     """
-    _discard(report_dir, _ALL_ARTIFACTS)
+    return _discard(report_dir, _ALL_ARTIFACTS)
+
+
+def discard_verdict(report_dir: Path) -> None:
+    """Withdraw a verdict the run turned out not to deserve.
+
+    run_meta.json survives: a run that aborted or drained incompletely is
+    exactly the one worth re-running the standalone detector against by hand.
+    """
+    _discard(report_dir, _VERDICT_ARTIFACTS)
 
 
 def dataset_size_of(dataset: Dataset | None) -> int | None:
@@ -161,9 +136,9 @@ def dataset_size_of(dataset: Dataset | None) -> int | None:
 def write_run_meta(report_dir: Path, dataset_size: int) -> None:
     """Record the super-pass size for a later hand re-run.
 
-    The integration pins this on the command line. run_meta.json lets
+    The run pins the size on the aggregator's command line. run_meta.json lets
     ``python -m inference_endpoint.metrics.steady_state_diagnostics <report_dir>``
-    work with no arguments.
+    resolve the same size with no arguments.
     """
     # Cleared first. A failed overwrite would leave the previous run's size in
     # place. A wrong run_meta.json is worse than a missing one.
@@ -374,57 +349,51 @@ def verdict_headline(
     )
 
 
-def _detector_caveats(stderr: str | None) -> str:
-    """The detector's own reliability notes, and nothing else.
-
-    Matches the caveat shape rather than excluding known noise. The child also
-    prints a 'wrote <path>' receipt, and transformers writes to the same
-    channel. Neither is something the detector said.
-    """
-    lines = [
-        line.strip()
-        for line in (stderr or "").splitlines()
-        if line.strip().startswith(_CAVEAT_PREFIX)
-    ]
-    return "\n".join(lines)
-
-
-def detect_steady_state(
-    report_dir: Path,
+def collection_plan(
     config: BenchmarkConfig,
+    report_dir: Path,
     *,
     tokenizer_name: str | None,
     dataset_size: int | None,
-) -> Path | None:
-    """Run the detector for a finished run, best-effort.
+    accuracy_only: bool,
+) -> tuple[int, Path] | None:
+    """Super-pass size and verdict path for the aggregator, or None to skip.
 
-    ``tokenizer_name`` and ``dataset_size`` come from the run, not the config.
-    The first honours the ``model_params.tokenizer_name`` override. The second
+    Decided before the run starts, because the aggregator rolls super-passes up
+    as the run happens rather than re-reading the event log afterwards. The
+    size is the dataset's sample count: one super-pass is one pass over it.
+
+    ``tokenizer_name`` and ``dataset_size`` come from the run, not the config --
+    the first honours the ``model_params.tokenizer_name`` override, the second
     only exists once the dataset is loaded.
 
-    Returns the verdict path on success, ``None`` on skip or failure. Every
-    failure path is absorbed: a run that produced valid performance artifacts
-    must not be failed by a diagnostic. ``KeyboardInterrupt`` is the exception
-    and propagates, so the caller can mark the run interrupted and still write
-    its artifacts.
+    Clearing stale artifacts happens here and happens whatever this returns:
+    ``report_dir`` is user-settable and reusable, and a previous run's verdict
+    left beside this run's results would read as this run's.
     """
     load_pattern = config.settings.load_pattern.type
 
     def skip(reason: str) -> None:
         logger.info("Steady-state detection skipped: %s", reason)
-        _discard(report_dir, _ALL_ARTIFACTS)
+
+    cleared = discard_artifacts(report_dir)
 
     if not config.settings.steady_state.enabled:
         skip("disabled by configuration")
         return None
+    if not cleared:
+        # The verdict is published by existence, so one the aggregator cannot
+        # overwrite would be read back at finalize as this run's.
+        skip(f"a previous run's artifacts could not be cleared from {report_dir}")
+        return None
+    if accuracy_only:
+        skip("accuracy-only runs have no performance phase")
+        return None
     if tokenizer_name is None:
         skip("the run resolved no tokenizer")
         return None
-    if dataset_size is None:
+    if dataset_size is None or dataset_size <= 0:
         skip("dataset size unknown")
-        return None
-    if not (report_dir / "events.jsonl").is_file():
-        skip(f"no events.jsonl in {report_dir}")
         return None
     if not is_eligible(load_pattern=load_pattern):
         logger.info(
@@ -433,85 +402,24 @@ def detect_steady_state(
             load_pattern.value,
             report_dir,
         )
-        # Every other skip clears run_meta.json. This one writes a fresh copy.
-        # The message above points at a hand re-run, which reads run_meta.json
-        # for the super-pass size.
-        if not _discard(report_dir, _VERDICT_ARTIFACTS):
-            # A fresh run_meta.json beside a steady_state.json we could not
-            # clear would read as this run's verdict.
-            return None
+        # The message points at a hand re-run, which reads run_meta.json for
+        # the super-pass size.
         write_run_meta(report_dir, dataset_size)
         return None
-    # Clear the previous run's verdict before spawning. The success check below
-    # is an existence test. A child that exits 0 without writing would otherwise
-    # republish a stale verdict as this run's.
-    if not _discard(report_dir, _VERDICT_ARTIFACTS):
-        skip(f"could not clear stale artifacts in {report_dir}")
-        return None
+
     write_run_meta(report_dir, dataset_size)
-    verdict = report_dir / "steady_state.json"
-
     logger.info(
-        "Running steady-state detection over %s; this tokenizes every response "
-        "(--no-steady-state opts out)",
-        report_dir,
+        "Steady-state detection enabled: the metrics aggregator will roll up "
+        "super-passes of %d samples (--no-steady-state opts out)",
+        dataset_size,
     )
-    try:
-        proc = subprocess.run(
-            build_command(
-                report_dir,
-                tokenizer_name=tokenizer_name,
-                dataset_size=dataset_size,
-                load_pattern=load_pattern,
-            ),
-            capture_output=True,
-            text=True,
-            timeout=config.settings.timeouts.steady_state_timeout_s,
-            check=False,
-        )
-    except KeyboardInterrupt:
-        # Re-raised, not absorbed. Detection runs before the report is written,
-        # so swallowing the user's first ^C would carry on into the slowest part
-        # of finalize; their second ^C then hits SigintGovernor's
-        # _force_exit_process_group and the run loses every artifact. Propagating
-        # reaches finalize_benchmark's handler, which marks the report
-        # interrupted and still writes it.
-        logger.warning("Steady-state detection cancelled by interrupt")
-        _discard(report_dir, _VERDICT_ARTIFACTS)
-        raise
-    except Exception:  # noqa: BLE001 - diagnostic; never fail a finished run
-        # exc_info keeps a programming error distinguishable from an environment
-        # failure. Without it the feature could be silently disabled.
-        logger.warning("Steady-state detection skipped", exc_info=True)
-        _discard(report_dir, _VERDICT_ARTIFACTS)
-        return None
+    return dataset_size, report_dir / "steady_state.json"
 
-    if proc.returncode != 0:
-        logger.warning(
-            "Steady-state detection failed (exit %s): %s",
-            proc.returncode,
-            # A crash puts the exception and message last.
-            (proc.stderr or "").strip()[-_STDERR_LOG_CHARS:],
-        )
-        # The child writes its JSON non-atomically, so a kill can truncate it.
-        _discard(report_dir, _VERDICT_ARTIFACTS)
-        return None
 
-    caveats = _detector_caveats(proc.stderr)
-    if caveats:
-        # e.g. poisson's "usually under-saturated" note. Without it,
-        # steady_state.json looks more trustworthy than the detector claims.
-        logger.info("Steady-state detector caveats: %s", caveats[:_STDERR_LOG_CHARS])
-
-    stdout_text = (proc.stdout or "").rstrip("\n")
-    if stdout_text:
-        body = f"{stdout_text}\n{caveats}\n" if caveats else f"{stdout_text}\n"
-        _write_best_effort(report_dir / "steady_state.txt", body)
-
-    if not verdict.is_file():
-        logger.warning("Steady-state detection produced no %s", verdict.name)
-        _discard(report_dir, _VERDICT_ARTIFACTS)
-        return None
-
-    logger.info("Steady-state detection complete: %s", verdict)
-    return verdict
+def collected_verdict(report_dir: Path) -> Path | None:
+    """The verdict the aggregator wrote for this run, if it wrote one."""
+    verdict = report_dir / "steady_state.json"
+    if verdict.is_file():
+        return verdict
+    logger.info("Steady-state detection produced no %s", verdict.name)
+    return None

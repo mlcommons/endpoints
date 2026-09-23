@@ -1,18 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the post-run steady-state detection step.
+"""Tests for the run's side of steady-state detection.
 
-Pins the gate (which runs earn a detection pass), the command handed to the
-detector subprocess, and the best-effort contract: no failure mode here may
-propagate out of finalize.
+Pins the gate (which runs the aggregator is asked to collect for), the
+artifacts the step owns in a reusable report dir, and the narrowing that turns
+the detector's JSON into the headline the Report carries.
 """
 
-import dataclasses
 import json
 import logging
-import subprocess
-import sys
 from pathlib import Path
 
 import msgspec.structs
@@ -28,7 +25,6 @@ from inference_endpoint.metrics.report import LevelShift
 
 pytestmark = pytest.mark.unit
 
-_DETECTOR_MODULE = "inference_endpoint.metrics.steady_state_diagnostics"
 _TOKENIZER = "openai/gpt-oss-120b"
 _DATASET_SIZE = 6396
 
@@ -83,72 +79,6 @@ class TestEligibility:
         ).supported
 
 
-class TestCommand:
-    def test_pins_every_input_the_detector_would_otherwise_guess(self, tmp_path):
-        cmd = steady_state.build_command(
-            tmp_path,
-            tokenizer_name=_TOKENIZER,
-            dataset_size=_DATASET_SIZE,
-            load_pattern=LoadPatternType.CONCURRENCY,
-        )
-
-        assert cmd == [
-            sys.executable,
-            "-m",
-            _DETECTOR_MODULE,
-            str(tmp_path),
-            "--json",
-            str(tmp_path / "steady_state.json"),
-            "--tokenizer",
-            _TOKENIZER,
-            "--dataset-size",
-            str(_DATASET_SIZE),
-            "--profile",
-            "concurrency",
-        ]
-
-
-class TestCaveatFilter:
-    def test_prefix_matches_what_the_detector_actually_emits(self):
-        """Pinned against the detector's own formatter rather than a copy of the
-        string, so a change on either side fails here instead of silently
-        publishing bookkeeping as a reliability note."""
-        profile = steady_state_diagnostics.profile_for_load_pattern("poisson")
-        assert profile.note, "expected the poisson profile to carry a caveat"
-
-        line = steady_state_diagnostics.format_profile_caveat(profile)
-
-        assert line.startswith(steady_state._CAVEAT_PREFIX)
-
-    def test_a_wrapped_note_is_collapsed_to_one_line(self):
-        """The consumer matches the prefix per line, so a multi-line caveat would
-        lose everything after the first line."""
-        profile = steady_state_diagnostics.profile_for_load_pattern("poisson")
-        wrapped = dataclasses.replace(profile, note="first line\nsecond line")
-
-        line = steady_state_diagnostics.format_profile_caveat(wrapped)
-
-        assert "\n" not in line
-        assert "second line" in line
-
-    def test_keeps_only_the_detectors_own_caveats(self):
-        caveat = "[profile: poisson] usually under-saturated"
-        stderr = "\n".join(
-            [
-                "None of PyTorch, TensorFlow >= 2.0 have been found.",
-                caveat,
-                "",
-                "wrote /runs/r1/steady_state.json",
-            ]
-        )
-
-        assert steady_state._detector_caveats(stderr) == caveat
-
-    def test_no_caveats_means_empty(self):
-        assert steady_state._detector_caveats("wrote /runs/r1/steady_state.json") == ""
-        assert steady_state._detector_caveats(None) == ""
-
-
 def _config(model_name="gpt-oss-120b", **settings):
     """A concurrency run: the detector has a validated profile for it."""
     settings.setdefault(
@@ -165,7 +95,8 @@ def _config(model_name="gpt-oss-120b", **settings):
     )
 
 
-def _agentic_config(model_name="gpt-oss-120b"):
+def _agentic_config(model_name="gpt-oss-120b", *, enabled=True):
+    """An agentic run: the detector has no profile for this load pattern."""
     return BenchmarkConfig(
         type=TestType.ONLINE,
         model_params={"name": model_name},
@@ -173,440 +104,236 @@ def _agentic_config(model_name="gpt-oss-120b"):
         datasets=[{"path": "D", "agentic_inference": {}}],
         settings={
             "load_pattern": {"type": "agentic_inference", "target_concurrency": 8},
-            "steady_state": {"enabled": True},
+            "steady_state": {"enabled": enabled},
         },
     )
 
 
-def _completed(cmd, returncode=0, stdout="", stderr=""):
-    return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
-
-
-def _detect(report_dir, config=None, **overrides):
-    kwargs = {"tokenizer_name": _TOKENIZER, "dataset_size": _DATASET_SIZE}
+def _plan(report_dir, config=None, **overrides):
+    kwargs = {
+        "tokenizer_name": _TOKENIZER,
+        "dataset_size": _DATASET_SIZE,
+        "accuracy_only": False,
+    }
     kwargs.update(overrides)
-    return steady_state.detect_steady_state(report_dir, config or _config(), **kwargs)
+    return steady_state.collection_plan(config or _config(), report_dir, **kwargs)
 
 
-def _succeeding(report_dir, stdout="headline\n", stderr=""):
-    """A child that behaves like the real one: exit 0 AND a verdict on disk."""
+# Every way a run can fail to earn collection, with the reason it must say and
+# whether it still owes a hand re-run the super-pass size.
+_SKIPS = [
+    pytest.param(
+        {"config": _config(**{"steady_state": {"enabled": False}})},
+        "disabled by configuration",
+        False,
+        id="disabled",
+    ),
+    pytest.param(
+        {"accuracy_only": True},
+        "no performance phase",
+        False,
+        id="accuracy-only",
+    ),
+    pytest.param({"tokenizer_name": None}, "no tokenizer", False, id="no-tokenizer"),
+    pytest.param(
+        {"dataset_size": None}, "dataset size unknown", False, id="no-dataset-size"
+    ),
+    pytest.param(
+        {"config": _agentic_config()},
+        "the detector has no profile for",
+        True,
+        id="unprofiled-load-pattern",
+    ),
+]
 
-    def run(cmd, **kw):
-        (report_dir / "steady_state.json").write_text("{}")
-        return _completed(cmd, stdout=stdout, stderr=stderr)
 
-    return run
+class TestCollectionPlan:
+    """What the aggregator is asked to do, decided before the run starts.
 
+    The aggregator rolls super-passes up as the run happens, so this cannot be
+    deferred to finalize: a run that was not asked to collect has no verdict to
+    publish afterwards.
+    """
 
-class TestDetectSteadyState:
-    def test_eligible_run_writes_run_meta_and_spawns_detector(
-        self, tmp_path, monkeypatch
+    def test_an_opted_in_run_collects_one_super_pass_per_pass_over_the_dataset(
+        self, tmp_path
     ):
+        """The size and the destination are both pinned here so the aggregator
+        never guesses either."""
         report_dir = _report_dir(tmp_path)
-        spawned = []
 
-        def fake_run(cmd, **kwargs):
-            spawned.append((cmd, kwargs.get("timeout")))
-            (report_dir / "steady_state.json").write_text("{}")
-            return _completed(cmd, stdout="ok\n")
+        assert _plan(report_dir) == (
+            _DATASET_SIZE,
+            report_dir / "steady_state.json",
+        )
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        result = _detect(report_dir)
+    def test_a_collected_run_publishes_its_own_super_pass_size(self, tmp_path):
+        """run_meta.json is how a by-hand re-run of the standalone detector
+        resolves the size with no arguments, so it must describe this run and
+        not the one that used the directory before."""
+        report_dir = _report_dir(tmp_path)
 
-        assert result == report_dir / "steady_state.json"
+        _plan(report_dir)
+
         assert json.loads((report_dir / "run_meta.json").read_text()) == {
             "dataset_size": _DATASET_SIZE
         }
-        assert len(spawned) == 1
-        assert spawned[0][0] == steady_state.build_command(
-            report_dir,
-            tokenizer_name=_TOKENIZER,
-            dataset_size=_DATASET_SIZE,
-            load_pattern=LoadPatternType.CONCURRENCY,
-        )
 
-    def test_writes_stdout_to_a_sibling_text_report(self, tmp_path, monkeypatch):
-        report_dir = _report_dir(tmp_path)
-        monkeypatch.setattr(
-            subprocess, "run", _succeeding(report_dir, stdout="HEADLINE\n")
-        )
-
-        _detect(report_dir)
-
-        assert (report_dir / "steady_state.txt").read_text() == "HEADLINE\n"
-
-    def test_detector_caveats_survive_a_successful_run(
-        self, tmp_path, monkeypatch, caplog
+    @pytest.mark.parametrize(("kwargs", "reason", "keeps_run_meta"), _SKIPS)
+    def test_a_run_that_does_not_earn_collection_says_why(
+        self, tmp_path, caplog, kwargs, reason, keeps_run_meta
     ):
-        """The detector reports caveats (e.g. 'system TPS is unreliable') on
-        stderr; dropping them would leave an untrustworthy number looking
-        authoritative."""
         report_dir = _report_dir(tmp_path)
-        caveat = "[profile: poisson] poisson: usually under-saturated"
-        monkeypatch.setattr(
-            subprocess, "run", _succeeding(report_dir, stderr=caveat + "\n")
-        )
 
         with caplog.at_level(logging.INFO):
-            _detect(report_dir)
+            assert _plan(report_dir, **kwargs) is None
 
-        assert caveat in (report_dir / "steady_state.txt").read_text()
-        assert caveat in caplog.text
+        assert reason in caplog.text
 
-    def test_child_bookkeeping_and_third_party_noise_stay_out_of_the_artifact(
-        self, tmp_path, monkeypatch, caplog
+    @pytest.mark.parametrize(("kwargs", "reason", "keeps_run_meta"), _SKIPS)
+    def test_only_an_unprofiled_load_pattern_leaves_metadata_behind(
+        self, tmp_path, kwargs, reason, keeps_run_meta
     ):
-        """stderr also carries the child's 'wrote <path>' receipt and anything
-        transformers emits. Neither is something the detector said."""
-        report_dir = _report_dir(tmp_path)
-        noise = (
-            "None of PyTorch, TensorFlow >= 2.0 have been found.\n"
-            f"\nwrote {report_dir / 'steady_state.json'}\n"
-        )
-        monkeypatch.setattr(subprocess, "run", _succeeding(report_dir, stderr=noise))
-
-        with caplog.at_level(logging.INFO):
-            _detect(report_dir)
-
-        assert (report_dir / "steady_state.txt").read_text() == "headline\n"
-        assert "wrote " not in caplog.text
-        assert "PyTorch" not in caplog.text
-
-    @pytest.mark.parametrize(
-        ("kwargs", "expected_reason", "keeps_run_meta"),
-        [
-            # A load pattern the detector cannot profile still has good
-            # metadata for this run, and its message points at a hand re-run
-            # that reads run_meta.json.
-            (
-                {"config": _agentic_config()},
-                "the detector has no profile for",
-                True,
-            ),
-            (
-                {"config": _config(**{"steady_state": {"enabled": False}})},
-                "disabled by configuration",
-                False,
-            ),
-            ({"tokenizer_name": None}, "no tokenizer", False),
-            ({"dataset_size": None}, "dataset size unknown", False),
-        ],
-    )
-    def test_skipped_runs_say_why_and_leave_the_right_artifacts(
-        self, tmp_path, monkeypatch, caplog, kwargs, expected_reason, keeps_run_meta
-    ):
-        report_dir = _report_dir(tmp_path)
-
-        def explode(cmd, **kw):
-            # pytest.fail raises BaseException; detect_steady_state's
-            # `except Exception` would swallow an AssertionError and the
-            # surviving log assertion would still pass.
-            pytest.fail(f"detector must not be spawned: {expected_reason}")
-
-        monkeypatch.setattr(subprocess, "run", explode)
-        with caplog.at_level(logging.INFO):
-            result = _detect(report_dir, **kwargs)
-
-        assert result is None
-        assert expected_reason in caplog.text
-        assert not (report_dir / "steady_state.txt").exists()
-        assert not (report_dir / "steady_state.json").exists()
-        if keeps_run_meta:
-            assert json.loads((report_dir / "run_meta.json").read_text()) == {
-                "dataset_size": _DATASET_SIZE
-            }
-        else:
-            assert not (
-                report_dir / "run_meta.json"
-            ).exists(), "a skipped run must not leave a run_meta.json nothing will read"
-
-    def test_missing_events_file_skips(self, tmp_path, monkeypatch, caplog):
-        def explode(cmd, **kw):
-            pytest.fail("detector needs events.jsonl; must not be spawned")
-
-        monkeypatch.setattr(subprocess, "run", explode)
-
-        with caplog.at_level(logging.INFO):
-            assert _detect(tmp_path) is None
-
-        assert "events.jsonl" in caplog.text
-
-    def test_a_missing_event_log_is_reported_before_the_workload_verdict(
-        self, tmp_path, monkeypatch, caplog
-    ):
-        """events.jsonl is the actionable blocker, and the 're-run by hand'
-        message an unprofiled load pattern emits would be useless without one."""
-        monkeypatch.setattr(
-            subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
-        )
-
-        with caplog.at_level(logging.INFO):
-            _detect(tmp_path, config=_agentic_config())
-
-        assert "no events.jsonl" in caplog.text
-        assert "not a validated workload" not in caplog.text
-        assert not (tmp_path / "run_meta.json").exists()
-
-    def test_configured_timeout_reaches_the_subprocess(self, tmp_path, monkeypatch):
-        report_dir = _report_dir(tmp_path)
-        seen = []
-
-        def fake_run(cmd, **kwargs):
-            seen.append(kwargs.get("timeout"))
-            return _completed(cmd)
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        _detect(
-            report_dir, config=_config(**{"timeouts": {"steady_state_timeout_s": 42.0}})
-        )
-
-        assert seen == [42.0]
-
-    def test_a_silent_child_is_not_reported_as_success(self, tmp_path, monkeypatch):
-        """Exit 0 without a verdict file is not a result."""
-        report_dir = _report_dir(tmp_path)
-        monkeypatch.setattr(
-            subprocess, "run", lambda cmd, **kw: _completed(cmd, stdout="headline\n")
-        )
-
-        assert _detect(report_dir) is None
-
-
-class TestBestEffortContract:
-    """Nothing in this module may fail a run whose artifacts are already written."""
-
-    def test_detector_failure_is_absorbed_and_logged(
-        self, tmp_path, monkeypatch, caplog
-    ):
-        report_dir = _report_dir(tmp_path)
-        monkeypatch.setattr(
-            subprocess, "run", lambda cmd, **kw: _completed(cmd, 2, stderr="boom")
-        )
-
-        with caplog.at_level(logging.WARNING):
-            assert _detect(report_dir) is None
-
-        assert not (report_dir / "steady_state.txt").exists()
-        assert "boom" in caplog.text
-
-    @pytest.mark.parametrize(
-        "failure",
-        [
-            pytest.param(subprocess.TimeoutExpired("cmd", 60.0), id="timeout"),
-            pytest.param(OSError("no interpreter"), id="spawn-oserror"),
-            pytest.param(TypeError("bad argv"), id="unexpected"),
-        ],
-    )
-    def test_every_spawn_failure_is_absorbed(
-        self, tmp_path, monkeypatch, caplog, failure
-    ):
-        report_dir = _report_dir(tmp_path)
-
-        def raise_it(cmd, **kw):
-            raise failure
-
-        monkeypatch.setattr(subprocess, "run", raise_it)
-
-        with caplog.at_level(logging.WARNING):
-            assert _detect(report_dir) is None
-
-        assert "steady-state" in caplog.text.lower()
-
-    def test_an_interrupt_propagates_instead_of_being_absorbed(
-        self, tmp_path, monkeypatch, caplog
-    ):
-        """A ^C during detection must reach finalize_benchmark.
-
-        Detection runs before the report is written. Swallowing the first ^C
-        would carry on into the slowest part of finalize; the user's second one
-        then force-kills the process group and the run loses every artifact.
-        The half-written verdict still has to go.
+        """An unprofiled run is told to re-run the detector by hand, and that
+        reads run_meta.json. Every other skip leaves nothing to read it: a
+        run_meta.json with no verdict beside it is a file that only misleads.
         """
         report_dir = _report_dir(tmp_path)
+        (report_dir / "run_meta.json").unlink()
 
-        def run(cmd, **kw):
-            (report_dir / "steady_state.json").write_text('{"truncated": ')
-            raise KeyboardInterrupt
+        _plan(report_dir, **kwargs)
 
-        monkeypatch.setattr(subprocess, "run", run)
+        assert (report_dir / "run_meta.json").exists() is keeps_run_meta
 
-        with caplog.at_level(logging.WARNING), pytest.raises(KeyboardInterrupt):
-            _detect(report_dir)
-
-        assert not (report_dir / "steady_state.json").exists()
-        assert "interrupt" in caplog.text.lower()
-
-    @pytest.mark.parametrize(
-        ("outcome", "kwargs"),
-        [
-            pytest.param("failure", {}, id="nonzero-exit"),
-            pytest.param("timeout", {}, id="timeout"),
-            pytest.param("interrupt", {}, id="interrupt"),
-            pytest.param("silent", {}, id="exit-0-no-verdict"),
-            pytest.param("skip", {"config": _agentic_config()}, id="ineligible"),
-            pytest.param(
-                "skip",
-                {"config": _config(**{"steady_state": {"enabled": False}})},
-                id="disabled",
-            ),
-            pytest.param("skip", {"tokenizer_name": None}, id="no-tokenizer"),
-            pytest.param("skip", {"dataset_size": None}, id="no-dataset-size"),
-        ],
-    )
-    def test_a_stale_verdict_never_outlives_the_run_it_described(
-        self, tmp_path, monkeypatch, outcome, kwargs
+    def test_an_unprofiled_load_pattern_replaces_the_previous_runs_metadata(
+        self, tmp_path
     ):
-        """report_dir is user-settable and reusable: a previous run's verdict must
-        not sit beside a newer run's results."""
+        """A stale size would send a by-hand re-run at the wrong super-pass
+        boundary and produce a verdict for a window that never existed."""
         report_dir = _report_dir(tmp_path)
 
-        def run(cmd, **kw):
-            # A killed or failing child can leave a half-written verdict: it
-            # writes the JSON non-atomically.
-            (report_dir / "steady_state.json").write_text('{"truncated": ')
-            if outcome == "timeout":
-                raise subprocess.TimeoutExpired(cmd, 1.0)
-            if outcome == "interrupt":
-                raise KeyboardInterrupt
-            if outcome == "silent":
-                (report_dir / "steady_state.json").unlink()
-                return _completed(cmd, 0, stdout="headline\n")
-            return _completed(cmd, 2, stderr="failed")
+        assert _plan(report_dir, config=_agentic_config()) is None
 
-        monkeypatch.setattr(subprocess, "run", run)
+        assert json.loads((report_dir / "run_meta.json").read_text()) == {
+            "dataset_size": _DATASET_SIZE
+        }
 
-        # An interrupt propagates (finalize_benchmark needs it to mark the run
-        # invalid); every other outcome returns None. The verdict goes either way.
-        if outcome == "interrupt":
-            with pytest.raises(KeyboardInterrupt):
-                _detect(report_dir, **kwargs)
-        else:
-            assert _detect(report_dir, **kwargs) is None
-        assert not (report_dir / "steady_state.json").exists()
-        assert not (report_dir / "steady_state.txt").exists()
-
-    def test_a_skipped_run_clears_stale_run_meta_too(self, tmp_path, monkeypatch):
-        """A stale run_meta.json would feed the wrong super-pass size to a later
-        by-hand re-run against this directory."""
+    def test_a_run_ruled_out_before_the_load_pattern_leaves_no_metadata(self, tmp_path):
+        """The unprofiled-pattern message is the only thing that points at a
+        hand re-run, so a run that never reaches that check has no reason to
+        publish a size."""
         report_dir = _report_dir(tmp_path)
-        monkeypatch.setattr(
-            subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
-        )
+        (report_dir / "run_meta.json").unlink()
 
-        _detect(report_dir, tokenizer_name=None)
+        assert _plan(report_dir, config=_agentic_config(enabled=False)) is None
 
         assert not (report_dir / "run_meta.json").exists()
 
-    def test_an_unvalidated_workload_still_gets_fresh_run_meta(
-        self, tmp_path, monkeypatch
+    @pytest.mark.parametrize("dataset_size", [0, -1, -6396])
+    def test_a_non_positive_dataset_size_is_no_size_at_all(
+        self, tmp_path, caplog, dataset_size
     ):
-        """Its caveat tells the user to hand-run the detector, which reads
-        run_meta.json. This run's metadata must replace the stale one."""
+        """A zero-length super-pass would divide the run into an unbounded
+        number of them; a negative one is not a count."""
         report_dir = _report_dir(tmp_path)
-        monkeypatch.setattr(
-            subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
-        )
+        (report_dir / "run_meta.json").unlink()
 
-        _detect(report_dir, config=_agentic_config())
+        with caplog.at_level(logging.INFO):
+            assert _plan(report_dir, dataset_size=dataset_size) is None
 
-        assert json.loads((report_dir / "run_meta.json").read_text()) == {
-            "dataset_size": _DATASET_SIZE
-        }
+        assert "dataset size unknown" in caplog.text
+        assert not (report_dir / "run_meta.json").exists()
 
-    @pytest.mark.parametrize(
-        "config",
-        [
-            pytest.param(None, id="eligible-pre-spawn"),
-            pytest.param(_agentic_config(), id="unvalidated-workload"),
-        ],
-    )
-    def test_an_unclearable_stale_verdict_aborts_rather_than_republishing(
-        self, tmp_path, monkeypatch, config
+    def test_an_unwritable_report_dir_does_not_fail_the_run(
+        self, tmp_path, monkeypatch, caplog
     ):
-        """Success is an existence test, so a verdict we could not delete would
-        be reported as this run's result. The unvalidated-workload path is the
-        sharper case: it would otherwise write a fresh run_meta.json next to the
-        stale steady_state.json, making that verdict look like this run's."""
+        """A full disk or a read-only mount costs the run its diagnostics, not
+        its results."""
         report_dir = _report_dir(tmp_path)
-        monkeypatch.setattr(
-            subprocess, "run", lambda cmd, **kw: pytest.fail("must not spawn")
-        )
-        real_unlink = Path.unlink
-
-        def failing_unlink(self, *args, **kwargs):
-            if self.name == "steady_state.json":
-                raise OSError("read-only file system")
-            return real_unlink(self, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "unlink", failing_unlink)
-
-        assert _detect(report_dir, config=config) is None
-        # Either cleared outright, or left as the earlier run's. What must not
-        # happen is this run's run_meta.json being published beside a stale
-        # steady_state.json, making that verdict look like this run's.
-        run_meta = report_dir / "run_meta.json"
-        published = run_meta.exists() and json.loads(run_meta.read_text()) == {
-            "dataset_size": _DATASET_SIZE
-        }
-        assert not published
-
-    @pytest.mark.parametrize(
-        "outcome",
-        [
-            pytest.param("failure", id="nonzero-exit"),
-            pytest.param("timeout", id="timeout"),
-            pytest.param("interrupt", id="interrupt"),
-        ],
-    )
-    def test_a_failed_run_keeps_its_own_fresh_run_meta(
-        self, tmp_path, monkeypatch, outcome
-    ):
-        """The detector ran, so run_meta.json describes THIS run and stays usable
-        for a by-hand retry -- on every failure path, not just a non-zero exit."""
-        report_dir = _report_dir(tmp_path)
-
-        def run(cmd, **kw):
-            if outcome == "timeout":
-                raise subprocess.TimeoutExpired(cmd, 1.0)
-            if outcome == "interrupt":
-                raise KeyboardInterrupt
-            return _completed(cmd, 2, stderr="failed")
-
-        monkeypatch.setattr(subprocess, "run", run)
-
-        if outcome == "interrupt":
-            with pytest.raises(KeyboardInterrupt):
-                _detect(report_dir)
-        else:
-            _detect(report_dir)
-
-        assert json.loads((report_dir / "run_meta.json").read_text()) == {
-            "dataset_size": _DATASET_SIZE
-        }
-
-    @pytest.mark.parametrize("artifact", ["run_meta.json", "steady_state.txt"])
-    def test_unwritable_report_dir_is_absorbed(
-        self, tmp_path, monkeypatch, caplog, artifact
-    ):
-        """A full disk or read-only mount must not fail a finished run."""
-        report_dir = _report_dir(tmp_path)
-        monkeypatch.setattr(subprocess, "run", _succeeding(report_dir, stdout="out\n"))
         real_write_text = Path.write_text
 
         def failing_write_text(self, *args, **kwargs):
-            if self.name == artifact:
-                raise OSError(f"no space left on device: {artifact}")
+            if self.name == "run_meta.json":
+                raise OSError("no space left on device")
             return real_write_text(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "write_text", failing_write_text)
 
         with caplog.at_level(logging.WARNING):
-            _detect(report_dir)
+            assert _plan(report_dir) == (
+                _DATASET_SIZE,
+                report_dir / "steady_state.json",
+            )
 
-        assert artifact in caplog.text
+        assert "run_meta.json" in caplog.text
         assert not (
-            report_dir / artifact
-        ).exists(), "a failed write must not leave the previous run's file in place"
+            report_dir / "run_meta.json"
+        ).exists(), "a failed write must not leave the previous run's size in place"
+
+
+class TestCollectedVerdict:
+    """Whether the aggregator actually produced a verdict for this run."""
+
+    def test_a_written_verdict_is_offered_to_the_report(self, tmp_path):
+        (tmp_path / "steady_state.json").write_text("{}")
+
+        assert steady_state.collected_verdict(tmp_path) == (
+            tmp_path / "steady_state.json"
+        )
+
+    def test_no_verdict_is_reported_as_none(self, tmp_path, caplog):
+        """The aggregator collects best-effort, so an absent verdict is a normal
+        outcome the report has to survive rather than an error."""
+        with caplog.at_level(logging.INFO):
+            assert steady_state.collected_verdict(tmp_path) is None
+
+        assert "steady_state.json" in caplog.text
+
+    def test_a_directory_in_the_verdicts_place_is_not_a_verdict(self, tmp_path):
+        """Everything downstream reads this path as a file; a directory here
+        would raise out of a finished run instead."""
+        (tmp_path / "steady_state.json").mkdir()
+
+        assert steady_state.collected_verdict(tmp_path) is None
+
+
+class TestDiscardVerdict:
+    """Withdrawing a verdict the run turned out not to deserve."""
+
+    def test_the_verdict_and_its_rendering_both_go(self, tmp_path):
+        """steady_state.txt is the same verdict in prose: leaving it behind
+        publishes the claim the JSON was withdrawn for."""
+        report_dir = _report_dir(tmp_path)
+
+        steady_state.discard_verdict(report_dir)
+
+        assert not (report_dir / "steady_state.json").exists()
+        assert not (report_dir / "steady_state.txt").exists()
+
+    def test_the_super_pass_size_survives_a_withdrawn_verdict(self, tmp_path):
+        """A run that aborted or drained incompletely is exactly the one worth
+        re-running the standalone detector against by hand, and that reads
+        run_meta.json."""
+        report_dir = _report_dir(tmp_path)
+
+        steady_state.discard_verdict(report_dir)
+
+        assert json.loads((report_dir / "run_meta.json").read_text()) == {
+            "dataset_size": 11
+        }
+
+    def test_withdrawing_a_verdict_that_was_never_written_is_not_an_error(
+        self, tmp_path
+    ):
+        """Runs that were never collected for take this path too."""
+        steady_state.discard_verdict(tmp_path)
+
+    def test_the_event_log_is_not_this_steps_to_remove(self, tmp_path):
+        report_dir = _report_dir(tmp_path)
+
+        steady_state.discard_verdict(report_dir)
+
+        assert (report_dir / "events.jsonl").exists()
 
 
 class TestDatasetSize:
@@ -1045,3 +772,46 @@ class TestRunMeta:
         )
 
         assert parsed["dataset_size"] == _DATASET_SIZE
+
+
+@pytest.mark.unit
+class TestStaleArtifactsBlockCollection:
+    """A verdict the run cannot overwrite must not become the run's verdict.
+
+    ``collected_verdict`` is an existence test, so a previous run's
+    ``steady_state.json`` that survives the clear would be lifted into this
+    run's ``result_summary.json`` and ``report.txt`` as if this run had
+    produced it. That is a wrong number in a submission artifact, not a missing
+    one, so the run declines to collect at all rather than risk publishing it.
+    """
+
+    def test_a_verdict_that_cannot_be_cleared_stops_collection(
+        self, tmp_path, monkeypatch
+    ):
+        (tmp_path / "steady_state.json").write_text('{"found": true}')
+
+        def refuse(self, missing_ok=False):
+            raise PermissionError("read-only report directory")
+
+        monkeypatch.setattr(Path, "unlink", refuse)
+
+        plan = steady_state.collection_plan(
+            _config(),
+            tmp_path,
+            tokenizer_name="tok",
+            dataset_size=100,
+            accuracy_only=False,
+        )
+
+        assert plan is None
+
+    def test_a_clean_directory_collects(self, tmp_path):
+        plan = steady_state.collection_plan(
+            _config(),
+            tmp_path,
+            tokenizer_name="tok",
+            dataset_size=100,
+            accuracy_only=False,
+        )
+
+        assert plan == (100, tmp_path / "steady_state.json")

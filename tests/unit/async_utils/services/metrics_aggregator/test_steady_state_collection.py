@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Steady-state collection inside the aggregator, against the standalone parse.
 
 The aggregator rolls super-passes up from the events it already routes, reusing
@@ -11,10 +26,10 @@ records are written out through the event logger's encoder for the parse.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import msgspec
 import pytest
-
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.record import (
     EventRecord,
@@ -175,3 +190,82 @@ async def test_untracked_samples_are_not_collected(tmp_path):
             assert agg.steady_state_series() == []
         finally:
             agg.close()
+
+
+async def _run_to_drain(tmp_path, socket_name, *, out_path=None, superpass_size=None):
+    """Route a full tracked run, including ENDED, through the aggregator."""
+    records = _records()
+    loop = asyncio.get_event_loop()
+    with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+        agg, _, publisher = make_aggregator(
+            ctx,
+            loop,
+            socket_name,
+            tokenizer=MockBatchTokenizer(),
+            steady_state_superpass_size=superpass_size,
+            steady_state_out=out_path,
+        )
+        try:
+            await agg.process(records)
+            await agg.process(
+                [EventRecord(event_type=SessionEventType.ENDED, timestamp_ns=99_999)]
+            )
+        finally:
+            agg.close()
+    return records, publisher
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_verdict_written_at_drain_matches_the_event_log_verdict(tmp_path):
+    """The verdict the aggregator writes is the one the standalone detector
+    reaches from the same run's event log -- equivalence carried through the
+    algorithm and out to the artifact the report reads."""
+    out = tmp_path / "steady_state.json"
+
+    records, _ = await _run_to_drain(
+        tmp_path, "agg_ss_drain", out_path=out, superpass_size=SUPERPASS_SIZE
+    )
+
+    written = msgspec.json.decode(out.read_bytes())
+    from_log = ssd.analyse(
+        ssd.build_super_pass_series(
+            _write_log(tmp_path, records),
+            SUPERPASS_SIZE,
+            MockBatchTokenizer().count_sync_batch,
+        ),
+        superpass_size=SUPERPASS_SIZE,
+    )
+
+    assert written == msgspec.json.decode(msgspec.json.encode(from_log))
+    assert (tmp_path / "steady_state.txt").read_text().startswith("super-passes:")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_no_verdict_written_when_collection_is_off(tmp_path, caplog):
+    """A run that never opted in skips detection outright. It must not reach
+    the detector and fall into the best-effort handler -- that would bury a
+    real failure under a skip that looks the same from the outside."""
+    out = tmp_path / "steady_state.json"
+
+    with caplog.at_level(logging.ERROR):
+        await _run_to_drain(tmp_path, "agg_ss_off", out_path=out)
+
+    assert not out.exists()
+    assert "steady-state detection failed" not in caplog.text
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_failed_verdict_write_still_publishes_the_final_snapshot(tmp_path):
+    """Steady state is best-effort; the final snapshot is the report's primary
+    source. A detector or IO failure must not cost the run its snapshot."""
+    unwritable = tmp_path / "nonexistent-dir" / "steady_state.json"
+
+    _, publisher = await _run_to_drain(
+        tmp_path, "agg_ss_io_fail", out_path=unwritable, superpass_size=SUPERPASS_SIZE
+    )
+
+    assert not unwritable.exists()
+    publisher.publish_final.assert_awaited_once()

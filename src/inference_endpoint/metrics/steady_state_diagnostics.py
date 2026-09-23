@@ -74,6 +74,11 @@ from inference_endpoint.core.types import TextModelOutput
 # --------------------------------------------------------------------------- #
 # Event wire constants (mirror core/record.py category.value topics)
 # --------------------------------------------------------------------------- #
+# Detector defaults, named so callers that must render a result alongside the
+# bounds it was computed under cannot drift from the bounds actually used.
+DEFAULT_COV_BOUNDS: tuple[float, ...] = (0.03, 0.05, 0.08)
+DEFAULT_WINDOW_SIZES: tuple[int, ...] = (4, 5)
+
 EV_START_TRACKING = "session.start_performance_tracking"
 EV_STOP_TRACKING = "session.stop_performance_tracking"
 EV_ISSUED = "sample.issued"
@@ -1522,7 +1527,7 @@ def min_steady_duration(
 def build_steady_state(
     series: Sequence[SuperPassRollup],
     gate_algo: str = "mk_hamed_rao",
-    cov_bounds: Sequence[float] = (0.03, 0.05, 0.08),
+    cov_bounds: Sequence[float] = DEFAULT_COV_BOUNDS,
     gated_metrics: Sequence[TrackedMetric] = GATED_METRICS,
     enforce_min_duration: bool = True,
 ) -> SteadyState:
@@ -1705,9 +1710,9 @@ def run(
     events_path: str,
     superpass_size: int,
     count_tokens: Callable[[list[TokenizationInput]], list[int]],
-    window_sizes: Sequence[int] = (4, 5),
+    window_sizes: Sequence[int] = DEFAULT_WINDOW_SIZES,
     warmup: int | str = "auto",
-    cov_bounds: Sequence[float] = (0.03, 0.05, 0.08),
+    cov_bounds: Sequence[float] = DEFAULT_COV_BOUNDS,
     trend_gate: str = "mk_hamed_rao",
     tokenize_batch_size: int = TOKENIZE_BATCH_SIZE,
     warmup_band: float = 0.05,
@@ -1734,9 +1739,9 @@ def analyse(
     series: list[SuperPassRollup],
     *,
     superpass_size: int,
-    window_sizes: Sequence[int] = (4, 5),
+    window_sizes: Sequence[int] = DEFAULT_WINDOW_SIZES,
     warmup: int | str = "auto",
-    cov_bounds: Sequence[float] = (0.03, 0.05, 0.08),
+    cov_bounds: Sequence[float] = DEFAULT_COV_BOUNDS,
     trend_gate: str = "mk_hamed_rao",
     warmup_band: float = 0.05,
     warmup_driver: str = "tpot_p50",

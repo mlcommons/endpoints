@@ -93,7 +93,6 @@ settings:
     performance_drain_timeout_s: null  # Performance drain seconds (None = unlimited).
     accuracy_drain_timeout_s: null  # Accuracy drain seconds (None = unlimited).
     metrics_drain_timeout_s: null  # Metrics drain seconds (None = unlimited).
-    steady_state_timeout_s: 600.0  # Post-run steady-state detection seconds (None = unlimited). Detection runs before the report, so this is wall-clock the report waits for; raise it for very large event logs.
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
@@ -105,8 +104,8 @@ settings:
     urls: null  # URL(s) the profiler start/stop triggers are derived from. When None, derived from endpoint_config.endpoints instead. Use when the profiler admin endpoint differs from the inference endpoint.
   early_stopping:  # MLPerf early-stopping percentile estimates (on by default; enabled: false opts out)
     enabled: true  # Early-stopping percentile estimates (default on)
-  steady_state:  # Post-run steady-state detection (off by default; enabled: true opts in)
-    enabled: false  # Post-run steady-state detection (default off)
+  steady_state:  # Steady-state detection (off by default; enabled: true opts in)
+    enabled: false  # Steady-state detection (default off)
   metrics_tokenizer_workers: 4  # In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT (default: 4; 0 = defer everything to the end-of-run drain).
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.

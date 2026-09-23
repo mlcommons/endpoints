@@ -32,32 +32,39 @@ operator's quick reference.
 
 ## Running it automatically after a benchmark
 
-`finalize_benchmark` can run the detector for you, out-of-process, between the metrics
-drain and the report. It writes `steady_state.json` (the full diagnostics) +
-`steady_state.txt` (and the `run_meta.json` it consumes) into the report directory, and
-puts the compact headline on the report itself, so it appears in
-`performance/result_summary.json`, `report.txt`, and the console summary. The headline
-is a typed struct (`SteadyStateHeadline` in `metrics/report.py`) carrying the window and
-how it was chosen, TPS with its batch-means intervals, TTFT/TPOT percentiles in
-nanoseconds, the min-duration evidence, any level-shift anomaly, the drift verdicts, and
-the workload profile's reliability note. Every field is optional: the detector's output
-is read from a file that may be truncated or come from a different version, so a missing
-value is normal rather than exceptional.
+The metrics aggregator can do this for you as the run happens. It already timestamps
+every sample event and already tokenizes each output for its TPOT trigger, so it rolls
+super-passes up in the process that produced them rather than re-reading and
+re-tokenizing the event log afterwards.
+
+It writes `steady_state.json` (the full diagnostics) + `steady_state.txt` into the
+report directory during its drain, just before the final snapshot; `finalize_benchmark`
+then reads the verdict and puts the compact headline on the report itself, so it appears
+in `performance/result_summary.json`, `report.txt`, and the console summary. The
+headline is a typed struct (`SteadyStateHeadline` in `metrics/report.py`) carrying the
+window and how it was chosen, TPS with its batch-means intervals, TTFT/TPOT percentiles
+in nanoseconds, the min-duration evidence, any level-shift anomaly, the drift verdicts,
+and the workload profile's reliability note. Every field is optional: the detector's
+output is read from a file that may be truncated or come from a different version, so a
+missing value is normal rather than exceptional.
 
 The per-super-pass trajectories, the CoV/drift tables and the latency histograms stay in
 `steady_state.json`; on a real run the histograms alone were two thirds of the block,
 and embedding them would dwarf the rest of the summary.
 
-Because the report is rendered after detection, a slow detector delays it — bounded by
-`settings.timeouts.steady_state_timeout_s` (default 600s). For scale: detection took 94s
-over a 1.0 GB `events.jsonl` (~57k samples), and cost grows with the log, so a
-substantially larger run may need this raised. Outputs carrying a separate `reasoning`
-or `tool_calls` field are counted one at a time through the chat template rather than in
-batches, so a chat-completions reasoning model is materially slower than the
-`openai_completions` path that figure was measured on. If a `^C` lands during the
-accuracy scoring that follows, the verdict is withdrawn from both the report and the
-directory: that run reports `interrupted` / `complete: false`, and a steady window must
-not describe it.
+The analysis runs after the token drain, because TPOT counts land there and the series
+is only complete once it finishes. It carries no deadline of its own. The expensive half
+of the old post-run detector was tokenization — 96% of a 94s pass over a 1.0 GB
+`events.jsonl` — and in-process that work is the run's own token drain, already bounded
+by `settings.timeouts.metrics_drain_timeout_s`. What is left is arithmetic over a few
+dozen per-super-pass rollups.
+
+`run_meta.json` is written beside the verdict. It records the super-pass size so a hand
+re-run of the standalone detector against the report directory needs no arguments.
+
+If a `^C` lands during the accuracy scoring that follows, the verdict is withdrawn from
+both the report and the directory: that run reports `interrupted` / `complete: false`,
+and a steady window must not describe it.
 
 It is **off by default and opt-in**:
 
@@ -70,25 +77,21 @@ settings:
 > **Use at your own risk.** The methodology has been exercised against a small set of
 > workloads (gpt-oss and DeepSeek-R1 at high concurrency). Nothing stops you enabling it
 > for any model, and nothing validates that the window it reports is meaningful for that
-> model's behaviour — interpreting the verdict is yours. It also tokenizes every response
-> in the run, which is not free.
+> model's behaviour — interpreting the verdict is yours.
 
-Enabling it is not sufficient. The run must also:
+Enabling it is not sufficient. Because collection happens during the run, the decision
+is made before it starts, and the run must also:
 
 - be a **performance** run (accuracy-only runs have no window to find),
-- have **completed** — an aborted or interrupted run, or one that hit the metrics drain
-  timeout, is a truncated view of the workload,
+- have resolved a tokenizer, and a dataset whose size is known,
 - use a load pattern the detector has a profile for. `concurrency` and `poisson` qualify;
   `offline` and `agentic` are `supported=False`, as is any unmapped pattern.
 
-A run that clears the opt-in but fails one of these logs why and leaves no verdict
-behind. Whatever the outcome, no failure in this step can fail a run that already
-produced valid performance artifacts — with one deliberate exception: pressing
-`Ctrl-C` during detection propagates, so the run is marked interrupted and its
-artifacts are still written. Absorbing it would mean the first `Ctrl-C` appeared
-to do nothing and the second killed the process before anything was saved.
-
-Deadline: `settings.timeouts.steady_state_timeout_s`.
+A verdict produced by a run that then fails to **complete** — aborted, interrupted, or a
+metrics drain timeout — is withdrawn afterwards, since it describes a truncated view of
+the workload. A run that clears the opt-in but fails one of the other conditions logs why
+and collects nothing. Whatever the outcome, no failure in this step can fail a run that
+already produced valid performance artifacts.
 
 ## Requirements
 

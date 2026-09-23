@@ -20,8 +20,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from enum import Enum
+from pathlib import Path
 from typing import Final
 
+import msgspec
 from inference_endpoint.async_utils.transport.zmq.pubsub import (
     ZmqMessageSubscriber,
 )
@@ -33,8 +35,11 @@ from inference_endpoint.core.record import (
     SessionEventType,
 )
 from inference_endpoint.metrics.steady_state_diagnostics import (
+    DEFAULT_COV_BOUNDS,
     SuperPassCollector,
     SuperPassRollup,
+    analyse,
+    render_text,
 )
 
 from .metrics_table import (
@@ -140,6 +145,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         shutdown_event: asyncio.Event | None = None,
         drain_timeout_s: float | None = None,
         steady_state_superpass_size: int | None = None,
+        steady_state_out: Path | None = None,
         **kwargs,
     ):
         # drain_timeout_s is injected (not derived) because the right
@@ -194,6 +200,10 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             if steady_state_superpass_size
             else None
         )
+        self._steady_state_superpass_size = steady_state_superpass_size
+        # Absolute path, injected rather than derived from the metrics output
+        # dir: the verdict belongs beside the report, not under metrics/.
+        self._steady_state_out = steady_state_out
 
         self._table = MetricsTable(self._registry)
         self._register_triggers(streaming)
@@ -504,6 +514,9 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     MetricCounterKey.LEGACY_LOADGEN_WINDOW_DURATION_NS.value,
                     table.total_loadgen_window_ns,
                 )
+                # After the flush: TPOT token counts land there, so the series
+                # is only complete once the drain is done.
+                self._write_steady_state()
                 await self._publisher.publish_final(
                     registry,
                     n_pending_tasks=n_pending,
@@ -522,6 +535,33 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                         "metrics: publisher.aclose failed during ENDED finalize"
                     )
                 self._finalize()
+
+    def _write_steady_state(self) -> None:
+        """Analyse the collected series and write the verdict beside the report.
+
+        Best-effort by design: this runs in the same breath as ``publish_final``,
+        and the final snapshot is the Report's primary source. No detector or IO
+        failure here may cost the run its snapshot, so everything is contained.
+        """
+        collector = self._collector
+        out = self._steady_state_out
+        if collector is None or out is None:
+            return
+        try:
+            result = analyse(
+                collector.series(),
+                superpass_size=self._steady_state_superpass_size or 0,
+            )
+            # A plain write suffices: this runs before publish_final, and the
+            # parent only reads the verdict once the final snapshot has landed,
+            # so no reader can observe the file mid-write.
+            # One bounds value feeds both artifacts, so the table header in the
+            # text render always describes the numbers beside it.
+            out.write_bytes(msgspec.json.format(msgspec.json.encode(result)))
+            out.with_suffix(".txt").write_text(render_text(result, DEFAULT_COV_BOUNDS))
+            logger.info("Steady-state verdict written to %s", out)
+        except Exception:  # noqa: BLE001 — best-effort; never fail the run.
+            logger.exception("metrics: steady-state detection failed")
 
     # ------------------------------------------------------------------
     # Lifecycle

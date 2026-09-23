@@ -46,17 +46,8 @@ class TestSteadyStateConfig:
 
 
 class TestSteadyStateTimeout:
-    def test_default_is_ten_minutes(self):
-        """Detection sits between the metrics drain and the report, so this
-        budget is wall-clock the report waits for. Measured at 94s over a 1.0GB
-        event log (~57k samples), so this is several times the observed cost
-        without leaving a stalled child able to hold a finished run for half an
-        hour."""
-        assert Timeouts().steady_state_timeout_s == 600.0
-
-    def test_none_means_unlimited(self):
-        assert Timeouts(steady_state_timeout_s=None).steady_state_timeout_s is None
-
-    def test_must_be_positive(self):
-        with pytest.raises(ValidationError):
-            Timeouts(steady_state_timeout_s=0)
+    def test_detection_has_no_timeout_of_its_own(self):
+        """Detection runs inside the metrics aggregator, which the metrics
+        drain budget already bounds. A second deadline over the same work could
+        only contradict the first."""
+        assert not any("steady_state" in name for name in Timeouts.model_fields)

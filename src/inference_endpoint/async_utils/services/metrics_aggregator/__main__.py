@@ -212,11 +212,43 @@ async def main() -> None:
         default=False,
         help="Compute MLPerf early-stopping percentile estimates for TTFT/TPOT/latency.",
     )
+    parser.add_argument(
+        "--steady-state-superpass-size",
+        type=int,
+        default=None,
+        help=(
+            "Samples per super-pass. Enables steady-state collection; the size "
+            "depends on the dataset, which only the parent process knows."
+        ),
+    )
+    parser.add_argument(
+        "--steady-state-out",
+        type=Path,
+        default=None,
+        help=(
+            "Where to write the steady-state verdict (JSON, plus a .txt render "
+            "beside it). Absolute: the verdict belongs beside the report, not "
+            "under the metrics output dir."
+        ),
+    )
     args = parser.parse_args()
     setup_logging(level="INFO")
 
     if args.tokenizer_workers < 0:
         raise SystemExit("FATAL: --tokenizer-workers must be >= 0")
+
+    # Either both or neither: a size with nowhere to write computes a verdict
+    # that is thrown away, and a path with no size never produces one.
+    if (args.steady_state_superpass_size is None) != (args.steady_state_out is None):
+        raise SystemExit(
+            "FATAL: --steady-state-superpass-size and --steady-state-out must "
+            "be given together"
+        )
+    if (
+        args.steady_state_superpass_size is not None
+        and args.steady_state_superpass_size <= 0
+    ):
+        raise SystemExit("FATAL: --steady-state-superpass-size must be > 0")
 
     # The parent owns directory setup — `commands/benchmark/execute.py`
     # creates `<report_dir>/metrics/` and validates it before launching
@@ -282,6 +314,8 @@ async def main() -> None:
                 streaming=args.streaming,
                 shutdown_event=shutdown_event,
                 drain_timeout_s=args.drain_timeout,
+                steady_state_superpass_size=args.steady_state_superpass_size,
+                steady_state_out=args.steady_state_out,
             )
             aggregator.start()
 

@@ -103,6 +103,8 @@ def _build_aggregator_args(
     drain_timeout_s: float | None,
     tokenizer_workers: int,
     early_stopping: bool,
+    steady_state_superpass_size: int | None,
+    steady_state_out: Path | None,
 ) -> list[str]:
     """CLI args for the metrics_aggregator subprocess."""
     args: list[str] = [
@@ -124,6 +126,15 @@ def _build_aggregator_args(
     if drain_timeout_s is not None:
         args.extend(["--drain-timeout", str(drain_timeout_s)])
     args.extend(["--tokenizer-workers", str(tokenizer_workers)])
+    if steady_state_superpass_size is not None and steady_state_out is not None:
+        args.extend(
+            [
+                "--steady-state-superpass-size",
+                str(steady_state_superpass_size),
+                "--steady-state-out",
+                str(steady_state_out),
+            ]
+        )
     return args
 
 
@@ -199,6 +210,11 @@ class MetricsPipeline:
     ``event_log_dir`` is on tmpfs (salvaged then removed by the caller);
     ``metrics_output_dir`` is on disk under the report dir (holds
     ``final_snapshot.json`` — the primary Report source) and is never removed here.
+
+    ``steady_state_plan`` is the ``(superpass_size, verdict_path)`` the aggregator
+    needs to roll up super-passes during the run, or None to leave that off. It is
+    passed in rather than read from the config because the size comes from the
+    loaded dataset, which the config does not know.
     """
 
     def __init__(
@@ -210,12 +226,14 @@ class MetricsPipeline:
         event_log_dir: Path,
         metrics_output_dir: Path,
         loop: asyncio.AbstractEventLoop,
+        steady_state_plan: tuple[int, Path] | None = None,
     ) -> None:
         self._config = config
         self._tokenizer_name = tokenizer_name
         self._enable_streaming = enable_streaming
         self._event_log_dir = event_log_dir
         self._metrics_output_dir = metrics_output_dir
+        self._steady_state_plan = steady_state_plan
         self._loop = loop
 
         self._stack: contextlib.ExitStack | None = None
@@ -295,6 +313,12 @@ class MetricsPipeline:
                 drain_timeout_s=timeouts.metrics_drain_timeout_s,
                 tokenizer_workers=self._config.settings.metrics_tokenizer_workers,
                 early_stopping=self._config.settings.early_stopping.enabled,
+                steady_state_superpass_size=(
+                    self._steady_state_plan[0] if self._steady_state_plan else None
+                ),
+                steady_state_out=(
+                    self._steady_state_plan[1] if self._steady_state_plan else None
+                ),
             )
             event_logger_args = _build_event_logger_args(
                 event_log_dir=self._event_log_dir,

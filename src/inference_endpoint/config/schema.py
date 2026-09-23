@@ -851,15 +851,6 @@ class Timeouts(WithUpdatesMixin, BaseModel):
         gt=0,
         description="Metrics drain seconds (None = unlimited).",
     )
-    steady_state_timeout_s: float | None = Field(
-        600.0,
-        gt=0,
-        description=(
-            "Post-run steady-state detection seconds (None = unlimited). "
-            "Detection runs before the report, so this is wall-clock the "
-            "report waits for; raise it for very large event logs."
-        ),
-    )
 
 
 class ProfilerEngine(str, Enum):
@@ -953,21 +944,20 @@ class EarlyStoppingConfig(BaseModel):
 
 
 class SteadyStateConfig(BaseModel):
-    """Post-run steady-state detection (off by default, opt-in).
+    """Steady-state detection (off by default, opt-in).
 
-    After a run finishes, the detector reconstructs per-super-pass TTFT/TPOT
-    from ``events.jsonl`` and writes ``steady_state.json`` and
-    ``steady_state.txt`` beside the report. It never runs for accuracy-only
-    runs, for runs that did not complete, or for load patterns the detector
-    marks unsupported.
+    The metrics aggregator rolls per-super-pass TTFT/TPOT up as the run happens,
+    then writes ``steady_state.json`` and ``steady_state.txt`` beside the report
+    once its token drain completes. It never runs for accuracy-only runs or for
+    load patterns the detector marks unsupported, and a verdict from a run that
+    did not complete is withdrawn.
 
     The steady-window headline is attached to the report, so it appears in
     ``performance/result_summary.json``, ``report.txt``, and the console
-    summary. The detector's full diagnostics stay in ``steady_state.json``.
+    summary. The full diagnostics stay in ``steady_state.json``.
 
     Opt-in and use at your own risk. The detector has been validated against a
     small set of workloads; on anything else the verdict is yours to interpret.
-    It also tokenizes every response, which is not free.
     See ``docs/steady_state_diagnostics.md``.
     """
 
@@ -977,9 +967,9 @@ class SteadyStateConfig(BaseModel):
         bool,
         cyclopts.Parameter(
             alias="--steady-state",
-            help="Run post-run steady-state detection (unvalidated for most workloads)",
+            help="Detect the run's steady-state window (unvalidated for most workloads)",
         ),
-    ] = Field(False, description="Post-run steady-state detection (default off)")
+    ] = Field(False, description="Steady-state detection (default off)")
 
 
 @cyclopts.Parameter(name="*")
@@ -1003,7 +993,7 @@ class Settings(WithUpdatesMixin, BaseModel):
     )
     steady_state: SteadyStateConfig = Field(
         default_factory=SteadyStateConfig,
-        description="Post-run steady-state detection (off by default; enabled: true opts in)",
+        description="Steady-state detection (off by default; enabled: true opts in)",
     )
     metrics_tokenizer_workers: Annotated[
         int,
