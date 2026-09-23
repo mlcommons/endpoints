@@ -1,9 +1,8 @@
-# `steady_state_diagnostics.py`
+# `steady_state_diagnostics`
 
-Post-hoc **steady-state / drift diagnostics** for a benchmark run's `events.jsonl`.
-Self-contained (no `inference_endpoint` import) — runs anywhere with a tokenizer via
-`uv`. The full methodology lives in
-[`docs/steady-state-detection.md`](../docs/steady-state-detection.md); this is the
+Post-hoc **steady-state / drift diagnostics** for a benchmark run's `events.jsonl`,
+at `src/inference_endpoint/metrics/steady_state_diagnostics.py`. The full methodology
+lives in [`steady-state-detection.md`](steady-state-detection.md); this is the
 operator's quick reference.
 
 ## What it does
@@ -40,14 +39,15 @@ sidecar `config.yaml` + `run_meta.json` (model → tokenizer, dataset size, load
 profile):
 
 ```bash
-uv run scripts/steady_state_diagnostics.py <run_dir>/
+uv run python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>/
 ```
 
 **One flag** — a bare `events.jsonl` with no sidecar; `--model` drives the built-in
 model→tokenizer registry and the workload profile:
 
 ```bash
-uv run scripts/steady_state_diagnostics.py events.jsonl --model kimi-k3
+uv run python -m inference_endpoint.metrics.steady_state_diagnostics events.jsonl \
+  --model kimi-k3
 ```
 
 Everything is auto-resolved from the run's config + a **workload profile**

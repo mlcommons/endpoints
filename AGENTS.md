@@ -243,7 +243,8 @@ src/inference_endpoint/
 │   ├── report.py              # Report.from_snapshot(MetricsSnapshot); display + JSON serialization
 │   ├── metric.py              # Metric types (Throughput, etc.)
 │   ├── early_stopping.py      # MLPerf LoadGen early-stopping percentile estimates (pure math; see docs/early_stopping.md)
-│   └── results_plots.py       # Standardized run-artifact plots (matplotlib-guarded); CLI: scripts/plot_results.py
+│   ├── results_plots.py       # Standardized run-artifact plots (matplotlib-guarded); CLI: scripts/plot_results.py
+│   └── steady_state_diagnostics.py  # Steady-window detector over events.jsonl (standalone: python -m ...; see docs/steady_state_diagnostics.md)
 ├── config/
 │   ├── schema.py              # Declared YAML/CLI surface (pydantic): settings incl. Timeouts, workload (model_params/datasets), roots + audit: block
 │   ├── runtime_settings.py    # RuntimeSettings + SampleOrderSpec dataclasses

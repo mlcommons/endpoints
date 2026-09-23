@@ -1,18 +1,12 @@
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["transformers>=4.40", "pyyaml>=6.0"]
-# ///
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Steady-state / drift diagnostics from a benchmark run's ``events.jsonl``.
 
-Self-contained: no ``inference_endpoint`` import, so it runs anywhere with just a
-tokenizer available (``uv run scripts/steady_state_diagnostics.py ...``). The event
-wire shapes it parses are defined by the product's ``core/record.py`` (event names,
-``EventRecord`` fields) and ``core/types.py`` (``TextModelOutput`` array layout); the
-parse here mirrors them and is pinned by tests/unit/scripts/test_steady_state_diagnostics.py.
+Parses the event log itself: the wire shapes are defined by the product's
+``core/record.py`` (event names, ``EventRecord`` fields) and ``core/types.py``
+(``TextModelOutput`` array layout); the parse here mirrors them and is pinned by
+tests/unit/metrics/test_steady_state_diagnostics.py.
 
 What it reconstructs (per performance-tracked sample):
   - ttft_ns = recv_first.ts - issued.ts
@@ -46,8 +40,9 @@ end-to-end latency are diagnostic too (latency's variation tracks the OSL mix).
 
 usage (auto-detects tokenizer, dataset size, and workload profile from the run's
 config.yaml / run_meta.json sidecars; see the model registry + PROFILES below):
-  uv run scripts/steady_state_diagnostics.py <run_dir>                 # 0 flags
-  uv run scripts/steady_state_diagnostics.py <events.jsonl> --model kimi-k3   # 1 flag
+  python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>       # 0 flags
+  python -m inference_endpoint.metrics.steady_state_diagnostics <events.jsonl> \
+      --model kimi-k3                                                          # 1 flag
 Every derived setting has an explicit override (--tokenizer, --dataset-size,
 --superpass-size, --profile, --cov-bounds, --window-sizes, --warmup, --json, ...).
 """
@@ -65,6 +60,7 @@ from statistics import NormalDist, median, pstdev
 from typing import Literal, NamedTuple, TypedDict
 
 import yaml
+from transformers import AutoTokenizer
 
 # --------------------------------------------------------------------------- #
 # Event wire constants (mirror core/record.py category.value topics)
@@ -1790,8 +1786,6 @@ def render_text(result: DiagnosticsResult, cov_bounds: Sequence[float]) -> str:
 def _make_token_counter(
     tokenizer_id: str, trust_remote_code: bool = False
 ) -> Callable[[list[str]], list[int]]:
-    from transformers import AutoTokenizer
-
     tok = AutoTokenizer.from_pretrained(
         tokenizer_id, trust_remote_code=trust_remote_code
     )
@@ -1950,11 +1944,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if profile.metric == "natl":
         sp_traj = args.superpass_size or profile.superpass_size or 32
         pairs = build_trajectory_natl(events, count_tokens, flush)
-        result = build_natl_result(pairs, sp_traj, tuple(cov_bounds))
-        print(render_natl(result))
+        natl = build_natl_result(pairs, sp_traj, tuple(cov_bounds))
+        print(render_natl(natl))
         if args.json_out:
             with open(args.json_out, "w") as fh:
-                json.dump(result, fh, indent=2)
+                json.dump(natl, fh, indent=2)
             print(f"wrote {args.json_out}", file=sys.stderr)
         print(_agentic_warning())
         return 0

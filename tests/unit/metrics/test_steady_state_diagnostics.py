@@ -1,37 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for scripts/steady_state_diagnostics.py.
+"""Tests for ``inference_endpoint.metrics.steady_state_diagnostics``.
 
-The script is self-contained (no ``inference_endpoint`` import), so these tests pin
-everything it owns: the plain-JSON event parse (wire shapes referenced from
-core/record.py + core/types.py), super-pass bucketing, TTFT/TPOT reconstruction via an
-injected token counter, the trend-detection algorithms, and the CoV table.
+Pins everything the detector owns: the plain-JSON event parse (wire shapes
+referenced from core/record.py + core/types.py), super-pass bucketing, TTFT/TPOT
+reconstruction via an injected token counter, the trend-detection algorithms, and
+the CoV table.
 """
 
-import importlib.util
 import json
-import sys
-from pathlib import Path
 
 import pytest
+from inference_endpoint.metrics import steady_state_diagnostics as mod
 
 pytestmark = pytest.mark.unit
-
-
-def _load_script():
-    spec = importlib.util.spec_from_file_location(
-        "steady_state_diagnostics",
-        Path("scripts/steady_state_diagnostics.py"),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    # Register before exec so dataclass field annotations (PEP 563 strings) resolve.
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-mod = _load_script()
 
 
 def _ev(event_type, ts, uuid="", data=None):
