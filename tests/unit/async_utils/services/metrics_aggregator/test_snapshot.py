@@ -27,6 +27,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     MetricsSnapshotCodec,
     SeriesStat,
     SessionState,
+    snapshot_to_dict,
 )
 from inference_endpoint.core.record import TOPIC_FRAME_SIZE
 
@@ -116,6 +117,47 @@ class TestMetricsSnapshot:
         assert isinstance(decoded.metrics[1], SeriesStat)
         assert decoded.metrics[0].name == "c1"
         assert decoded.metrics[1].name == "s1"
+
+    def test_steady_state_survives_the_wire_and_the_dict_form(self):
+        verdict = {
+            "found": True,
+            "window": {"sp_lo": 0, "sp_hi": 4, "start_ns": 1, "end_ns": 2},
+            "tps": {"system": 1.5, "per_user": 0.25},
+            "drifting_up": ["ttft_p50"],
+        }
+        snap = MetricsSnapshot(
+            counter=3,
+            timestamp_ns=7,
+            state=SessionState.COMPLETE,
+            n_pending_tasks=0,
+            metrics=[],
+            steady_state=verdict,
+        )
+        codec = MetricsSnapshotCodec()
+        _, payload = codec.encode(snap)
+        assert codec.decode(payload).steady_state == verdict
+        assert snapshot_to_dict(snap)["steady_state"] == verdict
+
+    def test_steady_state_defaults_to_none_for_older_frames(self):
+        """The field is appended, so a frame without it still decodes."""
+        codec = MetricsSnapshotCodec()
+        payload = msgspec.msgpack.encode([4, 8, "live", 0, []])
+        assert codec.decode(payload).steady_state is None
+
+    def test_non_finite_floats_inside_the_verdict_are_scrubbed(self):
+        """Without this, json.dumps(allow_nan=False) costs the run its snapshot."""
+        snap = MetricsSnapshot(
+            counter=5,
+            timestamp_ns=9,
+            state=SessionState.COMPLETE,
+            n_pending_tasks=0,
+            metrics=[],
+            steady_state={"tps": {"system": float("nan")}, "ci": [float("inf"), 1.0]},
+        )
+        assert snapshot_to_dict(snap)["steady_state"] == {
+            "tps": {"system": None},
+            "ci": [None, 1.0],
+        }
 
     def test_on_decode_error_drops_malformed(self):
         codec = MetricsSnapshotCodec()

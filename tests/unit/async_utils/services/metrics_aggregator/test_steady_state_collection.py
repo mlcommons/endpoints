@@ -336,3 +336,90 @@ class TestCollectionGate:
         ]
         collector = await _collect(tmp_path, records, "ss_size")
         assert collector.superpass_size == 3
+
+
+@pytest.mark.unit
+class TestVerdictOnTheFinalSnapshot:
+    """The verdict rides the terminal snapshot, and only when it is deserved."""
+
+    @staticmethod
+    async def _finalize(tmp_path, socket_name, *, extra=()):
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, publisher = make_aggregator(
+                ctx,
+                loop,
+                socket_name,
+                tokenizer=MockBatchTokenizer(),
+                steady_state_profile="concurrency",
+            )
+            try:
+                await agg.process(
+                    [
+                        *_event_stream(),
+                        *extra,
+                        session_event(SessionEventType.ENDED, ts=10**9),
+                    ]
+                )
+            finally:
+                agg.close()
+            return publisher.publish_final.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_verdict_reaches_publish_final(self, tmp_path):
+        kwargs = await self._finalize(tmp_path, "ss_final")
+        verdict = kwargs["steady_state"]
+        assert verdict is not None
+        assert verdict["superpass_size"] == SUPERPASS
+        assert verdict["n_super_passes"] > 0
+
+    @pytest.mark.asyncio
+    async def test_no_verdict_for_an_interrupted_run(self, tmp_path):
+        kwargs = await self._finalize(
+            tmp_path,
+            "ss_final_int",
+            extra=[session_event(SessionEventType.INTERRUPTED, ts=10**9 - 1)],
+        )
+        assert kwargs["steady_state"] is None
+
+    @pytest.mark.asyncio
+    async def test_no_verdict_when_tokenizations_did_not_drain(self, tmp_path):
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, _ = make_aggregator(
+                ctx,
+                loop,
+                "ss_final_pending",
+                tokenizer=MockBatchTokenizer(),
+                steady_state_profile="concurrency",
+            )
+            try:
+                await agg.process(_event_stream())
+                assert agg._steady_state_verdict(n_pending=3) is None
+                assert agg._steady_state_verdict(n_pending=0) is not None
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
+    async def test_a_detector_failure_never_costs_the_run_its_snapshot(
+        self, tmp_path, monkeypatch
+    ):
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, _ = make_aggregator(
+                ctx,
+                loop,
+                "ss_final_boom",
+                tokenizer=MockBatchTokenizer(),
+                steady_state_profile="concurrency",
+            )
+            try:
+                await agg.process(_event_stream())
+                monkeypatch.setattr(
+                    "inference_endpoint.async_utils.services.metrics_aggregator"
+                    ".aggregator.compute_steady_state_metrics",
+                    lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+                )
+                assert agg._steady_state_verdict(n_pending=0) is None
+            finally:
+                agg.close()

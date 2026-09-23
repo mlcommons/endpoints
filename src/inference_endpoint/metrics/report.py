@@ -255,6 +255,12 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # See mlcommons/endpoints#500.
     output_sequence_lengths_full_run: dict[str, Any] | None = None
 
+    # Steady-window verdict, as produced by ``metrics/steady_state_diagnostics.py``
+    # and carried on the metrics snapshot. None when steady-state collection was
+    # off or the run was not described by the series it collected. Kept in
+    # ``to_json`` (unlike ``accuracy``), so it reaches result_summary.json.
+    steady_state: dict[str, Any] | None = None
+
     @property
     def n_samples_succeeded(self) -> int:
         return max(0, self.n_samples_completed - self.n_samples_failed)
@@ -420,6 +426,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             e2e_avg_interactivity=e2e_avg_interactivity,
             finish_reason_counts=finish_reason_counts,
             run_config=run_config,
+            steady_state=snap.get("steady_state"),
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
@@ -436,6 +443,42 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             with Path(save_to).open("wb") as f:
                 f.write(json_bytes)
         return json_bytes
+
+    def _display_steady_state(self, fn: Callable[[str], None], newline: str) -> None:
+        """Render the steady-window headline; silent when no verdict was produced.
+
+        The full verdict -- histograms, CoV table, trend detail -- stays in
+        result_summary.json; only the numbers a reader acts on are printed.
+        """
+        ss = self.steady_state
+        if not ss:
+            return
+        if not ss.get("found"):
+            fn(f"Steady state: not found ({ss.get('reason')}){newline}")
+            return
+        window, tps = ss.get("window") or {}, ss.get("tps") or {}
+        held_s = (window.get("end_ns", 0) - window.get("start_ns", 0)) / 1e9
+        fn(
+            f"Steady state: super-passes {window.get('sp_lo')}..."
+            f"{window.get('sp_hi', 0) - 1} (post-warmup), "
+            f"{window.get('n_samples')} samples over {held_s:.0f}s{newline}"
+        )
+        fn(
+            f"  Steady TPS: {tps.get('system', 0.0):.2f} system, "
+            f"{tps.get('per_user', 0.0):.2f} per user{newline}"
+        )
+        if ss.get("drifting_up"):
+            fn(
+                f"  WARNING: {', '.join(ss['drifting_up'])} drifting up over the "
+                f"rest of the run{newline}"
+            )
+        if (ss.get("anomaly") or {}).get("detected"):
+            fn(
+                f"  ANOMALY: level shift at super-pass "
+                f"{ss['anomaly'].get('change_point_sp')}, TPOT "
+                f"{ss['anomaly'].get('delta_pct', 0.0):+.1f}% toward end of run"
+                f"{newline}"
+            )
 
     def display(
         self,
@@ -491,6 +534,8 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             fn(f"E2E average interactivity: {interactivity:.2f} tokens/s{newline}")
         else:
             fn(f"E2E average interactivity: N/A{newline}")
+
+        self._display_steady_state(fn, newline)
 
         if self.accuracy:
             fn(f"Accuracy:{newline}")

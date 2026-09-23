@@ -166,6 +166,12 @@ class MetricsSnapshot(
         metrics:          Tagged union of ``CounterStat`` and ``SeriesStat``,
                           ordered counters-first then series, registration
                           order within each.
+        steady_state:     Steady-window verdict from
+                          ``metrics/steady_state_diagnostics.py``, computed on
+                          the terminal snapshot when collection was enabled and
+                          the run is described by its series. None otherwise.
+
+    ``array_like=True`` makes field order the wire format: append, never insert.
     """
 
     counter: int
@@ -173,6 +179,7 @@ class MetricsSnapshot(
     state: SessionState
     n_pending_tasks: int
     metrics: list[MetricStat]
+    steady_state: dict | None = None
 
 
 # 4-byte topic to match TOPIC_FRAME_SIZE-prefix protocol used by the
@@ -215,6 +222,21 @@ def _scrub_nonfinite(v):
     return v
 
 
+def _scrub_deep(value):
+    """``_scrub_nonfinite`` through a nested structure.
+
+    The steady-state verdict is the one snapshot field this project does not
+    build field by field, so a single non-finite float anywhere inside it would
+    make ``json.dumps(..., allow_nan=False)`` raise and cost the run the
+    ``final_snapshot.json`` its Report is built from.
+    """
+    if isinstance(value, dict):
+        return {k: _scrub_deep(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_scrub_deep(v) for v in value]
+    return _scrub_nonfinite(value)
+
+
 def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
     """Convert a wire ``MetricsSnapshot`` to its dict form.
 
@@ -229,6 +251,7 @@ def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
         "state": snap.state.value,
         "n_pending_tasks": snap.n_pending_tasks,
         "metrics": [_metric_to_dict(m) for m in snap.metrics],
+        "steady_state": _scrub_deep(snap.steady_state),
     }
 
 

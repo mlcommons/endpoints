@@ -931,3 +931,62 @@ def test_scrub_nonfinite_round_trip_yields_none():
     json.dumps(d, allow_nan=False)
     # Sanity: original NaN was indeed non-finite.
     assert not math.isfinite(float("nan"))
+
+
+@pytest.mark.unit
+class TestSteadyStateOnTheReport:
+    """The verdict rides the snapshot into result_summary.json and report.txt."""
+
+    VERDICT = {
+        "found": True,
+        "reason": None,
+        "superpass_size": 500,
+        "n_super_passes": 12,
+        "warmup": 1,
+        "window": {
+            "sp_lo": 1,
+            "sp_hi": 9,
+            "n_super_passes": 8,
+            "n_samples": 4000,
+            "start_ns": 0,
+            "end_ns": 700_000_000_000,
+        },
+        "tps": {"system": 1234.5, "per_user": 42.0},
+        "drifting_up": ["ttft_p50"],
+        "anomaly": {"detected": True, "change_point_sp": 7, "delta_pct": 12.5},
+    }
+
+    def _report(self, verdict):
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(
+                state=SessionState.COMPLETE, n_pending_tasks=0, steady_state=verdict
+            )
+        )
+        return Report.from_snapshot(snap)
+
+    def test_absent_by_default(self):
+        assert self._report(None).steady_state is None
+
+    def test_read_from_the_snapshot_and_kept_in_to_json(self):
+        report = self._report(self.VERDICT)
+        assert report.steady_state == self.VERDICT
+        assert json.loads(report.to_json())["steady_state"] == self.VERDICT
+
+    def test_display_renders_the_headline(self):
+        lines: list[str] = []
+        self._report(self.VERDICT).display(lines.append)
+        text = "".join(lines)
+        assert "Steady state: super-passes 1...8 (post-warmup), 4000 samples" in text
+        assert "over 700s" in text
+        assert "Steady TPS: 1234.50 system, 42.00 per user" in text
+        assert "ttft_p50 drifting up" in text
+        assert "ANOMALY: level shift at super-pass 7, TPOT +12.5%" in text
+
+    def test_display_reports_a_missing_window(self):
+        lines: list[str] = []
+        verdict = {"found": False, "reason": "no admissible steady plateau"}
+        self._report(verdict).display(lines.append)
+        assert "Steady state: not found (no admissible steady plateau)" in "".join(
+            lines
+        )

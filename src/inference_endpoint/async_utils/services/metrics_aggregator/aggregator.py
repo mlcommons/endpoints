@@ -37,6 +37,7 @@ from inference_endpoint.metrics.steady_state_diagnostics import (
     PERFORMANCE_PHASE,
     PROFILES,
     SuperPassCollector,
+    compute_steady_state_metrics,
 )
 
 from .metrics_table import (
@@ -528,6 +529,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     registry,
                     n_pending_tasks=n_pending,
                     interrupted=self._interrupted,
+                    steady_state=self._steady_state_verdict(n_pending),
                 )
             finally:
                 # The aggregator MUST close the publisher and signal shutdown even
@@ -542,6 +544,37 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                         "metrics: publisher.aclose failed during ENDED finalize"
                     )
                 self._finalize()
+
+    def _steady_state_verdict(self, n_pending: int) -> dict | None:
+        """The verdict for the terminal snapshot, or None if it is not deserved.
+
+        Only computed for a run the collected series actually describes: an
+        interrupted run is truncated, and an incomplete drain means token counts
+        are missing, so TPOT and OSL would be wrong.
+
+        Runs before the snapshot is built so one atomic write carries it, which
+        costs the write the analysis time (seconds, on a multi-million-sample
+        run) -- inside the drain window ``metrics_drain_timeout_s`` already
+        bounds. Contained: no failure here may cost the run its snapshot.
+        """
+        collector, profile = self._collector, self._steady_state_profile
+        if collector is None or profile is None:
+            return None
+        if self._interrupted or n_pending > 0 or not collector.superpass_size:
+            logger.info("Steady state not computed: the run is not described by it")
+            return None
+        try:
+            return dict(
+                compute_steady_state_metrics(
+                    collector.series(),
+                    superpass_size=collector.superpass_size,
+                    cov_bounds=profile.cov_bounds,
+                    warmup_driver=profile.warmup_driver,
+                )
+            )
+        except Exception:  # noqa: BLE001 — best-effort; never fail the run.
+            logger.exception("metrics: steady-state detection failed")
+            return None
 
     # ------------------------------------------------------------------
     # Lifecycle
