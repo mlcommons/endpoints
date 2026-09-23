@@ -23,11 +23,11 @@ Place the dataset under `examples/10_Agentic_Inference/datasets/` or point the Y
 
 The Agentic Inference benchmark can support any model. The current iteration of the MLPerf Inference benchmark accepts official submissions for the following three models:
 
-| Model                  | Architecture                   | Parameters               | Context          |
-| ---------------------- | ------------------------------ | ------------------------ | ---------------- |
-| Kimi K3                | MoE + KDA/Gated MLA            | 2.8T total / 104B active | 1,048,576 tokens |
-| Qwen3.6-35B-A3B        | MoE + Gated DeltaNet/Attention | 35B total / 3B active    | 262,144 tokens   |
-| DeepSeek-V4-Pro (DSV4) | MoE + hybrid CSA/HCA + mHC     | 1.6T total / 49B active  | 1,048,576 tokens |
+| Model               | Architecture                    | Parameters                                    | Context          |
+| ------------------- | ------------------------------- | --------------------------------------------- | ---------------- |
+| Kimi K3             | MoE + KDA/Gated MLA             | 2.8T total / 104B active                      | 1,048,576 tokens |
+| Qwen3.6-35B-A3B     | MoE + Gated DeltaNet/Attention  | 35B total / 3B active                         | 262,144 tokens   |
+| DeepSeek-V4.1-Flash | Multimodal MoE + CED/CSA2 + mHC | 552B backbone / 8B prefill, 16B decode active | 1,048,576 tokens |
 
 Reference implementations and runnable examples for all three models are provided below.
 
@@ -35,7 +35,7 @@ Reference implementations and runnable examples for all three models are provide
 
 To run the benchmark, expose one of the supported models through an OpenAI-compatible API endpoint. The serving framework is not prescribed: submitters may use vLLM, SGLang, TensorRT-LLM, or another serving framework as long as it provides an OpenAI-compatible endpoint.
 
-The following SGLang commands are reference examples. Adjust model paths, parallelism, ports, and memory settings for your hardware.
+The following commands are reference examples. Adjust model paths, parallelism, ports, and memory settings for your hardware.
 
 ### Kimi K3
 
@@ -69,27 +69,35 @@ sglang serve \
   --mem-fraction-static 0.95
 ```
 
-### DSV4
+### DeepSeek-V4.1-Flash
 
-See the [SGLang DeepSeek-V4 recipe](https://docs.sglang.io/cookbook/autoregressive/DeepSeek/DeepSeek-V4) for hardware-specific deployment guidance.
+See the [vLLM DeepSeek-V4.1-Flash recipe](https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4.1-Flash?hardware=b200&features=tool_calling%2Creasoning%2Cspec_decoding%2Ctext_only) for hardware-specific deployment guidance.
 
 ```bash
-sglang serve \
-  --model-path deepseek-ai/DeepSeek-V4-Pro-0813 \
-  --served-model-name deepseek-ai/DeepSeek-V4-Pro-0813 \
-  --tp-size 8 \
-  --trust-remote-code \
-  --reasoning-parser deepseek-v4 \
-  --tool-call-parser deepseekv4 \
-  --host 0.0.0.0 \
-  --port 30000
+docker run --gpus all \
+  --privileged --ipc=host -p 8000:8000 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+  -e VLLM_USE_RUST_FRONTEND=1 \
+  vllm/vllm-openai:nightly deepseek-ai/DeepSeek-V4.1-Flash \
+  --tokenizer-mode deepseek_v41 \
+  --tensor-parallel-size 2 \
+  --attention-config '{"backend":"FLASHINFER_MLA_SPARSE_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}' \
+  --kv-cache-dtype fp8 \
+  --max-num-seqs 128 \
+  --engram-config '{"cpu_offload":true}' \
+  --tool-call-parser deepseek_v41 \
+  --enable-auto-tool-choice \
+  --reasoning-parser deepseek_v41 \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}' \
+  --language-model-only
 ```
 
-`--model-path` is the checkpoint loaded by the server. It can be a local path visible to the server container or a Hugging Face model ID, depending on your SGLang environment. `--served-model-name` is the OpenAI model name exposed to clients; set `model_params.name` in the YAML to the same value.
+The positional model argument is both the checkpoint loaded by vLLM and the OpenAI model name exposed to clients. Set `model_params.name` in the YAML to the same value.
 
 ## Client YAML
 
-Runnable example configs are provided for [Kimi K3](kimi_agentic_benchmark.yaml), [Qwen3.6-35B-A3B](qwen_agentic_benchmark.yaml), and [DSV4](dsv4_agentic_benchmark.yaml).
+Runnable example configs are provided for [Kimi K3](kimi_agentic_benchmark.yaml), [Qwen3.6-35B-A3B](qwen_agentic_benchmark.yaml), and [DeepSeek-V4.1-Flash](dsv4_agentic_benchmark.yaml).
 
 Some key client features specific to the Agentic Inference benchmark are described below.
 
@@ -119,7 +127,7 @@ For official submissions, submitters must set `agentic_inference.stop_issuing_on
 
 ### SWE-bench Accuracy
 
-Submitters must enable SWE-bench accuracy for official submissions. The Kimi K3, Qwen3.6-35B-A3B, and DSV4 example YAML files include the required SWE-bench accuracy dataset. The benchmark framework skips its built-in endpoint phase for the SWE-bench dataset. Instead, `SWEBenchScorer` submits the run to a native SWE-bench service. The service host owns Docker, `mini-swe-agent`, and the `swebench` evaluation harness, and it drives requests to the configured endpoint.
+Submitters must enable SWE-bench accuracy for official submissions. The Kimi K3, Qwen3.6-35B-A3B, and DeepSeek-V4.1-Flash example YAML files include the required SWE-bench accuracy dataset. The benchmark framework skips its built-in endpoint phase for the SWE-bench dataset. Instead, `SWEBenchScorer` submits the run to a native SWE-bench service. The service host owns Docker, `mini-swe-agent`, and the `swebench` evaluation harness, and it drives requests to the configured endpoint.
 
 Keep `accuracy_config.num_repeats: 1`: the scorer performs one external evaluation run per benchmark. Optional `accuracy_config.extras.subset` and `split` are used consistently for dataset loading, preflight, and scoring.
 
@@ -139,7 +147,7 @@ uv run --project src/inference_endpoint/evaluation/swebench_service \
 
 #### Build ARM64 SWE-bench Images
 
-[`build_and_push.py`](build_and_push.py) builds and pushes the native ARM64 images for the first 200 pinned SWE-bench Verified tasks. The script validates the task list, applies the required ARM compatibility fixes, and skips images that already exist in the destination registry.
+`[build_and_push.py](build_and_push.py)` builds and pushes the native ARM64 images for the first 200 pinned SWE-bench Verified tasks. The script validates the task list, applies the required ARM compatibility fixes, and skips images that already exist in the destination registry.
 
 Run it on a native ARM64 machine with Docker after logging in to a registry where you have push access:
 
@@ -175,7 +183,7 @@ Update the first `datasets` entry (`name` and `path`), `model_params.name`, and 
 ```bash
 CONFIG=examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml
 # For Kimi, use examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml.
-# For DSV4, use examples/10_Agentic_Inference/dsv4_agentic_benchmark.yaml.
+# For DeepSeek-V4.1-Flash, use examples/10_Agentic_Inference/dsv4_agentic_benchmark.yaml.
 
 # PERF (default): agentic performance and inline scoring; skips SWE-bench.
 uv run inference-endpoint benchmark from-config --config "$CONFIG"
@@ -215,7 +223,7 @@ For Qwen3.6-35B-A3B:
 - `max_new_tokens: 8192`
 - `chat_template_kwargs.preserve_thinking: true`
 
-For DSV4:
+For DeepSeek-V4.1-Flash:
 
 - `temperature: 1.0`
 - `top_k: 0`
@@ -224,11 +232,10 @@ For DSV4:
 - `streaming: "on"`
 - `chat_template_kwargs.thinking: true`
 - `chat_template_kwargs.reasoning_effort: max`
-- `chat_template_kwargs.preserve_thinking: true`
 
 Any sampling parameter or thinking flag not listed above for the selected model must be omitted. Submitters must not introduce additional sampling parameters or thinking flags.
 
-`preserve_thinking` ensures that reasoning tokens from previous turns are not stripped by the chat template before the input is sent to the inference engine. Because chat-template processing is a server-side property, the client can only request this behavior by sending the flag. Popular serving frameworks, including SGLang, vLLM, and TensorRT-LLM, honor this flag; however, each submitter is responsible for verifying that their server is compliant. The chat template must not omit reasoning tokens from any previous turn.
+For models that use `preserve_thinking`, the flag ensures that reasoning tokens from previous turns are not stripped by the chat template before the input is sent to the inference engine. Because chat-template processing is a server-side property, the client can only request this behavior by sending the flag. Popular serving frameworks, including SGLang, vLLM, and TensorRT-LLM, honor this flag; however, each submitter is responsible for verifying that their server is compliant. The chat template must not omit reasoning tokens from any previous turn.
 
 ### Dataset Size
 
@@ -245,17 +252,17 @@ For official submissions, `agentic_inference.stop_issuing_on_first_user_complete
 
 Official submissions must enable both inline accuracy and SWE-bench accuracy. Configure the performance dataset with `accuracy_config.eval_method: agentic_inference_inline`, and configure the SWE-bench accuracy dataset with `accuracy_config.eval_method: swe_bench_scorer`. For SWE-bench, `accuracy_config.extras.num_instances` must be set to `200`. When using the example `online` configs, run with `--mode both` so performance, inline accuracy, and SWE-bench accuracy are all executed.
 
-Qwen3.6-35B-A3B submissions must set `accuracy_config.extras.swebench_template: qwen_tools`. Kimi K3 submissions must omit `accuracy_config.extras.swebench_template`. The DSV4 SWE-bench template requirement is TBD.
+Qwen3.6-35B-A3B submissions must set `accuracy_config.extras.swebench_template: qwen_tools`. Kimi K3 and DeepSeek-V4.1-Flash submissions must omit `accuracy_config.extras.swebench_template`.
 
-Every Kimi K3 and Qwen3.6-35B-A3B submitted Pareto point must satisfy all of the model-specific accuracy thresholds below. For these models, SWE-bench accuracy is evaluated using mean-of-N: average one SWE-bench accuracy result from each of the [four mandatory regions](https://github.com/mlcommons/endpoints_policies/blob/main/endpoints_rules.md#54-regions-of-interest) (`N = 4`), then compare that mean with the model-specific SWE-bench threshold below. The DSV4 accuracy thresholds and SWE-bench evaluation policy are TBD.
+Every Kimi K3, Qwen3.6-35B-A3B, and DeepSeek-V4.1-Flash submitted Pareto point must satisfy all of the model-specific accuracy thresholds below. For these models, SWE-bench accuracy is evaluated using mean-of-N: average one SWE-bench accuracy result from each of the [four mandatory regions](https://github.com/mlcommons/endpoints_policies/blob/main/endpoints_rules.md#54-regions-of-interest) (`N = 4`), then compare that mean with the model-specific SWE-bench threshold below.
 
 Reference mean values are shown in parentheses.
 
-| Metric             |                  Kimi K3 |          Qwen3.6-35B-A3B | DSV4 |
-| ------------------ | -----------------------: | -----------------------: | ---: |
-| Inline accuracy    |    `>= 58.32%` (`58.9%`) |   `>= 55.86%` (`56.43%`) |  TBD |
-| OSL per-turn mean¹ | `425-520` tokens (`472`) | `344-422` tokens (`383`) |  TBD |
-| SWE-bench accuracy |    `>= 93.5%` (`94.83%`) |       `>= 69%` (`71.7%`) |  TBD |
+| Metric             | Kimi K3                  | Qwen3.6-35B-A3B          | DeepSeek-V4.1-Flash      |
+| ------------------ | ------------------------ | ------------------------ | ------------------------ |
+| Inline accuracy    | `>= 58.32%` (`58.9%`)    | `>= 55.86%` (`56.43%`)   | `>= 51.7%` (`53.3%`)     |
+| OSL per-turn mean¹ | `425-520` tokens (`472`) | `344-422` tokens (`383`) | `793-970` tokens (`882`) |
+| SWE-bench accuracy | `>= 93.5%` (`94.83%`)    | `>= 69%` (`71.7%`)       | `>= 96.4%` (`97.5%`)     |
 
 ¹ Read from `output_sequence_lengths_full_run.output_sequence_lengths.avg` (the full-run, all-turns mean), **not** the windowed `output_sequence_lengths.avg`. See [Tail Management](#tail-management).
 
@@ -275,14 +282,13 @@ Approved speculative-decoding heads:
 - [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark/tree/3c5bac301d9cf392706189d82ed947feca6c2f0f) (`3c5bac301d9cf392706189d82ed947feca6c2f0f`)
 - [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark/tree/cf6b8244620e7ea4b0651d214f28e89eac75bed6) (`cf6b8244620e7ea4b0651d214f28e89eac75bed6`)
 
-#### DSV4
+#### DeepSeek-V4.1-Flash
 
-Approved model checkpoints:
+Approved model checkpoint:
 
-- [deepseek-ai/DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813/tree/72e1d3230f6c080a530b0a1d46f8eb4602340597) (`72e1d3230f6c080a530b0a1d46f8eb4602340597`)
-- [nvidia/DeepSeek-V4-Pro-0813-NVFP4](https://huggingface.co/nvidia/DeepSeek-V4-Pro-0813-NVFP4/tree/949138637e8e8fe190335be2396af62187dc8a83) (`949138637e8e8fe190335be2396af62187dc8a83`)
+- [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
 
-Both approved DSV4 checkpoints include bundled DSpark speculative-decoding heads.
+The checkpoint includes its native DSpark speculative-decoding head.
 
 #### Qwen3.6-35B-A3B
 
