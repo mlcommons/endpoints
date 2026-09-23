@@ -1243,3 +1243,206 @@ def test_analyse_needs_no_event_log(tmp_path):
 
     assert result["n_super_passes"] == 8
     assert "steady_state" in result
+
+
+# --------------------------------------------------------------------------- #
+# SuperPassCollector — the in-process producer of the same series.
+# --------------------------------------------------------------------------- #
+
+
+def _replay_into_collector(collector, lines, count_tokens):
+    """Drive the collector the way the metrics aggregator drives it.
+
+    Mirrors the live call order: the super-pass index is read while the sample
+    row is still in flight (``TpotTrigger`` fires before the row is dropped),
+    and token counts arrive only at the drain flush, long after the sample
+    completed.
+    """
+    tracking = False
+    recv_first: dict[str, int] = {}
+    deferred: list[tuple[int, int, object]] = []
+    for line in lines:
+        rec = json.loads(line)
+        et = rec["event_type"]
+        ts = rec["timestamp_ns"]
+        uuid = rec.get("sample_uuid", "")
+        if et == "session.start_performance_tracking":
+            tracking = True
+        elif et == "session.stop_performance_tracking":
+            tracking = False
+        elif et == "sample.issued":
+            if tracking:
+                collector.on_issued(uuid, ts)
+        elif et == "sample.recv_first":
+            collector.on_recv_first(uuid, ts, rec.get("turn"))
+            recv_first.setdefault(uuid, ts)
+        elif et == "sample.complete":
+            sp_index = collector.sp_index_of(uuid)
+            first_ns = recv_first.pop(uuid, None)
+            collector.on_complete(uuid, ts)
+            if sp_index is None or first_ns is None:
+                continue
+            item = mod.tpot_tokenization_input(rec.get("data"))
+            if item is not None:
+                deferred.append((sp_index, ts - first_ns, item))
+    for sp_index, delta_ns, item in deferred:
+        (count,) = count_tokens([item])
+        if count > 0:
+            collector.add_tpot(sp_index, delta_ns / count, count)
+
+
+def _busy_event_stream():
+    """An event stream with the cases the two producers must agree on."""
+    lines = [_ev("sample.issued", 500, "untracked-before")]
+    lines.append(_ev("session.start_performance_tracking", 1000))
+    ts = 1000
+    for i in range(12):
+        uuid = f"s{i}"
+        ts += 100
+        lines.append(_ev("sample.issued", ts, uuid))
+        if i == 3:
+            # Retry: a second ISSUED must refresh the issue timestamp without
+            # opening a new bucket, and its repeated recv_first must not add a
+            # second TTFT.
+            lines.append(_ev("sample.issued", ts + 10, uuid))
+        lines.append(
+            json.dumps(
+                {
+                    "event_type": "sample.recv_first",
+                    "timestamp_ns": ts + 200,
+                    "sample_uuid": uuid,
+                    "turn": 1 if i % 4 == 0 else 2,
+                    "data": None,
+                }
+            )
+        )
+        if i == 3:
+            lines.append(_ev("sample.recv_first", ts + 250, uuid))
+        if i % 5 == 0:
+            data = ["TextModelOutput", ["a ", "b b "], ["think think "]]
+        elif i % 3 == 0:
+            data = ["TextModelOutput", "not streamed at all"]
+        else:
+            data = ["TextModelOutput", ["one ", "two three ", "four"]]
+        lines.append(_ev("sample.complete", ts + 900, uuid, data))
+    lines.append(_ev("session.stop_performance_tracking", ts + 2000))
+    lines.append(_ev("sample.issued", ts + 2100, "untracked-after"))
+    lines.append(_ev("sample.complete", ts + 2200, "untracked-after", None))
+    return lines
+
+
+def test_collector_produces_the_same_series_as_the_event_log_parse(tmp_path):
+    """The invariant the whole redesign rests on: the aggregator accumulating
+    rollups live and the standalone parse of the same run's event log must
+    reach the same series -- and therefore the same verdict."""
+    lines = _busy_event_stream()
+    path = _write_events(tmp_path, lines)
+
+    from_log = mod.build_super_pass_series(path, 4, _words)
+    collector = mod.SuperPassCollector(4)
+    _replay_into_collector(collector, lines, _words)
+
+    assert collector.series() == from_log
+
+
+def test_collector_verdict_matches_the_event_log_verdict(tmp_path):
+    """Equivalence carried all the way through the algorithm, so a schema or
+    ordering difference cannot hide behind a series comparison."""
+    lines = _busy_event_stream()
+    path = _write_events(tmp_path, lines)
+
+    collector = mod.SuperPassCollector(4)
+    _replay_into_collector(collector, lines, _words)
+
+    assert mod.analyse(
+        collector.series(), superpass_size=4, window_sizes=[2], warmup=0
+    ) == mod.run(
+        path, superpass_size=4, count_tokens=_words, window_sizes=[2], warmup=0
+    )
+
+
+def test_collector_ignores_samples_it_never_saw_issued():
+    """Events for an untracked sample carry no super-pass, so they must not
+    invent one -- the aggregator sees every sample, tracked or not."""
+    collector = mod.SuperPassCollector(4)
+
+    assert collector.sp_index_of("never-issued") is None
+    collector.on_recv_first("never-issued", 500, None)
+    collector.on_complete("never-issued", 900)
+
+    assert collector.series() == []
+
+
+def test_collector_retry_refreshes_the_issue_time_without_a_new_bucket():
+    collector = mod.SuperPassCollector(4)
+    collector.on_issued("A", 1000)
+    collector.on_issued("A", 1500)
+
+    (sp,) = collector.series()
+
+    assert sp.n_issued == 1
+    assert sp.last_issue_ns == 1500
+    assert collector.sp_index_of("A") == 0
+
+
+def test_collector_keeps_only_the_first_ttft_of_a_retried_sample():
+    collector = mod.SuperPassCollector(4)
+    collector.on_issued("A", 1000)
+    collector.on_recv_first("A", 1200, None)
+    collector.on_recv_first("A", 1900, None)
+
+    (sp,) = collector.series()
+
+    assert sp.ttft_ns == [200.0]
+    assert sp.last_event_ns == 1900
+
+
+def test_collector_excludes_the_cold_first_turn_from_warm_ttft():
+    collector = mod.SuperPassCollector(4)
+    collector.on_issued("A", 1000)
+    collector.on_recv_first("A", 1200, 1)
+    collector.on_issued("B", 1000)
+    collector.on_recv_first("B", 1300, 2)
+
+    (sp,) = collector.series()
+
+    assert sp.ttft_ns == [200.0, 300.0]
+    assert sp.ttft_warm_ns == [300.0]
+
+
+def test_collector_tpot_lands_after_the_sample_is_gone():
+    """Token counts arrive at the drain flush, by which point the row has been
+    dropped -- the super-pass index must survive in the caller's hands, not in
+    a map that grows for the whole run."""
+    collector = mod.SuperPassCollector(2)
+    collector.on_issued("A", 1000)
+    collector.on_recv_first("A", 1100, None)
+    sp_index = collector.sp_index_of("A")
+    collector.on_complete("A", 2100)
+
+    assert collector.sp_index_of("A") is None
+
+    collector.add_tpot(sp_index, 250.0, 4)
+    (sp,) = collector.series()
+
+    assert sp.tpot_ns == [250.0]
+    assert sp.out_tokens == 4
+    assert sp.latency_ns == [1100.0]
+
+
+def test_collector_window_end_never_moves_backwards():
+    """Events reach the aggregator over IPC, so a slow sample's recv_first can
+    land after a faster sibling has already completed. The super-pass window
+    end is the latest event it saw, not the last one to arrive -- letting it
+    regress would shorten the window and soften the min-duration gate."""
+    collector = mod.SuperPassCollector(4)
+    collector.on_issued("slow", 1000)
+    collector.on_issued("fast", 1000)
+    collector.on_complete("fast", 9000)
+
+    collector.on_recv_first("slow", 2000, None)
+    collector.on_complete("slow", 3000)
+
+    (sp,) = collector.series()
+
+    assert sp.last_event_ns == 9000

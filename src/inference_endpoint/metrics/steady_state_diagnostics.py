@@ -707,6 +707,100 @@ def build_super_pass_series(
     return series
 
 
+class SuperPassCollector:
+    """Accumulates the same series as :func:`build_super_pass_series`, live.
+
+    The metrics aggregator already timestamps every sample event and already
+    tokenizes each output for its TPOT trigger, so it can roll super-passes up
+    as the run happens instead of re-reading and re-tokenizing the event log
+    afterwards. Feeding both producers into :func:`analyse` keeps one algorithm
+    and one verdict schema; the standalone event-log path remains the way to
+    re-derive a verdict from an archived run.
+
+    Bucketing is by issue order, so callers must report only tracked samples --
+    an event for a sample that was never issued into a bucket is ignored.
+
+    Token counts arrive long after the sample completes, at the drain flush.
+    Callers therefore read :meth:`sp_index_of` while the sample is still in
+    flight and hand that index back to :meth:`add_tpot`, which is what keeps
+    this from holding a uuid map that grows for the length of the run.
+    """
+
+    __slots__ = ("_issue_counter", "_rows", "_series", "_superpass_size")
+
+    def __init__(self, superpass_size: int) -> None:
+        if superpass_size <= 0:
+            raise ValueError("superpass_size must be positive")
+        self._superpass_size = superpass_size
+        self._series: list[SuperPassRollup] = []
+        self._rows: dict[str, _PendingRow] = {}
+        self._issue_counter = 0
+
+    def _ensure(self, idx: int) -> SuperPassRollup:
+        while len(self._series) <= idx:
+            self._series.append(SuperPassRollup(index=len(self._series)))
+        return self._series[idx]
+
+    def on_issued(self, sample_uuid: str, ts_ns: int) -> None:
+        existing = self._rows.get(sample_uuid)
+        if existing is not None:
+            existing.issue_ns = ts_ns  # retry: refresh issue ts only
+            sp = self._series[existing.sp_index]
+            sp.last_issue_ns = max(sp.last_issue_ns, ts_ns)
+            sp.last_event_ns = max(sp.last_event_ns, ts_ns)
+            return
+        sp_idx = self._issue_counter // self._superpass_size
+        self._issue_counter += 1
+        self._rows[sample_uuid] = _PendingRow(sp_index=sp_idx, issue_ns=ts_ns)
+        sp = self._ensure(sp_idx)
+        sp.n_issued += 1
+        if sp.first_issue_ns < 0:
+            sp.first_issue_ns = ts_ns
+        sp.last_issue_ns = max(sp.last_issue_ns, ts_ns)
+        sp.last_event_ns = max(sp.last_event_ns, ts_ns)
+
+    def on_recv_first(self, sample_uuid: str, ts_ns: int, turn: int | None) -> None:
+        row = self._rows.get(sample_uuid)
+        if row is None:
+            return
+        sp = self._series[row.sp_index]
+        sp.last_event_ns = max(sp.last_event_ns, ts_ns)
+        # First recv_first only: a retried sample re-emits recv_first and must
+        # not contribute a second TTFT to the super-pass.
+        if row.recv_first_ns is not None:
+            return
+        row.recv_first_ns = ts_ns
+        ttft = float(ts_ns - row.issue_ns)
+        sp.ttft_ns.append(ttft)
+        # Warm-turn TTFT excludes the cold first turn of each agentic
+        # trajectory (turn 1 = no KV-cache hit). turn is None for single-turn
+        # workloads -> treated as warm (kept).
+        if turn is None or turn > 1:
+            sp.ttft_warm_ns.append(ttft)
+
+    def on_complete(self, sample_uuid: str, ts_ns: int) -> None:
+        row = self._rows.pop(sample_uuid, None)
+        if row is None:
+            return
+        sp = self._series[row.sp_index]
+        sp.last_event_ns = max(sp.last_event_ns, ts_ns)
+        sp.latency_ns.append(float(ts_ns - row.issue_ns))  # e2e, no recv_first needed
+
+    def sp_index_of(self, sample_uuid: str) -> int | None:
+        """The bucket of an in-flight sample, or None if it is not tracked."""
+        row = self._rows.get(sample_uuid)
+        return None if row is None else row.sp_index
+
+    def add_tpot(self, sp_index: int, tpot_ns: float, token_count: int) -> None:
+        """Attach a resolved TPOT and its token count to an earlier bucket."""
+        sp = self._series[sp_index]
+        sp.tpot_ns.append(tpot_ns)
+        sp.out_tokens += token_count
+
+    def series(self) -> list[SuperPassRollup]:
+        return self._series
+
+
 # --------------------------------------------------------------------------- #
 # Numeric helpers
 # --------------------------------------------------------------------------- #
