@@ -54,6 +54,7 @@ import json
 import math
 import os
 import sys
+from array import array
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from statistics import NormalDist, median, pstdev
@@ -584,6 +585,11 @@ def text_after_first_chunk(data: object) -> str:
 # --------------------------------------------------------------------------- #
 # Super-pass series
 # --------------------------------------------------------------------------- #
+def _samples() -> array[float]:
+    """An empty per-sample series. Shared default factory for SuperPassRollup."""
+    return array("d")
+
+
 @dataclass(slots=True)
 class SuperPassRollup:
     index: int
@@ -591,11 +597,15 @@ class SuperPassRollup:
     first_issue_ns: int = -1  # earliest issue ts (offered-load span start)
     last_issue_ns: int = -1  # latest issue ts (offered-load span end; throughput denom)
     last_event_ns: int = -1  # latest event ts incl. completions (drain-inclusive end)
-    ttft_ns: list[float] = field(default_factory=list)
-    ttft_warm_ns: list[float] = field(default_factory=list)  # turn >= 2 (KV-cache warm)
-    tpot_ns: list[float] = field(default_factory=list)
-    latency_ns: list[float] = field(default_factory=list)  # issue -> complete (e2e)
-    osl: list[float] = field(default_factory=list)  # per-sample post-first-chunk tokens
+    # array("d"), not list[float]: 8 packed bytes per sample instead of a boxed
+    # float plus a pointer -- 108 -> 34 bytes/sample over the five series, which
+    # is ~220 MB -> ~70 MB retained on a 2M-sample run. Readers only need a
+    # Sequence (append / len / truthiness / sorted / sum), so nothing else moves.
+    ttft_ns: array[float] = field(default_factory=_samples)
+    ttft_warm_ns: array[float] = field(default_factory=_samples)  # turn >= 2 (warm KV)
+    tpot_ns: array[float] = field(default_factory=_samples)
+    latency_ns: array[float] = field(default_factory=_samples)  # issue -> complete (e2e)
+    osl: array[float] = field(default_factory=_samples)  # post-first-chunk tokens
     out_tokens: int = 0
 
 

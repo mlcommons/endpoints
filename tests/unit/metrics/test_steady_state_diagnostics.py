@@ -95,7 +95,7 @@ def test_build_super_pass_series_buckets_by_issue_order(tmp_path):
     assert sorted(round(v, 2) for v in sp0.tpot_ns) == [266.67, 750.0]
     assert sp0.out_tokens == 5
     assert sp1.n_issued == 1
-    assert sp1.ttft_ns == [200.0]
+    assert list(sp1.ttft_ns) == [200.0]
 
 
 def test_build_super_pass_series_records_e2e_latency(tmp_path):
@@ -108,7 +108,7 @@ def test_build_super_pass_series_records_e2e_latency(tmp_path):
     ]
     path = _write_events(tmp_path, lines)
     series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
-    assert series[0].latency_ns == [2000.0]  # complete(3000) - issued(1000)
+    assert list(series[0].latency_ns) == [2000.0]  # complete(3000) - issued(1000)
 
 
 def test_warm_turn_ttft_excludes_cold_first_turn(tmp_path):
@@ -136,7 +136,7 @@ def test_warm_turn_ttft_excludes_cold_first_turn(tmp_path):
     path = _write_events(tmp_path, lines)
     series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
     assert sorted(series[0].ttft_ns) == [50.0, 200.0]  # all turns
-    assert series[0].ttft_warm_ns == [50.0]  # turn 1 discarded
+    assert list(series[0].ttft_warm_ns) == [50.0]  # turn 1 discarded
 
 
 def test_build_super_pass_series_ignores_events_outside_tracking(tmp_path):
@@ -322,7 +322,7 @@ def test_retried_sample_counts_ttft_once(tmp_path):
     ]
     path = _write_events(tmp_path, lines)
     series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
-    assert series[0].ttft_ns == [500.0]
+    assert list(series[0].ttft_ns) == [500.0]
 
 
 def test_valid_json_line_missing_timestamp_is_skipped(tmp_path):

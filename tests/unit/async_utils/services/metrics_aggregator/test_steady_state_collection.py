@@ -275,7 +275,7 @@ class TestOrderingInvariants:
         series = collector.series()
         assert [sp.n_issued for sp in series] == [2, 1]
         # 3 words after the first chunk -> tpot = 900 / 3.
-        assert [sp.tpot_ns for sp in series] == [[300.0, 300.0], [300.0]]
+        assert [list(sp.tpot_ns) for sp in series] == [[300.0, 300.0], [300.0]]
         assert [sp.out_tokens for sp in series] == [6, 3]
 
     @pytest.mark.asyncio
@@ -293,7 +293,7 @@ class TestOrderingInvariants:
         ]
         collector = await _collect(tmp_path, records, "ss_noflush", flush=False)
         assert collector.sp_index_of("a") is None  # released by on_complete
-        assert collector.series()[0].tpot_ns == []
+        assert list(collector.series()[0].tpot_ns) == []
 
 
 @pytest.mark.unit
