@@ -85,6 +85,9 @@ from inference_endpoint.config.schema import (
 )
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
 from inference_endpoint.core.types import APIType, QueryResult
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.predefined.swe_bench import SWEBench
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -3160,6 +3163,117 @@ class TestSetupBenchmark:
         )
 
         assert ctx.total_samples == 5
+
+    @pytest.mark.unit
+    def test_agentic_trajectory_repeats_are_included_in_total_samples(
+        self, tmp_path, _base_patches
+    ):
+        dataset = AgenticInferenceDataset(
+            pd.DataFrame(
+                [
+                    {
+                        "conversation_id": "c1",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "c1 first user turn",
+                    },
+                    {
+                        "conversation_id": "c1",
+                        "turn": 2,
+                        "role": "assistant",
+                        "content": "c1 assistant turn",
+                    },
+                    {
+                        "conversation_id": "c1",
+                        "turn": 3,
+                        "role": "user",
+                        "content": "c1 second user turn",
+                    },
+                    {
+                        "conversation_id": "c2",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "c2 only user turn",
+                    },
+                    {
+                        "conversation_id": "c3",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "c3 first user turn",
+                    },
+                    {
+                        "conversation_id": "c3",
+                        "turn": 2,
+                        "role": "assistant",
+                        "content": "c3 first assistant turn",
+                    },
+                    {
+                        "conversation_id": "c3",
+                        "turn": 3,
+                        "role": "user",
+                        "content": "c3 second user turn",
+                    },
+                    {
+                        "conversation_id": "c3",
+                        "turn": 4,
+                        "role": "assistant",
+                        "content": "c3 second assistant turn",
+                    },
+                    {
+                        "conversation_id": "c3",
+                        "turn": 5,
+                        "role": "user",
+                        "content": "c3 third user turn",
+                    },
+                ]
+            )
+        )
+        # fake dataset, 3 trajectory:
+        # traj1: user1 -> assistant1 -> user2 ==== totally 2 issued samples
+        # traj2: user1 ==== totally 1 issued sample
+        # traj3: user1 -> assistant1 -> user2 -> assistant2 -> user3 ==== totally 3 issued samples
+        dataset.load()
+        load_pattern = LoadPattern(
+            type=LoadPatternType.AGENTIC_INFERENCE, target_concurrency=2
+        )
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://x"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "name": "agentic",
+                    "type": "performance",
+                    "path": "unused.jsonl",
+                    "agentic_inference": {"num_trajectories_to_issue": 5},
+                }
+            ],
+            settings=OnlineSettings(load_pattern=load_pattern),
+            report_dir=str(tmp_path),
+        )
+        rt_settings = RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=None,
+            n_samples_from_dataset=6,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            # Seed 5 produces c1, c2, c3 for each sequential dataset pass.
+            rng_sample_index=random.Random(5),
+            load_pattern=load_pattern,
+        )
+
+        ctx = self._setup(
+            config,
+            TestMode.PERF,
+            (dataset, []),
+            rt_settings,
+        )
+
+        # One complete pass contributes 2 + 1 + 3 = 6 client-turn samples.
+        # Issuing five trajectories repeats c1 and c2, adding 2 + 1 more.
+        assert ctx.total_samples == 9
 
 
 class TestReportConfigSecretRedaction:
