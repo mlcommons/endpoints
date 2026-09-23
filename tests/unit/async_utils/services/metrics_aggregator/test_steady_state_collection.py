@@ -149,7 +149,7 @@ def _write_log(tmp_path, records):
     return str(writer.file_path)
 
 
-async def _collect(tmp_path, records, socket_name, *, flush=True):
+async def _collect(tmp_path, records, socket_name):
     """Drive ``records`` through a steady-state-enabled aggregator."""
     loop = asyncio.get_event_loop()
     with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
@@ -163,12 +163,11 @@ async def _collect(tmp_path, records, socket_name, *, flush=True):
         )
         try:
             await agg.process(records)
-            if flush and agg.token_queue is not None:
+            if agg.token_queue is not None:
                 await agg.token_queue.flush_remaining(None)
             return agg._collector
         finally:
             agg.close()
-
 
 
 STEADY_SUPERPASS = 20
@@ -279,11 +278,13 @@ class TestOrderingInvariants:
         assert [sp.out_tokens for sp in series] == [6, 3]
 
     @pytest.mark.asyncio
-    async def test_no_tpot_is_attributed_before_the_drain_flush(self, tmp_path):
-        """Without the flush the count never arrives, so nothing is attributed.
+    async def test_the_row_is_gone_by_the_time_the_token_count_arrives(self, tmp_path):
+        """Why the super-pass is read at fire time and carried in the closure.
 
-        This is what makes the fire-time read necessary: at flush time the row
-        is already gone.
+        The count only arrives at the drain flush. By then ``set_field`` has
+        dropped the sample from the table, so nothing at flush time could look
+        its super-pass up again -- and until the flush runs, nothing is
+        attributed at all.
         """
         records = [
             session_event(SessionEventType.STARTED, ts=0),
@@ -291,9 +292,24 @@ class TestOrderingInvariants:
             session_event(SessionEventType.START_PERFORMANCE_TRACKING, ts=10),
             *_sample("a", 100, 10, 900, ["c ", "x y z"]),
         ]
-        collector = await _collect(tmp_path, records, "ss_noflush", flush=False)
-        assert collector.sp_index_of("a") is None  # released by on_complete
-        assert list(collector.series()[0].tpot_ns) == []
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, _ = make_aggregator(
+                ctx,
+                loop,
+                "ss_noflush",
+                tokenizer=MockBatchTokenizer(),
+                steady_state_profile="concurrency",
+                streaming=True,
+            )
+            try:
+                await agg.process(records)
+                assert agg.table.get_row("a") is None
+                assert list(agg._collector.series()[0].tpot_ns) == []
+                await agg.token_queue.flush_remaining(None)
+                assert list(agg._collector.series()[0].tpot_ns) == [300.0]
+            finally:
+                agg.close()
 
 
 @pytest.mark.unit

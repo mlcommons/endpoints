@@ -90,6 +90,10 @@ class SampleRow(msgspec.Struct, gc=False):  # type: ignore[call-arg]
 
     sample_uuid: str
     tracked_block_idx: int = -1
+    # Steady-state super-pass this sample was issued into; -1 = not collected.
+    # Held here rather than in a uuid map inside SuperPassCollector, which would
+    # be a second copy of this table growing for the length of the run.
+    sp_index: int = -1
     issued_ns: int | None = None
     recv_first_ns: int | None = None
     last_recv_ns: int | None = None
@@ -225,9 +229,14 @@ class TokenTrigger(EmitTrigger):
         return token_count
 
     def _make_recorder(
-        self, ev_rec: EventRecord, pre_change: dict[str, Any]
+        self, ev_rec: EventRecord, row: SampleRow, pre_change: dict[str, Any]
     ) -> Callable[[int], None]:
-        """Build the callback the queue runs once the token count is known."""
+        """Build the callback the queue runs once the token count is known.
+
+        ``row`` is passed so a subclass can read in-flight state now: the count
+        arrives at the next flush, by which point ``set_field`` has dropped the
+        row from the table.
+        """
         registry, name = self.registry, self.metric_name
 
         def record(count: int) -> None:
@@ -245,7 +254,7 @@ class TokenTrigger(EmitTrigger):
             self.registry.record(self.metric_name, len(item.token_ids))
         elif isinstance(item, TextInput | MessageInput | PromptInput):
             if self._queue is not None:
-                self._queue.enqueue(item, self._make_recorder(ev_rec, pre_change))
+                self._queue.enqueue(item, self._make_recorder(ev_rec, row, pre_change))
 
 
 # ---------------------------------------------------------------------------
@@ -377,17 +386,15 @@ class TpotTrigger(TokenTrigger):
         )
         self._collector = collector
 
-    def _make_recorder(self, ev_rec, pre_change):
+    def _make_recorder(self, ev_rec, row, pre_change):
         collector = self._collector
         # Read the super-pass NOW, while the sample is still in flight: the token
-        # count arrives at the drain flush, by which point the row is gone.
-        # Carrying the index in the closure is also what spares the collector a
-        # uuid map that would grow for the length of the run.
-        sp_index = (
-            None if collector is None else collector.sp_index_of(ev_rec.sample_uuid)
-        )
-        if collector is None or sp_index is None:
-            return super()._make_recorder(ev_rec, pre_change)
+        # count arrives at the drain flush, by which point set_field has dropped
+        # the row. Carrying the int in the closure also keeps the row itself from
+        # being retained until the flush.
+        sp_index = row.sp_index
+        if collector is None or sp_index < 0:
+            return super()._make_recorder(ev_rec, row, pre_change)
         registry, name = self.registry, self.metric_name
 
         def record(count: int) -> None:

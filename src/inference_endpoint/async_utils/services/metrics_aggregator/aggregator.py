@@ -461,7 +461,8 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             if ev == SampleEventType.ISSUED:
                 table.set_field(uuid, SampleField.ISSUED_NS, ts, record)
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_ISSUED.value)
-                if table.get_row(uuid) is not None:
+                row = table.get_row(uuid)
+                if row is not None:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value)
                     # is_tracking as well as the row: set_field returns early for an
                     # ISSUED outside the tracking window WITHOUT dropping the
@@ -470,22 +471,44 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     # skips it, and a bucket whose last_issue_ns came from outside
                     # the window reports a different system TPS.
                     if collector is not None and table.is_tracking:
-                        collector.on_issued(uuid, ts)
+                        # The row carries the super-pass, so a second issue of the
+                        # same sample is a retry, not a new bucket slot.
+                        if row.sp_index < 0:
+                            row.sp_index = collector.assign(ts)
+                        else:
+                            collector.reissue(row.sp_index, ts)
             elif ev == SampleEventType.RECV_FIRST:
+                # Read before set_field overwrites recv_first_ns: a retried sample
+                # re-emits RECV_FIRST and must not contribute a second TTFT.
+                row = table.get_row(uuid) if collector is not None else None
+                first_chunk = row is not None and row.recv_first_ns is None
                 table.set_field(uuid, SampleField.RECV_FIRST_NS, ts, record)
                 table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
-                if collector is not None:
-                    collector.on_recv_first(uuid, ts, record.turn)
+                if (
+                    collector is not None
+                    and row is not None
+                    and row.sp_index >= 0
+                    and row.issued_ns is not None
+                ):
+                    collector.on_recv_first(
+                        row.sp_index, row.issued_ns, ts, record.turn, first=first_chunk
+                    )
             elif ev == SampleEventType.RECV_NON_FIRST:
                 table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
             elif ev == SampleEventType.COMPLETE:
-                # Check if tracked before set_field (which removes the row)
-                is_tracked = table.get_row(uuid) is not None
+                # Captured before set_field, which drops the row from the table.
+                row = table.get_row(uuid)
+                is_tracked = row is not None
                 table.set_field(uuid, SampleField.COMPLETE_NS, ts, record)
-                # After set_field: TpotTrigger fires from there and reads the
-                # sample's super-pass, which on_complete then releases.
-                if collector is not None:
-                    collector.on_complete(uuid, ts)
+                if (
+                    collector is not None
+                    and row is not None
+                    and row.sp_index >= 0
+                    and row.issued_ns is not None
+                ):
+                    collector.on_complete(
+                        row.sp_index, row.issued_ns, row.recv_first_ns, ts
+                    )
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_COMPLETED.value)
                 if is_tracked:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_COMPLETED.value)
