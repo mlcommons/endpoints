@@ -1188,3 +1188,58 @@ class TestTokenizerPrecedence:
             mod.main([str(tmp_path), "--dataset-size", "8"])
 
         assert "could not resolve a tokenizer" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# analyse() — the algorithm, independent of where the series came from.
+# --------------------------------------------------------------------------- #
+
+
+def test_analyse_is_the_whole_algorithm_after_the_parse(tmp_path):
+    """run() is the event-log producer plus analyse(). Splitting them is what
+    lets a second producer -- the metrics aggregator, accumulating rollups as
+    the run happens -- reach the same verdict without re-reading the log."""
+    lines = [_ev("session.start_performance_tracking", 0)]
+    ts = 1000
+    for i in range(24):
+        uuid = f"s{i}"
+        lines += [
+            _ev("sample.issued", ts, uuid),
+            _ev("sample.recv_first", ts + 200, uuid),
+            _ev("sample.complete", ts + 1200, uuid, ["TextModelOutput", ["a ", "b b"]]),
+        ]
+        ts += 100
+    lines.append(_ev("session.stop_performance_tracking", ts + 5000))
+    path = _write_events(tmp_path, lines)
+
+    series = mod.build_super_pass_series(path, 4, _words)
+    direct = mod.analyse(series, superpass_size=4, window_sizes=[4], warmup=0)
+    via_run = mod.run(
+        path, superpass_size=4, count_tokens=_words, window_sizes=[4], warmup=0
+    )
+
+    assert direct == via_run
+
+
+def test_analyse_needs_no_event_log(tmp_path):
+    """The algorithm takes a series, not a path -- an in-process producer can
+    hand it rollups it accumulated itself."""
+    series = [
+        mod.SuperPassRollup(
+            index=i,
+            n_issued=4,
+            first_issue_ns=i * 1_000_000_000,
+            last_issue_ns=i * 1_000_000_000 + 500_000_000,
+            last_event_ns=i * 1_000_000_000 + 900_000_000,
+            ttft_ns=[200.0] * 4,
+            tpot_ns=[50.0] * 4,
+            latency_ns=[1000.0] * 4,
+            out_tokens=40,
+        )
+        for i in range(8)
+    ]
+
+    result = mod.analyse(series, superpass_size=4, window_sizes=[4], warmup=0)
+
+    assert result["n_super_passes"] == 8
+    assert "steady_state" in result

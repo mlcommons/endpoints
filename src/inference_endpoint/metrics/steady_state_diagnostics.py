@@ -1620,18 +1620,48 @@ def run(
     warmup_driver: str = "tpot_p50",
     enforce_min_duration: bool = True,
 ) -> DiagnosticsResult:
-    """Build the full diagnostics result (the ``--json`` blob).
+    """Reconstruct the super-pass series from an event log, then analyse it."""
+    return analyse(
+        build_super_pass_series(
+            events_path, superpass_size, count_tokens, tokenize_batch_size
+        ),
+        superpass_size=superpass_size,
+        window_sizes=window_sizes,
+        warmup=warmup,
+        cov_bounds=cov_bounds,
+        trend_gate=trend_gate,
+        warmup_band=warmup_band,
+        warmup_driver=warmup_driver,
+        enforce_min_duration=enforce_min_duration,
+    )
 
-    ``window_sizes`` are counts of super-passes; ``superpass_size`` is a count of samples.
-    ``warmup`` is either ``"auto"`` (data-driven crop via ``adaptive_warmup`` on the
-    ``warmup_driver`` metric) or a fixed super-pass count. ``trend_gate`` names the trend
-    algorithm gating admissibility.
+
+def analyse(
+    series: list[SuperPassRollup],
+    *,
+    superpass_size: int,
+    window_sizes: Sequence[int] = (4, 5),
+    warmup: int | str = "auto",
+    cov_bounds: Sequence[float] = (0.03, 0.05, 0.08),
+    trend_gate: str = "mk_hamed_rao",
+    warmup_band: float = 0.05,
+    warmup_driver: str = "tpot_p50",
+    enforce_min_duration: bool = True,
+) -> DiagnosticsResult:
+    """Build the full diagnostics result from a per-super-pass series.
+
+    Takes the series rather than a path so the rollups can come from anywhere:
+    a parsed event log, or a producer accumulating them as the run happens.
+    ``superpass_size`` is carried in the result and is the producer's to state --
+    it cannot be recovered from the series, whose last bucket may be partial.
+
+    ``window_sizes`` are counts of super-passes. ``warmup`` is either ``"auto"``
+    (data-driven crop via ``adaptive_warmup`` on the ``warmup_driver`` metric) or
+    a fixed super-pass count. ``trend_gate`` names the trend algorithm gating
+    admissibility.
     """
     if isinstance(warmup, int) and warmup < 0:
         raise ValueError(f"warmup must be >= 0, got {warmup}")
-    series = build_super_pass_series(
-        events_path, superpass_size, count_tokens, tokenize_batch_size
-    )
     if warmup == "auto":
         resolved_warmup = adaptive_warmup(series, warmup_driver, warmup_band)
         warmup_mode = "auto"
