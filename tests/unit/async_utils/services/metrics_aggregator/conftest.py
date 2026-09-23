@@ -69,6 +69,15 @@ class MockBatchTokenizer:
     async def count_batch_async(self, inputs, _loop, live=False):
         if self._delay:
             await asyncio.sleep(self._delay)
+        return self.count_sync_batch(inputs)
+
+    def count_sync_batch(self, inputs):
+        """The same rule, synchronously — the post-run detector's entry point.
+
+        Both counting paths share one implementation so a test comparing the
+        aggregator's live rollups against a parse of the same event log is
+        comparing the algorithms, not two copies of a fake tokenizer.
+        """
         import msgspec
 
         outcomes = []
@@ -187,6 +196,7 @@ def make_aggregator(
     streaming: bool = True,
     shutdown_event: asyncio.Event | None = None,
     drain_timeout_s: float | None = None,
+    steady_state_superpass_size: int | None = None,
 ) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
     """Construct an aggregator wired to a real SUB socket and a mocked publisher.
 
@@ -220,5 +230,6 @@ def make_aggregator(
         streaming=streaming,
         shutdown_event=shutdown_event,
         drain_timeout_s=drain_timeout_s,
+        steady_state_superpass_size=steady_state_superpass_size,
     )
     return agg, registry, publisher

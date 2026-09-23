@@ -32,6 +32,10 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
+from inference_endpoint.metrics.steady_state_diagnostics import (
+    SuperPassCollector,
+    SuperPassRollup,
+)
 
 from .metrics_table import (
     ChunkDeltaTrigger,
@@ -135,6 +139,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         streaming: bool = False,
         shutdown_event: asyncio.Event | None = None,
         drain_timeout_s: float | None = None,
+        steady_state_superpass_size: int | None = None,
         **kwargs,
     ):
         # drain_timeout_s is injected (not derived) because the right
@@ -180,6 +185,15 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         # Pre-register all metrics on the registry. Tests can introspect via
         # registry.has_counter / has_series.
         self._register_metrics(streaming, sig_figs, n_histogram_buckets)
+
+        # Steady-state collection is opt-in: the caller supplies the
+        # super-pass size (derived from the dataset, which only the parent
+        # process knows) and None leaves the collector off entirely.
+        self._collector: SuperPassCollector | None = (
+            SuperPassCollector(steady_state_superpass_size)
+            if steady_state_superpass_size
+            else None
+        )
 
         self._table = MetricsTable(self._registry)
         self._register_triggers(streaming)
@@ -265,7 +279,10 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         if streaming:
             table.add_trigger(SampleField.RECV_FIRST_NS, TtftTrigger(registry))
             table.add_trigger(SampleField.LAST_RECV_NS, ChunkDeltaTrigger(registry))
-            table.add_trigger(SampleField.COMPLETE_NS, TpotTrigger(registry, queue))
+            table.add_trigger(
+                SampleField.COMPLETE_NS,
+                TpotTrigger(registry, queue, self._collector),
+            )
 
     @property
     def table(self) -> MetricsTable:
@@ -276,6 +293,14 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
     def token_queue(self) -> TokenBatchQueue | None:
         """The token batch queue, if token metrics are enabled."""
         return self._token_queue
+
+    def steady_state_series(self) -> list[SuperPassRollup] | None:
+        """Super-pass rollups accumulated so far, or None if collection is off.
+
+        The same series the standalone detector reconstructs from the event
+        log; both feed ``steady_state_diagnostics.analyse``.
+        """
+        return None if self._collector is None else self._collector.series()
 
     @property
     def pending_tokens(self) -> int:
@@ -290,6 +315,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         saw_shutdown = False
         table = self._table
         registry = self._registry
+        collector = self._collector
 
         self._total_processed += len(records)
         if self._total_processed - self._last_log_count >= 10000:
@@ -410,15 +436,23 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_ISSUED.value)
                 if table.get_row(uuid) is not None:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value)
+                    if collector is not None:
+                        collector.on_issued(uuid, ts)
             elif ev == SampleEventType.RECV_FIRST:
                 table.set_field(uuid, SampleField.RECV_FIRST_NS, ts, record)
                 table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
+                if collector is not None:
+                    collector.on_recv_first(uuid, ts, record.turn)
             elif ev == SampleEventType.RECV_NON_FIRST:
                 table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
             elif ev == SampleEventType.COMPLETE:
                 # Check if tracked before set_field (which removes the row)
                 is_tracked = table.get_row(uuid) is not None
                 table.set_field(uuid, SampleField.COMPLETE_NS, ts, record)
+                # After set_field: TpotTrigger fires from there and reads the
+                # sample's super-pass, which on_complete then releases.
+                if collector is not None:
+                    collector.on_complete(uuid, ts)
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_COMPLETED.value)
                 if is_tracked:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_COMPLETED.value)
