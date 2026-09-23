@@ -39,7 +39,7 @@ from ..core.record import (
     SampleEventType,
     SessionEventType,
 )
-from ..core.types import PromptData, Query, QueryResult, StreamChunk
+from ..core.types import PhaseData, PromptData, Query, QueryResult, StreamChunk
 from ..dataset_manager.dataset import Dataset
 from .sample_order import create_sample_order
 from .strategy import LoadStrategy, create_load_strategy
@@ -542,6 +542,25 @@ class BenchmarkSession:
         self._current_phase_type = phase.phase_type
         self._current_strategy = strategy
 
+        # getattr, not isinstance: only AgenticInferenceDataset carries
+        # conversation metadata, and importing it here would drag pandas into
+        # the load generator's import graph for a two-field read. It is None
+        # before load(), which reads as the single-turn case.
+        conv = getattr(phase.dataset, "conversation_metadata", None)
+        self._publish_session_event(
+            SessionEventType.PHASE_START,
+            PhaseData(
+                phase_type=phase.phase_type.value,
+                drain_after=phase.drain_after,
+                num_turns=(
+                    conv.max_turns_per_conv
+                    if conv is not None
+                    else phase.dataset.num_samples()
+                ),
+                num_trajectories=(conv.num_conversations if conv is not None else 0),
+            ),
+        )
+
         # Performance phases get tracking events
         if phase.phase_type == PhaseType.PERFORMANCE:
             self._publish_session_event(SessionEventType.START_PERFORMANCE_TRACKING)
@@ -860,16 +879,24 @@ class BenchmarkSession:
 
         return check
 
-    def _publish_session_event(self, event_type: SessionEventType) -> None:
+    def _publish_session_event(
+        self, event_type: SessionEventType, data: PhaseData | None = None
+    ) -> None:
         """Publish a session event and flush the publisher immediately.
 
-        Session events are control signals (STARTED, ENDED, START/STOP
-        PERFORMANCE_TRACKING) that subscribers must receive promptly for
-        correct state transitions. Flushing ensures any buffered sample
+        Session events are control signals (STARTED, ENDED, PHASE_START,
+        START/STOP PERFORMANCE_TRACKING) that subscribers must receive promptly
+        for correct state transitions. Flushing ensures any buffered sample
         events are sent first, followed by the session event, so ordering
         is preserved and the signal is not delayed by batching.
+
+        ``data`` carries a payload for the events that have one (PHASE_START).
+        Routing it through here rather than a second publish path keeps the
+        publish-then-flush ordering that makes these signals reliable.
         """
         self._publisher.publish(
-            EventRecord(event_type=event_type, timestamp_ns=time.monotonic_ns())
+            EventRecord(
+                event_type=event_type, timestamp_ns=time.monotonic_ns(), data=data
+            )
         )
         self._publisher.flush()

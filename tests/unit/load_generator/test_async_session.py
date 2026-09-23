@@ -31,7 +31,13 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import ErrorData, Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    ErrorData,
+    PhaseData,
+    Query,
+    QueryResult,
+    StreamChunk,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
@@ -1748,3 +1754,84 @@ class TestBenchmarkSessionHandleResponse:
 
         assert publisher.events == []
         assert phase_issuer.inflight == 1
+
+
+class NoopStrategy:
+    """Issues nothing, so ``_run_phase`` returns without any in-flight work."""
+
+    async def execute(self, phase_issuer) -> None:
+        return None
+
+
+@pytest.mark.unit
+class TestPhaseStartEvent:
+    """PHASE_START announces each phase's shape on the wire."""
+
+    @staticmethod
+    async def _run(dataset, phase_type=PhaseType.PERFORMANCE, drain=True):
+        publisher = FakePublisher()
+        session = BenchmarkSession(FakeIssuer(), publisher, asyncio.get_running_loop())
+        await session._run_phase(
+            PhaseConfig(
+                name="p",
+                runtime_settings=_make_settings(n_samples=dataset.num_samples()),
+                dataset=dataset,
+                phase_type=phase_type,
+                drain_after=drain,
+                strategy=NoopStrategy(),
+            )
+        )
+        return publisher
+
+    async def _phase_data(self, *args, **kwargs):
+        starts = (await self._run(*args, **kwargs)).events_of_type(
+            SessionEventType.PHASE_START
+        )
+        assert len(starts) == 1
+        return starts[0].data
+
+    @pytest.mark.asyncio
+    async def test_single_turn_dataset_reports_sample_count(self):
+        assert await self._phase_data(FakeDataset(7)) == PhaseData(
+            phase_type="performance",
+            drain_after=True,
+            num_turns=7,
+            num_trajectories=0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_agentic_dataset_reports_turns_and_trajectories(self):
+        dataset = FakeDataset(7)
+        dataset.conversation_metadata = SimpleNamespace(
+            max_turns_per_conv=4, num_conversations=3
+        )
+        assert await self._phase_data(dataset) == PhaseData(
+            phase_type="performance",
+            drain_after=True,
+            num_turns=4,
+            num_trajectories=3,
+        )
+
+    @pytest.mark.asyncio
+    async def test_published_for_non_performance_phases_too(self):
+        data = await self._phase_data(
+            FakeDataset(2), phase_type=PhaseType.WARMUP, drain=False
+        )
+        assert (data.phase_type, data.drain_after) == ("warmup", False)
+
+    @pytest.mark.asyncio
+    async def test_precedes_start_performance_tracking(self):
+        publisher = await self._run(FakeDataset(1))
+        order = [
+            e.event_type
+            for e in publisher.events
+            if e.event_type
+            in (
+                SessionEventType.PHASE_START,
+                SessionEventType.START_PERFORMANCE_TRACKING,
+            )
+        ]
+        assert order == [
+            SessionEventType.PHASE_START,
+            SessionEventType.START_PERFORMANCE_TRACKING,
+        ]

@@ -340,6 +340,37 @@ class ErrorData(
         )
 
 
+class PhaseData(
+    msgspec.Struct,
+    tag=True,
+    kw_only=True,
+    frozen=True,
+    omit_defaults=True,
+    array_like=True,
+    gc=False,
+):  # type: ignore[call-arg]
+    """Shape of one benchmark phase, attached to its PHASE_START event.
+
+    Scalars only, so ``gc=False`` holds unconditionally.
+
+    ``num_turns`` and ``num_trajectories`` are read as a pair. A single-turn
+    workload reports ``num_turns = dataset.num_samples()`` with
+    ``num_trajectories = 0``; an agentic one reports the per-conversation turn
+    limit and the conversation count.
+
+    Attributes:
+        phase_type: ``PhaseType`` value (``warmup`` / ``performance`` / ``accuracy``).
+        drain_after: Whether in-flight requests are drained before the next phase.
+        num_turns: Turns (samples) the phase can issue before repeating.
+        num_trajectories: Conversations, for agentic workloads; 0 otherwise.
+    """
+
+    phase_type: str
+    drain_after: bool
+    num_turns: int
+    num_trajectories: int = 0
+
+
 class Query(
     msgspec.Struct,
     frozen=True,
