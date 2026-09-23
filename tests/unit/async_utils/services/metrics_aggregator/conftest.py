@@ -198,6 +198,7 @@ def make_aggregator(
     drain_timeout_s: float | None = None,
     steady_state_superpass_size: int | None = None,
     steady_state_out=None,
+    steady_state_profile: str | None = None,
 ) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
     """Construct an aggregator wired to a real SUB socket and a mocked publisher.
 
@@ -233,5 +234,6 @@ def make_aggregator(
         drain_timeout_s=drain_timeout_s,
         steady_state_superpass_size=steady_state_superpass_size,
         steady_state_out=steady_state_out,
+        steady_state_profile=steady_state_profile,
     )
     return agg, registry, publisher

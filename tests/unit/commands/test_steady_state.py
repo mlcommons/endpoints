@@ -162,9 +162,10 @@ class TestCollectionPlan:
         never guesses either."""
         report_dir = _report_dir(tmp_path)
 
-        assert _plan(report_dir) == (
-            _DATASET_SIZE,
-            report_dir / "steady_state.json",
+        assert _plan(report_dir) == steady_state.SteadyStatePlan(
+            superpass_size=_DATASET_SIZE,
+            verdict_path=report_dir / "steady_state.json",
+            profile="concurrency",
         )
 
     def test_a_collected_run_publishes_its_own_super_pass_size(self, tmp_path):
@@ -260,9 +261,10 @@ class TestCollectionPlan:
         monkeypatch.setattr(Path, "write_text", failing_write_text)
 
         with caplog.at_level(logging.WARNING):
-            assert _plan(report_dir) == (
-                _DATASET_SIZE,
-                report_dir / "steady_state.json",
+            assert _plan(report_dir) == steady_state.SteadyStatePlan(
+                superpass_size=_DATASET_SIZE,
+                verdict_path=report_dir / "steady_state.json",
+                profile="concurrency",
             )
 
         assert "run_meta.json" in caplog.text
@@ -325,8 +327,13 @@ class TestDiscardVerdict:
     def test_withdrawing_a_verdict_that_was_never_written_is_not_an_error(
         self, tmp_path
     ):
-        """Runs that were never collected for take this path too."""
+        """Every finalize path that did not adopt a verdict calls this, and
+        most runs never collected one, so absence is the common case."""
+        (tmp_path / "run_meta.json").write_text('{"dataset_size": 8}')
+
         steady_state.discard_verdict(tmp_path)
+
+        assert [p.name for p in tmp_path.iterdir()] == ["run_meta.json"]
 
     def test_the_event_log_is_not_this_steps_to_remove(self, tmp_path):
         report_dir = _report_dir(tmp_path)
@@ -814,4 +821,21 @@ class TestStaleArtifactsBlockCollection:
             accuracy_only=False,
         )
 
-        assert plan == (100, tmp_path / "steady_state.json")
+        assert plan == steady_state.SteadyStatePlan(
+            superpass_size=100,
+            verdict_path=tmp_path / "steady_state.json",
+            profile="concurrency",
+        )
+
+
+@pytest.mark.unit
+class TestPlanCarriesTheProfile:
+    """The profile decides the CoV bounds and warmup driver the verdict is
+    judged on. The parent resolves it because it knows the load pattern; the
+    standalone detector resolves the same one from the run's config, which is
+    what keeps a hand re-run comparable to the published verdict."""
+
+    def test_the_profile_follows_the_load_pattern(self, tmp_path):
+        report_dir = _report_dir(tmp_path)
+
+        assert _plan(report_dir).profile == "concurrency"

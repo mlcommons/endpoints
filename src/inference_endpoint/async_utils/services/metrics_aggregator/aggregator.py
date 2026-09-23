@@ -35,7 +35,7 @@ from inference_endpoint.core.record import (
     SessionEventType,
 )
 from inference_endpoint.metrics.steady_state_diagnostics import (
-    DEFAULT_COV_BOUNDS,
+    PROFILES,
     SuperPassCollector,
     SuperPassRollup,
     analyse,
@@ -146,6 +146,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         drain_timeout_s: float | None = None,
         steady_state_superpass_size: int | None = None,
         steady_state_out: Path | None = None,
+        steady_state_profile: str | None = None,
         **kwargs,
     ):
         # drain_timeout_s is injected (not derived) because the right
@@ -200,10 +201,14 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             if steady_state_superpass_size
             else None
         )
-        self._steady_state_superpass_size = steady_state_superpass_size
         # Absolute path, injected rather than derived from the metrics output
         # dir: the verdict belongs beside the report, not under metrics/.
         self._steady_state_out = steady_state_out
+        # The workload profile carries the CoV bounds and warmup driver the
+        # verdict is judged on. Resolved by the parent, which knows the load
+        # pattern, so a hand re-run of the standalone detector -- which resolves
+        # the same profile -- is judged against the same thresholds.
+        self._steady_state_profile = PROFILES[steady_state_profile or "concurrency"]
 
         self._table = MetricsTable(self._registry)
         self._register_triggers(streaming)
@@ -446,7 +451,13 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_ISSUED.value)
                 if table.get_row(uuid) is not None:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value)
-                    if collector is not None:
+                    # is_tracking as well as the row: set_field returns early
+                    # for an ISSUED outside the tracking window WITHOUT dropping
+                    # the in-flight row, so a sample re-issued after
+                    # STOP_PERFORMANCE_TRACKING still has one. The event-log
+                    # parse skips it, and a bucket whose last_issue_ns came from
+                    # outside the window would report a different system TPS.
+                    if collector is not None and table.is_tracking:
                         collector.on_issued(uuid, ts)
             elif ev == SampleEventType.RECV_FIRST:
                 table.set_field(uuid, SampleField.RECV_FIRST_NS, ts, record)
@@ -514,14 +525,19 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     MetricCounterKey.LEGACY_LOADGEN_WINDOW_DURATION_NS.value,
                     table.total_loadgen_window_ns,
                 )
-                # After the flush: TPOT token counts land there, so the series
-                # is only complete once the drain is done.
-                self._write_steady_state()
                 await self._publisher.publish_final(
                     registry,
                     n_pending_tasks=n_pending,
                     interrupted=self._interrupted,
                 )
+                # After publish_final, and after the token drain: TPOT counts
+                # land in the drain, so the series is only complete then, and
+                # the snapshot is the Report's primary source while this is
+                # best-effort. Analysis cost grows with the run, so putting it
+                # first would delay the snapshot by an unbounded amount and an
+                # abort during it would cost the run its snapshot. The parent
+                # reads the verdict only after this process exits.
+                self._write_steady_state(n_pending)
             finally:
                 # The aggregator MUST close the publisher and signal shutdown even
                 # if the drain/publish above failed — otherwise main()'s
@@ -536,8 +552,14 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     )
                 self._finalize()
 
-    def _write_steady_state(self) -> None:
+    def _write_steady_state(self, n_pending: int) -> None:
         """Analyse the collected series and write the verdict beside the report.
+
+        Skipped for a run the aggregator already knows is not described by its
+        series: an interrupted run is truncated, and an incomplete drain means
+        token counts are missing. The verdict is published by existence, so one
+        written here survives a SIGKILL that stops the parent from withdrawing
+        it -- leaving an artifact next to a run it does not describe.
 
         Best-effort by design: this runs in the same breath as ``publish_final``,
         and the final snapshot is the Report's primary source. No detector or IO
@@ -547,18 +569,29 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         out = self._steady_state_out
         if collector is None or out is None:
             return
+        if self._interrupted:
+            logger.info("Steady state not written: the run was interrupted")
+            return
+        if n_pending > 0:
+            logger.info(
+                "Steady state not written: %d tokenizations did not drain",
+                n_pending,
+            )
+            return
         try:
+            profile = self._steady_state_profile
             result = analyse(
                 collector.series(),
-                superpass_size=self._steady_state_superpass_size or 0,
+                superpass_size=collector.superpass_size,
+                cov_bounds=profile.cov_bounds,
+                warmup_driver=profile.warmup_driver,
             )
-            # A plain write suffices: this runs before publish_final, and the
-            # parent only reads the verdict once the final snapshot has landed,
-            # so no reader can observe the file mid-write.
+            # A plain write suffices: the parent only reads the verdict once
+            # this process has exited, so no reader can observe it mid-write.
             # One bounds value feeds both artifacts, so the table header in the
             # text render always describes the numbers beside it.
             out.write_bytes(msgspec.json.format(msgspec.json.encode(result)))
-            out.with_suffix(".txt").write_text(render_text(result, DEFAULT_COV_BOUNDS))
+            out.with_suffix(".txt").write_text(render_text(result, profile.cov_bounds))
             logger.info("Steady-state verdict written to %s", out)
         except Exception:  # noqa: BLE001 — best-effort; never fail the run.
             logger.exception("metrics: steady-state detection failed")

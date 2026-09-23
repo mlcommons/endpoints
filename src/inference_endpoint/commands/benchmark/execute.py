@@ -1286,8 +1286,6 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
                 steady_state = steady_state_headline(
                     verdict, load_pattern=ctx.config.settings.load_pattern.type
                 )
-        else:
-            discard_steady_state_verdict(ctx.report_dir)
 
         if aborted:
             logger.warning("Run aborted — skipping accuracy scoring on partial data")
@@ -1297,12 +1295,18 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     except KeyboardInterrupt:
         report = _invalidate(bench, report)
         # The aggregator may already have produced a verdict for a run that is
-        # now invalid. Withdraw it from both the report and the directory
-        # rather than let it describe a run that did not finish.
+        # now invalid. Drop it from the report; the finally withdraws the file.
         steady_state = None
-        discard_steady_state_verdict(ctx.report_dir)
         raise
     finally:
+        # One withdrawal for every path that did not adopt a verdict: the
+        # aborted and incomplete cases above, a ^C, and the OSError re-raise
+        # from the event-log copy, which invalidates the run without reaching
+        # any of them. A verdict is published by existence, so a file left
+        # beside an invalidated run reads as that run's.
+        if steady_state is None:
+            discard_steady_state_verdict(ctx.report_dir)
+
         # Attach the per-dataset accuracy list so result_summary.json, the
         # console summary, and report.txt all carry it.
         if report is not None:

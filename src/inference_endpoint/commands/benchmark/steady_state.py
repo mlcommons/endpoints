@@ -36,7 +36,7 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from inference_endpoint.config.schema import BenchmarkConfig, LoadPatternType
 from inference_endpoint.dataset_manager.dataset import Dataset
@@ -54,11 +54,21 @@ from inference_endpoint.metrics.steady_state_diagnostics import (
 
 logger = logging.getLogger(__name__)
 
+
+class SteadyStatePlan(NamedTuple):
+    """What the aggregator needs to collect and judge a steady-state series."""
+
+    superpass_size: int
+    verdict_path: Path
+    profile: str
+
+
 # Artifacts this step owns. report_dir is reusable. A run that produces no
 # verdict must leave none behind. run_meta.json is listed separately: a run
 # that opted into collection keeps its own fresh copy, so a hand re-run never
 # reads a previous run's super-pass size.
-_VERDICT_ARTIFACTS = ("steady_state.json", "steady_state.txt")
+_VERDICT_JSON = "steady_state.json"
+_VERDICT_ARTIFACTS = (_VERDICT_JSON, "steady_state.txt")
 _ALL_ARTIFACTS = (*_VERDICT_ARTIFACTS, "run_meta.json")
 
 
@@ -270,6 +280,12 @@ def _anomaly(value: object) -> LevelShift | None:
         detected=True,
         # Checked, not copied: this is interpolated into a line of report.txt,
         # so an unusable value would be printed rather than just stored.
+        #
+        # Truthiness rather than `is not None` is deliberate here, unlike the
+        # other guards in this module. pettitt() searches range(1, n), so a
+        # significant change point is always >= 1; it reports 0 only from its
+        # too-short-series guard, which also reports significant=False. A zero
+        # that reaches here is therefore degenerate and has nothing to say.
         change_point_sp=(
             int(sp) if (sp := finite_number(value.get("change_point_sp"))) else None
         ),
@@ -356,8 +372,8 @@ def collection_plan(
     tokenizer_name: str | None,
     dataset_size: int | None,
     accuracy_only: bool,
-) -> tuple[int, Path] | None:
-    """Super-pass size and verdict path for the aggregator, or None to skip.
+) -> SteadyStatePlan | None:
+    """What the aggregator should collect, or None to skip.
 
     Decided before the run starts, because the aggregator rolls super-passes up
     as the run happens rather than re-reading the event log afterwards. The
@@ -413,12 +429,19 @@ def collection_plan(
         "super-passes of %d samples (--no-steady-state opts out)",
         dataset_size,
     )
-    return dataset_size, report_dir / "steady_state.json"
+    return SteadyStatePlan(
+        superpass_size=dataset_size,
+        verdict_path=report_dir / _VERDICT_JSON,
+        # Resolved here, where the load pattern is known. The standalone
+        # detector resolves the same profile from the run's config, so both
+        # judge the verdict against the same CoV bounds and warmup driver.
+        profile=profile_for_load_pattern(load_pattern.value).name,
+    )
 
 
 def collected_verdict(report_dir: Path) -> Path | None:
     """The verdict the aggregator wrote for this run, if it wrote one."""
-    verdict = report_dir / "steady_state.json"
+    verdict = report_dir / _VERDICT_JSON
     if verdict.is_file():
         return verdict
     logger.info("Steady-state detection produced no %s", verdict.name)

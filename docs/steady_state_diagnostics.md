@@ -53,11 +53,16 @@ The per-super-pass trajectories, the CoV/drift tables and the latency histograms
 and embedding them would dwarf the rest of the summary.
 
 The analysis runs after the token drain, because TPOT counts land there and the series
-is only complete once it finishes. It carries no deadline of its own. The expensive half
-of the old post-run detector was tokenization — 96% of a 94s pass over a 1.0 GB
-`events.jsonl` — and in-process that work is the run's own token drain, already bounded
-by `settings.timeouts.metrics_drain_timeout_s`. What is left is arithmetic over a few
-dozen per-super-pass rollups.
+is only complete once it finishes. It carries no deadline of its own: the tokenization it depends on
+is the run's own token drain, already bounded by
+`settings.timeouts.metrics_drain_timeout_s`, and the analysis itself runs after the
+final snapshot has been published, so a slow one cannot cost the run its report.
+
+Analysis cost grows with the sample count — measured at 0.4s for 57k samples, 4.9s for
+500k and 27s for 2M, with the collected series holding about 82 bytes per tracked
+sample. Both are negligible for the long-latency workloads this has been validated on;
+neither is bounded, so a very high-throughput run would pay for it in aggregator memory
+and in the time between the final snapshot and process exit.
 
 `run_meta.json` is written beside the verdict. It records the super-pass size so a hand
 re-run of the standalone detector against the report directory needs no arguments.
@@ -116,8 +121,9 @@ uv run python -m inference_endpoint.metrics.steady_state_diagnostics events.json
 ```
 
 Everything is auto-resolved from the run's config + a **workload profile**
-(`concurrency` / `poisson` / `offline` / `agentic`), which sets the tokenizer, super-pass
-size, CoV bounds, and metric. All of the following remain available as **optional
+(`concurrency` / `poisson` / `offline` / `agentic`), which sets the super-pass size,
+CoV bounds, warmup driver, and metric. The tokenizer is resolved separately, from
+`--tokenizer`, the model registry, or the run's config. All of the following remain available as **optional
 overrides**:
 
 ```
@@ -236,10 +242,6 @@ rolling scan) for deeper analysis.
 
 ## Caveats
 
-- **TPOT parity.** Token counts use plain tokenization of the output; the live
-  aggregator uses the chat-template path for reasoning/tool-call outputs, so absolute
-  TPOT ms can differ for reasoning models. CoV and the trend tests are scale-invariant,
-  so the steady/drift **verdicts** are unaffected — only the absolute TPOT magnitude.
 - **Window sizes < 4** are useless for drift (the trend test needs ≥ 4 points); they
   still contribute to the CoV table.
 - Window indices are **post-warmup relative** (add the resolved warmup — shown as

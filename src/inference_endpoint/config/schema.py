@@ -749,7 +749,7 @@ class WarmupConfig(BaseModel):
     enabled: Annotated[
         bool,
         cyclopts.Parameter(
-            alias="--warmup", help="Enable warmup phase before performance run"
+            name="--warmup", help="Enable warmup phase before performance run"
         ),
     ] = Field(False, description="Enable warmup phase before performance run")
     n_requests: Annotated[
@@ -938,7 +938,10 @@ class EarlyStoppingConfig(BaseModel):
     enabled: Annotated[
         bool,
         cyclopts.Parameter(
-            alias="--early-stopping",  # --no-early-stopping is the meaningful opt-out
+            # name=, not alias=: an alias leaves the auto-generated --enabled in
+            # place, and three flattened configs each carrying an `enabled` field
+            # would contribute three colliding --enabled spellings.
+            name="--early-stopping",  # --no-early-stopping is the meaningful opt-out
             help="Report MLPerf early-stopping percentile estimates for TTFT/TPOT/latency",
         ),
     ] = Field(True, description="Early-stopping percentile estimates (default on)")
@@ -968,7 +971,7 @@ class SteadyStateConfig(BaseModel):
     enabled: Annotated[
         bool,
         cyclopts.Parameter(
-            alias="--steady-state",
+            name="--steady-state",
             help="Detect the run's steady-state window (unvalidated for most workloads)",
         ),
     ] = Field(False, description="Steady-state detection (default off)")

@@ -222,6 +222,14 @@ async def main() -> None:
         ),
     )
     parser.add_argument(
+        "--steady-state-profile",
+        default="concurrency",
+        help=(
+            "Workload profile whose CoV bounds and warmup driver the verdict is "
+            "judged on. Resolved by the parent from the load pattern."
+        ),
+    )
+    parser.add_argument(
         "--steady-state-out",
         type=Path,
         default=None,
@@ -316,6 +324,7 @@ async def main() -> None:
                 drain_timeout_s=args.drain_timeout,
                 steady_state_superpass_size=args.steady_state_superpass_size,
                 steady_state_out=args.steady_state_out,
+                steady_state_profile=args.steady_state_profile,
             )
             aggregator.start()
 

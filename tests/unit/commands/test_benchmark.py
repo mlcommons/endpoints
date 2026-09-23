@@ -4066,6 +4066,31 @@ class TestSteadyStateHook:
         assert summary["complete"] is False
 
     @pytest.mark.unit
+    def test_a_failed_event_log_copy_also_withdraws_the_verdict(
+        self, tmp_path, monkeypatch
+    ):
+        """The run is invalidated on this path, and every other invalidating
+        path withdraws the verdict. Leaving it behind puts a file that reads as
+        a valid steady window next to a run reporting complete: false -- and
+        the verdict is published by existence, so a later reader cannot tell."""
+        self._seed_collected_artifacts(tmp_path)
+        monkeypatch.setattr(
+            execute_mod,
+            "_write_scoring_artifacts",
+            MagicMock(side_effect=OSError("No space left on device")),
+        )
+
+        with pytest.raises(OSError):
+            finalize_benchmark(
+                self._eligible_ctx(tmp_path), self._complete_result(tmp_path)
+            )
+
+        assert not (tmp_path / "steady_state.json").exists()
+        assert not (tmp_path / "steady_state.txt").exists()
+        # run_meta.json survives: this run is worth re-deriving by hand.
+        assert (tmp_path / "run_meta.json").exists()
+
+    @pytest.mark.unit
     def test_an_interrupt_copying_the_event_log_still_writes_the_report(
         self, tmp_path, monkeypatch
     ):
@@ -4131,3 +4156,31 @@ class TestOptInFlagSpellings:
         assert self._settings().early_stopping.enabled is True
         assert self._settings("--early-stopping").early_stopping.enabled is True
         assert self._settings("--no-early-stopping").early_stopping.enabled is False
+
+    def test_no_config_contributes_a_bare_enabled_flag(self):
+        """Three configs carry a field called `enabled`. Flattening them into
+        one namespace without giving each field an explicit name generates
+        three `--enabled` spellings that all collide: `--help` advertises the
+        flag against every one of them, and the parser binds it to whichever
+        was registered first. An opt-out that silently configures a different
+        feature is worse than one that does not parse."""
+        with pytest.raises(Exception, match="[Uu]nknown option"):
+            benchmark_app.parse_args([*self.BASE, "--enabled"], exit_on_error=False)
+        with pytest.raises(Exception, match="[Uu]nknown option"):
+            benchmark_app.parse_args([*self.BASE, "--no-enabled"], exit_on_error=False)
+
+    def test_each_flag_moves_only_its_own_feature(self):
+        """The collision was invisible because each flag still flipped *a*
+        boolean -- just not always its own."""
+        base = self._settings()
+        for flag, attr in (
+            ("--steady-state", "steady_state"),
+            ("--warmup", "warmup"),
+        ):
+            moved = self._settings(flag)
+            assert getattr(moved, attr).enabled is True, flag
+            for other in ("steady_state", "warmup", "early_stopping"):
+                if other != attr:
+                    assert (
+                        getattr(moved, other).enabled == getattr(base, other).enabled
+                    ), f"{flag} moved {other}"

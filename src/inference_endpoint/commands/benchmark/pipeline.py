@@ -59,6 +59,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.subscriber impor
     MetricsSnapshotSubscriber,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.commands.benchmark.steady_state import SteadyStatePlan
 from inference_endpoint.config.schema import LoadPatternType
 from inference_endpoint.metrics.report import Report
 
@@ -103,8 +104,7 @@ def _build_aggregator_args(
     drain_timeout_s: float | None,
     tokenizer_workers: int,
     early_stopping: bool,
-    steady_state_superpass_size: int | None,
-    steady_state_out: Path | None,
+    steady_state_plan: SteadyStatePlan | None,
 ) -> list[str]:
     """CLI args for the metrics_aggregator subprocess."""
     args: list[str] = [
@@ -126,13 +126,15 @@ def _build_aggregator_args(
     if drain_timeout_s is not None:
         args.extend(["--drain-timeout", str(drain_timeout_s)])
     args.extend(["--tokenizer-workers", str(tokenizer_workers)])
-    if steady_state_superpass_size is not None and steady_state_out is not None:
+    if steady_state_plan is not None:
         args.extend(
             [
                 "--steady-state-superpass-size",
-                str(steady_state_superpass_size),
+                str(steady_state_plan.superpass_size),
                 "--steady-state-out",
-                str(steady_state_out),
+                str(steady_state_plan.verdict_path),
+                "--steady-state-profile",
+                steady_state_plan.profile,
             ]
         )
     return args
@@ -211,10 +213,10 @@ class MetricsPipeline:
     ``metrics_output_dir`` is on disk under the report dir (holds
     ``final_snapshot.json`` — the primary Report source) and is never removed here.
 
-    ``steady_state_plan`` is the ``(superpass_size, verdict_path)`` the aggregator
-    needs to roll up super-passes during the run, or None to leave that off. It is
-    passed in rather than read from the config because the size comes from the
-    loaded dataset, which the config does not know.
+    ``steady_state_plan`` is what the aggregator needs to roll up super-passes
+    during the run, or None to leave that off. It is passed in rather than read
+    from the config because the size comes from the loaded dataset, which the
+    config does not know.
     """
 
     def __init__(
@@ -226,7 +228,7 @@ class MetricsPipeline:
         event_log_dir: Path,
         metrics_output_dir: Path,
         loop: asyncio.AbstractEventLoop,
-        steady_state_plan: tuple[int, Path] | None = None,
+        steady_state_plan: SteadyStatePlan | None = None,
     ) -> None:
         self._config = config
         self._tokenizer_name = tokenizer_name
@@ -313,12 +315,7 @@ class MetricsPipeline:
                 drain_timeout_s=timeouts.metrics_drain_timeout_s,
                 tokenizer_workers=self._config.settings.metrics_tokenizer_workers,
                 early_stopping=self._config.settings.early_stopping.enabled,
-                steady_state_superpass_size=(
-                    self._steady_state_plan[0] if self._steady_state_plan else None
-                ),
-                steady_state_out=(
-                    self._steady_state_plan[1] if self._steady_state_plan else None
-                ),
+                steady_state_plan=self._steady_state_plan,
             )
             event_logger_args = _build_event_logger_args(
                 event_log_dir=self._event_log_dir,

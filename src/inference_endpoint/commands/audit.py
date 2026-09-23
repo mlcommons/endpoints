@@ -147,7 +147,8 @@ def _run_phases(
         )
         # TEST04's audit phase issues one repeated sample. A steady-state
         # verdict there is meaningless. finalize_benchmark runs once per phase.
-        # Leaving this on would spawn a detector per phase.
+        # Leaving this on would have each phase's aggregator collect and
+        # publish its own verdict.
         phase_config = config.with_updates(
             report_dir=phase_dir,
             audit=None,

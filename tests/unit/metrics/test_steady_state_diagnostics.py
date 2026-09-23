@@ -1480,3 +1480,28 @@ def test_a_hand_re_run_asks_the_same_question_as_the_in_process_pass(
     assert sorted(from_cli["cov"]) == sorted(str(w) for w in mod.DEFAULT_WINDOW_SIZES)
     assert from_cli["cov"] == json.loads(json.dumps(in_process["cov"]))
     assert from_cli["drift"] == json.loads(json.dumps(in_process["drift"]))
+
+
+def test_a_sample_retried_within_one_flush_window_does_not_abort_the_parse(tmp_path):
+    """The standalone parse is the audit path for an archived run, so a
+    retry-heavy log must not take the whole pass down. Token counts are
+    resolved in batches, and a sample that completes, is re-issued and
+    completes again inside one batch reports its uuid twice."""
+    lines = [
+        _ev("session.start_performance_tracking", 1000),
+        _ev("sample.issued", 1100, "A"),
+        _ev("sample.recv_first", 1200, "A"),
+        _ev("sample.complete", 2000, "A", ["TextModelOutput", ["a ", "b b"]]),
+        _ev("sample.issued", 2100, "A"),
+        _ev("sample.recv_first", 2200, "A"),
+        _ev("sample.complete", 3000, "A", ["TextModelOutput", ["c ", "d d"]]),
+    ]
+    path = _write_events(tmp_path, lines)
+
+    series = mod.build_super_pass_series(path, 4, _words, 4096)
+
+    (sp,) = series
+    # Both completions are measured: keying the pending batch by uuid would
+    # have dropped the first sample's TPOT when the retry overwrote it.
+    assert len(sp.tpot_ns) == 2
+    assert len(sp.latency_ns) == 2

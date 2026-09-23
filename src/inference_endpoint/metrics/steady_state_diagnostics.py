@@ -559,9 +559,8 @@ def tpot_tokenization_input(data: object) -> TokenizationInput | None:
     """The TPOT denominator for one COMPLETE event, by the shared rule.
 
     Delegates to ``extract_tpot_tokenization_input`` so this reconstruction
-    lands on the same number as the live ``TpotTrigger``. A second rule here
-    drifted: it plain-concatenated chunks where the live path renders reasoning
-    through the chat template, and it dropped tool calls entirely.
+    lands on the same number as the live ``TpotTrigger``: reasoning and tool
+    calls go through the chat template rather than being concatenated as text.
     """
     output = _as_output(data)
     return extract_tpot_tokenization_input(output) if output is not None else None
@@ -618,9 +617,11 @@ def build_super_pass_series(
     rows: dict[str, _PendingRow] = {}
     tracking = False
     issue_counter = 0
-    batch_uuids: list[str] = []
+    # Parallel to batch_texts: the bucket and post-first-chunk span each queued
+    # output belongs to. Positional, not keyed by uuid -- a retried sample
+    # completes more than once, so one uuid can be queued twice per batch.
+    batch_pending: list[tuple[int, float]] = []
     batch_texts: list[TokenizationInput] = []
-    pending_tpot: dict[str, tuple[int, float]] = {}
 
     def _ensure(idx: int) -> SuperPassRollup:
         while len(series) <= idx:
@@ -630,12 +631,11 @@ def build_super_pass_series(
     def flush_tpot() -> None:
         if batch_texts:
             counts = count_tokens(batch_texts)
-            for uuid, cnt in zip(batch_uuids, counts, strict=True):
-                sp_idx, delta = pending_tpot.pop(uuid)
+            for (sp_idx, delta), cnt in zip(batch_pending, counts, strict=True):
                 if cnt > 0:
                     series[sp_idx].tpot_ns.append(delta / cnt)
                     series[sp_idx].out_tokens += cnt
-        batch_uuids.clear()
+        batch_pending.clear()
         batch_texts.clear()
 
     with open(events_path) as f:
@@ -706,8 +706,7 @@ def build_super_pass_series(
                     continue
                 item = tpot_tokenization_input(rec.get("data"))
                 if item is not None:
-                    pending_tpot[uuid] = (row.sp_index, float(ts - row.recv_first_ns))
-                    batch_uuids.append(uuid)
+                    batch_pending.append((row.sp_index, float(ts - row.recv_first_ns)))
                     batch_texts.append(item)
                     if len(batch_texts) >= flush_size:
                         flush_tpot()
@@ -743,6 +742,15 @@ class SuperPassCollector:
         self._series: list[SuperPassRollup] = []
         self._rows: dict[str, _PendingRow] = {}
         self._issue_counter = 0
+
+    @property
+    def superpass_size(self) -> int:
+        """Samples per bucket, as the caller stated it.
+
+        Carried in the result and not recoverable from the series, whose last
+        bucket may be partial.
+        """
+        return self._superpass_size
 
     def _ensure(self, idx: int) -> SuperPassRollup:
         while len(self._series) <= idx:

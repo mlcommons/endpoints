@@ -26,8 +26,8 @@ _MINIMAL_KWARGS = {
 
 class TestSteadyStateConfig:
     def test_disabled_by_default(self):
-        """Opt-in: the detector is unvalidated for most workloads and tokenizes
-        every response, so a run must ask for it."""
+        """Opt-in: the detector is unvalidated for most workloads, so a run
+        must ask for it."""
         assert SteadyStateConfig().enabled is False
 
     def test_settings_exposes_the_block(self):

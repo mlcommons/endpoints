@@ -269,3 +269,174 @@ async def test_a_failed_verdict_write_still_publishes_the_final_snapshot(tmp_pat
 
     assert not unwritable.exists()
     publisher.publish_final.assert_awaited_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_retry_after_tracking_stops_is_ignored_by_both_producers(tmp_path):
+    """A sample re-issued after STOP_PERFORMANCE_TRACKING is outside the
+    measured window, and the log parse drops it. The aggregator must too:
+    `MetricsTable.set_field` returns early for an untracked ISSUED without
+    dropping the in-flight row, so the row is still there to be found. The
+    disagreement lands on last_issue_ns -- the throughput denominator -- so
+    the two producers would report different system TPS for one run."""
+    records = [
+        EventRecord(event_type=SessionEventType.STARTED, timestamp_ns=500),
+        EventRecord(
+            event_type=SessionEventType.START_PERFORMANCE_TRACKING, timestamp_ns=1000
+        ),
+        EventRecord(
+            event_type=SampleEventType.ISSUED, timestamp_ns=1100, sample_uuid="A"
+        ),
+        EventRecord(
+            event_type=SampleEventType.RECV_FIRST, timestamp_ns=1200, sample_uuid="A"
+        ),
+        EventRecord(
+            event_type=SessionEventType.STOP_PERFORMANCE_TRACKING, timestamp_ns=5000
+        ),
+        EventRecord(
+            event_type=SampleEventType.ISSUED, timestamp_ns=9000, sample_uuid="A"
+        ),
+        EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            timestamp_ns=9500,
+            sample_uuid="A",
+            data=TextModelOutput(output=["a ", "b b"]),
+        ),
+    ]
+    loop = asyncio.get_event_loop()
+    with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+        agg, _, _ = make_aggregator(
+            ctx,
+            loop,
+            "agg_retry_after_stop",
+            tokenizer=MockBatchTokenizer(),
+            steady_state_superpass_size=SUPERPASS_SIZE,
+        )
+        try:
+            await agg.process(records)
+            await agg.token_queue.drain_all()
+            live = agg.steady_state_series()
+        finally:
+            agg.close()
+
+    from_log = ssd.build_super_pass_series(
+        _write_log(tmp_path, records),
+        SUPERPASS_SIZE,
+        MockBatchTokenizer().count_sync_batch,
+    )
+
+    assert live == from_log
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_no_verdict_is_written_for_an_interrupted_run(tmp_path):
+    """The session publishes INTERRUPTED just before ENDED on an aborted run,
+    so the aggregator already knows the series is truncated. Writing a verdict
+    anyway leaves one on disk that only the parent's withdrawal removes -- and
+    on a SIGKILL or an expired teardown grace the parent never gets there, so
+    the artifact outlives the run it misdescribes."""
+    out = tmp_path / "steady_state.json"
+    records = _records()
+    loop = asyncio.get_event_loop()
+    with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+        agg, _, _ = make_aggregator(
+            ctx,
+            loop,
+            "agg_ss_interrupted",
+            tokenizer=MockBatchTokenizer(),
+            steady_state_superpass_size=SUPERPASS_SIZE,
+            steady_state_out=out,
+        )
+        try:
+            await agg.process(records)
+            await agg.process(
+                [
+                    EventRecord(
+                        event_type=SessionEventType.INTERRUPTED, timestamp_ns=99_000
+                    ),
+                    EventRecord(event_type=SessionEventType.ENDED, timestamp_ns=99_999),
+                ]
+            )
+        finally:
+            agg.close()
+
+    assert not out.exists()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_the_final_snapshot_lands_before_the_verdict(tmp_path):
+    """final_snapshot.json is the Report's primary source; the verdict is
+    best-effort. Analysis cost grows with the run, so doing it first puts the
+    snapshot behind an unbounded delay -- and an abort during it costs the run
+    its snapshot. The parent reads the verdict only after this process exits,
+    so writing it afterwards is free."""
+    out = tmp_path / "steady_state.json"
+    seen: list[bool] = []
+    records = _records()
+    loop = asyncio.get_event_loop()
+    with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+        agg, _, publisher = make_aggregator(
+            ctx,
+            loop,
+            "agg_ss_order",
+            tokenizer=MockBatchTokenizer(),
+            steady_state_superpass_size=SUPERPASS_SIZE,
+            steady_state_out=out,
+        )
+
+        async def record_order(*_args, **_kwargs):
+            seen.append(out.exists())
+
+        publisher.publish_final.side_effect = record_order
+        try:
+            await agg.process(records)
+            await agg.process(
+                [EventRecord(event_type=SessionEventType.ENDED, timestamp_ns=99_999)]
+            )
+        finally:
+            agg.close()
+
+    assert seen == [False], "verdict was written before the final snapshot"
+    assert out.exists(), "verdict never written"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_the_verdict_is_judged_on_the_workload_profile(tmp_path):
+    """The standalone CLI resolves CoV bounds and the warmup driver from the
+    run's workload profile. The aggregator must use the same ones, or the
+    verdict a run publishes and the verdict a hand re-run reaches are judged
+    against different thresholds -- silently, since the two supported profiles
+    happen to carry the module defaults today."""
+    out = tmp_path / "steady_state.json"
+    loop = asyncio.get_event_loop()
+    with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+        agg, _, _ = make_aggregator(
+            ctx,
+            loop,
+            "agg_ss_profile",
+            tokenizer=MockBatchTokenizer(),
+            steady_state_superpass_size=SUPERPASS_SIZE,
+            steady_state_out=out,
+            steady_state_profile="agentic",
+        )
+        try:
+            await agg.process(_records())
+            await agg.process(
+                [EventRecord(event_type=SessionEventType.ENDED, timestamp_ns=99_999)]
+            )
+        finally:
+            agg.close()
+
+    written = msgspec.json.decode(out.read_bytes())
+    bounds = {
+        bound
+        for window in written["cov"].values()
+        for metric in window.values()
+        for bound in metric["passes"]
+    }
+    agentic = ssd.PROFILES["agentic"]
+    assert bounds == {str(b) for b in agentic.cov_bounds}
