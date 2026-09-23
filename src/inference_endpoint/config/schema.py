@@ -919,6 +919,7 @@ class ProfilingConfig(BaseModel):
         return v
 
 
+@cyclopts.Parameter(name="*")
 class EarlyStoppingConfig(BaseModel):
     """MLPerf-style early-stopping percentile estimates (on by default).
 
@@ -943,6 +944,7 @@ class EarlyStoppingConfig(BaseModel):
     ] = Field(True, description="Early-stopping percentile estimates (default on)")
 
 
+@cyclopts.Parameter(name="*")
 class SteadyStateConfig(BaseModel):
     """Steady-state detection (off by default, opt-in).
 

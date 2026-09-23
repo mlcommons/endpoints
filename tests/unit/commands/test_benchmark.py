@@ -4090,3 +4090,44 @@ class TestSteadyStateHook:
         )
         assert summary["state"] == "interrupted"
         assert summary["complete"] is False
+
+
+@pytest.mark.unit
+class TestOptInFlagSpellings:
+    """The opt-in flags must actually turn their features on.
+
+    A nested single-field config that cyclopts does not flatten binds the alias
+    to the model rather than the field, so the positive form asks for a value
+    and only ``--no-<flag>`` parses. That leaves an opt-out working and the
+    documented opt-in unusable.
+    """
+
+    BASE = [
+        "online",
+        "--endpoints",
+        "http://x",
+        "--model",
+        "m",
+        "--dataset",
+        "d.jsonl",
+        "--load-pattern",
+        "concurrency",
+        "--concurrency",
+        "4",
+    ]
+
+    def _settings(self, *flags):
+        _, bound, _ = benchmark_app.parse_args(
+            [*self.BASE, *flags], exit_on_error=False
+        )
+        return bound.arguments["config"].settings
+
+    def test_steady_state_opts_in_and_out(self):
+        assert self._settings().steady_state.enabled is False
+        assert self._settings("--steady-state").steady_state.enabled is True
+        assert self._settings("--no-steady-state").steady_state.enabled is False
+
+    def test_early_stopping_opts_in_and_out(self):
+        assert self._settings().early_stopping.enabled is True
+        assert self._settings("--early-stopping").early_stopping.enabled is True
+        assert self._settings("--no-early-stopping").early_stopping.enabled is False
