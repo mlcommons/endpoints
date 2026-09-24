@@ -490,7 +490,10 @@ class TestServiceExitBound:
 
     @staticmethod
     def _pipe_with_drain_budget(
-        tmp_path: Path, drain_s: float | None, grace_s: float = 60.0
+        tmp_path: Path,
+        drain_s: float | None,
+        grace_s: float = 60.0,
+        run_timeout_s: float | None = None,
     ):
         pipe = _make_pipe(tmp_path)
         setattr(  # noqa: B010 — plain assignment trips the config's declared type
@@ -501,6 +504,7 @@ class TestServiceExitBound:
                     timeouts=SimpleNamespace(
                         metrics_drain_timeout_s=drain_s,
                         service_exit_grace_s=grace_s,
+                        run_timeout_s=run_timeout_s,
                     )
                 )
             ),
@@ -518,6 +522,15 @@ class TestServiceExitBound:
         # the steady-state analysis, the atomic snapshot write, and exit.
         pipe = self._pipe_with_drain_budget(tmp_path, 120.0)
         assert pipe._service_exit_timeout_s == 180.0
+
+    def test_an_unlimited_drain_falls_back_to_the_run_deadline(self, tmp_path):
+        """Cancelling the watchdog removed the only ceiling a --timeout run had.
+
+        The shipped default is an unlimited drain, so without this fallback a
+        wedged service hangs the CLI with nothing left to interrupt it.
+        """
+        pipe = self._pipe_with_drain_budget(tmp_path, None, run_timeout_s=900.0)
+        assert pipe._service_exit_timeout_s == 960.0
 
     def test_an_unlimited_drain_budget_leaves_the_wait_unbounded(self, tmp_path):
         # Bounding only the tail would buy nothing and could kill a legitimately

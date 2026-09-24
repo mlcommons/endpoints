@@ -383,14 +383,21 @@ class MetricsPipeline:
 
         The aggregator's own drain budget plus a grace for everything it does
         after the drain: the publisher's 10s ZMQ linger, the steady-state
-        analysis (13.7s measured at 2M samples), the atomic snapshot write, and
-        process exit. ``None`` when the drain budget is unlimited by
-        configuration -- bounding only the tail would buy nothing and could kill
-        a legitimately slow drain.
+        analysis, the atomic snapshot write, and process exit.
+
+        When the drain budget is unlimited there is no budget to extend, so this
+        falls back to the run deadline. Cancelling the watchdog before this wait
+        removes the only ceiling a ``--timeout`` run used to have, and a wedged
+        service would otherwise hang the CLI with nothing left to interrupt it.
+        Unlimited only when the operator declined to bound either.
         """
-        drain_s = self._config.settings.timeouts.metrics_drain_timeout_s
-        grace = self._config.settings.timeouts.service_exit_grace_s
-        return None if drain_s is None else drain_s + grace
+        timeouts = self._config.settings.timeouts
+        grace = timeouts.service_exit_grace_s
+        if timeouts.metrics_drain_timeout_s is not None:
+            return timeouts.metrics_drain_timeout_s + grace
+        if timeouts.run_timeout_s is not None:
+            return timeouts.run_timeout_s + grace
+        return None
 
     async def drain_and_build_report(
         self,
