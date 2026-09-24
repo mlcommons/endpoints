@@ -58,13 +58,6 @@ from .token_metrics import BatchTokenizer, TokenBatchQueue
 
 logger = logging.getLogger(__name__)
 
-# Ceiling on the steady-state analysis, which runs in front of the final snapshot
-# write. Must stay comfortably below the parent's post-drain grace
-# (``Timeouts.service_exit_grace_s``, 60s), because once that expires the parent
-# kills this process -- and a kill before ``publish_final`` costs the run the
-# snapshot its Report is built from, not merely its verdict.
-STEADY_STATE_ANALYSIS_TIMEOUT_S: Final[float] = 30.0
-
 
 class MetricCounterKey(str, Enum):
     """Counter metric keys tracked by the aggregator.
@@ -197,16 +190,17 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         # registry.has_counter / has_series.
         self._register_metrics(streaming, enable_isl, sig_figs, n_histogram_buckets)
 
-        # Steady-state collection is opt-in, and the profile name is the opt-in:
-        # it carries the CoV bounds and warmup driver the verdict is judged on, and
-        # only the parent knows the load pattern they follow from. None = off.
-        # An unsupported profile -- agentic, whose steady-state metric is
-        # per-trajectory NATL and not what this collector produces, or offline --
-        # is refused here as well as by the parent's gate, so neither side alone
-        # can turn collection on for a workload it does not describe.
-        # .get, not [], so an unknown name degrades to collection-off like every
-        # other ineligibility. A KeyError here kills the subprocess at startup and
-        # the parent reports a launch timeout, naming nothing.
+        # A profile name enables steady-state collection. The profile carries
+        # the CoV bounds and warmup driver used for the verdict. None leaves
+        # collection off.
+        #
+        # Only the parent knows the load pattern, so it chooses the profile.
+        # This subprocess also refuses unsupported profiles, so neither side
+        # can enable collection for a run the verdict does not describe.
+        #
+        # Use .get so an unknown name degrades to collection off. Raising
+        # KeyError here would kill the subprocess during startup and surface
+        # as a launch timeout in the parent.
         self._steady_state_profile = (
             PROFILES.get(steady_state_profile) if steady_state_profile else None
         )
@@ -223,8 +217,8 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 steady_state_profile,
             )
             self._steady_state_profile = None
-        # The bucket size arrives later, on PHASE_START, but TpotTrigger needs the
-        # collector at registration time -- before any event.
+        # PHASE_START supplies the bucket size. TpotTrigger needs the collector
+        # registered before any event can arrive, so the size is latched later.
         self._collector = (
             SuperPassCollector() if self._steady_state_profile is not None else None
         )
@@ -386,10 +380,12 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     )
                     self._interrupted = True
                 elif ev == SessionEventType.PHASE_START:
-                    # Performance phases only: warmup announces first, with its
-                    # own dataset size, and the standalone parse reads the same
-                    # phase. announce_phase adds the second guard -- a series
-                    # already being bucketed cannot be re-sized.
+                    # Only performance phases define the bucket size. Warmup
+                    # announces first with its own dataset size, and the
+                    # standalone parser follows the same rule.
+                    #
+                    # announce_phase also refuses to resize a series once
+                    # bucket collection has started.
                     if (
                         collector is not None
                         and isinstance(record.data, PhaseData)
@@ -479,22 +475,22 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 row = table.get_row(uuid)
                 if row is not None:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value)
-                    # is_tracking as well as the row: set_field returns early for an
-                    # ISSUED outside the tracking window WITHOUT dropping the
-                    # in-flight row, so a sample re-issued after
-                    # STOP_PERFORMANCE_TRACKING still has one. The event-log parse
-                    # skips it, and a bucket whose last_issue_ns came from outside
-                    # the window reports a different system TPS.
+                    # A row can outlive the tracking window.
+                    # For ISSUED after STOP_PERFORMANCE_TRACKING, set_field
+                    # returns early but keeps the in-flight row. Bucketing that issue
+                    # would use last_issue_ns outside the window and change reported
+                    # system TPS. The event-log parser skips it too.
                     if collector is not None and table.is_tracking:
-                        # The row carries the super-pass, so a second issue of the
-                        # same sample is a retry, not a new bucket slot.
-                        if row.sp_index < 0:
-                            row.sp_index = collector.assign(ts)
+                        # A row's superpass_index marks its bucket slot. If it already
+                        # has one, this issue is a retry.
+                        if row.superpass_index < 0:
+                            row.superpass_index = collector.assign(ts)
                         else:
-                            collector.reissue(row.sp_index, ts)
+                            collector.reissue(row.superpass_index, ts)
             elif ev == SampleEventType.RECV_FIRST:
-                # Read before set_field overwrites recv_first_ns: a retried sample
-                # re-emits RECV_FIRST and must not contribute a second TTFT.
+                # Read the row before set_field overwrites recv_first_ns. A
+                # retried sample re-emits RECV_FIRST and must not add a second
+                # TTFT.
                 row = table.get_row(uuid) if collector is not None else None
                 first_chunk = row is not None and row.recv_first_ns is None
                 table.set_field(uuid, SampleField.RECV_FIRST_NS, ts, record)
@@ -502,27 +498,31 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 if (
                     collector is not None
                     and row is not None
-                    and row.sp_index >= 0
+                    and row.superpass_index >= 0
                     and row.issued_ns is not None
                 ):
                     collector.on_recv_first(
-                        row.sp_index, row.issued_ns, ts, record.turn, first=first_chunk
+                        row.superpass_index,
+                        row.issued_ns,
+                        ts,
+                        record.turn,
+                        first=first_chunk,
                     )
             elif ev == SampleEventType.RECV_NON_FIRST:
                 table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
             elif ev == SampleEventType.COMPLETE:
-                # Captured before set_field, which drops the row from the table.
+                # Read the row before set_field, which drops it from the table.
                 row = table.get_row(uuid)
                 is_tracked = row is not None
                 table.set_field(uuid, SampleField.COMPLETE_NS, ts, record)
                 if (
                     collector is not None
                     and row is not None
-                    and row.sp_index >= 0
+                    and row.superpass_index >= 0
                     and row.issued_ns is not None
                 ):
                     collector.on_complete(
-                        row.sp_index, row.issued_ns, row.recv_first_ns, ts
+                        row.superpass_index, row.issued_ns, row.recv_first_ns, ts
                     )
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_COMPLETED.value)
                 if is_tracked:
@@ -596,23 +596,27 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 self._finalize()
 
     async def _steady_state_verdict(self, n_pending: int) -> SteadyState | None:
-        """The verdict for the terminal snapshot, or None if it is not deserved.
+        """Return the steady-state verdict for the terminal snapshot.
 
-        Only computed for a run the collected series actually describes: an
-        interrupted run is truncated, and an incomplete drain means token counts
-        are missing, so TPOT and OSL would be wrong.
+        Returns None when collection is disabled or the series does not describe
+        the completed run. An interrupted run is truncated. A pending drain means
+        token counts are missing, so TPOT and OSL would be wrong.
 
-        Runs before the snapshot is built so one atomic write carries it, which
-        puts the analysis in front of the file the Report is built from. Nothing
-        else bounds that: the drain budget covers ``flush_remaining`` and has
-        already returned by now, and the parent kills this process once its own
-        grace expires. So the analysis carries its own deadline, and a run that
-        blows it publishes without a verdict rather than without a snapshot --
-        no failure here may cost the run its snapshot, wall-clock included.
+        This runs before the snapshot is built. The single atomic final write
+        then carries both the metrics and the verdict, so the analysis sits in
+        front of the file Report is built from.
 
-        Computed off the event loop so the deadline can be enforced at all: a
-        synchronous call cannot be interrupted, and abandoning the thread is
-        fine because the process exits moments later.
+        The analysis carries no deadline of its own. It is pure CPU over the
+        super-pass rollups the collector already built, and its cost tracks the
+        super-pass count: measured 2.9s at 100 super-passes (438,800 samples,
+        the longest shape this runs at) and 19s at 245. A deadline in front of
+        the final snapshot write would be a knob guarding a cost that does not
+        reach it.
+
+        The compute runs in ``asyncio.to_thread`` so the event loop stays
+        responsive while it works: a SIGTERM arriving mid-analysis still
+        reaches its handler and writes the INTERRUPTED snapshot, rather than
+        waiting on a blocked loop.
         """
         collector, profile = self._collector, self._steady_state_profile
         if collector is None or profile is None:
@@ -621,23 +625,13 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             logger.info("Steady state not computed: the run is not described by it")
             return None
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(
-                    compute_steady_state_metrics,
-                    collector.series(),
-                    superpass_size=collector.superpass_size,
-                    cov_bounds=profile.cov_bounds,
-                    warmup_driver=profile.warmup_driver,
-                ),
-                timeout=STEADY_STATE_ANALYSIS_TIMEOUT_S,
+            return await asyncio.to_thread(
+                compute_steady_state_metrics,
+                collector.series(),
+                superpass_size=collector.superpass_size,
+                cov_bounds=profile.cov_bounds,
+                warmup_driver=profile.warmup_driver,
             )
-        except TimeoutError:
-            logger.warning(
-                "Steady state not computed: analysis exceeded %.0fs; the snapshot "
-                "is published without a verdict",
-                STEADY_STATE_ANALYSIS_TIMEOUT_S,
-            )
-            return None
         except Exception:  # noqa: BLE001 — best-effort; never fail the run.
             logger.exception("metrics: steady-state detection failed")
             return None

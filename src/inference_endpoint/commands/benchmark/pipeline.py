@@ -102,17 +102,17 @@ def steady_state_profile(
 ) -> str | None:
     """Workload profile for live steady-state collection; None when ineligible.
 
-    Eligibility is read from the detector's own profile table, so this gate and
-    the profile the aggregator is judged on cannot drift. An accuracy-only run
-    has no performance phase to collect; without a tokenizer there is no TPOT to
-    bucket; and without streaming there is no ``TpotTrigger`` at all, so every
-    plateau gate would see an empty TPOT series and every verdict would be
-    ``found: false``. The decision has to be made before the run starts, because
-    collection happens as the run happens.
+    Eligibility comes from the detector's own profile table. This keeps the
+    parent gate and the aggregator's profile from drifting apart. The decision
+    must happen before the run starts because collection happens during the run.
+
+    Accuracy-only runs have no performance phase to collect. Without a tokenizer
+    there is no TPOT to bucket. Without streaming there is no ``TpotTrigger``;
+    every plateau gate would see an empty TPOT series, and every verdict would
+    be ``found: false``.
 
     Agentic is refused by name as well as by profile. Its steady-state metric is
-    per-trajectory NATL, which this collector does not produce, and an agentic
-    run must behave exactly as it did before steady state existed.
+    per-trajectory NATL, which this collector does not produce.
     """
     if not config.settings.steady_state.enabled:
         return None
@@ -377,28 +377,6 @@ class MetricsPipeline:
             raise
         self._stack = stack
 
-    @property
-    def _service_exit_timeout_s(self) -> float | None:
-        """How long to wait for the service subprocesses after the run ends.
-
-        The aggregator's own drain budget plus a grace for everything it does
-        after the drain: the publisher's 10s ZMQ linger, the steady-state
-        analysis, the atomic snapshot write, and process exit.
-
-        When the drain budget is unlimited there is no budget to extend, so this
-        falls back to the run deadline. Cancelling the watchdog before this wait
-        removes the only ceiling a ``--timeout`` run used to have, and a wedged
-        service would otherwise hang the CLI with nothing left to interrupt it.
-        Unlimited only when the operator declined to bound either.
-        """
-        timeouts = self._config.settings.timeouts
-        grace = timeouts.service_exit_grace_s
-        if timeouts.metrics_drain_timeout_s is not None:
-            return timeouts.metrics_drain_timeout_s + grace
-        if timeouts.run_timeout_s is not None:
-            return timeouts.run_timeout_s + grace
-        return None
-
     async def drain_and_build_report(
         self,
         *,
@@ -424,9 +402,7 @@ class MetricsPipeline:
         publisher.close()
         logger.info("Waiting for services to finish processing...")
         wait_for_services = asyncio.create_task(
-            asyncio.to_thread(
-                self._launcher.wait_for_exit, self._service_exit_timeout_s
-            )
+            asyncio.to_thread(self._launcher.wait_for_exit, None)
         )
         abort_wait: asyncio.Task[bool] | None = None
         try:

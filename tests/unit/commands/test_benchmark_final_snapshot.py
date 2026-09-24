@@ -488,62 +488,20 @@ class TestSteadyStateGate:
 class TestServiceExitBound:
     """How long the parent waits for the metrics services after the run ends."""
 
-    @staticmethod
-    def _pipe_with_drain_budget(
-        tmp_path: Path,
-        drain_s: float | None,
-        grace_s: float = 60.0,
-        run_timeout_s: float | None = None,
-    ):
-        pipe = _make_pipe(tmp_path)
-        setattr(  # noqa: B010 — plain assignment trips the config's declared type
-            pipe,
-            "_config",
-            SimpleNamespace(
-                settings=SimpleNamespace(
-                    timeouts=SimpleNamespace(
-                        metrics_drain_timeout_s=drain_s,
-                        service_exit_grace_s=grace_s,
-                        run_timeout_s=run_timeout_s,
-                    )
-                )
-            ),
-        )
-        return pipe
-
-    def test_the_grace_is_configurable(self, tmp_path):
-        # It lives on Timeouts with the other deadlines rather than as a module
-        # constant, but carries no CLI flag -- it is not an operator knob.
-        pipe = self._pipe_with_drain_budget(tmp_path, 120.0, grace_s=5.0)
-        assert pipe._service_exit_timeout_s == 125.0
-
-    def test_bound_is_the_drain_budget_plus_a_finalize_grace(self, tmp_path):
-        # The grace covers what the aggregator does after the drain: ZMQ linger,
-        # the steady-state analysis, the atomic snapshot write, and exit.
-        pipe = self._pipe_with_drain_budget(tmp_path, 120.0)
-        assert pipe._service_exit_timeout_s == 180.0
-
-    def test_an_unlimited_drain_falls_back_to_the_run_deadline(self, tmp_path):
-        """Cancelling the watchdog removed the only ceiling a --timeout run had.
-
-        The shipped default is an unlimited drain, so without this fallback a
-        wedged service hangs the CLI with nothing left to interrupt it.
-        """
-        pipe = self._pipe_with_drain_budget(tmp_path, None, run_timeout_s=900.0)
-        assert pipe._service_exit_timeout_s == 960.0
-
-    def test_an_unlimited_drain_budget_leaves_the_wait_unbounded(self, tmp_path):
-        # Bounding only the tail would buy nothing and could kill a legitimately
-        # slow drain the operator chose not to bound.
-        pipe = self._pipe_with_drain_budget(tmp_path, None)
-        assert pipe._service_exit_timeout_s is None
-
     @pytest.mark.asyncio
-    async def test_the_bound_reaches_wait_for_exit(self, tmp_path, monkeypatch):
-        pipe = self._pipe_with_drain_budget(tmp_path, 10.0)
+    async def test_the_wait_for_services_is_unbounded(self, tmp_path, monkeypatch):
+        """A deadline here would SIGKILL the aggregator mid-finalize.
+
+        ``wait_for_exit`` kills on expiry, and the aggregator writes
+        final_snapshot.json -- the Report's primary source -- as the last thing
+        it does. A run whose drain the operator chose not to bound must not
+        lose its snapshot to a bound the parent invented. The abort path keeps
+        its own ceiling via ``interrupted_teardown_grace_s``.
+        """
+        pipe = _make_pipe(tmp_path)
         pipe.publisher = MagicMock(buffered_count=0, pending_count=0)
         pipe._launcher = MagicMock()
         pipe.subscriber = MagicMock(latest=None)
         monkeypatch.setattr(f"{_PIPE}._load_final_snapshot_from_disk", lambda p: None)
         await pipe.drain_and_build_report()
-        pipe._launcher.wait_for_exit.assert_called_once_with(70.0)
+        pipe._launcher.wait_for_exit.assert_called_once_with(None)

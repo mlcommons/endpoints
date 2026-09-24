@@ -93,7 +93,6 @@ settings:
     performance_drain_timeout_s: null  # Performance drain seconds (None = unlimited).
     accuracy_drain_timeout_s: null  # Accuracy drain seconds (None = unlimited).
     metrics_drain_timeout_s: null  # Metrics drain seconds (None = unlimited).
-    service_exit_grace_s: 60.0  # Grace added to the metrics drain budget when waiting for the service subprocesses to exit: the publisher's ZMQ linger, the steady-state analysis, the final snapshot write, and teardown. Unused when the drain budget is unlimited.
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)

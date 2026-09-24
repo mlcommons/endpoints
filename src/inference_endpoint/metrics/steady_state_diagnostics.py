@@ -1,46 +1,49 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Steady-state / drift diagnostics from a benchmark run's ``events.jsonl``.
+"""Steady-state and drift diagnostics for benchmark event logs.
 
-Parses the event log itself: the wire shapes are defined by the product's
-``core/record.py`` (event names, ``EventRecord`` fields) and ``core/types.py``
-(``TextModelOutput`` array layout); the parse here mirrors them and is pinned by
-tests/unit/metrics/test_steady_state_diagnostics.py.
+This module rebuilds per-sample TTFT and TPOT from ``events.jsonl``. The event
+shapes come from ``core/record.py`` and ``core/types.py``. The parser is covered
+by tests/unit/metrics/test_steady_state_diagnostics.py.
 
-What it reconstructs (per performance-tracked sample):
+For each performance-tracked sample it computes:
   - ttft_ns = recv_first.ts - issued.ts
   - tpot_ns = (complete.ts - recv_first.ts) / tokens(text_after_first_chunk)
-Token counts use plain tokenization of ``text_after_first_chunk``. The live metrics
-aggregator instead tokenizes reasoning/tool-call outputs via the chat-template path
-(``apply_chat_template``), so absolute TPOT ms here can differ from a run's report for
-reasoning models. CoV and the trend tests are scale-invariant, so the steady/drift
-diagnosis is unaffected -- only the absolute TPOT magnitude shifts.
 
-Samples are bucketed into super-passes by issue order (``--superpass-size`` samples per
-super-pass, default = ``--dataset-size``), giving a per-super-pass trajectory for each
-metric*percentile.
+Token counts use plain tokenization of ``text_after_first_chunk``. The live
+metrics aggregator uses the chat-template path for reasoning and tool-call
+outputs. For reasoning models, absolute TPOT can differ from the run report.
+CoV and trend tests are scale-invariant, so the steady/drift verdict is the
+same.
 
-The **headline** output is the ``steady_state`` block: the first steady plateau (grow-
-from-left segmentation, admissible = trend-steady + within a CoV bound on the gated
-metrics), summarized with TTFT/TPOT histograms + percentiles and per-user / system TPS
-with batch-means confidence intervals. A staircase level-shift toward the end of the run
-(multi-plateau difference corroborated by a Pettitt change-point) is flagged as an
-``anomaly`` rather than hidden. See docs/steady-state-detection.md.
+Samples are grouped by issue order into super-passes. ``--superpass-size`` sets
+the samples per bucket. By default it is the dataset size. Each metric and
+percentile gets one trajectory across those buckets.
 
-Below the headline the tool prints a whole-run trend verdict per metric, across every
-trend algorithm. The headline itself carries the CoV of the reported window -- the
-number that justifies the verdict -- or, when no window was admissible, the CoV of the
-whole span when the run was trend-steady throughout.
+The headline output is the ``steady_state`` block. It reports the first steady
+plateau found by grow-from-left segmentation. A plateau is admissible when the
+gated metrics are trend-steady and within the CoV bound. The block includes
+TTFT/TPOT histograms, percentiles, and per-user and system TPS with batch-means
+confidence intervals.
 
-Admissibility gates on TPOT at p50 + p90 only (decode-rate steadiness). TTFT is a
-diagnostic: shown in the headline percentiles and the whole-run trend, and it raises the
-Drifting-Up warning, but it does not gate a window — at high concurrency its tail variance
-is structural (prefill/dataset-ISL skew + queue), not decode un-steadiness. p99 and
-end-to-end latency are diagnostic too (latency's variation tracks the OSL mix).
+A late staircase level shift is reported as ``anomaly``. The detector requires
+a multi-plateau difference and a Pettitt change point. See
+docs/steady-state-detection.md.
 
-usage (auto-detects the tokenizer and workload profile from the run's config.yaml
-and the super-pass size from its phase_start event; see MODEL_REGISTRY + PROFILES):
+The CLI also prints whole-run trend verdicts for each metric and trend
+algorithm. The headline carries the CoV for the reported window. If no window
+is admissible but the whole run is trend-steady, it carries the whole-span CoV.
+
+Only TPOT p50 and p90 gate admissibility. TTFT is diagnostic. It appears in the
+headline percentiles and whole-run trend table, and it can raise the Drifting-Up
+warning. It does not reject a window. At high concurrency, TTFT tail variance
+comes from prefill, dataset ISL skew, and queueing, not from decode instability.
+p99 and end-to-end latency are also diagnostic. Latency variation tracks the
+OSL mix.
+
+usage (auto-detects the tokenizer and workload profile from config.yaml, and
+the super-pass size from the phase_start event; see MODEL_REGISTRY + PROFILES):
   python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>       # 0 flags
   python -m inference_endpoint.metrics.steady_state_diagnostics <events.jsonl> \
       --model kimi-k3                                                          # 1 flag
@@ -81,22 +84,23 @@ EV_COMPLETE = "sample.complete"
 # Below this many super-passes a trend test is statistically meaningless.
 MIN_TREND_N = 4
 
-# slope-vs-scatter thresholds (mirror the reference drift detector): a metric drifts
-# when the run-length change is a large fraction of its level AND large vs the residual
-# scatter around the fitted line.
+# Slope-vs-scatter drift thresholds.
+# A metric drifts when the fitted run-length change is large relative to both
+# its level and the residual scatter around the fitted line.
 REL_DRIFT_THRESHOLD = 0.15
 SNR_THRESHOLD = 2.0
 
-# Effect-size floor for a trend to disqualify a steady window during plateau segmentation
-# (§5.5). The rank-based trend gate is significance-only: over a long window it flags a
-# practically negligible monotonic drift (a couple of percent end-to-end) as a "trend" and
-# fragments a genuinely steady run into many sub-window plateaus. A window is broken on
-# trend only when the drift is BOTH significant AND at least this fraction end-to-end;
-# below it, the drift is within noise and the window holds. CoV still guards genuine
-# variance/choppiness, so this relaxes over-sensitive trend fragmentation only — not
-# scatter. Calibrated on the corpus: over-fragmenting breaks had |rel_drift| <= 0.03,
-# while real drift and level shifts far exceed 0.05. Cumulative, so a persistent slow
-# drift still breaks once the growing window's total change crosses the floor.
+# Effect-size floor for trend breaks during plateau segmentation (§5.5).
+# The rank-based gate tests significance only. Over a long window, it can flag
+# a negligible monotonic change of a few percent as a trend.
+#
+# A trend breaks a window only when it is significant and at least this large
+# end-to-end. Smaller drift is treated as noise. CoV still guards real scatter.
+#
+# Corpus calibration: over-fragmenting breaks had |rel_drift| <= 0.03. Real
+# drift and level shifts were well above 0.05. The threshold is cumulative, so
+# persistent slow drift still breaks the growing window once total change
+# crosses the floor.
 TREND_REL_DRIFT_MIN = 0.05
 
 # z for a two-sided 95% confidence interval (Hamed-Rao autocorrelation significance).
@@ -110,30 +114,32 @@ TOKENIZE_BATCH_SIZE = 4096
 # hand from a run's event log must be judged on the same grid as the live one.
 DEFAULT_COV_BOUNDS: tuple[float, ...] = (0.03, 0.05, 0.08)
 
-# Minimum steady-window TIME duration (docs/steady-state-detection.md §5.5). Passing the
-# >= MIN_TREND_N super-pass floor is not enough: at high throughput a window of a few
-# super-passes is only seconds of wall-time, far too brief to certify steadiness. The
-# required duration is max(precision, relaxation, floor):
-#   precision  = k*.tau_sp,  k* = max(ceil((1.96.CoV_b / eps)^2), MIN_TREND_N)  (batch-means +-eps)
-#   relaxation = mult . p90(sample latency)   (queue/KV-eviction transient safety; p90 not
-#                p99, so a few extreme-outlier request lifetimes don't dominate the floor)
-#   floor      = MLPerf min-duration floor
+# Minimum steady-window wall time (docs/steady-state-detection.md §5.5).
+# MIN_TREND_N super-passes are not enough by themselves. At high throughput, a
+# few super-passes can cover only seconds of offered load.
+#
+# The required duration is max(precision, relaxation, floor):
+#   precision  = k* . tau_sp
+#   k*         = max(ceil((1.96 . CoV_b / eps)^2), MIN_TREND_N)
+#                This is the batch-means target for +-eps precision.
+#   relaxation = mult . p90(sample latency)
+#                This covers queue and KV-eviction transients. p90 is used
+#                instead of p99 so a few extreme request lifetimes do not set
+#                the floor.
+#   floor      = MLPerf min-duration floor.
 MIN_DUR_EPS = 0.05
 MIN_DUR_RELAX_MULT = 5.0
 MIN_DUR_FLOOR_S = 600.0
-# k* floor: >= MIN_TREND_N batches. The batch-means CI already widens when CoV is high,
-# so k* self-raises for noisy metrics; a >4 floor would only over-penalize clean runs.
+# k* is floored at MIN_TREND_N batches. The batch-means CI grows with CoV, so
+# k* rises for noisy metrics. A higher fixed floor would only penalize clean runs.
 MIN_DUR_KSTAR_FLOOR = MIN_TREND_N
 
 # A per-super-pass metric trajectory is classified into one of these states.
 Verdict = Literal["up", "down", "steady", "insufficient"]
 
 
-# The verdict's own types. Structs rather than TypedDicts: this shape rides
-# ``MetricsSnapshot`` and lands in ``result_summary.json``, so msgspec checks it
-# at both ends and mypy checks every consumer. They were TypedDicts when this
-# file was a standalone script with no msgspec dependency and a ``json.dump``
-# output; neither is true now.
+# The verdict rides ``MetricsSnapshot`` and lands in ``result_summary.json``.
+# Use msgspec Structs so both boundaries validate it and mypy checks consumers.
 class Anomaly(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     detected: bool
     change_point_sp: int | None
@@ -204,13 +210,15 @@ class SteadyState(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     osl: dict | None  # per-sample post-first-chunk output token counts
     latency: dict | None  # per-sample end-to-end latency
     tps: TpsBlock | None
-    # CoV per tracked metric. Over the reported window when there is one -- the
-    # number that justifies the verdict. When no window was found but some span
-    # was trend-steady, it is measured over that span instead and ``cov_basis``
-    # says so: scatter, not drift, is then what cost the run its window.
+    # CoV per tracked metric. When a window is reported, this is measured over
+    # that window and justifies the verdict.
+    #
+    # If no window is found but some span is trend-steady, this is measured over
+    # that span instead. ``cov_basis`` then identifies the span. In that case,
+    # scatter, not drift, explains why no window passed.
     cov: dict[str, CovCell]
-    # Set only when ``cov`` describes something other than ``window`` -- i.e. on a
-    # run that found no plateau. ``None`` whenever ``window`` is the basis.
+    # Set only when ``cov`` describes a span other than ``window``. ``None`` when
+    # the reported window is the basis.
     cov_basis: CovBasis | None
     anomaly: Anomaly
     short_window: ShortWindow | None  # min-duration gate detail (None if no plateau)
@@ -227,8 +235,9 @@ class TrackedMetric(NamedTuple):
     gated: bool  # participates in the convergence gate (vs. diagnostic-only)
 
 
-# Metric*percentile trajectories tracked. ``gated`` ones participate in convergence;
-# everything else is diagnostic. TTFT is intentionally NOT gated (see GATED_METRICS).
+# Metric-percentile trajectories to track.
+# Gated metrics participate in convergence. The rest are diagnostic.
+# TTFT is intentionally diagnostic only; see GATED_METRICS.
 TRACKED_METRICS: tuple[TrackedMetric, ...] = (
     TrackedMetric("ttft_p50", "ttft_ns", 0.50, False),
     TrackedMetric("ttft_p90", "ttft_ns", 0.90, False),
@@ -236,24 +245,27 @@ TRACKED_METRICS: tuple[TrackedMetric, ...] = (
     TrackedMetric("tpot_p90", "tpot_ns", 0.90, True),
     TrackedMetric("ttft_p99", "ttft_ns", 0.99, False),
     TrackedMetric("tpot_p99", "tpot_ns", 0.99, False),
-    # End-to-end sample latency (issue->complete). Diagnostic by default (its variance
-    # tracks the OSL mix, §5.1); useful for agentic where per-turn TTFT is turbulent.
+    # End-to-end sample latency is diagnostic. Its variance tracks the OSL mix
+    # (§5.1). It is also useful for agentic runs with turbulent per-turn TTFT.
     TrackedMetric("latency_p50", "latency_ns", 0.50, False),
     TrackedMetric("latency_p90", "latency_ns", 0.90, False),
-    # Warm-turn TTFT (agentic turn >= 2): cold first-turn prefill discarded.
+    # Warm-turn TTFT for agentic turn >= 2. The cold first turn is excluded.
     TrackedMetric("ttft_warm_p50", "ttft_warm_ns", 0.50, False),
     TrackedMetric("ttft_warm_p90", "ttft_warm_ns", 0.90, False),
 )
 
-# Admissibility gate: TPOT p50/p90 only (decode-rate steadiness). TTFT is deliberately
-# NOT a hard gate — at high concurrency its tail variance (prefill time tracking dataset
-# ISL skew + queue wait) is structural, not decode un-steadiness, and fragments genuinely
-# steady runs (docs/steady-state-detection.md §5.5). Measured: two ~800s steady-TPOT runs
-# (c7k, c22k) were rejected purely by TTFT-tail fragmentation; TPOT-only recovers them.
+# The admissibility gate uses only TPOT p50 and p90. These measure decode-rate
+# steadiness.
+#
+# TTFT is not a hard gate. At high concurrency, TTFT tail variance comes from
+# prefill, dataset ISL skew, and queue wait. It is structural, not decode
+# instability, and it fragments steady runs (docs/steady-state-detection.md §5.5).
+#
+# Calibration evidence: two ~800s runs with steady TPOT, c7k and c22k, were
+# rejected purely by TTFT-tail fragmentation. TPOT-only gating recovers them.
 GATED_METRICS: tuple[TrackedMetric, ...] = tuple(m for m in TRACKED_METRICS if m.gated)
-# Metrics watched for the whole-run Drifting-Up *warning*: the gated TPOT pair plus TTFT
-# p50/p90. TTFT is soft here — a genuine TTFT saturation drift is still surfaced (warning),
-# just never a hard reject.
+# Drifting-Up watches the gated TPOT pair plus TTFT p50 and p90. TTFT remains a
+# warning-only signal: genuine TTFT saturation drift is surfaced, not rejected.
 DRIFT_WATCH_METRICS: tuple[TrackedMetric, ...] = tuple(
     m
     for m in TRACKED_METRICS
@@ -358,18 +370,21 @@ _LOAD_PATTERN_PROFILE: dict[str, str] = {
 
 
 def profile_for_load_pattern(lp: str) -> Profile | None:
-    """The profile for a load pattern, or None if nobody classified it.
+    """Return the validated profile for a load pattern.
 
-    Fails closed: a workload no one has validated the detector against must not
-    inherit a verdict from whichever profile the lookup happens to default to.
+    Return ``None`` for unclassified load patterns. The detector must fail
+    closed so an unvalidated workload does not inherit another profile's verdict.
     """
     name = _LOAD_PATTERN_PROFILE.get(lp)
     return PROFILES[name] if name is not None else None
 
 
 def find_run_files(target: str) -> tuple[str, str | None]:
-    """Resolve (events.jsonl, config.yaml|None) from a run dir or an events.jsonl
-    path. A directory is searched in ``./`` and ``./client/``."""
+    """Resolve ``events.jsonl`` and an optional ``config.yaml``.
+
+    ``target`` may be a run directory or an event-log path. Directories are
+    searched in ``./`` and ``./client/``.
+    """
     if os.path.isdir(target):
         cands = [
             os.path.join(target, "events.jsonl"),
@@ -418,15 +433,15 @@ def read_run_config(config_yaml_path: str | None) -> dict:
 
 
 def superpass_size_from_events(events_path: str) -> int | None:
-    """Super-pass size announced by the run's first performance phase.
+    """Return the super-pass size from the first performance phase.
 
-    Lets a re-run against a report directory take no arguments, and makes it
-    impossible to disagree with the size the run itself bucketed on.
+    This lets a re-run against a report directory take no arguments. It also
+    keeps the replay on the same bucket size as the original run.
 
-    Decoded rather than indexed: ``PhaseData`` rides the log as a positional
-    array -- every member of the ``EventRecord.data`` tagged union is
-    ``array_like`` -- so hand-indexing would quietly read the wrong field the
-    day one is added, while ``convert`` checks the tag and the arity too.
+    ``PhaseData`` is decoded rather than hand-indexed. It is logged as a
+    positional array because ``EventRecord.data`` members are ``array_like``.
+    ``msgspec.convert`` checks both the tag and arity, so a shape mismatch fails
+    instead of reading the wrong field.
     """
     with open(events_path) as f:
         for line in f:
@@ -445,7 +460,7 @@ def superpass_size_from_events(events_path: str) -> int | None:
 # NATL (agentic per-trajectory throughput) -- EXPERIMENTAL, see the CLI warning
 # --------------------------------------------------------------------------- #
 def full_output_text(data: object) -> str:
-    """All generated text for a turn (reasoning + output + tool_calls), for OSL counting."""
+    """Return all generated text for a turn, for OSL counting."""
     if not isinstance(data, list):
         return ""
     parts: list[str] = []
@@ -466,8 +481,11 @@ def build_trajectory_natl(
     count_tokens: Callable[[list[str]], list[int]],
     flush_size: int = 512,
 ) -> list[tuple[int, float]]:
-    """Per-trajectory NATL = sum(output tokens) / sum(e2e latency s), keyed by
-    conversation_id. Returns (last_complete_ns, natl) sorted by completion."""
+    """Compute per-trajectory NATL values sorted by completion time.
+
+    NATL is sum(output tokens) / sum(e2e latency seconds), grouped by
+    ``conversation_id``. Each returned pair is ``(last_complete_ns, natl)``.
+    """
     issue: dict[str, tuple[str, int]] = {}
     conv_lat_s: dict[str, float] = {}
     conv_tokens: dict[str, int] = {}
@@ -563,15 +581,18 @@ def build_natl_result(
 
 
 # --------------------------------------------------------------------------- #
-# TextModelOutput.text_after_first_chunk, ported to the parsed JSON array
+# TextModelOutput.text_after_first_chunk for the parsed JSON array
 # --------------------------------------------------------------------------- #
 def text_after_first_chunk(data: object) -> str:
-    """Return output text excluding the first streamed chunk (the TPOT numerator).
+    """Return output text after the first streamed chunk.
 
-    ``data`` is the COMPLETE event payload: ``[tag, output, reasoning?, tool_calls?]``
-    with trailing defaults omitted (msgspec ``array_like`` + ``omit_defaults``). ``output``
-    and ``reasoning`` are each either a string (non-streaming) or a list of chunks
-    (streaming). Mirrors ``TextModelOutput.text_after_first_chunk`` in core/types.py.
+    This is the text used as the TPOT numerator. ``data`` is the COMPLETE event
+    payload: ``[tag, output, reasoning?, tool_calls?]`` with trailing defaults
+    omitted by msgspec ``array_like`` and ``omit_defaults``.
+
+    ``output`` and ``reasoning`` are each either a string for non-streaming
+    output or a list of streamed chunks. The logic mirrors
+    ``TextModelOutput.text_after_first_chunk`` in core/types.py.
     """
     if not isinstance(data, list) or not data:
         return ""
@@ -613,10 +634,11 @@ class SuperPassRollup:
     first_issue_ns: int = -1  # earliest issue ts (offered-load span start)
     last_issue_ns: int = -1  # latest issue ts (offered-load span end; throughput denom)
     last_event_ns: int = -1  # latest event ts incl. completions (drain-inclusive end)
-    # array("d"), not list[float]: 8 packed bytes per sample instead of a boxed
-    # float plus a pointer -- 108 -> 34 bytes/sample over the five series, which
-    # is ~220 MB -> ~70 MB retained on a 2M-sample run. Readers only need a
-    # Sequence (append / len / truthiness / sorted / sum), so nothing else moves.
+    # Keep sample series in array("d"). It stores 8 packed bytes per sample
+    # instead of a boxed float plus a pointer: 108 -> 34 bytes/sample across
+    # the five series, or ~220 MB -> ~70 MB retained for a 2M-sample run.
+    # Callers only need Sequence-style operations, so list semantics are not
+    # required.
     ttft_ns: array[float] = field(default_factory=_samples)
     ttft_warm_ns: array[float] = field(default_factory=_samples)  # turn >= 2 (warm KV)
     tpot_ns: array[float] = field(default_factory=_samples)
@@ -631,29 +653,30 @@ class SuperPassRollup:
 class _PendingRow:
     """In-flight sample state during the parse, keyed by uuid until COMPLETE."""
 
-    sp_index: int
+    superpass_index: int
     issue_ns: int
     recv_first_ns: int | None = None
 
 
 class SuperPassCollector:
-    """Buckets performance-tracked samples into super-passes by issue order.
+    """Bucket performance-tracked samples into super-passes by issue order.
 
-    The one implementation of that bucketing arithmetic. Two producers drive it:
-    the metrics aggregator, calling the hooks live from its event router, and
-    :func:`build_super_pass_series`, replaying an archived ``events.jsonl``. Both
-    therefore emit the same ``list[SuperPassRollup]`` and reach the same verdict.
+    This class owns the bucketing arithmetic used by both producers: the live
+    metrics aggregator and :func:`build_super_pass_series`. Both paths therefore
+    produce the same ``list[SuperPassRollup]`` and the same verdict.
 
-    It keeps no per-sample state. Each caller already has an in-flight row --
-    ``SampleRow`` in the aggregator, :class:`_PendingRow` in the parse -- and
-    passes the sample's super-pass index and timestamps back in. A uuid map here
-    would be a second copy of the aggregator's, growing for the length of the
-    run, and the token count a super-pass needs only arrives at the drain flush,
-    long after the row is gone.
+    The collector keeps no per-sample state. The caller already has an in-flight
+    row, either ``SampleRow`` in the aggregator or :class:`_PendingRow` in the
+    replay parser. The caller stores the super-pass index there and passes it
+    back with timestamps. A uuid map here would duplicate that state for the
+    whole run.
 
-    Callers must report only tracked samples. ``sp_index < 0`` means the sample
-    was never bucketed -- issued before the size was known -- and every hook
-    must then be skipped.
+    Token counts can arrive during drain, after the in-flight row is gone.
+    Callers pass the stored super-pass index back to attach TPOT later.
+
+    Callers must report only tracked samples. ``superpass_index < 0`` means the sample
+    was issued before the bucket size was known. Every later hook for that
+    sample must be skipped.
     """
 
     __slots__ = ("_issue_counter", "_series", "superpass_size")
@@ -667,79 +690,85 @@ class SuperPassCollector:
     def announce_phase(self, num_turns: int) -> None:
         """Latch the bucket size from a phase announcement.
 
-        Ignored once bucketing has begun, so a phase announced after the
-        performance one -- accuracy, or a second performance phase -- cannot
-        re-size a series already built.
+        After bucketing starts, later phase announcements are ignored. Accuracy
+        phases and additional performance phases cannot resize an existing
+        series.
         """
         if num_turns > 0 and not self._series:
             self.superpass_size = num_turns
 
     def series(self) -> list[SuperPassRollup]:
+        """Return the collected super-pass rollups."""
         return self._series
 
     def assign(self, ts_ns: int) -> int:
-        """Open a bucket slot for a newly issued sample; returns its super-pass.
+        """Assign a newly issued sample to a super-pass.
 
-        ``-1`` before the bucket size is known. The caller stores the result on
-        its own in-flight row and hands it back to every other hook.
+        Returns ``-1`` until the bucket size is known. The caller stores the
+        result on its in-flight row and passes it to later hooks.
         """
         if not self.superpass_size:
             return -1
-        sp_idx = self._issue_counter // self.superpass_size
+        superpass_index = self._issue_counter // self.superpass_size
         self._issue_counter += 1
-        while len(self._series) <= sp_idx:
+        while len(self._series) <= superpass_index:
             self._series.append(SuperPassRollup(index=len(self._series)))
-        sp = self._series[sp_idx]
+        sp = self._series[superpass_index]
         sp.n_issued += 1
         if sp.first_issue_ns < 0:
             sp.first_issue_ns = ts_ns
         sp.last_issue_ns = max(sp.last_issue_ns, ts_ns)
         sp.last_event_ns = max(sp.last_event_ns, ts_ns)
-        return sp_idx
+        return superpass_index
 
-    def reissue(self, sp_index: int, ts_ns: int) -> None:
-        """A retry of an already-bucketed sample: only its issue ts moves."""
-        sp = self._series[sp_index]
+    def reissue(self, superpass_index: int, ts_ns: int) -> None:
+        """Update issue timing for a retry of an already-bucketed sample."""
+        sp = self._series[superpass_index]
         sp.last_issue_ns = max(sp.last_issue_ns, ts_ns)
         sp.last_event_ns = max(sp.last_event_ns, ts_ns)
 
     def on_recv_first(
-        self, sp_index: int, issue_ns: int, ts_ns: int, turn: int | None, *, first: bool
+        self,
+        superpass_index: int,
+        issue_ns: int,
+        ts_ns: int,
+        turn: int | None,
+        *,
+        first: bool,
     ) -> None:
-        """Record the sample's TTFT. ``first`` is False for a retry's second chunk."""
-        sp = self._series[sp_index]
+        """Record TTFT for the sample's first streamed chunk."""
+        sp = self._series[superpass_index]
         sp.last_event_ns = max(sp.last_event_ns, ts_ns)
-        # A retried sample re-emits recv_first and must not contribute a second
-        # TTFT to the super-pass.
+        # Retries re-emit recv_first. Count TTFT only once per sample.
         if not first:
             return
         ttft = float(ts_ns - issue_ns)
         sp.ttft_ns.append(ttft)
-        # Warm-turn TTFT excludes the cold first turn of each agentic trajectory
-        # (turn 1 = no KV-cache hit). turn is None for single-turn workloads ->
-        # treated as warm (kept).
+        # Warm-turn TTFT excludes turn 1 of each agentic trajectory because it
+        # has no KV-cache hit. Single-turn workloads have no turn number, so
+        # they stay in the warm series.
         if turn is None or turn > 1:
             sp.ttft_warm_ns.append(ttft)
 
     def on_complete(
-        self, sp_index: int, issue_ns: int, recv_first_ns: int | None, ts_ns: int
+        self, superpass_index: int, issue_ns: int, recv_first_ns: int | None, ts_ns: int
     ) -> float | None:
-        """Record e2e latency; return the TPOT numerator in ns if it streamed.
+        """Record e2e latency and return the streamed TPOT numerator.
 
-        The numerator is what a caller that tokenizes the output itself needs to
-        finish the TPOT division later, via :meth:`add_tpot`. None when the
-        sample never streamed a first chunk.
+        The returned value is nanoseconds from first chunk to completion. The
+        caller later divides it by token count via :meth:`add_tpot`. Return
+        ``None`` when the sample never streamed a first chunk.
         """
-        sp = self._series[sp_index]
+        sp = self._series[superpass_index]
         sp.last_event_ns = max(sp.last_event_ns, ts_ns)
         sp.latency_ns.append(float(ts_ns - issue_ns))  # e2e, no recv_first needed
         if recv_first_ns is None:
             return None
         return float(ts_ns - recv_first_ns)
 
-    def add_tpot(self, sp_index: int, tpot_ns: float, token_count: int) -> None:
+    def add_tpot(self, superpass_index: int, tpot_ns: float, token_count: int) -> None:
         """Attach a resolved TPOT and its token count to an earlier bucket."""
-        sp = self._series[sp_index]
+        sp = self._series[superpass_index]
         sp.tpot_ns.append(tpot_ns)
         sp.osl.append(float(token_count))
         sp.out_tokens += token_count
@@ -753,10 +782,12 @@ def build_super_pass_series(
 ) -> list[SuperPassRollup]:
     """Replay an ``events.jsonl`` through a :class:`SuperPassCollector`.
 
-    ``count_tokens`` maps a batch of texts to token counts; injected so the parse is
-    testable without a real tokenizer and the tokenizer is swappable. ``flush_size``
-    caps how many output texts are buffered before a tokenizer flush — lower it to bound
-    peak memory on long reasoning outputs (fewer texts held, smaller tokenizer calls).
+    ``count_tokens`` maps a text batch to token counts. It is injected so tests
+    can avoid a real tokenizer and callers can swap tokenizers.
+
+    ``flush_size`` caps buffered output texts before tokenizer flush. Lower
+    values bound peak memory for long reasoning outputs at the cost of smaller
+    tokenizer batches.
     """
     if superpass_size <= 0:
         raise ValueError("superpass_size must be positive")
@@ -773,9 +804,9 @@ def build_super_pass_series(
     def flush_tpot() -> None:
         if batch_texts:
             counts = count_tokens(batch_texts)
-            for (sp_idx, delta), cnt in zip(pending, counts, strict=True):
+            for (superpass_index, delta), cnt in zip(pending, counts, strict=True):
                 if cnt > 0:
-                    collector.add_tpot(sp_idx, delta / cnt, cnt)
+                    collector.add_tpot(superpass_index, delta / cnt, cnt)
         pending.clear()
         batch_texts.clear()
 
@@ -805,16 +836,18 @@ def build_super_pass_series(
                 existing = rows.get(uuid)
                 if existing is not None:
                     existing.issue_ns = ts  # retry: refresh issue ts only
-                    collector.reissue(existing.sp_index, ts)
+                    collector.reissue(existing.superpass_index, ts)
                     continue
-                sp_idx = collector.assign(ts)
-                if sp_idx >= 0:
-                    rows[uuid] = _PendingRow(sp_index=sp_idx, issue_ns=ts)
+                superpass_index = collector.assign(ts)
+                if superpass_index >= 0:
+                    rows[uuid] = _PendingRow(
+                        superpass_index=superpass_index, issue_ns=ts
+                    )
             elif et == EV_RECV_FIRST:
                 row = rows.get(uuid)
                 if row is not None:
                     collector.on_recv_first(
-                        row.sp_index,
+                        row.superpass_index,
                         row.issue_ns,
                         ts,
                         rec.get("turn"),
@@ -827,13 +860,13 @@ def build_super_pass_series(
                 if row is None:
                     continue
                 delta = collector.on_complete(
-                    row.sp_index, row.issue_ns, row.recv_first_ns, ts
+                    row.superpass_index, row.issue_ns, row.recv_first_ns, ts
                 )
                 if delta is None:
                     continue
                 text = text_after_first_chunk(rec.get("data"))
                 if text:
-                    pending.append((row.sp_index, delta))
+                    pending.append((row.superpass_index, delta))
                     batch_texts.append(text)
                     if len(batch_texts) >= flush_size:
                         flush_tpot()
@@ -908,9 +941,9 @@ def window_elapsed_ns(series: Sequence[SuperPassRollup], lo: int, hi: int) -> in
 def window_issue_span_ns(series: Sequence[SuperPassRollup], lo: int, hi: int) -> int:
     """Offered-load span of ``[lo, hi)``: earliest to latest *issue*.
 
-    This is the throughput denominator (§5.1): the drain lives after the last issue, so
-    counting to the last completion would inflate the denominator and deflate TPS —
-    badly so for high-tail workloads (long TTFT + decode).
+    This is the throughput denominator (§5.1). Drain time starts after the last
+    issue, so counting to the last completion would inflate the denominator and
+    deflate TPS, especially for high-tail workloads with long TTFT and decode.
     """
     window = series[lo:hi]
     firsts = [sp.first_issue_ns for sp in window if sp.first_issue_ns >= 0]
@@ -1187,11 +1220,11 @@ def _autocorr_of_ranks(values: Sequence[float]) -> list[float]:
 
 
 def mann_kendall_hamed_rao(values: Sequence[float], alpha: float = 0.05) -> TrendResult:
-    """Mann-Kendall with the Hamed-Rao autocorrelation variance correction.
+    """Mann-Kendall with Hamed-Rao autocorrelation correction.
 
-    Inflates (or, for negatively autocorrelated data, deflates) the MK variance by an
-    effective-sample-size factor computed from the significant autocorrelations of the
-    data ranks, so serial correlation does not fake significance.
+    The correction scales MK variance by an effective-sample-size factor from
+    significant autocorrelations in the data ranks. This keeps serial
+    correlation from creating false significance.
     """
     n = len(values)
     if n < MIN_TREND_N:
@@ -1207,10 +1240,9 @@ def mann_kendall_hamed_rao(values: Sequence[float], alpha: float = 0.05) -> Tren
             continue
         factor_sum += (n - k) * (n - k - 1) * (n - k - 2) * r
     correction = 1.0 + (2.0 / (n * (n - 1) * (n - 2))) * factor_sum
-    # A non-positive effective-sample correction is degenerate (over-correction under
-    # strong negative autocorrelation). Fall back to the uncorrected MK variance rather
-    # than clamping to a sliver, which would collapse the variance and manufacture a
-    # significant trend from essentially no evidence.
+    # A non-positive correction is degenerate, usually from over-correction under
+    # strong negative autocorrelation. Use the uncorrected MK variance. Clamping
+    # near zero would collapse variance and manufacture a significant trend.
     if correction <= 0:
         correction = 1.0
     return _mk_verdict(s, var0 * correction, alpha)
@@ -1244,10 +1276,11 @@ def _ols(values: Sequence[float]) -> tuple[float, float, list[float]]:
 
 
 def _rel_drift(values: Sequence[float]) -> float:
-    """Signed end-to-end fractional change of the OLS trend line over the window.
+    """Return signed end-to-end fractional change of the OLS line.
 
-    Matches ``slope_vs_scatter``'s ``rel_drift``; used as the effect-size floor that keeps
-    a significant-but-negligible trend from fragmenting a steady plateau (§5.5).
+    This matches ``slope_vs_scatter``'s ``rel_drift``. It is the effect-size
+    floor that keeps negligible but significant trends from fragmenting a steady
+    plateau (§5.5).
     """
     if len(values) < 2:
         return 0.0
@@ -1317,8 +1350,8 @@ ALGORITHMS: dict[str, Callable[[Sequence[float]], TrendResult]] = {
 def cov_pass_row(
     values: Sequence[float], bounds: Sequence[float]
 ) -> dict[float, bool | None]:
-    # Fewer than 2 points -> CoV is undefined; report inconclusive (None), never PASS,
-    # so a short/empty window can't masquerade as steady.
+    # CoV is undefined with fewer than two points. Report inconclusive, not
+    # PASS, so a short or empty window cannot masquerade as steady.
     if len(values) < 2:
         return {b: None for b in bounds}
     c = cov(values)
@@ -1357,9 +1390,8 @@ def _window_percentile_series(
     return out
 
 
-# Which condition a candidate window clears, or the first one it fails. Trend and
-# scatter are kept apart because a run that drifts and a run that is merely noisy
-# fail for different reasons and call for different advice.
+# Gate outcomes for candidate windows.
+# Trend and scatter failures stay separate because they need different advice.
 _GATE_OK: Final[str] = "ok"
 _GATE_SHORT: Final[str] = "short"
 _GATE_TREND: Final[str] = "trend"
@@ -1374,12 +1406,11 @@ def _window_gate(
     cov_bounds: Sequence[float],
     gated_metrics: Sequence[TrackedMetric],
 ) -> str:
-    """Which gate the window clears, or the first one it fails.
+    """Return the first gate a window fails, or ``ok``.
 
-    A trend break disqualifies immediately -- no later metric can redeem it. A CoV
-    failure is remembered but does not stop the scan, so a window that is
-    trend-steady throughout reports ``cov`` rather than whichever metric happened
-    to be checked last.
+    Trend failure disqualifies the window immediately. CoV failure is remembered
+    but does not stop the scan. That lets a trend-steady window report ``cov``
+    even if later metrics are checked.
     """
     gate = ALGORITHMS[gate_algo]
     loosest = max(cov_bounds)
@@ -1392,9 +1423,9 @@ def _window_gate(
             gate(traj).verdict != "steady"
             and abs(_rel_drift(traj)) >= TREND_REL_DRIFT_MIN
         ):
-            # Significant trend AND practically large: a genuine drift/level-shift breaks
-            # the window. A significant-but-negligible drift (< the effect-size floor) is
-            # within noise and does not fragment the plateau; CoV below still guards scatter.
+            # Break only on trends that are significant and practically large.
+            # Smaller significant drift is treated as noise. CoV still guards
+            # scatter below.
             return _GATE_TREND
         if cov(traj) > loosest:
             worst = _GATE_COV
@@ -1420,17 +1451,14 @@ def gated_trend_drifters(
     gate_algo: str,
     gated_metrics: Sequence[TrackedMetric] = GATED_METRICS,
 ) -> list[str] | None:
-    """Which gated metrics trend across the whole series; ``[]`` if none do.
+    """Return gated metrics that trend across the whole series.
 
-    ``None`` when the question cannot be asked at all -- too few super-passes to
-    trend-test, or a super-pass with no samples.
+    Returns ``[]`` when no gated metric trends. Returns ``None`` when the test
+    cannot run because there are too few super-passes or an empty super-pass.
 
-    Applies the same trend rule as :func:`_window_gate`, effect-size floor
-    included, so "trend-steady" means here exactly what it means for
-    admissibility. One test over the whole span, not a search: when no plateau
-    was admissible, whether the *run* drifts is what separates "it drifted" from
-    "it was flat but too noisy", and a per-window search re-derives an answer the
-    whole-span test already gives.
+    This applies the same trend rule as :func:`_window_gate`, including the
+    effect-size floor. A whole-span test separates drifting runs from flat but
+    noisy runs when no plateau is admissible.
     """
     gate = ALGORITHMS[gate_algo]
     drifting: list[str] = []
@@ -1455,11 +1483,11 @@ def segment_plateaus(
     gated_metrics: Sequence[TrackedMetric] = GATED_METRICS,
     min_len: int = MIN_TREND_N,
 ) -> list[tuple[int, int]]:
-    """Grow-from-left segmentation into maximal admissible plateaus.
+    """Segment the series into maximal admissible plateaus.
 
-    From each start, extend the window until admissibility breaks (a staircase jump
-    fails the CoV/trend gate); the maximal admissible span is one plateau, then resume
-    past it. Plateaus shorter than ``min_len`` are impossible by construction.
+    From each start, extend the window until admissibility fails. The longest
+    passing span is one plateau. Then scanning resumes after that plateau.
+    Plateaus shorter than ``min_len`` are impossible by construction.
     """
     n = len(series)
     plateaus: list[tuple[int, int]] = []
@@ -1487,12 +1515,15 @@ def detect_level_shift(
     cov_band: float = 0.05,
     baseline_idx: int = 0,
 ) -> Anomaly:
-    """Flag a staircase: a plateau *after* ``baseline_idx`` whose TPOT level differs from
-    the reported plateau by more than ``cov_band``, corroborated by a Pettitt change-point
-    on the per-super-pass TPOT means. ``delta_pct`` > 0 means the later level is worse
-    (TPOT rose). ``baseline_idx`` is the index of the reported plateau: degradation is
-    measured relative to it, and only plateaus after it count (earlier ones were skipped,
-    not degradations)."""
+    """Flag a late TPOT level shift.
+
+    A shift requires a later plateau to differ from ``baseline_idx`` by more
+    than ``cov_band`` and a Pettitt change point on per-super-pass TPOT means.
+    ``delta_pct`` > 0 means the later level is worse because TPOT rose.
+
+    ``baseline_idx`` is the reported plateau. Degradation is measured relative
+    to it. Earlier plateaus do not count as degradations.
+    """
     found = [list(p) for p in plateaus]
 
     def _none(pet: dict | None = None) -> Anomaly:
@@ -1537,12 +1568,11 @@ def global_trend(
     gate_algo: str,
     metrics: Sequence[TrackedMetric] = DRIFT_WATCH_METRICS,
 ) -> dict[str, Verdict]:
-    """Trend verdict per watched metric over ``series[from_idx:]`` (plateau onset to end).
+    """Return trend verdicts from plateau onset to the run end.
 
-    A window can be locally flat while a metric climbs across the rest of the run (a slow
-    drift the short per-window gate misses); this whole-tail test catches it. Watches the
-    drift set (TPOT + TTFT), so a soft TTFT saturation drift is surfaced even though TTFT
-    does not gate admissibility.
+    A local plateau can be flat while a metric climbs later. This whole-tail
+    test catches slow drift missed by short per-window gates. It watches TPOT
+    and TTFT, so TTFT saturation is surfaced without gating admissibility.
     """
     gate = ALGORITHMS[gate_algo]
     out: dict[str, Verdict] = {}
@@ -1561,13 +1591,14 @@ def adaptive_warmup(
     min_warmup: int = 1,
     max_frac: float = 0.5,
 ) -> int:
-    """Data-driven warmup crop: drop leading super-passes still off the steady level.
+    """Drop leading super-passes that are outside the steady band.
 
-    The driver's steady level is estimated from the median of the series' back half;
-    leading super-passes whose driver value is more than ``band`` (fractional) away from
-    it — in *either* direction — are cropped. Symmetric because the natural driver, TPOT,
-    ramps *up* to steady (unlike TTFT, which decays down). Capped at ``max_frac`` of the
-    run so it can never crop everything.
+    The steady level is the driver's median over the back half of the series.
+    Leading super-passes are cropped while their driver value is more than
+    ``band`` away from that level in either direction.
+
+    The check is symmetric because TPOT ramps up to steady while TTFT decays
+    down. The crop is capped at ``max_frac`` of the run.
     """
     m = _METRIC_BY_KEY[driver]
     vals = super_pass_percentile_series(series, m.source_attr, m.percentile)
@@ -1585,12 +1616,15 @@ def adaptive_warmup(
 def min_steady_duration(
     series: Sequence[SuperPassRollup], lo: int, hi: int
 ) -> ShortWindow:
-    """Required steady-window wall-time for the window ``[lo, hi)`` (§5.5).
+    """Return the required steady-window wall time for ``[lo, hi)`` (§5.5).
 
-    ``max(precision, relaxation, floor)``. ``is_short`` compares it to the window's
-    offered-load span (the throughput denominator, so it matches the TPS reported for the
-    same window). All inputs come from the window itself, so a high-throughput window with
-    a short offered span is correctly asked for far more super-passes than the trend floor.
+    The requirement is ``max(precision, relaxation, floor)``. ``is_short``
+    compares that requirement to the window's offered-load span. This matches
+    the throughput denominator used for the reported TPS.
+
+    All inputs come from the window itself. A high-throughput window with a
+    short offered span can therefore require many more super-passes than the
+    trend floor.
     """
     window = series[lo:hi]
     tpot_p50 = [
@@ -1607,11 +1641,10 @@ def min_steady_duration(
     l_p90 = percentile_lower(sorted(lat), 0.90) / 1e9 if lat else 0.0
 
     kstar = max(math.ceil((CI_Z_95 * cov_b / MIN_DUR_EPS) ** 2), MIN_DUR_KSTAR_FLOOR)
-    # The precision term only binds when the metric is noisy enough to demand MORE batches
-    # than the trend floor. At the floor (k* == MIN_TREND_N), the >= MIN_TREND_N super-passes
-    # already satisfy the trend requirement, so duration is governed by relaxation/floor
-    # alone — a clean minimal plateau that meets the wall-time floor is valid, not rejected
-    # by a precision term that degenerates to ~the window's own duration at 4 super-passes.
+    # The precision term binds only when noise demands more batches than the
+    # trend floor. At k* == MIN_TREND_N, the trend requirement is already met.
+    # Then relaxation and floor control duration. This keeps a clean minimal
+    # plateau valid when it meets the wall-time floor.
     t_prec = kstar * tau_sp if kstar > MIN_DUR_KSTAR_FLOOR else 0.0
     t_relax = MIN_DUR_RELAX_MULT * l_p90
     min_s = max(t_prec, t_relax, MIN_DUR_FLOOR_S)
@@ -1650,19 +1683,19 @@ def compute_steady_state_metrics(
     gated_metrics: Sequence[TrackedMetric] = GATED_METRICS,
     enforce_min_duration: bool = True,
 ) -> SteadyState:
-    """Crop warmup, select the first steady plateau, and summarize it.
+    """Select and summarize the first steady plateau after warmup.
 
-    Pure over a ``SuperPassRollup`` series, so the two producers -- the live
-    collector in the metrics aggregator and ``build_super_pass_series`` over an
-    archived ``events.jsonl`` -- reach the same verdict. Window indices are
+    This is pure over a ``SuperPassRollup`` series. The live collector and the
+    event-log replay therefore reach the same verdict. Window indices are
     relative to the post-warmup series.
 
-    ``warmup`` is ``"auto"`` (data-driven crop on ``warmup_driver``) or a fixed
-    super-pass count. ``superpass_size`` is passed in rather than derived: it is
-    carried in the result and a partial last bucket cannot reveal it.
-    ``enforce_min_duration`` (default) hard-rejects a plateau whose wall-time is
-    below the §5.5 minimum (``found=False``); when disabled the plateau is still
-    reported and the ``short_window`` detail carries an advisory instead.
+    ``warmup`` is ``"auto"`` for a data-driven crop on ``warmup_driver``, or a
+    fixed super-pass count. ``superpass_size`` is passed in because a partial
+    last bucket cannot reveal it.
+
+    With ``enforce_min_duration=True``, a plateau below the §5.5 wall-time
+    minimum is rejected with ``found=False``. When disabled, the plateau is
+    reported and ``short_window`` carries the advisory detail.
     """
     if isinstance(warmup, int) and warmup < 0:
         raise ValueError(f"warmup must be >= 0, got {warmup}")
@@ -1675,10 +1708,9 @@ def compute_steady_state_metrics(
     plateaus = segment_plateaus(series, gate_algo, cov_bounds, gated_metrics)
     if not plateaus:
         gt = global_trend(series, 0, gate_algo)  # drift-watch set (TPOT + TTFT)
-        # No plateau was admissible, so say which half of the gate failed. A run
-        # that is trend-steady throughout was rejected on scatter: report its CoV,
-        # measured over the same span the trend test just cleared. A run that
-        # drifts has no steady span for a CoV to describe, so none is claimed.
+        # No plateau was admissible, so report whether trend or scatter failed.
+        # If the whole run is trend-steady, report CoV over that same span. If
+        # it drifts, there is no steady span for CoV to describe.
         drifters = gated_trend_drifters(series, gate_algo, gated_metrics)
         steady_throughout = drifters == []
         reason = "no admissible steady plateau"
@@ -1715,10 +1747,10 @@ def compute_steady_state_metrics(
             global_trend=gt,
             drifting_up=[k for k, v in gt.items() if v == "up"],
         )
-    # Min-duration selection. When enforced, walk plateaus in order and report the FIRST
-    # that clears the min-duration gate — skipping earlier plateaus too brief to certify.
-    # If none qualify, reject, reporting the longest candidate for context. When the gate
-    # is disabled, always report the first plateau (advisory only).
+    # Min-duration selection. When enforced, report the first plateau that
+    # clears the gate. Earlier plateaus are too brief to certify. If none
+    # qualify, reject and report the longest candidate for context. When the
+    # gate is disabled, report the first plateau with an advisory.
     shorts = [min_steady_duration(series, lo, hi) for lo, hi in plateaus]
     if enforce_min_duration:
         sel = next((i for i, sw in enumerate(shorts) if not sw.is_short), None)
@@ -1749,11 +1781,13 @@ def compute_steady_state_metrics(
     )
     # per-user TPS = 1e9/TPOT is monotone-decreasing, so invert the CI bounds.
     per_user_ci = [per_user_tps(tpot_ci[1]), per_user_tps(tpot_ci[0])]
-    # Aggregate tokens / offered-load (issue) span (§5.1) — NOT the completion span, which
-    # would inflate the denominator with the drain and deflate TPS on high-tail workloads.
-    # The CI is a batch-means half-width from per-super-pass throughput, centered on the
-    # point (per-super-pass issue spans exclude inter-super-pass gaps, so their mean would
-    # not equal the aggregate).
+    # Aggregate TPS uses tokens divided by offered-load issue span (§5.1), not
+    # completion span. Including drain would inflate the denominator and deflate
+    # TPS on high-tail workloads.
+    #
+    # The CI uses a batch-means half-width from per-super-pass throughput,
+    # centered on the aggregate point. Per-super-pass issue spans exclude
+    # inter-super-pass gaps, so their mean need not equal the aggregate.
     system = system_tps(
         pooled_out_tokens(series, lo, hi), window_issue_span_ns(series, lo, hi)
     )
@@ -1769,9 +1803,8 @@ def compute_steady_state_metrics(
     else:
         system_ci = [system, system]
     skipped_short = sum(1 for i in range(report_idx) if shorts[i].is_short)
-    # Every admissible plateau can be genuine but too brief to certify. The
-    # longest candidate's window stays in the blob (informative) while the run
-    # reports no steady state.
+    # All admissible plateaus can be too brief to certify. Keep the longest
+    # candidate in the result for context, but report no steady state.
     short_reason: str | None = (
         (
             f"all {len(plateaus)} admissible plateau(s) too short: longest "
@@ -1821,11 +1854,10 @@ def compute_steady_state_metrics(
 # Top-level orchestration
 # --------------------------------------------------------------------------- #
 class DiagnosticsResult(TypedDict):
-    """The standalone CLI's blob: the verdict plus its debug tables.
+    """Standalone CLI result: the verdict plus debug tables.
 
-    Only ``steady_state`` is produced in a benchmark run; ``drift`` is the
-    whole-run trend scan that earns its keep when a verdict comes back
-    ``found: false`` and someone has to work out why.
+    Benchmark runs produce only ``steady_state``. The CLI also includes
+    ``drift``, a whole-run trend scan used to explain ``found: false`` verdicts.
     """
 
     steady_state: SteadyState
@@ -2193,7 +2225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(render_text(result, cov_bounds))
     if args.json_out:
-        # msgspec, not json.dump: the verdict is a Struct tree now.
+        # msgspec encodes the Struct tree and validates its shape.
         with open(args.json_out, "wb") as fh:
             fh.write(msgspec.json.format(msgspec.json.encode(result)))
         print(f"\nwrote {args.json_out}", file=sys.stderr)

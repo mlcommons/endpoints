@@ -986,14 +986,6 @@ async def _run_benchmark_async(
                     # Fire /stop_profile for URLs whose /start_profile succeeded.
                     # Unifies the clean phase-end path and the abort path.
                     profiler.stop(session_completed_normally and not watchdog.fired)
-                    # The whole-run deadline covers the run, not the tidy-up
-                    # after it. The session has ended; everything past here is
-                    # cleanup, and a watchdog firing during the metrics drain
-                    # would abort the aggregator mid-finalize and cost the run
-                    # the final_snapshot.json its Report is built from. A
-                    # watchdog that already fired keeps `fired` set, so the run
-                    # still reports as timed out.
-                    watchdog.cancel()
                     # Graceful drain runs on both the clean-finish and session-
                     # failure paths; BenchmarkSession.run publishes ENDED in finally.
                     try:

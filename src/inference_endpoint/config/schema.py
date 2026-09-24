@@ -851,16 +851,6 @@ class Timeouts(WithUpdatesMixin, BaseModel):
         gt=0,
         description="Metrics drain seconds (None = unlimited).",
     )
-    service_exit_grace_s: Annotated[float, cyclopts.Parameter(show=False)] = Field(
-        60.0,
-        gt=0,
-        description=(
-            "Grace added to the metrics drain budget when waiting for the "
-            "service subprocesses to exit: the publisher's ZMQ linger, the "
-            "steady-state analysis, the final snapshot write, and teardown. "
-            "Unused when the drain budget is unlimited."
-        ),
-    )
 
 
 class ProfilerEngine(str, Enum):
@@ -957,23 +947,24 @@ class EarlyStoppingConfig(BaseModel):
 class SteadyStateConfig(BaseModel):
     """Steady-state window detection (off by default, opt-in).
 
-    The metrics aggregator collects a per-super-pass series as the run happens
-    and computes the steady window at the end, carried on the report as
-    ``steady_state``. Costs one extra rollup per sample event; it re-uses the
-    token counts the TPOT trigger already produced, so nothing is tokenized
-    twice. Supported for the `concurrency` and `poisson` load patterns on
-    non-accuracy-only runs with a resolvable tokenizer; otherwise silently off.
-    Interpreting the verdict is the submitter's problem -- there is no model
-    allowlist. See ``docs/steady_state_diagnostics.md``.
+    The metrics aggregator collects a per-super-pass series during the run and
+    attaches the final verdict to the report as ``steady_state``.
+
+    Collection adds one rollup per sample event. It reuses token counts from the
+    TPOT trigger, so nothing is tokenized twice.
+
+    Supported runs use the `concurrency` or `poisson` load pattern, are not
+    accuracy-only, and have a resolvable tokenizer. Other runs leave it off.
+    There is no model allowlist. See ``docs/steady_state_diagnostics.md``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: Annotated[
         bool,
-        # An explicit name, not an alias: an alias would ALSO expose the field
-        # name, and a bare `--enabled` collides with every other flattened
-        # single-field option model.
+        # Use an explicit name, not an alias. An alias would also expose the
+        # field name, and a bare `--enabled` collides with other flattened
+        # single-field option models.
         cyclopts.Parameter(
             name="--steady-state",
             help="Detect the run's steady window and report it",

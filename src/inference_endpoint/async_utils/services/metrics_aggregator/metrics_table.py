@@ -90,10 +90,10 @@ class SampleRow(msgspec.Struct, gc=False):  # type: ignore[call-arg]
 
     sample_uuid: str
     tracked_block_idx: int = -1
-    # Steady-state super-pass this sample was issued into; -1 = not collected.
-    # Held here rather than in a uuid map inside SuperPassCollector, which would
-    # be a second copy of this table growing for the length of the run.
-    sp_index: int = -1
+    # Super-pass this sample was issued into; -1 means not collected.
+    # Lives on SampleRow so the collector stays stateless per sample: a uuid map
+    # in SuperPassCollector would duplicate this table for the length of the run.
+    superpass_index: int = -1
     issued_ns: int | None = None
     recv_first_ns: int | None = None
     last_recv_ns: int | None = None
@@ -233,9 +233,8 @@ class TokenTrigger(EmitTrigger):
     ) -> Callable[[int], None]:
         """Build the callback the queue runs once the token count is known.
 
-        ``row`` is passed so a subclass can read in-flight state now: the count
-        arrives at the next flush, by which point ``set_field`` has dropped the
-        row from the table.
+        Subclasses may need in-flight state before the next flush. At flush time
+        ``set_field`` may have dropped the row, so the caller passes it here.
         """
         registry, name = self.registry, self.metric_name
 
@@ -388,12 +387,12 @@ class TpotTrigger(TokenTrigger):
 
     def _make_recorder(self, ev_rec, row, pre_change):
         collector = self._collector
-        # Read the super-pass NOW, while the sample is still in flight: the token
-        # count arrives at the drain flush, by which point set_field has dropped
-        # the row. Carrying the int in the closure also keeps the row itself from
-        # being retained until the flush.
-        sp_index = row.sp_index
-        if collector is None or sp_index < 0:
+        # Read the super-pass while the sample is still in flight. The token
+        # count arrives at the drain flush; by then set_field has dropped the
+        # row. Carry only the int in the closure, so the row is not retained
+        # until the flush.
+        superpass_index = row.superpass_index
+        if collector is None or superpass_index < 0:
             return super()._make_recorder(ev_rec, row, pre_change)
         registry, name = self.registry, self.metric_name
 
@@ -401,7 +400,7 @@ class TpotTrigger(TokenTrigger):
             value = self._compute_value(count, ev_rec, pre_change)
             if value is not None:
                 registry.record(name, value)
-                collector.add_tpot(sp_index, value, count)
+                collector.add_tpot(superpass_index, value, count)
 
         return record
 
