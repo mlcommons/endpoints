@@ -289,18 +289,18 @@ def test_run_result_structure(tmp_path):
     # ttft climbs steadily -> an upward drift the scan should surface.
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100 + 20 * i)
     result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
-    assert result["steady_state"]["n_super_passes"] == 8
-    assert result["steady_state"]["warmup"] == 1
+    assert result["steady_state"].n_super_passes == 8
+    assert result["steady_state"].warmup == 1
     assert result["drift"]["ttft_p50"]["mk_hamed_rao"] == "up"
     # CoV cells carry a pass/fail per bound and a gate flag. Admissibility gates on
     # TPOT only, so tpot_p50 is gated while ttft_p50 is now diagnostic.
-    cov = result["steady_state"]["cov"]
-    assert cov["tpot_p50"]["gated"] is True
+    cov = result["steady_state"].cov
+    assert cov["tpot_p50"].gated is True
     cell = cov["ttft_p50"]
-    assert cell["gated"] is False
-    assert set(cell["passes"]) == {"0.03", "0.05", "0.08"}
+    assert cell.gated is False
+    assert set(cell.passes) == {"0.03", "0.05", "0.08"}
     # p99 is present but marked diagnostic (not gated)
-    assert cov["ttft_p99"]["gated"] is False
+    assert cov["ttft_p99"].gated is False
 
 
 def test_text_after_first_chunk_empty_reasoning_str_output_is_first_chunk():
@@ -525,9 +525,9 @@ def test_ttft_not_gated_but_still_drift_warned():
         mod.window_admissible(series, 0, 8, GATE, BOUNDS) is True
     )  # TTFT ignored by the gate
     ss = _analyse(series, enforce_min_duration=False)
-    assert ss["found"] is True
-    assert "ttft_p50" in ss["drifting_up"]  # TTFT drift surfaced as a soft warning
-    assert "tpot_p50" not in ss["drifting_up"]  # TPOT is flat
+    assert ss.found is True
+    assert "ttft_p50" in ss.drifting_up  # TTFT drift surfaced as a soft warning
+    assert "tpot_p50" not in ss.drifting_up  # TPOT is flat
 
 
 def test_segment_plateaus_splits_staircase():
@@ -545,54 +545,54 @@ def test_detect_level_shift_flags_staircase():
     series = _mk_series([(100, 50)] * 6 + [(200, 60)] * 6)
     plateaus = mod.segment_plateaus(series, GATE, BOUNDS)
     shift = mod.detect_level_shift(series, plateaus)
-    assert shift["detected"] is True
-    assert shift["change_point_sp"] == 6
-    assert shift["delta_pct"] > 0  # degradation (TPOT rose)
+    assert shift.detected is True
+    assert shift.change_point_sp == 6
+    assert shift.delta_pct > 0  # degradation (TPOT rose)
 
 
 def test_detect_level_shift_none_on_single_plateau():
     series = _mk_series([(100, 50)] * 8)
     plateaus = mod.segment_plateaus(series, GATE, BOUNDS)
-    assert mod.detect_level_shift(series, plateaus)["detected"] is False
+    assert mod.detect_level_shift(series, plateaus).detected is False
 
 
 def test_steady_state_reports_first_plateau_and_anomaly():
     series = _mk_series([(100, 50)] * 6 + [(200, 60)] * 6)
     ss = _analyse(series, enforce_min_duration=False)
-    assert ss["found"] is True
-    assert ss["window"]["sp_lo"] == 0 and ss["window"]["sp_hi"] == 6  # first plateau
-    assert ss["tps"]["per_user"] > 0 and ss["tps"]["system"] > 0
-    assert ss["ttft"]["count"] == 6 * 40
-    assert ss["anomaly"]["detected"] is True  # the 100->200 step is surfaced
+    assert ss.found is True
+    assert ss.window.sp_lo == 0 and ss.window.sp_hi == 6  # first plateau
+    assert ss.tps.per_user > 0 and ss.tps.system > 0
+    assert ss.ttft["count"] == 6 * 40
+    assert ss.anomaly.detected is True  # the 100->200 step is surfaced
 
 
 def test_steady_state_reports_osl_latency_and_window_bounds():
     series = _mk_series([(100, 50)] * 6)
     ss = _analyse(series, enforce_min_duration=False)
-    w = ss["window"]
+    w = ss.window
     # Wall-clock bounds come from the window's own issue timestamps.
-    assert (w["start_ns"], w["end_ns"]) == (
+    assert (w.start_ns, w.end_ns) == (
         series[0].first_issue_ns,
         series[5].last_issue_ns,
     )
     # OSL and latency are summarized per sample over the same window as TTFT/TPOT.
-    assert ss["osl"]["count"] == ss["ttft"]["count"] == 6 * 40
-    assert ss["osl"]["p50"] == 10.0
-    assert ss["latency"]["p50"] == 150.0
+    assert ss.osl["count"] == ss.ttft["count"] == 6 * 40
+    assert ss.osl["p50"] == 10.0
+    assert ss.latency["p50"] == 150.0
 
 
 def test_steady_state_cov_scores_the_reported_window():
     series = _mk_series([(100, 50)] * 6)
     ss = _analyse(series, enforce_min_duration=False)
     # Dead-flat window -> CoV 0 on every tracked metric, passing every bound.
-    assert set(ss["cov"]) == {m.key for m in mod.TRACKED_METRICS}
-    assert ss["cov"]["tpot_p50"] == {
-        "gated": True,
-        "n": 6,
-        "cov": 0.0,
-        "passes": {"0.03": True, "0.05": True, "0.08": True},
-    }
-    assert ss["cov"]["ttft_p99"]["gated"] is False
+    assert set(ss.cov) == {m.key for m in mod.TRACKED_METRICS}
+    assert ss.cov["tpot_p50"] == mod.CovCell(
+        gated=True,
+        n=6,
+        cov=0.0,
+        passes={"0.03": True, "0.05": True, "0.08": True},
+    )
+    assert ss.cov["ttft_p99"].gated is False
 
 
 def test_steady_state_carries_the_run_shape():
@@ -604,8 +604,8 @@ def test_steady_state_carries_the_run_shape():
         cov_bounds=BOUNDS,
         enforce_min_duration=False,
     )
-    assert (ss["superpass_size"], ss["n_super_passes"], ss["warmup"]) == (512, 8, 2)
-    assert ss["window"]["n_super_passes"] == 6  # indices are post-warmup
+    assert (ss.superpass_size, ss.n_super_passes, ss.warmup) == (512, 8, 2)
+    assert ss.window.n_super_passes == 6  # indices are post-warmup
 
 
 def test_a_flat_but_noisy_run_reports_its_cov_over_the_whole_span():
@@ -618,31 +618,31 @@ def test_a_flat_but_noisy_run_reports_its_cov_over_the_whole_span():
     # No trend, but the super-pass means swing +-10% -> CoV above every bound.
     series = _mk_series([(50 if i % 2 else 60, 50) for i in range(8)])
     ss = _analyse(series)
-    assert ss["found"] is False
-    assert ss["cov"], "a trend-steady run should carry its CoV"
-    basis = ss["cov_basis"]
+    assert ss.found is False
+    assert ss.cov, "a trend-steady run should carry its CoV"
+    basis = ss.cov_basis
     assert basis is not None
-    assert basis == {"sp_lo": 0, "sp_hi": 8, "n_super_passes": 8}
-    assert "CoV" in (ss["reason"] or "")
-    assert ss["osl"] is None and ss["latency"] is None
+    assert basis == mod.CovBasis(sp_lo=0, sp_hi=8, n_super_passes=8)
+    assert "CoV" in (ss.reason or "")
+    assert ss.osl is None and ss.latency is None
 
 
 def test_a_drifting_run_claims_no_cov_and_names_the_drifter():
     """Nothing was steady, so there is no span a CoV would describe."""
     series = _mk_series([(10 * (i + 1), 50) for i in range(8)])
     ss = _analyse(series)
-    assert ss["found"] is False
-    assert ss["cov"] == {}
-    assert ss["cov_basis"] is None
-    assert "trends across the run" in (ss["reason"] or "")
+    assert ss.found is False
+    assert ss.cov == {}
+    assert ss.cov_basis is None
+    assert "trends across the run" in (ss.reason or "")
 
 
 def test_nothing_trend_steady_reports_no_cov_at_all():
     """Too short to trend-test at all: CoV is not the story, so none is claimed."""
     ss = _analyse(_mk_series([(50, 50)] * (mod.MIN_TREND_N - 1)))
-    assert ss["found"] is False
-    assert ss["cov"] == {}
-    assert ss["cov_basis"] is None
+    assert ss.found is False
+    assert ss.cov == {}
+    assert ss.cov_basis is None
 
 
 def test_adaptive_warmup_crops_tpot_ramp():
@@ -666,7 +666,7 @@ def test_adaptive_warmup_capped_at_max_frac():
 def test_run_auto_warmup_resolves_to_int(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100.0)
     result = mod.run(path, superpass_size=1, count_tokens=_words, warmup="auto")
-    assert isinstance(result["steady_state"]["warmup"], int)
+    assert isinstance(result["steady_state"].warmup, int)
 
 
 def test_steady_state_flags_global_drift_after_first_plateau():
@@ -674,24 +674,24 @@ def test_steady_state_flags_global_drift_after_first_plateau():
     # pattern): a local plateau exists, yet the metric drifts up globally.
     series = _mk_series([(100, 50)] * 6 + [(100 + 25 * i, 50) for i in range(1, 8)])
     ss = _analyse(series, enforce_min_duration=False)
-    assert ss["found"] is True
-    assert ss["window"]["sp_lo"] == 0 and ss["window"]["sp_hi"] == 6
-    assert ss["anomaly"]["detected"] is False  # gradual ramp, not a discrete staircase
-    assert "tpot_p50" in ss["drifting_up"]  # global Drifting-Up gate catches it
-    assert "ttft_p50" not in ss["drifting_up"]  # TTFT is flat
+    assert ss.found is True
+    assert ss.window.sp_lo == 0 and ss.window.sp_hi == 6
+    assert ss.anomaly.detected is False  # gradual ramp, not a discrete staircase
+    assert "tpot_p50" in ss.drifting_up  # global Drifting-Up gate catches it
+    assert "ttft_p50" not in ss.drifting_up  # TTFT is flat
 
 
 def test_steady_state_no_global_drift_on_flat_run():
     series = _mk_series([(100, 50)] * 8)
     ss = _analyse(series, enforce_min_duration=False)
-    assert ss["drifting_up"] == []
+    assert ss.drifting_up == []
 
 
 def test_steady_state_none_when_run_never_settles():
     # per-super-pass TPOT ramps every step -> no length-4 window is within CoV
     series = _mk_series([(100 + 20 * i, 50) for i in range(8)])
     ss = _analyse(series, enforce_min_duration=False)
-    assert ss["found"] is False
+    assert ss.found is False
 
 
 def _spanned_series(
@@ -720,10 +720,10 @@ def test_min_steady_duration_floor_dominates_clean_short_run():
     sw = mod.min_steady_duration(
         _spanned_series(6, per_sp_span_s=1.0, latency_s=0.1), 0, 6
     )
-    assert sw["dominant"] == "floor"
-    assert sw["min_duration_s"] == mod.MIN_DUR_FLOOR_S
-    assert sw["kstar"] == mod.MIN_DUR_KSTAR_FLOOR  # flat metric -> k* pinned at floor
-    assert sw["is_short"] is True  # ~6s window << 600s floor
+    assert sw.dominant == "floor"
+    assert sw.min_duration_s == mod.MIN_DUR_FLOOR_S
+    assert sw.kstar == mod.MIN_DUR_KSTAR_FLOOR  # flat metric -> k* pinned at floor
+    assert sw.is_short is True  # ~6s window << 600s floor
 
 
 def test_min_steady_duration_relaxation_dominates_on_long_tail():
@@ -731,8 +731,8 @@ def test_min_steady_duration_relaxation_dominates_on_long_tail():
     sw = mod.min_steady_duration(
         _spanned_series(6, per_sp_span_s=1.0, latency_s=200.0), 0, 6
     )
-    assert sw["dominant"] == "relaxation"
-    assert abs(sw["min_duration_s"] - 1000.0) < 1e-3
+    assert sw.dominant == "relaxation"
+    assert abs(sw.min_duration_s - 1000.0) < 1e-3
 
 
 def test_min_steady_duration_precision_dominates_on_noisy_metric():
@@ -742,8 +742,8 @@ def test_min_steady_duration_precision_dominates_on_noisy_metric():
             100.0 if i % 2 == 0 else 160.0
         ] * 40  # high CoV_b across super-passes
     sw = mod.min_steady_duration(series, 0, 8)
-    assert sw["kstar"] > mod.MIN_DUR_KSTAR_FLOOR  # k* self-raises with CoV
-    assert sw["dominant"] == "precision"
+    assert sw.kstar > mod.MIN_DUR_KSTAR_FLOOR  # k* self-raises with CoV
+    assert sw.dominant == "precision"
 
 
 def test_min_steady_duration_precision_exempt_at_kstar_floor():
@@ -753,11 +753,11 @@ def test_min_steady_duration_precision_exempt_at_kstar_floor():
     sw = mod.min_steady_duration(
         _spanned_series(4, per_sp_span_s=200.0, latency_s=1.0), 0, 4
     )
-    assert sw["kstar"] == mod.MIN_DUR_KSTAR_FLOOR
-    assert sw["t_precision_s"] == 0.0
-    assert sw["dominant"] == "floor"
-    assert sw["min_duration_s"] == mod.MIN_DUR_FLOOR_S
-    assert sw["is_short"] is False
+    assert sw.kstar == mod.MIN_DUR_KSTAR_FLOOR
+    assert sw.t_precision_s == 0.0
+    assert sw.dominant == "floor"
+    assert sw.min_duration_s == mod.MIN_DUR_FLOOR_S
+    assert sw.is_short is False
 
 
 def test_min_steady_duration_not_short_when_window_long_enough():
@@ -765,30 +765,30 @@ def test_min_steady_duration_not_short_when_window_long_enough():
     sw = mod.min_steady_duration(
         _spanned_series(6, per_sp_span_s=120.0, latency_s=1.0), 0, 6
     )
-    assert sw["is_short"] is False
+    assert sw.is_short is False
 
 
 def test_steady_state_hard_fails_short_window():
     series = _mk_series([(100, 50)] * 8)  # flat plateau, microsecond spans
     ss = _analyse(series)  # enforce default True
-    assert ss["found"] is False
-    assert ss["reason"] is not None and "too short" in ss["reason"]
-    assert ss["short_window"]["is_short"] is True
-    assert ss["window"] is not None  # window summary kept for context
+    assert ss.found is False
+    assert ss.reason is not None and "too short" in ss.reason
+    assert ss.short_window.is_short is True
+    assert ss.window is not None  # window summary kept for context
 
 
 def test_steady_state_soft_reports_short_window():
     series = _mk_series([(100, 50)] * 8)
     ss = _analyse(series, enforce_min_duration=False)
-    assert ss["found"] is True  # not rejected, only flagged
-    assert ss["short_window"]["is_short"] is True
+    assert ss.found is True  # not rejected, only flagged
+    assert ss.short_window.is_short is True
 
 
 def test_steady_state_accepts_long_enough_window():
     series = _spanned_series(8, per_sp_span_s=120.0, latency_s=1.0)  # flat, ~960s span
     ss = _analyse(series)  # enforce default True
-    assert ss["found"] is True
-    assert ss["short_window"]["is_short"] is False
+    assert ss.found is True
+    assert ss.short_window.is_short is False
 
 
 def _concat_plateaus(segs):
@@ -818,37 +818,37 @@ def test_hard_path_skips_short_plateau_for_next_admissible():
     A = _spanned_series(4, tpot=5.0, per_sp_span_s=1.0, latency_s=0.1)
     B = _spanned_series(8, tpot=6.5, per_sp_span_s=120.0, latency_s=1.0)
     ss = _analyse(_concat_plateaus([A, B]))
-    assert ss["found"] is True
-    assert ss["window"]["plateau_index"] == 1  # first (short) plateau skipped
-    assert ss["window"]["skipped_short"] == 1
-    assert ss["window"]["sp_lo"] == 4 and ss["window"]["sp_hi"] == 12
-    assert ss["short_window"]["is_short"] is False
+    assert ss.found is True
+    assert ss.window.plateau_index == 1  # first (short) plateau skipped
+    assert ss.window.skipped_short == 1
+    assert ss.window.sp_lo == 4 and ss.window.sp_hi == 12
+    assert ss.short_window.is_short is False
 
 
 def test_hard_path_rejects_when_all_plateaus_short():
     A = _spanned_series(4, tpot=5.0, per_sp_span_s=1.0, latency_s=0.1)
     B = _spanned_series(5, tpot=6.5, per_sp_span_s=1.0, latency_s=0.1)  # also short
     ss = _analyse(_concat_plateaus([A, B]))
-    assert ss["found"] is False
-    assert "too short" in ss["reason"]
-    assert ss["window"] is not None  # longest candidate kept for context
+    assert ss.found is False
+    assert "too short" in ss.reason
+    assert ss.window is not None  # longest candidate kept for context
 
 
 def test_soft_path_reports_first_plateau_even_when_short():
     A = _spanned_series(4, tpot=5.0, per_sp_span_s=1.0, latency_s=0.1)
     B = _spanned_series(8, tpot=6.5, per_sp_span_s=120.0, latency_s=1.0)
     ss = _analyse(_concat_plateaus([A, B]), enforce_min_duration=False)
-    assert ss["found"] is True
-    assert ss["window"]["plateau_index"] == 0  # first plateau, no skipping
-    assert ss["window"]["skipped_short"] == 0
-    assert ss["short_window"]["is_short"] is True  # flagged, advisory only
+    assert ss.found is True
+    assert ss.window.plateau_index == 0  # first plateau, no skipping
+    assert ss.window.skipped_short == 0
+    assert ss.short_window.is_short is True  # flagged, advisory only
 
 
 def test_run_result_has_steady_state_block(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100.0)
     result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
     assert "steady_state" in result
-    assert "anomaly" in result["steady_state"]
+    assert result["steady_state"].anomaly is not None
 
 
 def test_render_text_has_section_headers(tmp_path):

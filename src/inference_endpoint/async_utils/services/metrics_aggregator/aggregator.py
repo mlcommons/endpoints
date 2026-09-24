@@ -35,6 +35,7 @@ from inference_endpoint.core.record import (
 from inference_endpoint.core.types import PhaseData, PhaseType
 from inference_endpoint.metrics.steady_state_diagnostics import (
     PROFILES,
+    SteadyState,
     SuperPassCollector,
     compute_steady_state_metrics,
 )
@@ -594,7 +595,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     )
                 self._finalize()
 
-    async def _steady_state_verdict(self, n_pending: int) -> dict | None:
+    async def _steady_state_verdict(self, n_pending: int) -> SteadyState | None:
         """The verdict for the terminal snapshot, or None if it is not deserved.
 
         Only computed for a run the collected series actually describes: an
@@ -622,14 +623,11 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(
-                    lambda: dict(
-                        compute_steady_state_metrics(
-                            collector.series(),
-                            superpass_size=collector.superpass_size,
-                            cov_bounds=profile.cov_bounds,
-                            warmup_driver=profile.warmup_driver,
-                        )
-                    )
+                    compute_steady_state_metrics,
+                    collector.series(),
+                    superpass_size=collector.superpass_size,
+                    cov_bounds=profile.cov_bounds,
+                    warmup_driver=profile.warmup_driver,
                 ),
                 timeout=STEADY_STATE_ANALYSIS_TIMEOUT_S,
             )

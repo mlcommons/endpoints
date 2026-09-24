@@ -245,9 +245,9 @@ class TestProducerEquivalence:
         live_verdict = compute_steady_state_metrics(
             collector.series(), superpass_size=STEADY_SUPERPASS
         )
-        assert live_verdict["found"] is True, live_verdict["reason"]
-        assert live_verdict["window"]["n_samples"] > 0
-        assert live_verdict["tps"]["system"] > 0
+        assert live_verdict.found is True, live_verdict.reason
+        assert live_verdict.window is not None and live_verdict.window.n_samples > 0
+        assert live_verdict.tps is not None and live_verdict.tps.system > 0
         assert live_verdict == compute_steady_state_metrics(
             replayed, superpass_size=STEADY_SUPERPASS
         )
@@ -414,8 +414,8 @@ class TestVerdictOnTheFinalSnapshot:
         kwargs = await self._finalize(tmp_path, "ss_final")
         verdict = kwargs["steady_state"]
         assert verdict is not None
-        assert verdict["superpass_size"] == SUPERPASS
-        assert verdict["n_super_passes"] > 0
+        assert verdict.superpass_size == SUPERPASS
+        assert verdict.n_super_passes > 0
 
     @pytest.mark.asyncio
     async def test_no_verdict_for_an_interrupted_run(self, tmp_path):

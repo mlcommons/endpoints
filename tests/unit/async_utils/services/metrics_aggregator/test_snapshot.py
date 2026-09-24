@@ -30,6 +30,12 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     snapshot_to_dict,
 )
 from inference_endpoint.core.record import TOPIC_FRAME_SIZE
+from inference_endpoint.metrics.steady_state_diagnostics import (
+    Anomaly,
+    SteadyState,
+    SteadyWindow,
+    TpsBlock,
+)
 
 
 @pytest.mark.unit
@@ -119,12 +125,43 @@ class TestMetricsSnapshot:
         assert decoded.metrics[1].name == "s1"
 
     def test_steady_state_survives_the_wire_and_the_dict_form(self):
-        verdict = {
-            "found": True,
-            "window": {"sp_lo": 0, "sp_hi": 4, "start_ns": 1, "end_ns": 2},
-            "tps": {"system": 1.5, "per_user": 0.25},
-            "drifting_up": ["ttft_p50"],
-        }
+        verdict = SteadyState(
+            found=True,
+            reason=None,
+            superpass_size=10,
+            n_super_passes=4,
+            warmup=0,
+            window=SteadyWindow(
+                sp_lo=0,
+                sp_hi=4,
+                n_super_passes=4,
+                n_samples=40,
+                start_ns=1,
+                end_ns=2,
+                plateau_index=0,
+                n_plateaus=1,
+                skipped_short=0,
+            ),
+            ttft=None,
+            tpot=None,
+            osl=None,
+            latency=None,
+            tps=TpsBlock(
+                per_user=0.25, per_user_ci=[0.2, 0.3], system=1.5, system_ci=[1.4, 1.6]
+            ),
+            cov={},
+            cov_basis=None,
+            anomaly=Anomaly(
+                detected=False,
+                change_point_sp=None,
+                delta_pct=0.0,
+                pettitt=None,
+                plateaus=[],
+            ),
+            short_window=None,
+            global_trend={},
+            drifting_up=["ttft_p50"],
+        )
         snap = MetricsSnapshot(
             counter=3,
             timestamp_ns=7,
@@ -135,8 +172,10 @@ class TestMetricsSnapshot:
         )
         codec = MetricsSnapshotCodec()
         _, payload = codec.encode(snap)
+        # The wire keeps the Struct; the dict form is builtins, since that is
+        # what final_snapshot.json holds and what Report.from_snapshot converts.
         assert codec.decode(payload).steady_state == verdict
-        assert snapshot_to_dict(snap)["steady_state"] == verdict
+        assert snapshot_to_dict(snap)["steady_state"] == msgspec.to_builtins(verdict)
 
     def test_steady_state_defaults_to_none_for_older_frames(self):
         """The field is appended, so a frame without it still decodes."""

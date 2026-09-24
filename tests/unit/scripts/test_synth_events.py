@@ -223,10 +223,10 @@ def test_flat_run_detected_as_steady(tmp_path):
         out, superpass_size=40, count_tokens=_words, enforce_min_duration=False
     )
     ss = result["steady_state"]
-    assert ss["found"] is True
-    assert ss["window"] is not None
-    assert ss["window"]["n_super_passes"] >= 4
-    assert ss["anomaly"]["detected"] is False
+    assert ss.found is True
+    assert ss.window is not None
+    assert ss.window.n_super_passes >= 4
+    assert ss.anomaly.detected is False
 
 
 def test_poisson_mode_generates_and_parses(tmp_path):

@@ -31,6 +31,7 @@ from typing import ClassVar, Final
 import msgspec
 import msgspec.msgpack
 from inference_endpoint.core.record import TOPIC_FRAME_SIZE
+from inference_endpoint.metrics.steady_state_diagnostics import SteadyState
 
 
 class SessionState(str, Enum):
@@ -179,7 +180,7 @@ class MetricsSnapshot(
     state: SessionState
     n_pending_tasks: int
     metrics: list[MetricStat]
-    steady_state: dict | None = None
+    steady_state: SteadyState | None = None
 
 
 # 4-byte topic to match TOPIC_FRAME_SIZE-prefix protocol used by the
@@ -251,7 +252,11 @@ def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
         "state": snap.state.value,
         "n_pending_tasks": snap.n_pending_tasks,
         "metrics": [_metric_to_dict(m) for m in snap.metrics],
-        "steady_state": _scrub_deep(snap.steady_state),
+        "steady_state": _scrub_deep(
+            None
+            if snap.steady_state is None
+            else msgspec.to_builtins(snap.steady_state)
+        ),
     }
 
 

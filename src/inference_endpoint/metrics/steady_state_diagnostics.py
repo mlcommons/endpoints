@@ -129,7 +129,12 @@ MIN_DUR_KSTAR_FLOOR = MIN_TREND_N
 Verdict = Literal["up", "down", "steady", "insufficient"]
 
 
-class Anomaly(TypedDict):
+# The verdict's own types. Structs rather than TypedDicts: this shape rides
+# ``MetricsSnapshot`` and lands in ``result_summary.json``, so msgspec checks it
+# at both ends and mypy checks every consumer. They were TypedDicts when this
+# file was a standalone script with no msgspec dependency and a ``json.dump``
+# output; neither is true now.
+class Anomaly(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     detected: bool
     change_point_sp: int | None
     delta_pct: float  # signed % change of the later TPOT level vs the first plateau
@@ -137,7 +142,7 @@ class Anomaly(TypedDict):
     plateaus: list[list[int]]
 
 
-class SteadyWindow(TypedDict):
+class SteadyWindow(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     sp_lo: int  # post-warmup super-pass index (inclusive)
     sp_hi: int  # exclusive
     n_super_passes: int
@@ -149,14 +154,14 @@ class SteadyWindow(TypedDict):
     skipped_short: int  # earlier plateaus skipped for failing the min-duration gate
 
 
-class TpsBlock(TypedDict):
+class TpsBlock(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     per_user: float  # 1e9 / mean(TPOT ns) = output tok/s/user
     per_user_ci: list[float]  # [lo, hi]
     system: float  # total output tokens / window wall-clock
     system_ci: list[float]
 
 
-class ShortWindow(TypedDict):
+class ShortWindow(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     is_short: bool  # window wall-time < required min-duration
     window_duration_s: float  # offered-load (issue) span of the reported window
     min_duration_s: float  # max(precision, relaxation, floor)
@@ -170,14 +175,14 @@ class ShortWindow(TypedDict):
     l_p90_s: float  # p90 sample e2e latency over the window
 
 
-class CovCell(TypedDict):
+class CovCell(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     gated: bool
     n: int  # super-passes the CoV was computed over
     cov: float | None  # None when there are < 2 points
     passes: dict[str, bool | None]  # cov-bound (as str) -> pass / fail / inconclusive
 
 
-class CovBasis(TypedDict):
+class CovBasis(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     """The span ``cov`` was measured over, when it is not the reported window."""
 
     sp_lo: int  # post-warmup super-pass index (inclusive)
@@ -185,7 +190,7 @@ class CovBasis(TypedDict):
     n_super_passes: int
 
 
-class SteadyState(TypedDict):
+class SteadyState(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     found: bool
     reason: str | None
     superpass_size: (
@@ -1327,12 +1332,12 @@ def cov_table(
     out: dict[str, CovCell] = {}
     for m in TRACKED_METRICS:
         traj = super_pass_percentile_series(series, m.source_attr, m.percentile)
-        out[m.key] = {
-            "gated": m.gated,
-            "n": len(traj),
-            "cov": cov(traj) if len(traj) >= 2 else None,
-            "passes": {str(b): v for b, v in cov_pass_row(traj, bounds).items()},
-        }
+        out[m.key] = CovCell(
+            gated=m.gated,
+            n=len(traj),
+            cov=cov(traj) if len(traj) >= 2 else None,
+            passes={str(b): v for b, v in cov_pass_row(traj, bounds).items()},
+        )
     return out
 
 
@@ -1488,15 +1493,19 @@ def detect_level_shift(
     (TPOT rose). ``baseline_idx`` is the index of the reported plateau: degradation is
     measured relative to it, and only plateaus after it count (earlier ones were skipped,
     not degradations)."""
-    result: Anomaly = {
-        "detected": False,
-        "change_point_sp": None,
-        "delta_pct": 0.0,
-        "pettitt": None,
-        "plateaus": [list(p) for p in plateaus],
-    }
+    found = [list(p) for p in plateaus]
+
+    def _none(pet: dict | None = None) -> Anomaly:
+        return Anomaly(
+            detected=False,
+            change_point_sp=None,
+            delta_pct=0.0,
+            pettitt=pet,
+            plateaus=found,
+        )
+
     if len(plateaus) <= baseline_idx + 1:
-        return result
+        return _none()
 
     def _tpot_mean(lo: int, hi: int) -> float:
         vals = pooled(series, lo, hi, "tpot_ns")
@@ -1504,20 +1513,22 @@ def detect_level_shift(
 
     first_mean = _tpot_mean(*plateaus[baseline_idx])
     if first_mean <= 0:
-        return result
+        return _none()
     sp_means = [
         (sum(sp.tpot_ns) / len(sp.tpot_ns)) if sp.tpot_ns else 0.0 for sp in series
     ]
     pet = pettitt(sp_means)
-    result["pettitt"] = pet
     for lo, hi in plateaus[baseline_idx + 1 :]:
         rel = (_tpot_mean(lo, hi) - first_mean) / first_mean
         if abs(rel) > cov_band and pet["significant"]:
-            result["detected"] = True
-            result["change_point_sp"] = pet["change_point"]
-            result["delta_pct"] = rel * 100.0
-            break
-    return result
+            return Anomaly(
+                detected=True,
+                change_point_sp=pet["change_point"],
+                delta_pct=rel * 100.0,
+                pettitt=pet,
+                plateaus=found,
+            )
+    return _none(pet)
 
 
 def global_trend(
@@ -1612,19 +1623,19 @@ def min_steady_duration(
         else "floor"
     )
     window_dur = window_issue_span_ns(series, lo, hi) / 1e9
-    return {
-        "is_short": window_dur < min_s,
-        "window_duration_s": window_dur,
-        "min_duration_s": min_s,
-        "dominant": dominant,
-        "t_precision_s": t_prec,
-        "t_relaxation_s": t_relax,
-        "t_floor_s": MIN_DUR_FLOOR_S,
-        "kstar": kstar,
-        "cov_b": cov_b,
-        "tau_sp_s": tau_sp,
-        "l_p90_s": l_p90,
-    }
+    return ShortWindow(
+        is_short=window_dur < min_s,
+        window_duration_s=window_dur,
+        min_duration_s=min_s,
+        dominant=dominant,
+        t_precision_s=t_prec,
+        t_relaxation_s=t_relax,
+        t_floor_s=MIN_DUR_FLOOR_S,
+        kstar=kstar,
+        cov_b=cov_b,
+        tau_sp_s=tau_sp,
+        l_p90_s=l_p90,
+    )
 
 
 def compute_steady_state_metrics(
@@ -1661,11 +1672,6 @@ def compute_steady_state_metrics(
         else int(warmup)
     )
     series = full_series[resolved_warmup:] if resolved_warmup < len(full_series) else []
-    shape: dict = {
-        "superpass_size": superpass_size,
-        "n_super_passes": len(full_series),
-        "warmup": resolved_warmup,
-    }
     plateaus = segment_plateaus(series, gate_algo, cov_bounds, gated_metrics)
     if not plateaus:
         gt = global_trend(series, 0, gate_algo)  # drift-watch set (TPOT + TTFT)
@@ -1686,41 +1692,43 @@ def compute_steady_state_metrics(
                 "no admissible steady plateau: "
                 f"{', '.join(drifters)} trends across the run"
             )
-        return {
-            **shape,  # type: ignore[typeddict-item]
-            "found": False,
-            "reason": reason,
-            "window": None,
-            "ttft": None,
-            "tpot": None,
-            "osl": None,
-            "latency": None,
-            "tps": None,
-            "cov": cov_table(series, cov_bounds) if steady_throughout else {},
-            "cov_basis": (
-                {"sp_lo": 0, "sp_hi": len(series), "n_super_passes": len(series)}
+        return SteadyState(
+            superpass_size=superpass_size,
+            n_super_passes=len(full_series),
+            warmup=resolved_warmup,
+            found=False,
+            reason=reason,
+            window=None,
+            ttft=None,
+            tpot=None,
+            osl=None,
+            latency=None,
+            tps=None,
+            cov=cov_table(series, cov_bounds) if steady_throughout else {},
+            cov_basis=(
+                CovBasis(sp_lo=0, sp_hi=len(series), n_super_passes=len(series))
                 if steady_throughout
                 else None
             ),
-            "anomaly": detect_level_shift(series, plateaus),
-            "short_window": None,
-            "global_trend": gt,
-            "drifting_up": [k for k, v in gt.items() if v == "up"],
-        }
+            anomaly=detect_level_shift(series, plateaus),
+            short_window=None,
+            global_trend=gt,
+            drifting_up=[k for k, v in gt.items() if v == "up"],
+        )
     # Min-duration selection. When enforced, walk plateaus in order and report the FIRST
     # that clears the min-duration gate — skipping earlier plateaus too brief to certify.
     # If none qualify, reject, reporting the longest candidate for context. When the gate
     # is disabled, always report the first plateau (advisory only).
     shorts = [min_steady_duration(series, lo, hi) for lo, hi in plateaus]
     if enforce_min_duration:
-        sel = next((i for i, sw in enumerate(shorts) if not sw["is_short"]), None)
+        sel = next((i for i, sw in enumerate(shorts) if not sw.is_short), None)
     else:
         sel = 0
     reject_all_short = sel is None
     report_idx = (
         sel
         if sel is not None
-        else max(range(len(plateaus)), key=lambda i: shorts[i]["window_duration_s"])
+        else max(range(len(plateaus)), key=lambda i: shorts[i].window_duration_s)
     )
     short = shorts[report_idx]
     lo, hi = plateaus[report_idx]  # the reported steady state
@@ -1760,49 +1768,53 @@ def compute_steady_state_metrics(
         system_ci = [system - half, system + half]
     else:
         system_ci = [system, system]
-    skipped_short = sum(1 for i in range(report_idx) if shorts[i]["is_short"])
-    ss: SteadyState = {
-        **shape,  # type: ignore[typeddict-item]
-        "found": True,
-        "reason": None,
-        "window": {
-            "sp_lo": lo,
-            "sp_hi": hi,
-            "n_super_passes": hi - lo,
-            "n_samples": len(ttft),
-            "start_ns": series[lo].first_issue_ns,
-            "end_ns": series[hi - 1].last_issue_ns,
-            "plateau_index": report_idx,
-            "n_plateaus": len(plateaus),
-            "skipped_short": skipped_short,
-        },
-        "ttft": summarize(ttft) if ttft else None,
-        "tpot": summarize(tpot) if tpot else None,
-        "osl": summarize(osl) if osl else None,
-        "latency": summarize(latency) if latency else None,
-        "cov": cov_table(series[lo:hi], cov_bounds),
-        "cov_basis": None,  # the reported window is the basis
-        "tps": {
-            "per_user": per_user_tps(mean_tpot),
-            "per_user_ci": per_user_ci,
-            "system": system,
-            "system_ci": system_ci,
-        },
-        "anomaly": anomaly,
-        "short_window": short,
-        "global_trend": gt,
-        "drifting_up": [k for k, v in gt.items() if v == "up"],
-    }
-    if reject_all_short:
-        # Every admissible plateau is genuine but too brief to certify. Keep the longest
-        # candidate's window in the blob (informative), but report no steady state.
-        ss["found"] = False
-        ss["reason"] = (
+    skipped_short = sum(1 for i in range(report_idx) if shorts[i].is_short)
+    # Every admissible plateau can be genuine but too brief to certify. The
+    # longest candidate's window stays in the blob (informative) while the run
+    # reports no steady state.
+    short_reason: str | None = (
+        (
             f"all {len(plateaus)} admissible plateau(s) too short: longest "
-            f"{short['window_duration_s']:.0f}s < {short['min_duration_s']:.0f}s required "
-            f"({short['dominant']}-dominated)"
+            f"{short.window_duration_s:.0f}s < {short.min_duration_s:.0f}s required "
+            f"({short.dominant}-dominated)"
         )
-    return ss
+        if reject_all_short
+        else None
+    )
+    return SteadyState(
+        superpass_size=superpass_size,
+        n_super_passes=len(full_series),
+        warmup=resolved_warmup,
+        found=not reject_all_short,
+        reason=short_reason,
+        window=SteadyWindow(
+            sp_lo=lo,
+            sp_hi=hi,
+            n_super_passes=hi - lo,
+            n_samples=len(ttft),
+            start_ns=series[lo].first_issue_ns,
+            end_ns=series[hi - 1].last_issue_ns,
+            plateau_index=report_idx,
+            n_plateaus=len(plateaus),
+            skipped_short=skipped_short,
+        ),
+        ttft=summarize(ttft) if ttft else None,
+        tpot=summarize(tpot) if tpot else None,
+        osl=summarize(osl) if osl else None,
+        latency=summarize(latency) if latency else None,
+        cov=cov_table(series[lo:hi], cov_bounds),
+        cov_basis=None,  # the reported window is the basis
+        tps=TpsBlock(
+            per_user=per_user_tps(mean_tpot),
+            per_user_ci=per_user_ci,
+            system=system,
+            system_ci=system_ci,
+        ),
+        anomaly=anomaly,
+        short_window=short,
+        global_trend=gt,
+        drifting_up=[k for k, v in gt.items() if v == "up"],
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1853,7 +1865,7 @@ def run(
         gate_algo=trend_gate,
         enforce_min_duration=enforce_min_duration,
     )
-    post = series[ss["warmup"] :]
+    post = series[ss.warmup :]
     return {
         "steady_state": ss,
         "drift": {
@@ -1888,57 +1900,57 @@ def _fmt_ms(ns: float) -> str:
 
 def _render_steady_state(ss: SteadyState) -> list[str]:
     out = ["=== STEADY STATE (headline) ==="]
-    if not ss["found"]:
-        out.append(f"  not found: {ss['reason']}")
+    if not ss.found:
+        out.append(f"  not found: {ss.reason}")
     else:
-        w = ss["window"]
-        tps = ss["tps"]
+        w = ss.window
+        tps = ss.tps
         assert w is not None and tps is not None
         out.append(
-            f"  window: super-passes {w['sp_lo']}..{w['sp_hi'] - 1} (post-warmup), "
-            f"{w['n_samples']} samples"
+            f"  window: super-passes {w.sp_lo}..{w.sp_hi - 1} (post-warmup), "
+            f"{w.n_samples} samples"
         )
-        if w["skipped_short"] > 0:
+        if w.skipped_short > 0:
             out.append(
-                f"  note: skipped {w['skipped_short']} earlier plateau(s) below "
-                f"min-duration; reporting plateau {w['plateau_index'] + 1} of "
-                f"{w['n_plateaus']}"
+                f"  note: skipped {w.skipped_short} earlier plateau(s) below "
+                f"min-duration; reporting plateau {w.plateau_index + 1} of "
+                f"{w.n_plateaus}"
             )
         out.append(
-            f"  TPS per-user: {tps['per_user']:8.1f} tok/s/user  "
-            f"CI [{tps['per_user_ci'][0]:.1f}, {tps['per_user_ci'][1]:.1f}]"
+            f"  TPS per-user: {tps.per_user:8.1f} tok/s/user  "
+            f"CI [{tps.per_user_ci[0]:.1f}, {tps.per_user_ci[1]:.1f}]"
         )
         out.append(
-            f"  TPS system:   {tps['system']:8.1f} tok/s        "
-            f"CI [{tps['system_ci'][0]:.1f}, {tps['system_ci'][1]:.1f}]"
+            f"  TPS system:   {tps.system:8.1f} tok/s        "
+            f"CI [{tps.system_ci[0]:.1f}, {tps.system_ci[1]:.1f}]"
         )
-        for name in ("ttft", "tpot"):
-            s = ss[name]  # type: ignore[literal-required]
-            if s:
+        for name, stat in (("ttft", ss.ttft), ("tpot", ss.tpot)):
+            if stat:
                 out.append(
-                    f"  {name.upper():4} p50 {_fmt_ms(s['p50'])}  p90 {_fmt_ms(s['p90'])}"
-                    f"  p99 {_fmt_ms(s['p99'])}"
-                    f"  mean {_fmt_ms(s['mean'])}"
+                    f"  {name.upper():4} p50 {_fmt_ms(stat['p50'])}"
+                    f"  p90 {_fmt_ms(stat['p90'])}"
+                    f"  p99 {_fmt_ms(stat['p99'])}"
+                    f"  mean {_fmt_ms(stat['mean'])}"
                 )
-    sw = ss["short_window"]
-    if ss["found"] and sw is not None and sw["is_short"]:
+    sw = ss.short_window
+    if ss.found and sw is not None and sw.is_short:
         # Reached only with the min-duration gate disabled (--no-min-duration); the
         # enforced path reports found=False with the same numbers in `reason`.
         out.append(
-            f"  WARNING: Window too short -- {sw['window_duration_s']:.0f}s steady vs "
-            f"{sw['min_duration_s']:.0f}s desired ({sw['dominant']}-dominated); "
+            f"  WARNING: Window too short -- {sw.window_duration_s:.0f}s steady vs "
+            f"{sw.min_duration_s:.0f}s desired ({sw.dominant}-dominated); "
             f"the steady number is a best-effort estimate over too little wall-time"
         )
-    if ss["drifting_up"]:
+    if ss.drifting_up:
         out.append(
-            f"  WARNING: {', '.join(ss['drifting_up'])} drifting UP over the rest of the "
+            f"  WARNING: {', '.join(ss.drifting_up)} drifting UP over the rest of the "
             f"run -- the window is a local plateau; global steady state is questionable"
         )
-    an = ss["anomaly"]
-    if an["detected"]:
+    an = ss.anomaly
+    if an.detected:
         out.append(
-            f"  ANOMALY: level shift at super-pass {an['change_point_sp']}, "
-            f"TPOT {an['delta_pct']:+.1f}% toward end of run (likely degradation)"
+            f"  ANOMALY: level shift at super-pass {an.change_point_sp}, "
+            f"TPOT {an.delta_pct:+.1f}% toward end of run (likely degradation)"
         )
     return out
 
@@ -1950,11 +1962,8 @@ def _render_cov_table(
     lines = [label, f"  {'metric':<12} {'gate':<5} {'CoV':>8}   {bound_hdr}"]
     for m in TRACKED_METRICS:
         cell = table[m.key]
-        covv = cell["cov"]
-        covs = f"{covv:.4f}" if covv is not None else "   n/a"
-        passes = "  ".join(
-            f"{_pass_glyph(cell['passes'][str(b)]):>7}" for b in cov_bounds
-        )
+        covs = f"{cell.cov:.4f}" if cell.cov is not None else "   n/a"
+        passes = "  ".join(f"{_pass_glyph(cell.passes[str(b)]):>7}" for b in cov_bounds)
         lines.append(
             f"  {m.key:<12} {'gate' if m.gated else 'diag':<5} {covs:>8}   {passes}"
         )
@@ -1964,23 +1973,23 @@ def _render_cov_table(
 def render_text(result: DiagnosticsResult, cov_bounds: Sequence[float]) -> str:
     ss = result["steady_state"]
     lines = [
-        f"super-passes: {ss['n_super_passes']} "
-        f"(size {ss['superpass_size']}, warmup {ss['warmup']})",
+        f"super-passes: {ss.n_super_passes} "
+        f"(size {ss.superpass_size}, warmup {ss.warmup})",
         "",
     ]
     lines.extend(_render_steady_state(ss))
-    if ss["cov"]:
-        basis = ss["cov_basis"]
+    if ss.cov:
+        basis = ss.cov_basis
         title = (
             "CoV inside the reported window"
             if basis is None
             else (
                 "CoV over the longest trend-steady span "
-                f"({basis['n_super_passes']} super-passes; no window was admissible)"
+                f"({basis.n_super_passes} super-passes; no window was admissible)"
             )
         )
         lines.append("")
-        lines.extend(_render_cov_table(title, ss["cov"], cov_bounds))
+        lines.extend(_render_cov_table(title, ss.cov, cov_bounds))
     lines.append("")
     lines.append("--- diagnostics ---")
     lines.append("")
@@ -2184,8 +2193,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(render_text(result, cov_bounds))
     if args.json_out:
-        with open(args.json_out, "w") as fh:
-            json.dump(result, fh, indent=2)
+        # msgspec, not json.dump: the verdict is a Struct tree now.
+        with open(args.json_out, "wb") as fh:
+            fh.write(msgspec.json.format(msgspec.json.encode(result)))
         print(f"\nwrote {args.json_out}", file=sys.stderr)
     return 0
 

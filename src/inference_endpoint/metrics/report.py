@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from collections.abc import Callable, Iterable
@@ -35,6 +36,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.registry import 
 from inference_endpoint.evaluation.accuracy_results import (
     samples_weighted_average_accuracy,
 )
+from inference_endpoint.metrics.steady_state_diagnostics import SteadyState
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
@@ -47,6 +49,9 @@ SERIES_TO_SUMMARY_FIELD: Final[dict[str, str]] = {
     "tpot_ns": "tpot",
     "sample_latency_ns": "latency",
 }
+
+
+logger = logging.getLogger(__name__)
 
 
 def place_early_stopping_percentiles(
@@ -178,20 +183,26 @@ def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _num(value: object, default: float = 0.0) -> float:
-    """A float fit for ``format``, whatever the verdict actually carried.
+def _steady_state_of(snap: dict) -> SteadyState | None:
+    """Decode the verdict off a snapshot dict, or ``None`` if it is unusable.
 
-    The verdict is an opaque dict from the detector, and ``snapshot_to_dict``
-    scrubs every non-finite float in it to ``None`` before the snapshot is
-    written. ``dict.get(key, default)`` returns that stored ``None`` rather than
-    the default, so formatting it with ``:.2f`` would raise out of ``display()``
-    -- on the success path of every run that produced a verdict.
+    ``final_snapshot.json`` is read with ``json.loads``, so the verdict arrives
+    as plain dicts and has to be converted to be typed. A verdict that does not
+    match the schema is dropped rather than raised: it is a diagnostic, and a
+    run that produced one still deserves its report. Dropping it makes the
+    absence visible, where coercing would print a plausible wrong number.
     """
-    return (
-        value
-        if isinstance(value, int | float) and not isinstance(value, bool)
-        else default
-    )
+    raw = snap.get("steady_state")
+    if raw is None:
+        return None
+    try:
+        return msgspec.convert(raw, type=SteadyState)
+    except msgspec.ValidationError:
+        logger.warning(
+            "Steady-state verdict did not match the expected schema; dropping it",
+            exc_info=True,
+        )
+        return None
 
 
 class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
@@ -275,7 +286,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # and carried on the metrics snapshot. None when steady-state collection was
     # off or the run was not described by the series it collected. Kept in
     # ``to_json`` (unlike ``accuracy``), so it reaches result_summary.json.
-    steady_state: dict[str, Any] | None = None
+    steady_state: SteadyState | None = None
 
     @property
     def n_samples_succeeded(self) -> int:
@@ -442,7 +453,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             e2e_avg_interactivity=e2e_avg_interactivity,
             finish_reason_counts=finish_reason_counts,
             run_config=run_config,
-            steady_state=snap.get("steady_state"),
+            steady_state=_steady_state_of(snap),
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
@@ -467,32 +478,34 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         result_summary.json; only the numbers a reader acts on are printed.
         """
         ss = self.steady_state
-        if not ss:
+        if ss is None:
             return
-        if not ss.get("found"):
-            fn(f"Steady state: not found ({ss.get('reason')}){newline}")
+        if not ss.found:
+            fn(f"Steady state: not found ({ss.reason}){newline}")
             return
-        window, tps = ss.get("window") or {}, ss.get("tps") or {}
-        held_s = (_num(window.get("end_ns")) - _num(window.get("start_ns"))) / 1e9
+        window, tps = ss.window, ss.tps
+        if window is None or tps is None:
+            return
+        held_s = (window.end_ns - window.start_ns) / 1e9
         fn(
-            f"Steady state: super-passes {window.get('sp_lo')}..."
-            f"{int(_num(window.get('sp_hi'))) - 1} (post-warmup), "
-            f"{window.get('n_samples')} samples over {held_s:.0f}s{newline}"
+            f"Steady state: super-passes {window.sp_lo}..."
+            f"{window.sp_hi - 1} (post-warmup), "
+            f"{window.n_samples} samples over {held_s:.0f}s{newline}"
         )
         fn(
-            f"  Steady TPS: {_num(tps.get('system')):.2f} system, "
-            f"{_num(tps.get('per_user')):.2f} per user{newline}"
+            f"  Steady TPS: {tps.system:.2f} system, "
+            f"{tps.per_user:.2f} per user{newline}"
         )
-        if ss.get("drifting_up"):
+        if ss.drifting_up:
             fn(
-                f"  WARNING: {', '.join(ss['drifting_up'])} drifting up over the "
+                f"  WARNING: {', '.join(ss.drifting_up)} drifting up over the "
                 f"rest of the run{newline}"
             )
-        if (ss.get("anomaly") or {}).get("detected"):
+        if ss.anomaly.detected:
             fn(
                 f"  ANOMALY: level shift at super-pass "
-                f"{ss['anomaly'].get('change_point_sp')}, TPOT "
-                f"{_num(ss['anomaly'].get('delta_pct')):+.1f}% toward end of run"
+                f"{ss.anomaly.change_point_sp}, TPOT "
+                f"{ss.anomaly.delta_pct:+.1f}% toward end of run"
                 f"{newline}"
             )
 
