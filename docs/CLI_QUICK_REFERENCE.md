@@ -103,10 +103,10 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--client.max-connections --max-connections` - Max TCP connections (-1=unlimited)
 - `--endpoint-config.api-key --api-key` - API authentication
 - `--endpoint-config.api-type --api-type` - API type: openai/sglang (default: openai)
-- `--report-dir` - Report output directory
-  Note: applies to CLI-driven `benchmark offline` / `benchmark online`; `benchmark from-config`
-  does not expose a CLI override for `report_dir`. Set it in the YAML only if you need to control
-  the output location; otherwise a default report directory is used.
+- `--report-dir` - Report output directory. Available on `benchmark offline` / `benchmark online`
+  and on `benchmark from-config` (where it overrides the YAML `report_dir`). Unset, the run writes
+  to a timestamped default directory. See [Run Output Structure](OUTPUT_STRUCTURE.md) for what
+  lands there.
 - `--timeout` - Whole-run watchdog (`settings.timeouts.run_timeout_s`; unset = off)
 - Other timeout flags: `--timeouts.service-ready-timeout-s`, `--timeouts.warmup-drain-timeout-s`, `--timeouts.performance-drain-timeout-s`, `--timeouts.accuracy-drain-timeout-s`, `--timeouts.metrics-drain-timeout-s`, `--timeouts.interrupted-teardown-grace-s`
 - `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
@@ -179,6 +179,9 @@ inference-endpoint benchmark offline \
 Report directories contain a sanitized `config.yaml`: credentials and other
 secret values are replaced with `<redacted>`. Restore those values before
 reusing that file as benchmark input.
+
+A combined (`both`) run writes performance and accuracy artifacts into one report directory —
+see [Run Output Structure](OUTPUT_STRUCTURE.md) for the full layout.
 
 ## Load Patterns
 
