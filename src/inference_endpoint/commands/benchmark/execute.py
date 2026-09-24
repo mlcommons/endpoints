@@ -80,7 +80,7 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import PhaseType, QueryResult
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -105,7 +105,6 @@ from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     EndpointResponseIdleTimeoutError,
     PhaseConfig,
-    PhaseType,
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report

@@ -84,7 +84,7 @@ from inference_endpoint.config.schema import (
     OnlineBenchmarkConfig as OnlineConfig,
 )
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
-from inference_endpoint.core.types import APIType, QueryResult
+from inference_endpoint.core.types import APIType, PhaseType, QueryResult
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -107,7 +107,6 @@ from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import (
     EndpointResponseIdleTimeoutError,
     PhaseResult,
-    PhaseType,
     SessionResult,
 )
 from inference_endpoint.metrics.metric import Throughput

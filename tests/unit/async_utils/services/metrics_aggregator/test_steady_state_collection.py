@@ -34,7 +34,7 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import PhaseData, TextModelOutput
+from inference_endpoint.core.types import PhaseData, PhaseType, TextModelOutput
 from inference_endpoint.metrics.steady_state_diagnostics import (
     build_super_pass_series,
     compute_steady_state_metrics,
@@ -50,7 +50,10 @@ from .conftest import (
 SUPERPASS = 2
 
 
-def phase_start(num_turns: int = SUPERPASS, phase_type: str = "performance"):
+def phase_start(
+    num_turns: int = SUPERPASS,
+    phase_type: PhaseType = PhaseType.PERFORMANCE,
+):
     return EventRecord(
         event_type=SessionEventType.PHASE_START,
         timestamp_ns=0,
@@ -90,7 +93,7 @@ def _event_stream() -> list[EventRecord]:
         session_event(SessionEventType.STARTED, ts=0),
         # A warmup phase announces first; its samples are untracked, and its
         # announcement must not outlive the performance one.
-        phase_start(num_turns=99, phase_type="warmup"),
+        phase_start(num_turns=99, phase_type=PhaseType.WARMUP),
         *_sample("warm", 10, 5, 50, ["w ", "x y"]),
         phase_start(),
         session_event(SessionEventType.START_PERFORMANCE_TRACKING, ts=100),
@@ -360,7 +363,7 @@ class TestCollectionGate:
         """
         records = [
             session_event(SessionEventType.STARTED, ts=0),
-            phase_start(num_turns=99, phase_type="warmup"),
+            phase_start(num_turns=99, phase_type=PhaseType.WARMUP),
         ]
         collector = await _collect(tmp_path, records, "ss_warmup_size")
         assert collector.superpass_size == 0
@@ -373,7 +376,7 @@ class TestCollectionGate:
             phase_start(num_turns=3),
             session_event(SessionEventType.START_PERFORMANCE_TRACKING, ts=10),
             *_sample("a", 100, 10, 900, ["c ", "x"]),
-            phase_start(num_turns=77, phase_type="accuracy"),
+            phase_start(num_turns=77, phase_type=PhaseType.ACCURACY),
         ]
         collector = await _collect(tmp_path, records, "ss_size")
         assert collector.superpass_size == 3

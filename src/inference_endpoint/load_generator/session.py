@@ -26,7 +26,6 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Protocol
 
 import msgspec
@@ -39,7 +38,14 @@ from ..core.record import (
     SampleEventType,
     SessionEventType,
 )
-from ..core.types import PhaseData, PromptData, Query, QueryResult, StreamChunk
+from ..core.types import (
+    PhaseData,
+    PhaseType,
+    PromptData,
+    Query,
+    QueryResult,
+    StreamChunk,
+)
 from ..dataset_manager.dataset import Dataset
 from .sample_order import create_sample_order
 from .strategy import LoadStrategy, create_load_strategy
@@ -54,14 +60,6 @@ class EndpointResponseIdleTimeoutError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Phase configuration
 # ---------------------------------------------------------------------------
-
-
-class PhaseType(str, Enum):
-    """Phase types control tracking and reporting behavior."""
-
-    PERFORMANCE = "performance"
-    ACCURACY = "accuracy"
-    WARMUP = "warmup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,7 +548,7 @@ class BenchmarkSession:
         self._publish_session_event(
             SessionEventType.PHASE_START,
             PhaseData(
-                phase_type=phase.phase_type.value,
+                phase_type=phase.phase_type,
                 drain_after=phase.drain_after,
                 # The sample order cycles over ``n_samples_from_dataset``, which
                 # is what one pass actually is -- the ruleset path sets it from
@@ -558,7 +556,7 @@ class BenchmarkSession:
                 # dataset's own count would size super-passes to a pass that
                 # never happens.
                 num_turns=(
-                    conv.max_turns_per_conv
+                    len(conv.samples)
                     if conv is not None
                     else phase.runtime_settings.n_samples_from_dataset
                 ),

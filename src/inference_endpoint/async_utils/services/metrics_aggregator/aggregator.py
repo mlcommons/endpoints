@@ -32,9 +32,8 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import PhaseData
+from inference_endpoint.core.types import PhaseData, PhaseType
 from inference_endpoint.metrics.steady_state_diagnostics import (
-    PERFORMANCE_PHASE,
     PROFILES,
     SuperPassCollector,
     compute_steady_state_metrics,
@@ -393,7 +392,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     if (
                         collector is not None
                         and isinstance(record.data, PhaseData)
-                        and record.data.phase_type == PERFORMANCE_PHASE
+                        and record.data.phase_type is PhaseType.PERFORMANCE
                     ):
                         collector.announce_phase(record.data.num_turns)
                 else:

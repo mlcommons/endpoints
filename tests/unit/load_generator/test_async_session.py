@@ -34,6 +34,7 @@ from inference_endpoint.core.record import (
 from inference_endpoint.core.types import (
     ErrorData,
     PhaseData,
+    PhaseType,
     Query,
     QueryResult,
     StreamChunk,
@@ -45,7 +46,6 @@ from inference_endpoint.load_generator.session import (
     PhaseConfig,
     PhaseIssuer,
     PhaseResult,
-    PhaseType,
     SessionResult,
 )
 from inference_endpoint.metrics.metric import Throughput
@@ -1793,7 +1793,7 @@ class TestPhaseStartEvent:
     @pytest.mark.asyncio
     async def test_single_turn_dataset_reports_sample_count(self):
         assert await self._phase_data(FakeDataset(7)) == PhaseData(
-            phase_type="performance",
+            phase_type=PhaseType.PERFORMANCE,
             drain_after=True,
             num_turns=7,
             num_trajectories=0,
@@ -1802,13 +1802,15 @@ class TestPhaseStartEvent:
     @pytest.mark.asyncio
     async def test_agentic_dataset_reports_turns_and_trajectories(self):
         dataset = FakeDataset(7)
+        # num_turns is turns issued in one pass -- every turn across every
+        # conversation, not the per-conversation ceiling.
         dataset.conversation_metadata = SimpleNamespace(
-            max_turns_per_conv=4, num_conversations=3
+            samples=[object()] * 11, max_turns_per_conv=4, num_conversations=3
         )
         assert await self._phase_data(dataset) == PhaseData(
-            phase_type="performance",
+            phase_type=PhaseType.PERFORMANCE,
             drain_after=True,
-            num_turns=4,
+            num_turns=11,
             num_trajectories=3,
         )
 

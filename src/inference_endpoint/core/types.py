@@ -340,6 +340,20 @@ class ErrorData(
         )
 
 
+class PhaseType(str, Enum):
+    """Phase types control tracking and reporting behavior.
+
+    Lives here rather than beside ``BenchmarkSession`` because it rides the wire
+    on ``PhaseData``: the metrics aggregator and the standalone detector both
+    need it, and importing the load generator for it would put that whole
+    import graph into the metrics subprocess.
+    """
+
+    PERFORMANCE = "performance"
+    ACCURACY = "accuracy"
+    WARMUP = "warmup"
+
+
 class PhaseData(
     msgspec.Struct,
     tag=True,
@@ -353,19 +367,20 @@ class PhaseData(
 
     Scalars only, so ``gc=False`` holds unconditionally.
 
-    ``num_turns`` and ``num_trajectories`` are read as a pair. A single-turn
-    workload reports ``num_turns = dataset.num_samples()`` with
-    ``num_trajectories = 0``; an agentic one reports the per-conversation turn
-    limit and the conversation count.
+    ``num_turns`` is one meaning in both shapes: turns issued in one pass over
+    the dataset, a turn being a sample. A single-turn workload reports the
+    sample count of a pass; an agentic one reports every turn across every
+    conversation. ``num_trajectories`` carries the conversation count alongside
+    it, so mean turns per trajectory is derivable.
 
     Attributes:
-        phase_type: ``PhaseType`` value (``warmup`` / ``performance`` / ``accuracy``).
+        phase_type: Which phase this is.
         drain_after: Whether in-flight requests are drained before the next phase.
-        num_turns: Turns (samples) the phase can issue before repeating.
+        num_turns: Turns (samples) issued in one pass over the dataset.
         num_trajectories: Conversations, for agentic workloads; 0 otherwise.
     """
 
-    phase_type: str
+    phase_type: PhaseType
     drain_after: bool
     num_turns: int
     num_trajectories: int = 0

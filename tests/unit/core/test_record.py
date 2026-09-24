@@ -31,6 +31,7 @@ from inference_endpoint.core.record import (
 from inference_endpoint.core.types import (
     ErrorData,
     PhaseData,
+    PhaseType,
     PromptData,
     TextModelOutput,
 )
@@ -127,7 +128,7 @@ class TestEventRecordRoundTrip:
         record = EventRecord(
             event_type=SessionEventType.PHASE_START,
             data=PhaseData(
-                phase_type="performance",
+                phase_type=PhaseType.PERFORMANCE,
                 drain_after=True,
                 num_turns=1000,
                 num_trajectories=4,

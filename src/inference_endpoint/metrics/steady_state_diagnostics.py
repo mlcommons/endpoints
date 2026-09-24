@@ -61,8 +61,11 @@ from dataclasses import dataclass, field
 from statistics import NormalDist, median, pstdev
 from typing import Final, Literal, NamedTuple, TypedDict
 
+import msgspec
 import yaml
 from transformers import AutoTokenizer
+
+from inference_endpoint.core.types import PhaseData, PhaseType
 
 # --------------------------------------------------------------------------- #
 # Event wire constants (mirror core/record.py category.value topics)
@@ -74,10 +77,6 @@ EV_ISSUED = "sample.issued"
 EV_RECV_FIRST = "sample.recv_first"
 EV_COMPLETE = "sample.complete"
 
-# PhaseType.PERFORMANCE.value. Duplicated rather than imported: the aggregator
-# and this module both need it, and importing load_generator.session would drag
-# the load generator into the metrics import graph for one string.
-PERFORMANCE_PHASE = "performance"
 
 # Below this many super-passes a trend test is statistically meaningless.
 MIN_TREND_N = 4
@@ -416,25 +415,24 @@ def read_run_config(config_yaml_path: str | None) -> dict:
 def superpass_size_from_events(events_path: str) -> int | None:
     """Super-pass size announced by the run's first performance phase.
 
-    ``PhaseData`` rides the ``session.phase_start`` event as
-    ``[tag, phase_type, drain_after, num_turns, num_trajectories]``, so a
-    re-run against a report directory needs no arguments and cannot disagree
-    with the size the run itself bucketed on.
+    Lets a re-run against a report directory take no arguments, and makes it
+    impossible to disagree with the size the run itself bucketed on.
+
+    Decoded rather than indexed: ``PhaseData`` rides the log as a positional
+    array -- every member of the ``EventRecord.data`` tagged union is
+    ``array_like`` -- so hand-indexing would quietly read the wrong field the
+    day one is added, while ``convert`` checks the tag and the arity too.
     """
     with open(events_path) as f:
         for line in f:
             if EV_PHASE_START not in line:
                 continue
             try:
-                data = json.loads(line).get("data")
-            except json.JSONDecodeError:
+                phase = msgspec.convert(json.loads(line).get("data"), type=PhaseData)
+            except (json.JSONDecodeError, msgspec.ValidationError):
                 continue
-            if (
-                isinstance(data, list)
-                and len(data) > 3
-                and data[1] == PERFORMANCE_PHASE
-            ):
-                return int(data[3])
+            if phase.phase_type is PhaseType.PERFORMANCE:
+                return phase.num_turns
     return None
 
 
