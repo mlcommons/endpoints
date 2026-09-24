@@ -1,0 +1,14 @@
+# Model spec (see docs/bench_suite.md, "Model").
+# MLPerf Inference reference model for the CNN/DailyMail summarization benchmark.
+#
+# `sha` pins the REFERENCE checkpoint — the authoritative benchmark definition. It also fixes
+# the tokenizer: token metrics (ISL/OSL/TPOT, GEN_LEN, TOKENS_PER_SAMPLE) MUST be computed with
+# THIS repo @ sha, so no separate tokenizer pin is needed — it would just repeat this sha.
+# A submission may SERVE a different checkpoint (e.g. a quantized variant) — documented, and
+# checked with a SOFT model-integrity gate (rule 5b) — but the tokenizer stays the reference
+# (quantization changes weights, not the vocab/merges; tokenization may not vary).
+# Add an optional `tokenizer: {reference_id, sha}` ONLY if the tokenizer lives in a DIFFERENT
+# repo than the model (not the case for these four).
+id: llama3-1-8b
+reference_id: meta-llama/Llama-3.1-8B-Instruct
+sha: 0e9e39f249a16976918f6564b8830bc894c89659

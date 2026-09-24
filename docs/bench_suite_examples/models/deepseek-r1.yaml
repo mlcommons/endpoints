@@ -1,0 +1,8 @@
+# Model spec (see docs/bench_suite.md, "Model").
+# `sha` pins the REFERENCE checkpoint; it also fixes the tokenizer (token metrics use this repo
+# @ sha — no separate tokenizer pin). A submission may serve a different (e.g. quantized)
+# checkpoint (documented, SOFT model-integrity gate, rule 5b), but the tokenizer stays this
+# reference. See models/llama3-1-8b.yaml for the full rationale.
+id: deepseek-r1
+reference_id: deepseek-ai/DeepSeek-R1-0528
+sha: 4236a6af538feda4548eca9ab308586007567f52

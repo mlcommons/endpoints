@@ -1,0 +1,13 @@
+# Model spec (see docs/bench_suite.md, "Model").
+# DeepSeek V4 Pro — a reasoning model with a `reasoning_effort` knob and thinking mode.
+# Run on the GPT-OSS-120b datasets via plain chat (system/user from text, no Harmony) —
+# see benchmarks/dsv4-pro-gptoss.yaml. NOT an official MLPerf v6.1 benchmark (our added example).
+#
+# `sha` pins the REFERENCE checkpoint; it also fixes the tokenizer (no separate tokenizer pin).
+# A submission may serve a different (e.g. quantized) checkpoint — documented, SOFT model-
+# integrity gate (rule 5b) — but the tokenizer stays this reference. See llama3-1-8b.yaml.
+# NOTE: DeepSeek V4 Pro uses a dedicated `encoding/` (no Jinja template); its token-counting
+# encoder is that versioned encoding (the `model_encoding` pin, G24), not a separate SHA.
+id: dsv4-pro
+reference_id: deepseek-ai/DeepSeek-V4-Pro-0813
+sha: 72e1d3230f6c080a530b0a1d46f8eb4602340597

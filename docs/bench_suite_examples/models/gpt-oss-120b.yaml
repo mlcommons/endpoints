@@ -1,0 +1,9 @@
+# Model spec (see docs/bench_suite.md, "Model").
+# `sha` pins the REFERENCE checkpoint; it also fixes the tokenizer (no separate tokenizer pin).
+# A submission may serve a different (e.g. quantized) checkpoint — documented, SOFT model-
+# integrity gate (rule 5b) — but the tokenizer stays this reference. See llama3-1-8b.yaml.
+# NOTE: gpt-oss's canonical tokenizer is the Harmony `o200k_harmony` encoding (client-side, G15),
+# versioned via the openai_harmony library — the `model_encoding` pin (G24), not a separate SHA.
+id: gpt-oss-120b
+reference_id: openai/gpt-oss-120b
+sha: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
