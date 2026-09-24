@@ -44,7 +44,7 @@ and the super-pass size from its phase_start event; see MODEL_REGISTRY + PROFILE
   python -m inference_endpoint.metrics.steady_state_diagnostics <events.jsonl> \
       --model kimi-k3                                                          # 1 flag
 Every derived setting has an explicit override (--tokenizer, --dataset-size,
---superpass-size, --profile, --cov-bounds, --window-sizes, --warmup, --json, ...).
+--superpass-size, --profile, --cov-bounds, --warmup, --json, ...).
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ from array import array
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from statistics import NormalDist, median, pstdev
-from typing import Literal, NamedTuple, TypedDict
+from typing import Final, Literal, NamedTuple, TypedDict
 
 import yaml
 from transformers import AutoTokenizer
@@ -109,7 +109,6 @@ TOKENIZE_BATCH_SIZE = 4096
 # One default per knob, shared by the library and the CLI: a verdict re-derived by
 # hand from a run's event log must be judged on the same grid as the live one.
 DEFAULT_COV_BOUNDS: tuple[float, ...] = (0.03, 0.05, 0.08)
-DEFAULT_WINDOW_SIZES: tuple[int, ...] = (4, 6, 8)
 
 # Minimum steady-window TIME duration (docs/steady-state-detection.md §5.5). Passing the
 # >= MIN_TREND_N super-pass floor is not enough: at high throughput a window of a few
@@ -178,6 +177,14 @@ class CovCell(TypedDict):
     passes: dict[str, bool | None]  # cov-bound (as str) -> pass / fail / inconclusive
 
 
+class CovBasis(TypedDict):
+    """The span ``cov`` was measured over, when it is not the reported window."""
+
+    sp_lo: int  # post-warmup super-pass index (inclusive)
+    sp_hi: int  # exclusive
+    n_super_passes: int
+
+
 class SteadyState(TypedDict):
     found: bool
     reason: str | None
@@ -192,9 +199,14 @@ class SteadyState(TypedDict):
     osl: dict | None  # per-sample post-first-chunk output token counts
     latency: dict | None  # per-sample end-to-end latency
     tps: TpsBlock | None
-    # CoV per tracked metric across the super-passes INSIDE the reported window --
-    # the number that justifies the verdict. Empty when no window was reported.
+    # CoV per tracked metric. Over the reported window when there is one -- the
+    # number that justifies the verdict. When no window was found but some span
+    # was trend-steady, it is measured over that span instead and ``cov_basis``
+    # says so: scatter, not drift, is then what cost the run its window.
     cov: dict[str, CovCell]
+    # Set only when ``cov`` describes something other than ``window`` -- i.e. on a
+    # run that found no plateau. ``None`` whenever ``window`` is the basis.
+    cov_basis: CovBasis | None
     anomaly: Anomaly
     short_window: ShortWindow | None  # min-duration gate detail (None if no plateau)
     global_trend: dict[
@@ -1341,6 +1353,50 @@ def _window_percentile_series(
     return out
 
 
+# Which condition a candidate window clears, or the first one it fails. Trend and
+# scatter are kept apart because a run that drifts and a run that is merely noisy
+# fail for different reasons and call for different advice.
+_GATE_OK: Final[str] = "ok"
+_GATE_SHORT: Final[str] = "short"
+_GATE_TREND: Final[str] = "trend"
+_GATE_COV: Final[str] = "cov"
+
+
+def _window_gate(
+    series: Sequence[SuperPassRollup],
+    lo: int,
+    hi: int,
+    gate_algo: str,
+    cov_bounds: Sequence[float],
+    gated_metrics: Sequence[TrackedMetric],
+) -> str:
+    """Which gate the window clears, or the first one it fails.
+
+    A trend break disqualifies immediately -- no later metric can redeem it. A CoV
+    failure is remembered but does not stop the scan, so a window that is
+    trend-steady throughout reports ``cov`` rather than whichever metric happened
+    to be checked last.
+    """
+    gate = ALGORITHMS[gate_algo]
+    loosest = max(cov_bounds)
+    worst = _GATE_OK
+    for m in gated_metrics:
+        traj = _window_percentile_series(series, lo, hi, m.source_attr, m.percentile)
+        if traj is None or len(traj) < MIN_TREND_N:
+            return _GATE_SHORT
+        if (
+            gate(traj).verdict != "steady"
+            and abs(_rel_drift(traj)) >= TREND_REL_DRIFT_MIN
+        ):
+            # Significant trend AND practically large: a genuine drift/level-shift breaks
+            # the window. A significant-but-negligible drift (< the effect-size floor) is
+            # within noise and does not fragment the plateau; CoV below still guards scatter.
+            return _GATE_TREND
+        if cov(traj) > loosest:
+            worst = _GATE_COV
+    return worst
+
+
 def window_admissible(
     series: Sequence[SuperPassRollup],
     lo: int,
@@ -1350,23 +1406,35 @@ def window_admissible(
     gated_metrics: Sequence[TrackedMetric] = GATED_METRICS,
 ) -> bool:
     """True iff every gated metric is trend-steady and within the loosest CoV bound."""
-    gate = ALGORITHMS[gate_algo]
-    loosest = max(cov_bounds)
-    for m in gated_metrics:
-        traj = _window_percentile_series(series, lo, hi, m.source_attr, m.percentile)
-        if traj is None or len(traj) < MIN_TREND_N:
-            return False
-        if (
-            gate(traj).verdict != "steady"
-            and abs(_rel_drift(traj)) >= TREND_REL_DRIFT_MIN
-        ):
-            # Significant trend AND practically large: a genuine drift/level-shift breaks
-            # the window. A significant-but-negligible drift (< the effect-size floor) is
-            # within noise and does not fragment the plateau; CoV below still guards scatter.
-            return False
-        if cov(traj) > loosest:
-            return False
-    return True
+    return (
+        _window_gate(series, lo, hi, gate_algo, cov_bounds, gated_metrics) == _GATE_OK
+    )
+
+
+def largest_trend_steady_span(
+    series: Sequence[SuperPassRollup],
+    gate_algo: str,
+    cov_bounds: Sequence[float],
+    gated_metrics: Sequence[TrackedMetric] = GATED_METRICS,
+) -> tuple[int, int] | None:
+    """The longest span whose gated metrics are trend-steady, whatever their CoV.
+
+    Only meaningful when no plateau was admissible: if a long span is trend-steady
+    and still produced no window, scatter is what failed, and the CoV over this
+    span is the number that says so. ``None`` when nothing is even trend-steady --
+    the case where CoV is not the story.
+    """
+    n = len(series)
+    best: tuple[int, int] | None = None
+    for start in range(n - MIN_TREND_N + 1):
+        for end in range(n, start + MIN_TREND_N - 1, -1):
+            if _window_gate(
+                series, start, end, gate_algo, cov_bounds, gated_metrics
+            ) in (_GATE_OK, _GATE_COV):
+                if best is None or (end - start) > (best[1] - best[0]):
+                    best = (start, end)
+                break  # scanning down from n, the first hit is this start's longest
+    return best
 
 
 def segment_plateaus(
@@ -1595,17 +1663,41 @@ def compute_steady_state_metrics(
     plateaus = segment_plateaus(series, gate_algo, cov_bounds, gated_metrics)
     if not plateaus:
         gt = global_trend(series, 0, gate_algo)  # drift-watch set (TPOT + TTFT)
+        # A long trend-steady span that still yielded no plateau was rejected on
+        # scatter, not drift. Reporting CoV over that span -- and how long it was
+        # -- turns "no admissible steady plateau" into something actionable.
+        span = largest_trend_steady_span(series, gate_algo, cov_bounds, gated_metrics)
+        reason = "no admissible steady plateau"
+        if span is not None:
+            reason = (
+                "no admissible steady plateau: the longest trend-steady span is "
+                f"{span[1] - span[0]} super-passes, but its CoV exceeds "
+                f"{max(cov_bounds)}"
+            )
         return {
             **shape,  # type: ignore[typeddict-item]
             "found": False,
-            "reason": "no admissible steady plateau",
+            "reason": reason,
             "window": None,
             "ttft": None,
             "tpot": None,
             "osl": None,
             "latency": None,
             "tps": None,
-            "cov": {},
+            "cov": (
+                cov_table(series[span[0] : span[1]], cov_bounds)
+                if span is not None
+                else {}
+            ),
+            "cov_basis": (
+                {
+                    "sp_lo": span[0],
+                    "sp_hi": span[1],
+                    "n_super_passes": span[1] - span[0],
+                }
+                if span is not None
+                else None
+            ),
             "anomaly": detect_level_shift(series, plateaus),
             "short_window": None,
             "global_trend": gt,
@@ -1685,6 +1777,7 @@ def compute_steady_state_metrics(
         "osl": summarize(osl) if osl else None,
         "latency": summarize(latency) if latency else None,
         "cov": cov_table(series[lo:hi], cov_bounds),
+        "cov_basis": None,  # the reported window is the basis
         "tps": {
             "per_user": per_user_tps(mean_tpot),
             "per_user_ci": per_user_ci,
@@ -1714,13 +1807,12 @@ def compute_steady_state_metrics(
 class DiagnosticsResult(TypedDict):
     """The standalone CLI's blob: the verdict plus its debug tables.
 
-    Only ``steady_state`` is produced in a benchmark run; ``cov`` and ``drift``
-    are per-window-size scans that earn their keep when a verdict comes back
+    Only ``steady_state`` is produced in a benchmark run; ``drift`` is the
+    whole-run trend scan that earns its keep when a verdict comes back
     ``found: false`` and someone has to work out why.
     """
 
     steady_state: SteadyState
-    cov: dict[str, dict[str, CovCell]]  # window size (str) -> metric key -> cell
     drift: dict[str, dict[str, Verdict]]  # metric key -> algorithm -> verdict
 
 
@@ -1732,7 +1824,6 @@ def run(
     events_path: str,
     superpass_size: int,
     count_tokens: Callable[[list[str]], list[int]],
-    window_sizes: Sequence[int] = DEFAULT_WINDOW_SIZES,
     warmup: int | str = "auto",
     cov_bounds: Sequence[float] = DEFAULT_COV_BOUNDS,
     trend_gate: str = "mk_hamed_rao",
@@ -1743,7 +1834,6 @@ def run(
 ) -> DiagnosticsResult:
     """Reconstruct the series from an event log, then analyse and diagnose it.
 
-    ``window_sizes`` are counts of super-passes and drive the debug tables only;
     ``superpass_size`` is a count of samples.
     """
     series = build_super_pass_series(
@@ -1762,7 +1852,6 @@ def run(
     post = series[ss["warmup"] :]
     return {
         "steady_state": ss,
-        "cov": {str(w): cov_table(post[-w:], cov_bounds) for w in window_sizes},
         "drift": {
             m.key: _drift_verdicts(
                 super_pass_percentile_series(post, m.source_attr, m.percentile)
@@ -1877,21 +1966,19 @@ def render_text(result: DiagnosticsResult, cov_bounds: Sequence[float]) -> str:
     ]
     lines.extend(_render_steady_state(ss))
     if ss["cov"]:
-        lines.append("")
-        lines.extend(
-            _render_cov_table("CoV inside the reported window", ss["cov"], cov_bounds)
-        )
-    lines.append("")
-    lines.append("--- diagnostics ---")
-    for w in sorted(result["cov"], key=int):
-        lines.append("")
-        lines.extend(
-            _render_cov_table(
-                f"CoV steadiness (trailing {w} super-passes)",
-                result["cov"][w],
-                cov_bounds,
+        basis = ss["cov_basis"]
+        title = (
+            "CoV inside the reported window"
+            if basis is None
+            else (
+                "CoV over the longest trend-steady span "
+                f"({basis['n_super_passes']} super-passes; no window was admissible)"
             )
         )
+        lines.append("")
+        lines.extend(_render_cov_table(title, ss["cov"], cov_bounds))
+    lines.append("")
+    lines.append("--- diagnostics ---")
     lines.append("")
     lines.append("drift (whole-run trend per metric)")
     algos = list(ALGORITHMS)
@@ -1918,10 +2005,6 @@ def _make_token_counter(
         return [len(ids) for ids in enc]
 
     return count
-
-
-def _parse_int_list(s: str) -> list[int]:
-    return [int(x) for x in s.split(",") if x.strip()]
 
 
 def _parse_float_list(s: str) -> list[float]:
@@ -2004,12 +2087,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="workload profile (auto-selected from the run's load pattern)",
     )
     ap.add_argument(
-        "--window-sizes",
-        type=_parse_int_list,
-        default=None,
-        help="comma-separated window sizes, in super-passes",
-    )
-    ap.add_argument(
         "--warmup",
         type=_warmup_arg,
         default="auto",
@@ -2066,7 +2143,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     cov_bounds = args.cov_bounds or list(profile.cov_bounds)
     warmup_driver = args.warmup_driver or profile.warmup_driver
     flush = args.tokenize_batch_size or profile.tokenize_batch_size
-    window_sizes = args.window_sizes or list(DEFAULT_WINDOW_SIZES)
     count_tokens = _make_token_counter(tokenizer, trust)
 
     if profile.metric == "natl":
@@ -2094,7 +2170,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         events,
         superpass_size=int(size),
         count_tokens=count_tokens,
-        window_sizes=window_sizes,
         warmup=args.warmup,
         cov_bounds=cov_bounds,
         trend_gate=args.trend_gate,

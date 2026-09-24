@@ -288,20 +288,19 @@ def _synthetic_events(tmp_path, n, ttft_ns_fn):
 def test_run_result_structure(tmp_path):
     # ttft climbs steadily -> an upward drift the scan should surface.
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100 + 20 * i)
-    result = mod.run(
-        path, superpass_size=1, count_tokens=_words, window_sizes=[4], warmup=1
-    )
+    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
     assert result["steady_state"]["n_super_passes"] == 8
     assert result["steady_state"]["warmup"] == 1
     assert result["drift"]["ttft_p50"]["mk_hamed_rao"] == "up"
-    # CoV table carries a pass/fail cell per bound and a gate flag. Admissibility gates on
+    # CoV cells carry a pass/fail per bound and a gate flag. Admissibility gates on
     # TPOT only, so tpot_p50 is gated while ttft_p50 is now diagnostic.
-    assert result["cov"]["4"]["tpot_p50"]["gated"] is True
-    cell = result["cov"]["4"]["ttft_p50"]
+    cov = result["steady_state"]["cov"]
+    assert cov["tpot_p50"]["gated"] is True
+    cell = cov["ttft_p50"]
     assert cell["gated"] is False
     assert set(cell["passes"]) == {"0.03", "0.05", "0.08"}
     # p99 is present but marked diagnostic (not gated)
-    assert result["cov"]["4"]["ttft_p99"]["gated"] is False
+    assert cov["ttft_p99"]["gated"] is False
 
 
 def test_text_after_first_chunk_empty_reasoning_str_output_is_first_chunk():
@@ -609,13 +608,32 @@ def test_steady_state_carries_the_run_shape():
     assert ss["window"]["n_super_passes"] == 6  # indices are post-warmup
 
 
-def test_no_plateau_result_still_carries_shape_and_empty_cov():
+def test_no_plateau_reports_cov_over_the_longest_trend_steady_span():
+    """Scatter and drift fail for different reasons, so say which one it was.
+
+    A span that is trend-steady yet yielded no plateau was rejected on CoV. The
+    verdict reports that CoV, and the span it was measured over, so "no
+    admissible steady plateau" stops being the whole answer.
+    """
     series = _mk_series([(10 * (i + 1), 50) for i in range(8)])
     ss = _analyse(series)
     assert ss["found"] is False
-    assert ss["cov"] == {}
+    assert ss["cov"], "a trend-steady span should carry its CoV"
+    basis = ss["cov_basis"]
+    assert basis is not None
+    assert basis["n_super_passes"] == basis["sp_hi"] - basis["sp_lo"]
+    assert basis["n_super_passes"] >= mod.MIN_TREND_N
+    assert "CoV" in (ss["reason"] or "")
     assert ss["osl"] is None and ss["latency"] is None
     assert ss["n_super_passes"] == 8
+
+
+def test_nothing_trend_steady_reports_no_cov_at_all():
+    """Too short to trend-test at all: CoV is not the story, so none is claimed."""
+    ss = _analyse(_mk_series([(50, 50)] * (mod.MIN_TREND_N - 1)))
+    assert ss["found"] is False
+    assert ss["cov"] == {}
+    assert ss["cov_basis"] is None
 
 
 def test_adaptive_warmup_crops_tpot_ramp():
@@ -819,20 +837,16 @@ def test_soft_path_reports_first_plateau_even_when_short():
 
 def test_run_result_has_steady_state_block(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100.0)
-    result = mod.run(
-        path, superpass_size=1, count_tokens=_words, window_sizes=[4], warmup=1
-    )
+    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
     assert "steady_state" in result
     assert "anomaly" in result["steady_state"]
 
 
 def test_render_text_has_section_headers(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100 + 20 * i)
-    result = mod.run(
-        path, superpass_size=1, count_tokens=_words, window_sizes=[4], warmup=1
-    )
+    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
     text = mod.render_text(result, cov_bounds=[0.03, 0.05, 0.08])
-    assert "CoV steadiness (trailing 4 super-passes)" in text
+    assert "CoV" in text
     assert "drift (whole-run" in text
     assert "ttft_p50" in text
 
