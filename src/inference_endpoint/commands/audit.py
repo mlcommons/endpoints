@@ -151,9 +151,7 @@ def _run_phases(
             report_dir=phase_dir,
             audit=None,
             datasets=phase_datasets,
-            settings=config.settings.with_updates(
-                steady_state=SteadyStateConfig(enabled=False)
-            ),
+            settings=config.settings.with_updates(steady_state=SteadyStateConfig()),
         )
 
         bench: BenchmarkResult | None = None
