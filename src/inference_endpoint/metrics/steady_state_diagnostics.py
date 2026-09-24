@@ -1411,30 +1411,37 @@ def window_admissible(
     )
 
 
-def largest_trend_steady_span(
+def gated_trend_drifters(
     series: Sequence[SuperPassRollup],
     gate_algo: str,
-    cov_bounds: Sequence[float],
     gated_metrics: Sequence[TrackedMetric] = GATED_METRICS,
-) -> tuple[int, int] | None:
-    """The longest span whose gated metrics are trend-steady, whatever their CoV.
+) -> list[str] | None:
+    """Which gated metrics trend across the whole series; ``[]`` if none do.
 
-    Only meaningful when no plateau was admissible: if a long span is trend-steady
-    and still produced no window, scatter is what failed, and the CoV over this
-    span is the number that says so. ``None`` when nothing is even trend-steady --
-    the case where CoV is not the story.
+    ``None`` when the question cannot be asked at all -- too few super-passes to
+    trend-test, or a super-pass with no samples.
+
+    Applies the same trend rule as :func:`_window_gate`, effect-size floor
+    included, so "trend-steady" means here exactly what it means for
+    admissibility. One test over the whole span, not a search: when no plateau
+    was admissible, whether the *run* drifts is what separates "it drifted" from
+    "it was flat but too noisy", and a per-window search re-derives an answer the
+    whole-span test already gives.
     """
-    n = len(series)
-    best: tuple[int, int] | None = None
-    for start in range(n - MIN_TREND_N + 1):
-        for end in range(n, start + MIN_TREND_N - 1, -1):
-            if _window_gate(
-                series, start, end, gate_algo, cov_bounds, gated_metrics
-            ) in (_GATE_OK, _GATE_COV):
-                if best is None or (end - start) > (best[1] - best[0]):
-                    best = (start, end)
-                break  # scanning down from n, the first hit is this start's longest
-    return best
+    gate = ALGORITHMS[gate_algo]
+    drifting: list[str] = []
+    for m in gated_metrics:
+        traj = _window_percentile_series(
+            series, 0, len(series), m.source_attr, m.percentile
+        )
+        if traj is None or len(traj) < MIN_TREND_N:
+            return None
+        if (
+            gate(traj).verdict != "steady"
+            and abs(_rel_drift(traj)) >= TREND_REL_DRIFT_MIN
+        ):
+            drifting.append(m.key)
+    return drifting
 
 
 def segment_plateaus(
@@ -1663,16 +1670,22 @@ def compute_steady_state_metrics(
     plateaus = segment_plateaus(series, gate_algo, cov_bounds, gated_metrics)
     if not plateaus:
         gt = global_trend(series, 0, gate_algo)  # drift-watch set (TPOT + TTFT)
-        # A long trend-steady span that still yielded no plateau was rejected on
-        # scatter, not drift. Reporting CoV over that span -- and how long it was
-        # -- turns "no admissible steady plateau" into something actionable.
-        span = largest_trend_steady_span(series, gate_algo, cov_bounds, gated_metrics)
+        # No plateau was admissible, so say which half of the gate failed. A run
+        # that is trend-steady throughout was rejected on scatter: report its CoV,
+        # measured over the same span the trend test just cleared. A run that
+        # drifts has no steady span for a CoV to describe, so none is claimed.
+        drifters = gated_trend_drifters(series, gate_algo, gated_metrics)
+        steady_throughout = drifters == []
         reason = "no admissible steady plateau"
-        if span is not None:
+        if steady_throughout:
             reason = (
-                "no admissible steady plateau: the longest trend-steady span is "
-                f"{span[1] - span[0]} super-passes, but its CoV exceeds "
-                f"{max(cov_bounds)}"
+                "no admissible steady plateau: the run is trend-steady across all "
+                f"{len(series)} super-passes, but its CoV exceeds {max(cov_bounds)}"
+            )
+        elif drifters:
+            reason = (
+                "no admissible steady plateau: "
+                f"{', '.join(drifters)} trends across the run"
             )
         return {
             **shape,  # type: ignore[typeddict-item]
@@ -1684,18 +1697,10 @@ def compute_steady_state_metrics(
             "osl": None,
             "latency": None,
             "tps": None,
-            "cov": (
-                cov_table(series[span[0] : span[1]], cov_bounds)
-                if span is not None
-                else {}
-            ),
+            "cov": cov_table(series, cov_bounds) if steady_throughout else {},
             "cov_basis": (
-                {
-                    "sp_lo": span[0],
-                    "sp_hi": span[1],
-                    "n_super_passes": span[1] - span[0],
-                }
-                if span is not None
+                {"sp_lo": 0, "sp_hi": len(series), "n_super_passes": len(series)}
+                if steady_throughout
                 else None
             ),
             "anomaly": detect_level_shift(series, plateaus),

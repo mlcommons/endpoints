@@ -608,24 +608,33 @@ def test_steady_state_carries_the_run_shape():
     assert ss["window"]["n_super_passes"] == 6  # indices are post-warmup
 
 
-def test_no_plateau_reports_cov_over_the_longest_trend_steady_span():
+def test_a_flat_but_noisy_run_reports_its_cov_over_the_whole_span():
     """Scatter and drift fail for different reasons, so say which one it was.
 
-    A span that is trend-steady yet yielded no plateau was rejected on CoV. The
-    verdict reports that CoV, and the span it was measured over, so "no
-    admissible steady plateau" stops being the whole answer.
+    A run that is trend-steady throughout yet yielded no plateau was rejected on
+    CoV. The verdict reports that CoV over the span the trend test cleared, so
+    "no admissible steady plateau" stops being the whole answer.
     """
+    # No trend, but the super-pass means swing +-10% -> CoV above every bound.
+    series = _mk_series([(50 if i % 2 else 60, 50) for i in range(8)])
+    ss = _analyse(series)
+    assert ss["found"] is False
+    assert ss["cov"], "a trend-steady run should carry its CoV"
+    basis = ss["cov_basis"]
+    assert basis is not None
+    assert basis == {"sp_lo": 0, "sp_hi": 8, "n_super_passes": 8}
+    assert "CoV" in (ss["reason"] or "")
+    assert ss["osl"] is None and ss["latency"] is None
+
+
+def test_a_drifting_run_claims_no_cov_and_names_the_drifter():
+    """Nothing was steady, so there is no span a CoV would describe."""
     series = _mk_series([(10 * (i + 1), 50) for i in range(8)])
     ss = _analyse(series)
     assert ss["found"] is False
-    assert ss["cov"], "a trend-steady span should carry its CoV"
-    basis = ss["cov_basis"]
-    assert basis is not None
-    assert basis["n_super_passes"] == basis["sp_hi"] - basis["sp_lo"]
-    assert basis["n_super_passes"] >= mod.MIN_TREND_N
-    assert "CoV" in (ss["reason"] or "")
-    assert ss["osl"] is None and ss["latency"] is None
-    assert ss["n_super_passes"] == 8
+    assert ss["cov"] == {}
+    assert ss["cov_basis"] is None
+    assert "trends across the run" in (ss["reason"] or "")
 
 
 def test_nothing_trend_steady_reports_no_cov_at_all():
