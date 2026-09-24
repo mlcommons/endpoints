@@ -224,10 +224,10 @@ async def main() -> None:
         default=None,
         choices=sorted(PROFILES),
         help=(
-            "Collect the steady-state super-pass series and judge it on this "
-            "workload profile's CoV bounds and warmup driver. Omitted = no "
-            "collection. Resolved by the parent, which knows the load pattern, so "
-            "a hand re-run of the standalone detector is judged the same way."
+            "Collect the steady-state super-pass series. Evaluate it with this "
+            "workload profile's CoV bounds and warmup driver. Omit this flag to "
+            "disable collection. The parent resolves it from the load pattern so "
+            "standalone detector re-runs use the same profile."
         ),
     )
     args = parser.parse_args()

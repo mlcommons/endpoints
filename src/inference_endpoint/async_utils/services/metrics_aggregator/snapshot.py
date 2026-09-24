@@ -168,11 +168,11 @@ class MetricsSnapshot(
                           ordered counters-first then series, registration
                           order within each.
         steady_state:     Steady-window verdict from
-                          ``metrics/steady_state_diagnostics.py``, computed on
-                          the terminal snapshot when collection was enabled and
-                          the run is described by its series. None otherwise.
+                          ``metrics/steady_state_diagnostics.py``. Present only
+                          on the terminal snapshot when collection was enabled
+                          and the series describe the run.
 
-    ``array_like=True`` makes field order the wire format: append, never insert.
+    ``array_like=True`` makes field order the wire format. Append fields only.
     """
 
     counter: int
@@ -224,12 +224,12 @@ def _scrub_nonfinite(v):
 
 
 def _scrub_deep(value):
-    """``_scrub_nonfinite`` through a nested structure.
+    """Scrub non-finite floats from a nested structure.
 
-    The steady-state verdict is the one snapshot field this project does not
-    build field by field, so a single non-finite float anywhere inside it would
-    make ``json.dumps(..., allow_nan=False)`` raise and cost the run the
-    ``final_snapshot.json`` its Report is built from.
+    The steady-state verdict is not built field by field like the rest of the
+    snapshot. One non-finite float inside it would make
+    ``json.dumps(..., allow_nan=False)`` raise. Then ``final_snapshot.json``
+    would not be written.
     """
     if isinstance(value, dict):
         return {k: _scrub_deep(v) for k, v in value.items()}

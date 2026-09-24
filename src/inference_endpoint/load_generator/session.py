@@ -540,21 +540,20 @@ class BenchmarkSession:
         self._current_phase_type = phase.phase_type
         self._current_strategy = strategy
 
-        # getattr, not isinstance: only AgenticInferenceDataset carries
-        # conversation metadata, and importing it here would drag pandas into
-        # the load generator's import graph for a two-field read. It is None
-        # before load(), which reads as the single-turn case.
+        # Use getattr instead of isinstance to keep AgenticInferenceDataset out
+        # of the load generator import graph; it imports pandas. None covers
+        # datasets without conversation metadata and the pre-load single-turn
+        # case.
         conv = getattr(phase.dataset, "conversation_metadata", None)
         self._publish_session_event(
             SessionEventType.PHASE_START,
             PhaseData(
                 phase_type=phase.phase_type,
                 drain_after=phase.drain_after,
-                # The sample order cycles over ``n_samples_from_dataset``, which
-                # is what one pass actually is -- the ruleset path sets it from
-                # ``ds_subset_size`` without truncating the dataloader, so the
-                # dataset's own count would size super-passes to a pass that
-                # never happens.
+                # One pass is over ``n_samples_from_dataset``, not the dataset's
+                # raw size. The ruleset path sets it from ``ds_subset_size``
+                # without truncating the dataloader, so the dataset count would
+                # create super-passes that do not match issued samples.
                 num_turns=(
                     len(conv.samples)
                     if conv is not None
@@ -885,17 +884,16 @@ class BenchmarkSession:
     def _publish_session_event(
         self, event_type: SessionEventType, data: PhaseData | None = None
     ) -> None:
-        """Publish a session event and flush the publisher immediately.
+        """Publish a session event, then flush the publisher.
 
         Session events are control signals (STARTED, ENDED, PHASE_START,
-        START/STOP PERFORMANCE_TRACKING) that subscribers must receive promptly
-        for correct state transitions. Flushing ensures any buffered sample
-        events are sent first, followed by the session event, so ordering
-        is preserved and the signal is not delayed by batching.
+        START/STOP PERFORMANCE_TRACKING) that subscribers must receive promptly.
+        Flushing sends buffered sample events first, then the session event, so
+        ordering is preserved without waiting for another batch.
 
-        ``data`` carries a payload for the events that have one (PHASE_START).
-        Routing it through here rather than a second publish path keeps the
-        publish-then-flush ordering that makes these signals reliable.
+        ``data`` carries payloads for events that have them, such as
+        PHASE_START. Routing it through this method preserves the same
+        publish-then-flush ordering.
         """
         self._publisher.publish(
             EventRecord(

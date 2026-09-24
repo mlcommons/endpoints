@@ -145,8 +145,8 @@ def _run_phases(
             if spec.test_mode == TestMode.PERF
             else perf_datasets + accuracy_datasets
         )
-        # Steady state off for every audit phase: TEST04 issues one repeated
-        # sample, which no steady-window verdict describes.
+        # Disable steady state for audit phases. TEST04 issues one repeated
+        # sample, so the collected series would not describe a steady window.
         phase_config = config.with_updates(
             report_dir=phase_dir,
             audit=None,

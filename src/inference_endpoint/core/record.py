@@ -132,8 +132,8 @@ class SessionEventType(EventType):
     INTERRUPTED = "interrupted"
     STOP_LOADGEN = "stop_loadgen"
     # Announces the shape of the phase about to run, carrying PhaseData.
-    # Published for every phase, immediately before START_PERFORMANCE_TRACKING
-    # for performance ones.
+    # Published for every phase. For performance phases, it immediately precedes
+    # START_PERFORMANCE_TRACKING.
     PHASE_START = "phase_start"
     START_PERFORMANCE_TRACKING = "start_performance_tracking"
     STOP_PERFORMANCE_TRACKING = "stop_performance_tracking"

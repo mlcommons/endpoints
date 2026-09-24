@@ -343,10 +343,10 @@ class ErrorData(
 class PhaseType(str, Enum):
     """Phase types control tracking and reporting behavior.
 
-    Lives here rather than beside ``BenchmarkSession`` because it rides the wire
-    on ``PhaseData``: the metrics aggregator and the standalone detector both
-    need it, and importing the load generator for it would put that whole
-    import graph into the metrics subprocess.
+    This lives in core because ``PhaseData`` carries it over the metrics wire.
+    The metrics aggregator and standalone detector need it, and importing it
+    from the load generator would pull that import graph into the metrics
+    subprocess.
     """
 
     PERFORMANCE = "performance"
@@ -363,15 +363,15 @@ class PhaseData(
     array_like=True,
     gc=False,
 ):  # type: ignore[call-arg]
-    """Shape of one benchmark phase, attached to its PHASE_START event.
+    """Data carried by a ``PHASE_START`` event.
 
-    Scalars only, so ``gc=False`` holds unconditionally.
+    All fields are scalar, so ``gc=False`` is safe.
 
-    ``num_turns`` is one meaning in both shapes: turns issued in one pass over
-    the dataset, a turn being a sample. A single-turn workload reports the
-    sample count of a pass; an agentic one reports every turn across every
-    conversation. ``num_trajectories`` carries the conversation count alongside
-    it, so mean turns per trajectory is derivable.
+    ``num_turns`` has the same meaning for single-turn and agentic workloads:
+    turns issued in one pass over the dataset. A turn is a sample. Single-turn
+    workloads report the sample count for a pass. Agentic workloads report every
+    turn across every conversation. ``num_trajectories`` carries the conversation
+    count, so mean turns per trajectory is derivable.
 
     Attributes:
         phase_type: Which phase this is.

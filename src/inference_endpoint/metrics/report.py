@@ -184,13 +184,14 @@ def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
 
 
 def _steady_state_of(snap: dict) -> SteadyState | None:
-    """Decode the verdict off a snapshot dict, or ``None`` if it is unusable.
+    """Decode the steady-state verdict from a snapshot dict.
 
     ``final_snapshot.json`` is read with ``json.loads``, so the verdict arrives
-    as plain dicts and has to be converted to be typed. A verdict that does not
-    match the schema is dropped rather than raised: it is a diagnostic, and a
-    run that produced one still deserves its report. Dropping it makes the
-    absence visible, where coercing would print a plausible wrong number.
+    as plain dicts and must be converted.
+
+    A schema mismatch is dropped rather than raised because the verdict is a
+    diagnostic. Dropping it makes the absence visible. Raising would suppress
+    the report, and coercing could print a plausible wrong number.
     """
     raw = snap.get("steady_state")
     if raw is None:
@@ -282,9 +283,8 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # See mlcommons/endpoints#500.
     output_sequence_lengths_full_run: dict[str, Any] | None = None
 
-    # Steady-window verdict, as produced by ``metrics/steady_state_diagnostics.py``
-    # and carried on the metrics snapshot. None when steady-state collection was
-    # off or the run was not described by the series it collected. Kept in
+    # Steady-window verdict carried on the metrics snapshot. None when
+    # collection was off or the collected series do not describe the run. Kept in
     # ``to_json`` (unlike ``accuracy``), so it reaches result_summary.json.
     steady_state: SteadyState | None = None
 
@@ -472,10 +472,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         return json_bytes
 
     def _display_steady_state(self, fn: Callable[[str], None], newline: str) -> None:
-        """Render the steady-window headline; silent when no verdict was produced.
+        """Render the actionable steady-window summary, if there is a verdict.
 
-        The full verdict -- histograms, CoV table, trend detail -- stays in
-        result_summary.json; only the numbers a reader acts on are printed.
+        The full verdict stays in result_summary.json: histograms, CoV table,
+        and trend detail. The terminal display prints only the numbers a reader
+        acts on.
         """
         ss = self.steady_state
         if ss is None:
