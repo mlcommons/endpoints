@@ -346,7 +346,7 @@ class TestCollectionGate:
             try:
                 await agg.process(_event_stream())
                 assert agg._collector is None
-                assert agg._steady_state_verdict(n_pending=0) is None
+                assert await agg._steady_state_verdict(n_pending=0) is None
             finally:
                 agg.close()
 
@@ -436,8 +436,8 @@ class TestVerdictOnTheFinalSnapshot:
             )
             try:
                 await agg.process(_event_stream())
-                assert agg._steady_state_verdict(n_pending=3) is None
-                assert agg._steady_state_verdict(n_pending=0) is not None
+                assert await agg._steady_state_verdict(n_pending=3) is None
+                assert await agg._steady_state_verdict(n_pending=0) is not None
             finally:
                 agg.close()
 
@@ -461,6 +461,6 @@ class TestVerdictOnTheFinalSnapshot:
                     ".aggregator.compute_steady_state_metrics",
                     lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
                 )
-                assert agg._steady_state_verdict(n_pending=0) is None
+                assert await agg._steady_state_verdict(n_pending=0) is None
             finally:
                 agg.close()
