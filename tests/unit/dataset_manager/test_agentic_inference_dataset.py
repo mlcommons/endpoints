@@ -13,11 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import json
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
+from unittest.mock import MagicMock
 
+import inference_endpoint.dataset_manager.agentic_inference_dataset as agentic_module
 import pandas as pd
 import pytest
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
@@ -233,6 +236,82 @@ def test_agentic_inference_dataset_validation_missing_fields(missing_fields_json
         AgenticInferenceDataset.load_from_file(
             missing_fields_jsonl, format=DatasetFormat.JSONL
         )
+
+
+@pytest.mark.unit
+def test_agentic_inference_dataset_downloads_dataset(tmp_path, monkeypatch):
+    payload = b'{"conversation_id":"c1","turn":1,"role":"user","content":"hello"}\n'
+    expected_sha256 = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(AgenticInferenceDataset, "DATASET_SHA256", expected_sha256)
+
+    def fake_download_r2_artifact(**kwargs):
+        downloaded_path = kwargs["destination_dir"] / kwargs["artifact_name"]
+        downloaded_path.parent.mkdir(parents=True, exist_ok=True)
+        downloaded_path.write_bytes(payload)
+        return downloaded_path
+
+    download = MagicMock(side_effect=fake_download_r2_artifact)
+    monkeypatch.setattr(agentic_module, "download_r2_artifact", download)
+
+    dataframe = AgenticInferenceDataset.generate(tmp_path)
+    cache_path = (
+        tmp_path
+        / AgenticInferenceDataset.DATASET_ID
+        / AgenticInferenceDataset.CACHE_FILENAME
+    )
+    assert cache_path.read_bytes() == payload
+    assert dataframe.iloc[0]["conversation_id"] == "c1"
+    download.assert_called_once_with(
+        uri=AgenticInferenceDataset.R2_DATASET_URI,
+        destination_dir=tmp_path / AgenticInferenceDataset.DATASET_ID,
+        artifact_name=AgenticInferenceDataset.CACHE_FILENAME,
+        expected_sha256=expected_sha256,
+    )
+
+
+@pytest.mark.unit
+def test_agentic_inference_dataset_recovers_from_corrupt_cache(tmp_path, monkeypatch):
+    payload = b'{"conversation_id":"c1","turn":1,"role":"user","content":"hello"}\n'
+    monkeypatch.setattr(
+        AgenticInferenceDataset, "DATASET_SHA256", hashlib.sha256(payload).hexdigest()
+    )
+    cache_dir = tmp_path / AgenticInferenceDataset.DATASET_ID
+    cache_dir.mkdir()
+    cache_path = cache_dir / AgenticInferenceDataset.CACHE_FILENAME
+    cache_path.write_bytes(b"corrupt")
+
+    def fake_download_r2_artifact(**kwargs):
+        downloaded_path = kwargs["destination_dir"] / kwargs["artifact_name"]
+        downloaded_path.write_bytes(payload)
+        return downloaded_path
+
+    download = MagicMock(side_effect=fake_download_r2_artifact)
+    monkeypatch.setattr(agentic_module, "download_r2_artifact", download)
+
+    dataframe = AgenticInferenceDataset.generate(tmp_path)
+
+    assert cache_path.read_bytes() == payload
+    assert dataframe.iloc[0]["conversation_id"] == "c1"
+    download.assert_called_once()
+
+
+@pytest.mark.unit
+def test_agentic_inference_dataset_uses_valid_cache(tmp_path, monkeypatch):
+    payload = b'{"conversation_id":"c1","turn":1,"role":"user","content":"hello"}\n'
+    monkeypatch.setattr(
+        AgenticInferenceDataset, "DATASET_SHA256", hashlib.sha256(payload).hexdigest()
+    )
+    cache_dir = tmp_path / AgenticInferenceDataset.DATASET_ID
+    cache_dir.mkdir()
+    (cache_dir / AgenticInferenceDataset.CACHE_FILENAME).write_bytes(payload)
+
+    download = MagicMock()
+    monkeypatch.setattr(agentic_module, "download_r2_artifact", download)
+
+    dataframe = AgenticInferenceDataset.generate(tmp_path)
+
+    download.assert_not_called()
+    assert dataframe.iloc[0]["conversation_id"] == "c1"
 
 
 @pytest.mark.unit
