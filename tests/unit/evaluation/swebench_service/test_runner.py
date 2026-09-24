@@ -214,7 +214,10 @@ def test_patch_config_normalizes_api_base(tmp_path, endpoint, expected_api_base)
     assert "user:pass" not in text
     assert "token=secret" not in text
     assert "fragment" not in text
-    assert "model_class" not in cfg["model"]
+    assert cfg["model"]["model_class"] == (
+        "swebench_service.routing_model.SessionRoutingLitellmModel"
+    )
+    assert cfg["model"]["routing_headers"] == ["X-Session-ID"]
     assert "api_key" not in cfg["model"]["model_kwargs"]
     assert cfg["environment"]["run_args"] == [
         "--rm",
@@ -245,6 +248,51 @@ def test_patch_config_keeps_api_key_out_of_yaml_and_forwards_generation(tmp_path
     assert model_kwargs["seed"] == 23
     assert model_kwargs["max_tokens"] == 2048
     assert model_kwargs["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_routing_model_reuses_one_id_per_trajectory_and_separates_instances():
+    routing_model = pytest.importorskip(
+        "inference_endpoint.evaluation.swebench_service.swebench_service.routing_model"
+    )
+    SessionRoutingLitellmModel = routing_model.SessionRoutingLitellmModel
+    headers = ("X-Session-ID", "X-SMG-Routing-Key")
+
+    first = SessionRoutingLitellmModel(
+        model_name="test-model",
+        routing_headers=headers,
+        model_kwargs={"extra_headers": {"X-Existing": "keep"}},
+    )
+    second = SessionRoutingLitellmModel(
+        model_name="test-model",
+        routing_headers=headers,
+    )
+
+    first_headers = first.config.model_kwargs["extra_headers"]
+    second_headers = second.config.model_kwargs["extra_headers"]
+    assert first_headers == {
+        "X-Existing": "keep",
+        "X-Session-ID": first.routing_session_id,
+        "X-SMG-Routing-Key": first.routing_session_id,
+    }
+    assert second_headers == {
+        "X-Session-ID": second.routing_session_id,
+        "X-SMG-Routing-Key": second.routing_session_id,
+    }
+    assert first.routing_session_id != second.routing_session_id
+
+
+def test_routing_model_allows_headers_to_be_disabled():
+    routing_model = pytest.importorskip(
+        "inference_endpoint.evaluation.swebench_service.swebench_service.routing_model"
+    )
+    SessionRoutingLitellmModel = routing_model.SessionRoutingLitellmModel
+    model = SessionRoutingLitellmModel(
+        model_name="test-model",
+        routing_headers=(),
+        model_kwargs={"temperature": 0.2},
+    )
+
+    assert "extra_headers" not in model.config.model_kwargs
 
 
 def test_base_env_supplies_api_key_only_to_agent_subprocess(monkeypatch, tmp_path):
@@ -305,6 +353,7 @@ def test_qwen_template_selects_model_without_mutating_pythonpath(monkeypatch, tm
     assert cfg["model"]["model_class"] == (
         "swebench_service.qwen_tools_model.QwenToolsModel"
     )
+    assert cfg["model"]["routing_headers"] == ["X-Session-ID"]
     assert envs[0]["PYTHONPATH"] == "/existing/path"
 
 
