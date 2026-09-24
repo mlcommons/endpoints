@@ -93,6 +93,21 @@ Code execution cannot be done safely in-process. The evaluation server runs in a
 with resource limits. This is a deliberate architecture choice — not a shortcut — and is
 documented prominently in the dataset README.
 
+**An externally-scored accuracy-only run builds an idle issuer**
+
+A scorer with `SKIP_ENDPOINT_PHASE` evaluates through its own service, so the run
+issues no samples and `total_samples` is zero. `BenchmarkSession` still requires a
+non-None issuer, so one is built and never used. Accuracy-only runs are pinned to
+`num_workers=1` for deterministic single-stream ordering, and `HTTPClientConfig`
+requires `num_workers` to divide the endpoint count, so that idle client is handed a
+single endpoint. This is scoped strictly to the zero-sample case: a run that will
+issue keeps the full endpoint list and the divisibility invariant applies to it
+unchanged.
+
+Scorers that themselves fan work across several endpoints read the endpoint list from
+the run's `config.yaml`, not from this client, so the narrowing does not narrow the
+run.
+
 ## Integration Points
 
 | Component                        | Role                                                   |
