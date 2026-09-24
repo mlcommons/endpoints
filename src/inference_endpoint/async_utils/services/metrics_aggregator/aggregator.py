@@ -204,9 +204,17 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         # per-trajectory NATL and not what this collector produces, or offline --
         # is refused here as well as by the parent's gate, so neither side alone
         # can turn collection on for a workload it does not describe.
+        # .get, not [], so an unknown name degrades to collection-off like every
+        # other ineligibility. A KeyError here kills the subprocess at startup and
+        # the parent reports a launch timeout, naming nothing.
         self._steady_state_profile = (
-            PROFILES[steady_state_profile] if steady_state_profile else None
+            PROFILES.get(steady_state_profile) if steady_state_profile else None
         )
+        if steady_state_profile and self._steady_state_profile is None:
+            logger.warning(
+                "Steady-state collection refused: unknown profile %r",
+                steady_state_profile,
+            )
         if self._steady_state_profile is not None and not (
             self._steady_state_profile.supported
         ):

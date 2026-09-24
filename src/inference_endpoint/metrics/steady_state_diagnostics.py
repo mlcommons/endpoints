@@ -28,9 +28,10 @@ with batch-means confidence intervals. A staircase level-shift toward the end of
 (multi-plateau difference corroborated by a Pettitt change-point) is flagged as an
 ``anomaly`` rather than hidden. See docs/steady-state-detection.md.
 
-Below the headline the tool prints diagnostics: a CoV pass/fail table per requested
-window size and a whole-run trend summary. The headline itself carries the CoV of the
-reported window, which is the number that justifies the verdict.
+Below the headline the tool prints a whole-run trend verdict per metric, across every
+trend algorithm. The headline itself carries the CoV of the reported window -- the
+number that justifies the verdict -- or, when no window was admissible, the CoV of the
+whole span when the run was trend-steady throughout.
 
 Admissibility gates on TPOT at p50 + p90 only (decode-rate steadiness). TTFT is a
 diagnostic: shown in the headline percentiles and the whole-run trend, and it raises the
@@ -1801,7 +1802,7 @@ def compute_steady_state_metrics(
         ss["reason"] = (
             f"all {len(plateaus)} admissible plateau(s) too short: longest "
             f"{short['window_duration_s']:.0f}s < {short['min_duration_s']:.0f}s required "
-            f"({short['dominant']}-dominated); pass --no-min-duration to override"
+            f"({short['dominant']}-dominated)"
         )
     return ss
 

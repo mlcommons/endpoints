@@ -211,7 +211,7 @@ def test_different_seed_differs(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# (d) planted-steady no-drift run -> build_steady_state finds a window
+# (d) planted-steady no-drift run -> compute_steady_state_metrics finds a window
 # --------------------------------------------------------------------------- #
 
 
