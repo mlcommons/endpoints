@@ -851,6 +851,16 @@ class Timeouts(WithUpdatesMixin, BaseModel):
         gt=0,
         description="Metrics drain seconds (None = unlimited).",
     )
+    service_exit_grace_s: Annotated[float, cyclopts.Parameter(show=False)] = Field(
+        60.0,
+        gt=0,
+        description=(
+            "Grace added to the metrics drain budget when waiting for the "
+            "service subprocesses to exit: the publisher's ZMQ linger, the "
+            "steady-state analysis, the final snapshot write, and teardown. "
+            "Unused when the drain budget is unlimited."
+        ),
+    )
 
 
 class ProfilerEngine(str, Enum):

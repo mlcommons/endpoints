@@ -45,7 +45,7 @@ import logging
 import uuid
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.services.launcher import (
@@ -70,12 +70,6 @@ logger = logging.getLogger(__name__)
 
 _AGGREGATOR_MODULE = "inference_endpoint.async_utils.services.metrics_aggregator"
 _EVENT_LOGGER_MODULE = "inference_endpoint.async_utils.services.event_logger"
-
-
-# Grace added to the aggregator's drain budget when waiting for the service
-# subprocesses to exit: the publisher's 10s ZMQ linger, the steady-state
-# analysis, the atomic final_snapshot.json write, and process teardown.
-_SERVICE_EXIT_GRACE_S: Final[float] = 60.0
 
 
 def _load_final_snapshot_from_disk(path: Path) -> dict[str, Any] | None:
@@ -120,16 +114,28 @@ def steady_state_profile(
     per-trajectory NATL, which this collector does not produce, and an agentic
     run must behave exactly as it did before steady state existed.
     """
-    if (
-        not config.settings.steady_state.enabled
-        or accuracy_only
-        or not enable_streaming
-        or not tokenizer_name
-        or config.settings.load_pattern.type is LoadPatternType.AGENTIC_INFERENCE
-    ):
+    if not config.settings.steady_state.enabled:
         return None
-    profile = profile_for_load_pattern(config.settings.load_pattern.type.value)
-    return profile.name if profile is not None and profile.supported else None
+
+    load_pattern = config.settings.load_pattern.type
+    reason: str | None = None
+    if accuracy_only:
+        reason = "the run is accuracy-only, so it has no performance window"
+    elif not enable_streaming:
+        reason = "streaming is off, so there is no TPOT series to gate on"
+    elif not tokenizer_name:
+        reason = "the run resolved no tokenizer, so TPOT cannot be counted"
+    elif load_pattern is LoadPatternType.AGENTIC_INFERENCE:
+        reason = "agentic runs are measured by per-trajectory NATL, not a steady window"
+    else:
+        profile = profile_for_load_pattern(load_pattern.value)
+        if profile is not None and profile.supported:
+            return profile.name
+        reason = f"the detector has no supported profile for load_pattern={load_pattern.value}"
+
+    # The user asked for this explicitly, so say why they are not getting it.
+    logger.warning("Steady-state detection disabled: %s", reason)
+    return None
 
 
 def _build_aggregator_args(
@@ -383,7 +389,8 @@ class MetricsPipeline:
         a legitimately slow drain.
         """
         drain_s = self._config.settings.timeouts.metrics_drain_timeout_s
-        return None if drain_s is None else drain_s + _SERVICE_EXIT_GRACE_S
+        grace = self._config.settings.timeouts.service_exit_grace_s
+        return None if drain_s is None else drain_s + grace
 
     async def drain_and_build_report(
         self,

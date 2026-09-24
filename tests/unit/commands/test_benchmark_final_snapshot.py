@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -399,6 +400,30 @@ class TestSteadyStateGate:
     def test_off_by_default_and_when_opted_out(self):
         assert self._profile(LoadPatternType.CONCURRENCY, enabled=False) is None
 
+    @pytest.mark.parametrize(
+        ("kwargs", "load_pattern", "expected"),
+        [
+            ({"acc": True}, LoadPatternType.CONCURRENCY, "accuracy-only"),
+            ({"streaming": False}, LoadPatternType.CONCURRENCY, "streaming is off"),
+            ({"tokenizer": None}, LoadPatternType.CONCURRENCY, "no tokenizer"),
+            ({}, LoadPatternType.AGENTIC_INFERENCE, "per-trajectory NATL"),
+            ({}, LoadPatternType.MAX_THROUGHPUT, "no supported profile"),
+        ],
+    )
+    def test_an_explicit_opt_in_that_is_refused_says_why(
+        self, caplog, kwargs, load_pattern, expected
+    ):
+        """The user asked for this on the command line; silence is not an answer."""
+        with caplog.at_level(logging.WARNING):
+            assert self._profile(load_pattern, **kwargs) is None
+        assert expected in caplog.text
+
+    def test_opting_out_is_not_worth_a_warning(self, caplog):
+        """Nothing was promised, so there is nothing to explain."""
+        with caplog.at_level(logging.WARNING):
+            self._profile(LoadPatternType.CONCURRENCY, enabled=False)
+        assert "Steady-state detection disabled" not in caplog.text
+
     def test_supported_load_patterns_resolve_to_their_profile(self):
         assert self._profile(LoadPatternType.CONCURRENCY) == "concurrency"
         assert self._profile(LoadPatternType.POISSON) == "poisson"
@@ -464,18 +489,29 @@ class TestServiceExitBound:
     """How long the parent waits for the metrics services after the run ends."""
 
     @staticmethod
-    def _pipe_with_drain_budget(tmp_path: Path, drain_s: float | None):
+    def _pipe_with_drain_budget(
+        tmp_path: Path, drain_s: float | None, grace_s: float = 60.0
+    ):
         pipe = _make_pipe(tmp_path)
         setattr(  # noqa: B010 — plain assignment trips the config's declared type
             pipe,
             "_config",
             SimpleNamespace(
                 settings=SimpleNamespace(
-                    timeouts=SimpleNamespace(metrics_drain_timeout_s=drain_s)
+                    timeouts=SimpleNamespace(
+                        metrics_drain_timeout_s=drain_s,
+                        service_exit_grace_s=grace_s,
+                    )
                 )
             ),
         )
         return pipe
+
+    def test_the_grace_is_configurable(self, tmp_path):
+        # It lives on Timeouts with the other deadlines rather than as a module
+        # constant, but carries no CLI flag -- it is not an operator knob.
+        pipe = self._pipe_with_drain_budget(tmp_path, 120.0, grace_s=5.0)
+        assert pipe._service_exit_timeout_s == 125.0
 
     def test_bound_is_the_drain_budget_plus_a_finalize_grace(self, tmp_path):
         # The grace covers what the aggregator does after the drain: ZMQ linger,
