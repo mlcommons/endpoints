@@ -369,8 +369,8 @@ class TestCollectionGate:
         assert collector.superpass_size == 0
 
     @pytest.mark.asyncio
-    async def test_bucket_size_comes_from_the_performance_phase(self, tmp_path):
-        """A later phase cannot re-size a series already being bucketed."""
+    async def test_a_later_accuracy_phase_is_refused_by_phase_type(self, tmp_path):
+        """The router drops it before the collector ever sees it."""
         records = [
             session_event(SessionEventType.STARTED, ts=0),
             phase_start(num_turns=3),
@@ -379,6 +379,28 @@ class TestCollectionGate:
             phase_start(num_turns=77, phase_type=PhaseType.ACCURACY),
         ]
         collector = await _collect(tmp_path, records, "ss_size")
+        assert collector.superpass_size == 3
+
+    @pytest.mark.asyncio
+    async def test_a_second_performance_phase_cannot_resize_a_started_series(
+        self, tmp_path
+    ):
+        """The phase-type check passes here, so the empty-series guard is what holds.
+
+        A second performance announcement clears the router's phase-type check,
+        so only ``announce_phase``'s own ``not self._series`` guard stops it
+        re-sizing buckets that samples are already being assigned to -- which
+        would silently re-bucket the run mid-flight.
+        """
+        records = [
+            session_event(SessionEventType.STARTED, ts=0),
+            phase_start(num_turns=3),
+            session_event(SessionEventType.START_PERFORMANCE_TRACKING, ts=10),
+            *_sample("a", 100, 10, 900, ["c ", "x"]),
+            phase_start(num_turns=77),
+            *_sample("b", 2000, 10, 900, ["d ", "y"]),
+        ]
+        collector = await _collect(tmp_path, records, "ss_resize")
         assert collector.superpass_size == 3
 
 

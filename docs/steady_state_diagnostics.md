@@ -80,6 +80,10 @@ sidecar `config.yaml` (model → tokenizer, load pattern → profile):
 uv run python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>/
 ```
 
+> **Runs predating the `session.phase_start` event** carry no announced super-pass
+> size, so auto-detection cannot find one. Pass `--superpass-size <N>` (one full
+> dataset pass) for those; everything else still resolves from `config.yaml`.
+
 **One flag** — a bare `events.jsonl` with no sidecar; `--model` drives the built-in
 model→tokenizer registry and the workload profile:
 
