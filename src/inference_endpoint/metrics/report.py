@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from collections.abc import Callable, Iterable
@@ -35,6 +36,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.registry import 
 from inference_endpoint.evaluation.accuracy_results import (
     samples_weighted_average_accuracy,
 )
+from inference_endpoint.metrics.steady_state_diagnostics import SteadyState
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
@@ -47,6 +49,9 @@ SERIES_TO_SUMMARY_FIELD: Final[dict[str, str]] = {
     "tpot_ns": "tpot",
     "sample_latency_ns": "latency",
 }
+
+
+logger = logging.getLogger(__name__)
 
 
 def place_early_stopping_percentiles(
@@ -178,6 +183,29 @@ def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _steady_state_of(snap: dict) -> SteadyState | None:
+    """Decode the steady-state verdict from a snapshot dict.
+
+    ``final_snapshot.json`` is read with ``json.loads``, so the verdict arrives
+    as plain dicts and must be converted.
+
+    A schema mismatch is dropped rather than raised because the verdict is a
+    diagnostic. Dropping it makes the absence visible. Raising would suppress
+    the report, and coercing could print a plausible wrong number.
+    """
+    raw = snap.get("steady_state")
+    if raw is None:
+        return None
+    try:
+        return msgspec.convert(raw, type=SteadyState)
+    except msgspec.ValidationError:
+        logger.warning(
+            "Steady-state verdict did not match the expected schema; dropping it",
+            exc_info=True,
+        )
+        return None
+
+
 class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     """Summarized benchmark report."""
 
@@ -254,6 +282,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # ``n_errors``/``n_undecodable``/``n_missing``/``partial``.
     # See mlcommons/endpoints#500.
     output_sequence_lengths_full_run: dict[str, Any] | None = None
+
+    # Steady-window verdict carried on the metrics snapshot. None when
+    # collection was off or the collected series do not describe the run. Kept in
+    # ``to_json`` (unlike ``accuracy``), so it reaches result_summary.json.
+    steady_state: SteadyState | None = None
 
     @property
     def n_samples_succeeded(self) -> int:
@@ -420,6 +453,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             e2e_avg_interactivity=e2e_avg_interactivity,
             finish_reason_counts=finish_reason_counts,
             run_config=run_config,
+            steady_state=_steady_state_of(snap),
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
@@ -436,6 +470,45 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             with Path(save_to).open("wb") as f:
                 f.write(json_bytes)
         return json_bytes
+
+    def _display_steady_state(self, fn: Callable[[str], None], newline: str) -> None:
+        """Render the actionable steady-window summary, if there is a verdict.
+
+        The full verdict stays in result_summary.json: histograms, CoV table,
+        and trend detail. The terminal display prints only the numbers a reader
+        acts on.
+        """
+        ss = self.steady_state
+        if ss is None:
+            return
+        if not ss.found:
+            fn(f"Steady state: not found ({ss.reason}){newline}")
+            return
+        window, tps = ss.window, ss.tps
+        if window is None or tps is None:
+            return
+        held_s = (window.end_ns - window.start_ns) / 1e9
+        fn(
+            f"Steady state: super-passes {window.sp_lo}..."
+            f"{window.sp_hi - 1} (post-warmup), "
+            f"{window.n_samples} samples over {held_s:.0f}s{newline}"
+        )
+        fn(
+            f"  Steady TPS: {tps.system:.2f} system, "
+            f"{tps.per_user:.2f} per user{newline}"
+        )
+        if ss.drifting_up:
+            fn(
+                f"  WARNING: {', '.join(ss.drifting_up)} drifting up over the "
+                f"rest of the run{newline}"
+            )
+        if ss.anomaly.detected:
+            fn(
+                f"  ANOMALY: level shift at super-pass "
+                f"{ss.anomaly.change_point_sp}, TPOT "
+                f"{ss.anomaly.delta_pct:+.1f}% toward end of run"
+                f"{newline}"
+            )
 
     def display(
         self,
@@ -491,6 +564,8 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             fn(f"E2E average interactivity: {interactivity:.2f} tokens/s{newline}")
         else:
             fn(f"E2E average interactivity: N/A{newline}")
+
+        self._display_steady_state(fn, newline)
 
         if self.accuracy:
             fn(f"Accuracy:{newline}")

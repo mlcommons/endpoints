@@ -28,7 +28,7 @@ from inference_endpoint.commands.benchmark.watchdog import (
     _PerfPhaseTimeout,
     sigint_policy,
 )
-from inference_endpoint.load_generator.session import PhaseType
+from inference_endpoint.core.types import PhaseType
 
 
 def _fire(gov: SigintGovernor) -> None:

@@ -26,7 +26,8 @@ import time
 import types
 from collections.abc import Callable, Iterator
 
-from inference_endpoint.load_generator.session import BenchmarkSession, PhaseType
+from inference_endpoint.core.types import PhaseType
+from inference_endpoint.load_generator.session import BenchmarkSession
 
 logger = logging.getLogger(__name__)
 

@@ -84,7 +84,7 @@ from inference_endpoint.config.schema import (
     OnlineBenchmarkConfig as OnlineConfig,
 )
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
-from inference_endpoint.core.types import APIType, QueryResult
+from inference_endpoint.core.types import APIType, PhaseType, QueryResult
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -107,7 +107,6 @@ from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import (
     EndpointResponseIdleTimeoutError,
     PhaseResult,
-    PhaseType,
     SessionResult,
 )
 from inference_endpoint.metrics.metric import Throughput
@@ -754,6 +753,32 @@ class TestCommandHandlers:
             [*base, "--no-warmup-salt"], exit_on_error=False
         )
         assert bound.arguments["config"].settings.warmup.salt is False
+
+    @pytest.mark.unit
+    def test_steady_state_flag_default_and_both_forms_parse(self):
+        """Both `--steady-state` and `--no-steady-state` must parse.
+
+        The field carries an explicit `name=`, not an `alias=`: an alias also
+        exposes the field name, and a bare `--enabled` collides with every other
+        flattened single-field option model.
+        """
+        base = [
+            "offline",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+        ]
+        for args, expected in (
+            ([], False),
+            (["--steady-state"], True),
+            (["--no-steady-state"], False),
+        ):
+            _, bound, _ = benchmark_app.parse_args([*base, *args], exit_on_error=False)
+            settings = bound.arguments["config"].settings
+            assert settings.steady_state.enabled is expected
 
     @pytest.mark.unit
     def test_loadgen_flag_serialized_only_for_poisson(self):

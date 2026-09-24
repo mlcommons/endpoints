@@ -4,7 +4,7 @@
 """Tests for scripts/synth_events.py.
 
 The generator plants a known steady region / ramp / drift / staircase into an
-``events.jsonl`` whose wire schema matches ``scripts/steady_state_diagnostics.py``. These
+``events.jsonl`` whose wire schema matches the steady-state detector. These
 tests round-trip generated runs back through the diagnostic (with a whitespace token
 counter, so 1 chunk == 1 word == ~1 token) and assert the reconstructed TTFT/TPOT recover
 the planted base values and that a flat run is detected as steady.
@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from inference_endpoint.metrics import steady_state_diagnostics as diag
 
 pytestmark = pytest.mark.unit
 
@@ -30,7 +31,6 @@ def _load(name, rel):
 
 
 synth = _load("synth_events", "scripts/synth_events.py")
-diag = _load("steady_state_diagnostics", "scripts/steady_state_diagnostics.py")
 
 
 def _words(texts):
@@ -211,7 +211,7 @@ def test_different_seed_differs(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# (d) planted-steady no-drift run -> build_steady_state finds a window
+# (d) planted-steady no-drift run -> compute_steady_state_metrics finds a window
 # --------------------------------------------------------------------------- #
 
 
@@ -223,10 +223,10 @@ def test_flat_run_detected_as_steady(tmp_path):
         out, superpass_size=40, count_tokens=_words, enforce_min_duration=False
     )
     ss = result["steady_state"]
-    assert ss["found"] is True
-    assert ss["window"] is not None
-    assert ss["window"]["n_super_passes"] >= 4
-    assert ss["anomaly"]["detected"] is False
+    assert ss.found is True
+    assert ss.window is not None
+    assert ss.window.n_super_passes >= 4
+    assert ss.anomaly.detected is False
 
 
 def test_poisson_mode_generates_and_parses(tmp_path):

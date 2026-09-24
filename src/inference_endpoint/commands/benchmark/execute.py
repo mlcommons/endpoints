@@ -80,7 +80,7 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import PhaseType, QueryResult
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -105,7 +105,6 @@ from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     EndpointResponseIdleTimeoutError,
     PhaseConfig,
-    PhaseType,
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
@@ -850,6 +849,7 @@ async def _run_benchmark_async(
         config,
         tokenizer_name=ctx.tokenizer_name,
         enable_streaming=ctx.enable_streaming,
+        accuracy_only=ctx.accuracy_only,
         event_log_dir=event_log_dir,
         metrics_output_dir=metrics_output_dir,
         loop=loop,

@@ -37,7 +37,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
     extract_tokenization_input,
 )
 from inference_endpoint.core.record import EventRecord, EventType
-from inference_endpoint.core.types import TextModelOutput
+from inference_endpoint.core.types import PhaseType, TextModelOutput
 from inference_endpoint.metrics.report import series_metric_dict
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,6 @@ _COMPLETE_MARKER = b'"event_type":"sample.complete"'
 _PREFIX_BYTES = 256
 # AgenticInferenceInlineScorer's dataset_name; the key its turns live under in
 # sample_idx_map.json.
-_PERFORMANCE_PHASE = "performance"
 
 TokenCounter = Callable[[MessageInput | TextInput], int]
 
@@ -221,7 +220,9 @@ def load_performance_uuids(report_dir: Path) -> set[str] | None:
     except (msgspec.DecodeError, OSError) as e:
         logger.warning("Full-run OSL: unreadable sample_idx_map.json: %s", e)
         return None
-    per_phase = idx_map.get(_PERFORMANCE_PHASE) if isinstance(idx_map, dict) else None
+    per_phase = (
+        idx_map.get(PhaseType.PERFORMANCE.value) if isinstance(idx_map, dict) else None
+    )
     if not isinstance(per_phase, dict) or not per_phase:
         return None
     return set(per_phase)
