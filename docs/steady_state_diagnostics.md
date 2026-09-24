@@ -11,9 +11,25 @@ operator's quick reference.
 The metrics aggregator accumulates the same super-pass series as the run happens --
 reusing the token counts its TPOT trigger already produced -- and computes the
 verdict once the token drain finishes. It lands on `Report.steady_state`, so it
-reaches `result_summary.json`, `report.txt`, and the console summary. Off by
-default, and silently off for accuracy-only runs, runs with no resolvable
-tokenizer, and load patterns whose profile is not `supported` (offline, agentic).
+reaches `result_summary.json`, `report.txt`, and the console summary.
+
+Off by default. What it can judge:
+
+| Load pattern      | Steady state  | Why                                                                                 |
+| ----------------- | ------------- | ----------------------------------------------------------------------------------- |
+| `concurrency`     | supported     |                                                                                     |
+| `poisson`         | supported     |                                                                                     |
+| `offline`         | not supported | every query is issued at t=0, so the min-duration gate has no issue span to measure |
+| `agentic`         | not supported | its steady-state metric is per-trajectory NATL, not what this collector produces    |
+| anything unmapped | not supported | fails closed rather than inheriting a profile nobody validated                      |
+
+A run also needs a performance phase (not accuracy-only), streaming enabled
+(TPOT is the gated metric, and it only exists when streaming), and a resolvable
+tokenizer. Any of these missing and collection is silently off.
+
+Detection is best-effort and cannot cost a run its result: it runs inside the
+aggregator's own finalize, and a failure anywhere in it leaves the performance
+report exactly as it would have been.
 
 **After a run** (this CLI): replays `events.jsonl` through the same collector and
 the same `compute_steady_state_metrics`, so both reach the same verdict. This is
