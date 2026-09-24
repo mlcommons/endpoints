@@ -973,6 +973,26 @@ class TestSteadyStateOnTheReport:
         assert report.steady_state == self.VERDICT
         assert json.loads(report.to_json())["steady_state"] == self.VERDICT
 
+    def test_a_scrubbed_non_finite_value_does_not_break_display(self):
+        """``snapshot_to_dict`` scrubs non-finite floats to ``None``.
+
+        ``dict.get(key, default)`` returns that stored ``None`` rather than the
+        default, so formatting it would raise out of ``display()`` -- on the
+        success path of every run that produced a verdict. ``cov()`` divides by
+        a mean that can be zero, so this is reachable, not theoretical.
+        """
+        verdict = {
+            **self.VERDICT,
+            "window": {**self.VERDICT["window"], "end_ns": None},
+            "tps": {"system": None, "per_user": None},
+            "anomaly": {"detected": True, "change_point_sp": 7, "delta_pct": None},
+        }
+        lines: list[str] = []
+        self._report(verdict).display(lines.append)  # must not raise
+        text = "".join(lines)
+        assert "Steady TPS: 0.00 system" in text
+        assert "ANOMALY" in text
+
     def test_display_renders_the_headline(self):
         lines: list[str] = []
         self._report(self.VERDICT).display(lines.append)

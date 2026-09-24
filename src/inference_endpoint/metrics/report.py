@@ -178,6 +178,22 @@ def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _num(value: object, default: float = 0.0) -> float:
+    """A float fit for ``format``, whatever the verdict actually carried.
+
+    The verdict is an opaque dict from the detector, and ``snapshot_to_dict``
+    scrubs every non-finite float in it to ``None`` before the snapshot is
+    written. ``dict.get(key, default)`` returns that stored ``None`` rather than
+    the default, so formatting it with ``:.2f`` would raise out of ``display()``
+    -- on the success path of every run that produced a verdict.
+    """
+    return (
+        value
+        if isinstance(value, int | float) and not isinstance(value, bool)
+        else default
+    )
+
+
 class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     """Summarized benchmark report."""
 
@@ -457,15 +473,15 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             fn(f"Steady state: not found ({ss.get('reason')}){newline}")
             return
         window, tps = ss.get("window") or {}, ss.get("tps") or {}
-        held_s = (window.get("end_ns", 0) - window.get("start_ns", 0)) / 1e9
+        held_s = (_num(window.get("end_ns")) - _num(window.get("start_ns"))) / 1e9
         fn(
             f"Steady state: super-passes {window.get('sp_lo')}..."
-            f"{window.get('sp_hi', 0) - 1} (post-warmup), "
+            f"{int(_num(window.get('sp_hi'))) - 1} (post-warmup), "
             f"{window.get('n_samples')} samples over {held_s:.0f}s{newline}"
         )
         fn(
-            f"  Steady TPS: {tps.get('system', 0.0):.2f} system, "
-            f"{tps.get('per_user', 0.0):.2f} per user{newline}"
+            f"  Steady TPS: {_num(tps.get('system')):.2f} system, "
+            f"{_num(tps.get('per_user')):.2f} per user{newline}"
         )
         if ss.get("drifting_up"):
             fn(
@@ -476,7 +492,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             fn(
                 f"  ANOMALY: level shift at super-pass "
                 f"{ss['anomaly'].get('change_point_sp')}, TPOT "
-                f"{ss['anomaly'].get('delta_pct', 0.0):+.1f}% toward end of run"
+                f"{_num(ss['anomaly'].get('delta_pct')):+.1f}% toward end of run"
                 f"{newline}"
             )
 

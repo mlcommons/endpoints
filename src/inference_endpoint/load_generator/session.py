@@ -552,10 +552,15 @@ class BenchmarkSession:
             PhaseData(
                 phase_type=phase.phase_type.value,
                 drain_after=phase.drain_after,
+                # The sample order cycles over ``n_samples_from_dataset``, which
+                # is what one pass actually is -- the ruleset path sets it from
+                # ``ds_subset_size`` without truncating the dataloader, so the
+                # dataset's own count would size super-passes to a pass that
+                # never happens.
                 num_turns=(
                     conv.max_turns_per_conv
                     if conv is not None
-                    else phase.dataset.num_samples()
+                    else phase.runtime_settings.n_samples_from_dataset
                 ),
                 num_trajectories=(conv.num_conversations if conv is not None else 0),
             ),
