@@ -5,6 +5,15 @@ at `src/inference_endpoint/metrics/steady_state_diagnostics.py`. The full method
 lives in [`steady-state-detection.md`](steady-state-detection.md); this is the
 operator's quick reference.
 
+**The rules live elsewhere.** What counts as an official result — when the
+steady-state window supersedes the whole-run `total`, the coverage `status`
+taxonomy, and which load patterns are in scope — is set by
+[§4.4 Reporting Basis (Steady-State Window)][rules] in the MLCommons
+`endpoints_policies` repo. This document describes the tool and its defaults.
+Where the two disagree, the rules win.
+
+[rules]: https://github.com/mlcommons/endpoints_policies/blob/main/endpoints_rules.md#44-reporting-basis-steady-state-window
+
 ## Two ways to get a verdict
 
 **During a run** (opt-in): `--steady-state` / `settings.steady_state.enabled: true`.
