@@ -90,12 +90,7 @@ interest, and latency metrics explicitly do not apply.
   (`commands/benchmark/pipeline.py:222-225`), so concurrency uses the native window.
 - **Per-request latency percentile.** `sample_latency_ns` maps to `latency`
   (`metrics/report.py:50`, `:234`), with P90 and P95 both in the default grid.
-- **`ConcurrencyScheduler`.** Semaphore released on every terminal result, errors included
-  (`load_generator/strategy.py`).
-- **Phase isolation.** `max_issue_duration_ms` bounds only the performance phase
-  (`commands/benchmark/watchdog.py`).
 - **Sample order is infinite**, never raising `StopIteration` (`load_generator/sample_order.py`).
-- **Point identity.** `target_concurrency` lands in `result_summary.json` via `run_config`.
 - **Audit.** TEST04 already accepts `concurrency`
   (`compliance/audit_test/output_caching_test.py`).
 - **Missing tokenizer is handled gracefully**, not fatally (`commands/benchmark/execute.py`).
