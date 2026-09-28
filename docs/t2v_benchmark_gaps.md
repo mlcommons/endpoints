@@ -6,23 +6,32 @@ Status: proposal · Baseline: `4235a9c` · Scope: this repository only.
 > `v1.0_rules_dev` @ `6b0b1ef` (2026-09-22). That branch is **unmerged and still moving**; every
 > rule citation here is as-of that commit and should be re-checked before being relied on.
 
-Running a text-to-video workload as an Endpoints submission needs a **pareto curve**: several
-measurement points at different concurrencies, each sustaining a minimum steady-state window, plus
-an Offline point and accuracy runs. Two things stand in the way. The client measures **one point
-per invocation**, and a video response is a **single artifact rather than a token stream**, which
-the metric and steady-state machinery assumes throughout.
+An Endpoints submission needs a **pareto curve**: several runs at different concurrency levels,
+plus one Offline run and a set of accuracy runs. Each run has to hold steady for a minimum time.
 
-This records the distance between what the client does today and what a text-to-video submission
-needs, and itemises the work in §5. The adapter itself (`videogen/`) and the example workload
-(`examples/09_Wan22_VideoGen_Example/`) already exist; what is missing is everything around them.
+**Two things block that today:**
 
-Three of the eight gaps are specific to a tokenless workload, two of them detailed in §3.1 and
-§3.2. The other five block a multi-point curve for **any** model and are marked `any model` in
-the gap table, so fixing them unblocks video and every other benchmark at once. Existing
-text-model curves are produced by running each concurrency separately and stitching the results
-downstream, which is the workaround for exactly those five.
+- The client measures **one point per run**. There is no way to sweep several.
+- A video reply is **one file, not a stream of tokens**. The metric and steady-state code assume
+  tokens everywhere.
 
-This covers the client slice only. §6 lists what it deliberately excludes.
+**What already exists:**
+
+- The adapter, `videogen/`.
+- The example workload, `examples/09_Wan22_VideoGen_Example/`.
+
+Everything around them is what is missing, and §5 lists that work.
+
+**How the gaps split:**
+
+- Eight gaps in total (§3).
+- **Three** only matter for a workload with no tokens. Two of those are explained in §3.1 and §3.2.
+- **Five** block a multi-point curve for **any** model, marked `any model` in the gap table.
+- So fixing those five helps video and every other benchmark at the same time.
+- Text curves are built today by running each concurrency on its own and joining the results
+  afterwards. That is the workaround for those same five gaps.
+
+**Scope:** the client only. §6 lists what is left out.
 
 ## 0. What is missing
 
