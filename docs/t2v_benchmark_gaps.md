@@ -22,14 +22,12 @@ plus 1 Offline run and a set of accuracy runs. Each run has to hold steady for a
 
 Everything around them is what is missing, and §5 lists that work.
 
-**How the gaps split:**
+**The gaps:**
 
-- 8 gaps in total (§3).
-- **3** only matter for a workload with no tokens. 2 of those are explained in §3.1 and §3.2.
-- **5** block a multi-point curve for **any** model, marked `any model` in the gap table.
-- So fixing those 5 helps video and every other benchmark at the same time.
-- Text curves are built today by running each concurrency on its own and joining the results
-  afterwards. That is the workaround for those same 5 gaps.
+- 3 gaps (§3), plus example configs.
+- Only 1 is a hard blocker: steady state cannot certify a window without tokens (§3.1).
+- The client also has limits that affect every model, not just video. They do **not** block a
+  T2V benchmark, because the same workaround text curves already use works here too. See §3.3.
 
 **Scope:** the client only. §6 lists what is left out.
 
@@ -38,17 +36,11 @@ Everything around them is what is missing, and §5 lists that work.
 | Category | Missing |
 | --- | --- |
 | [Naming](#a-naming) | A ruleset model and dataset entry, so the tooling recognises the benchmark at all |
-| [Missing metrics](#b-missing-metrics) | The per-user rate as a named field |
-| [Duration support](#c-duration-support) | A floor, so a point can meet a minimum steady-state window |
-| [Multi-point support](#d-multi-point-support) | A sweep driver, and a publish layout for more than 1 point |
-| [Validation support](#e-validation-support) | Checking a curve rather than a single single-stream point |
-| [Tokenless support](#f-tokenless-support) | Steady-state gating without TPOT, and artifact-safe responses |
-| [Example configs](#g-example-configs) | Concurrency-region configs sized to whole dataset passes |
+| [Tokenless support](#b-tokenless-support) | Steady-state gating without TPOT, and artifact-safe responses |
+| [Example configs](#c-example-configs) | Concurrency-region configs sized to whole dataset passes |
 
-Nothing is missing on the client side of the request path: the adapter and the example workload
-already run. The gaps
-are in measuring a curve, proving it valid, and describing the benchmark to the tooling. §3 and §5
-follow the same order as this table.
+The adapter and the example workload already run. What is missing is the description of the
+benchmark to the tooling, and the handling of a reply that carries no tokens.
 
 ## 1. Target shape
 
@@ -63,7 +55,7 @@ runs.
 - **§6.2**: minimum steady-state duration is 600 s in the Ultra Low Concurrency region and
   **1200 s** in the Low, Medium, and High regions.
 
-Neither is expressible today for a concurrency-scheduled run: see gaps 3 and 4.
+Neither is expressible today for a concurrency-scheduled run: see §3.3.
 
 ### 1.1 Metrics for video generation
 
@@ -110,23 +102,13 @@ interest, and latency metrics explicitly do not apply.
 
 ## 3. Gaps
 
-Ordered by the categories in §0. `Scope` distinguishes gaps that block any model from those
-specific to a tokenless workload.
+Ordered by the categories in §0.
 
-| # | Gap | Evidence | Scope | Kind |
-| --- | --- | --- | --- | --- |
-| 1 | No ruleset entry exists for the benchmark, so `_resolve_model` raises `KeyError` before any other check runs. Without one there is also no golden accuracy and no validity thresholds. | `compliance/checker.py:156-164` | tokenless | code |
-| 2 | The per-user rate is not emitted as a named field; `Report` carries `qps` and `tps` only. Minor, since it is the reciprocal of the already-emitted `latency` P90. | `metrics/report.py:250` | any model | code |
-| 3 | Stop predicate is a pure OR of stop-requested / count-reached / `max_duration_ns` exceeded. No branch holds off the count stop until a wall-clock floor passes, so a phase is count-driven or capped, never floored. | `load_generator/session.py:866-880` | any model | code |
-| 4 | `min_issue_duration_ms` is a poisson count-sizer (`target_qps × duration`), not a floor. Rejected for non-poisson patterns, and relaxing that validator alone is insufficient because `total_samples_to_issue()` then raises, since concurrency has no `target_qps`. | `config/schema.py:1021-1027`, `config/runtime_settings.py:249` | any model | code |
-| 5 | No sweep driver. 1 invocation is 1 point, with no per-point report-dir convention and no cross-point aggregation. `publish_submission.py` publishes a single run into a single scenario directory. | n/a | any model | tooling |
-| 6 | Config lock requires `target_concurrency == 1`, so it fails at every point of a curve above 1, and expects a `temperature` field artifact adapters do not carry. | `compliance/checker.py:149`, `:115-119` | any model | code |
-| 7 | Steady state cannot certify a tokenless window. See §3.1. | `metrics/steady_state_diagnostics.py` | tokenless | code |
-| 8 | `VideoGenAdapter` mirrors the video *path string* into `response_output`, which the OSL trigger tokenizes. Harmless only because the model name resolves to no tokenizer; supplying one yields meaningless OSL and TPS. See §3.2. | `videogen/adapter.py` | tokenless | latent |
-
-Gaps 3 and 4 together mean the steady-state window a pareto point needs **cannot currently be
-expressed** for a concurrency run, for any model. Gap 6 means that even a correctly measured curve
-cannot be validated by this repository's checker.
+| # | Gap | Evidence | Kind |
+| --- | --- | --- | --- |
+| 1 | No ruleset entry exists for the benchmark, so `_resolve_model` raises `KeyError` before any other check runs. Without one there is also no golden accuracy and no validity thresholds. | `compliance/checker.py:156-164` | code |
+| 2 | Steady state cannot certify a window with no tokens. See §3.1. **This is the only hard blocker.** | `metrics/steady_state_diagnostics.py` | code |
+| 3 | `VideoGenAdapter` mirrors the video *path string* into `response_output`, which the OSL trigger tokenizes. Harmless only because the model name resolves to no tokenizer; supplying one yields meaningless OSL and TPS. See §3.2. | `videogen/adapter.py` | latent |
 
 ### 3.1 Why steady state cannot gate a tokenless run
 
@@ -163,10 +145,31 @@ output-sequence-length trigger tokenizes. Nothing breaks today only because the 
 not resolve to a tokenizer, so token metrics stay disabled. Supplying `--tokenizer` would silently
 produce OSL and TPS figures computed from a filesystem path.
 
+### 3.3 Client limits that are not T2V problems
+
+Working out how to run a sweep surfaced several limits in the client. None of them block a T2V
+benchmark, and they are recorded here only so the §4 recipe makes sense.
+
+- There is no minimum-duration floor in the run loop, and `min_issue_duration_ms` is a poisson
+  sample-count sizer rather than a floor, rejected for `concurrency`
+  (`load_generator/session.py:866-880`, `config/schema.py:1021-1027`,
+  `config/runtime_settings.py:249`). The §4 recipe meets the floor without either.
+- One invocation measures one point. There is no sweep driver and no multi-point publish layout.
+  Existing text curves are built by running each concurrency on its own and joining the results
+  afterwards; the same applies here.
+- The per-user rate is not emitted as a named field, but it is the reciprocal of a value already
+  reported (`metrics/report.py:250`), so it is one division in post-processing.
+- `compliance/checker.py` requires `target_concurrency == 1`, but it is scoped to Edge-Agentic
+  (BFCL v4) submissions and is reachable only through `scripts/check_compliance.py`. It is not the
+  validator for an Endpoints pareto submission, so it is not on this path.
+
+Fixing any of these would help every benchmark, not just video. That is a separate argument and
+not a prerequisite here.
+
 ## 4. Workaround available today
 
 Since a point must end on a whole dataset pass (§6.4) *and* meet a duration floor (§6.2), and no
-floor setting exists (gaps 3 and 4), size the count to the duration instead of capping the clock:
+floor setting exists (§3.3), size the count to the duration instead of capping the clock:
 
 1. Calibrate. Run the point briefly to estimate sustained throughput at that concurrency.
 2. Choose the smallest integer `N` where `N × dataset_size / throughput` comfortably exceeds the
@@ -189,8 +192,7 @@ sample order is infinite, so nothing clamps it.
 - **The duration is achieved, not enforced.** If throughput is lower than calibrated the point
   simply runs longer, which is safe. If higher, it may undershoot the floor, so size `N` with
   margin and check the achieved duration afterwards.
-- Every point above concurrency 1 still fails the compliance checker (gap 6).
-- Do **not** use `min_issue_duration_ms` for this (gap 4).
+- Do **not** use `min_issue_duration_ms` for this (§3.3).
 - Capping with `max_issue_duration_ms` instead would end the run mid-pass and violate §6.4. It
   remains useful only as a runaway guard set well above the expected finish.
 
@@ -205,54 +207,28 @@ requires an explicit marker.
 | --- | --- | --- | --- | --- |
 | A1 | Register the benchmark as a ruleset model and dataset (`config/rulesets/mlcommons/`). Not needed to *run*, but without it there is no golden accuracy, no validity thresholds, and `_resolve_model` raises. | 1 | n/a | S |
 
-### B. Missing metrics
+### B. Tokenless support
 
 | # | Task | Fixes | Depends on | Size |
 | --- | --- | --- | --- | --- |
-| B1 | Emit the per-user rate as a named field rather than leaving every consumer to derive it. | 2 | n/a | XS |
-| B2 | Make the reported latency percentile explicit (P90, per §4.1). | n/a | B1 | XS |
+| B1 | Modality-aware steady-state gating: gate on an alternative metric where the gated one has no samples (end-to-end latency exists for every workload), or report un-gated with a reason instead of returning `None`. Requires a way for a workload to declare its gating metric. | 2 | n/a | M |
+| B2 | Remove the tokenizer footgun: stop routing a path through `response_output`, or mark the field non-tokenizable for artifact-output adapters. | 3 | n/a | S |
 
-### C. Duration support
-
-| # | Task | Fixes | Depends on | Size |
-| --- | --- | --- | --- | --- |
-| C1 | Duration floor: gate the count branch on minimum elapsed time (AND semantics), and accept the setting for `concurrency`. Must land as one change, because relaxing the validator alone makes `total_samples_to_issue()` raise. Prefer a new setting name over widening `min_issue_duration_ms`. | 3, 4 | n/a | S |
-
-### D. Multi-point support
+### C. Example configs
 
 | # | Task | Fixes | Depends on | Size |
 | --- | --- | --- | --- | --- |
-| D1 | Decide whether a multi-point sweep driver belongs here or in submitter tooling, then build or document accordingly. | 5 | n/a | M |
-| D2 | Multi-point publish layout for `publish_submission.py`. | 5 | D1 | M |
+| C1 | Add concurrency-region example configs sized per §6.4, using the §4 recipe. The shipped video configs cover only `max_throughput` (the Offline point) and `concurrency: 1`. | n/a | n/a | XS |
 
-### E. Validation support
-
-| # | Task | Fixes | Depends on | Size |
-| --- | --- | --- | --- | --- |
-| E1 | Validate multi-point curves. Redesigns what `check_submission` covers, since the config lock is built around a single single-stream point. | 6 | C1 | L |
-
-### F. Tokenless support
-
-| # | Task | Fixes | Depends on | Size |
-| --- | --- | --- | --- | --- |
-| F1 | Modality-aware steady-state gating: gate on an alternative metric where the gated one has no samples (end-to-end latency exists for every workload), or report un-gated with a reason instead of returning `None`. Requires a way for a workload to declare its gating metric. | 7 | n/a | M |
-| F2 | Remove the tokenizer footgun: stop routing a path through `response_output`, or mark the field non-tokenizable for artifact-output adapters. | 8 | n/a | S |
-
-### G. Example configs
-
-| # | Task | Fixes | Depends on | Size |
-| --- | --- | --- | --- | --- |
-| G1 | Add concurrency-region example configs sized per §6.4. The shipped video configs cover only `max_throughput` (the Offline point) and `concurrency: 1`. | 5 | C1 | XS |
-
-### H. Documentation
+### D. Documentation
 
 | # | Task | Depends on |
 | --- | --- | --- |
-| H1 | Update this document as items land; update `AGENTS.md` if any module moves or is added. | any |
-| H2 | Note the modality constraint in `steady_state_diagnostics.md` once F1 settles. | F1 |
+| D1 | Update this document as items land; update `AGENTS.md` if any module moves or is added. | any |
+| D2 | Note the modality constraint in `steady_state_diagnostics.md` once B1 settles. | B1 |
 
-**Critical path:** C1 → G1 → (E1, D1). C1 unblocks a legitimate multi-point run for every model.
-E1 is the only item that is unavoidable rather than convenient.
+**B1 is the critical item.** Under v1.0 §4.4 the steady-state verdict is the official reporting
+basis, so without it a T2V run has no official result. A1 and C1 are small and independent.
 
 ## 6. Out of scope for this repository
 
