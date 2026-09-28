@@ -26,15 +26,15 @@ This covers the client slice only. §6 lists what it deliberately excludes.
 
 ## 0. What is missing
 
-| Category | Missing | Scope |
-| --- | --- | --- |
-| Naming | A ruleset model and dataset entry, so the tooling recognises the benchmark at all | tokenless |
-| Missing metrics | The per-user rate as a named field | any model |
-| Duration support | A floor, so a point can meet a minimum steady-state window | any model |
-| Multi-point support | A sweep driver, and a publish layout for more than one point | any model |
-| Validation support | Checking a curve rather than a single single-stream point | any model |
-| Tokenless support | Steady-state gating without TPOT, and artifact-safe responses | tokenless |
-| Example configs | Concurrency-region configs sized to whole dataset passes | tokenless |
+| Category | Missing |
+| --- | --- |
+| Naming | A ruleset model and dataset entry, so the tooling recognises the benchmark at all |
+| Missing metrics | The per-user rate as a named field |
+| Duration support | A floor, so a point can meet a minimum steady-state window |
+| Multi-point support | A sweep driver, and a publish layout for more than one point |
+| Validation support | Checking a curve rather than a single single-stream point |
+| Tokenless support | Steady-state gating without TPOT, and artifact-safe responses |
+| Example configs | Concurrency-region configs sized to whole dataset passes |
 
 Nothing in the serving path is missing: the adapter and the example workload already run. The gaps
 are in measuring a curve, proving it valid, and describing the benchmark to the tooling. Each
