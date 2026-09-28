@@ -121,15 +121,15 @@ why it does not apply.
   has a resolved tokenizer *and* streaming, on top of `settings.steady_state.enabled` being set at
   all (it is off by default). A tokenless run fails both conditions by construction.
 - The reasoning is sound for its purpose: without streaming there is no `TpotTrigger`, so every
-  plateau gate would see an empty TPOT series and every verdict would be `found: false`.
-- Outcome is a `None` verdict, not an error: `Report.steady_state` is `SteadyState | None`
+  plateau gate would see an empty TPOT series and nothing would ever validate.
+- Outcome is a `None` result, not an error: `Report.steady_state` is `SteadyState | None`
   (`metrics/report.py:289`, `:456`).
 - There is no way for a workload to declare a different gating metric. Eligibility comes from
   `Profile.supported` (`metrics/steady_state_diagnostics.py:311`), and `SteadyStateConfig`
   (`config/schema.py:947`, `:994`) carries no model allowlist (`:958`).
 
 The tension is between a defensible client design and the v1.0 rule. The client correctly declines
-to emit a verdict it cannot compute, while §4.4 makes that verdict the basis of the official
+to emit a result it cannot compute, while §4.4 makes that result the basis of the official
 result. Closing it needs a gating metric that exists for tokenless workloads, not a change on
 either side alone.
 
@@ -222,7 +222,7 @@ requires an explicit marker.
 | D1 | Update this document as items land; update `AGENTS.md` if any module moves or is added. | any |
 | D2 | Note the modality constraint in `steady_state_diagnostics.md` once B1 settles. | B1 |
 
-**B1 is the critical item.** Under v1.0 §4.4 the steady-state verdict is the official reporting
+**B1 is the critical item.** Under v1.0 §4.4 the steady-state result is the official reporting
 basis, so without it a T2V run has no official result. A1 and C1 are small and independent.
 
 ## 6. Out of scope for this repository
