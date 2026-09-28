@@ -36,7 +36,8 @@ This covers the client slice only. §6 lists what it deliberately excludes.
 | [Tokenless support](#f-tokenless-support) | Steady-state gating without TPOT, and artifact-safe responses |
 | [Example configs](#g-example-configs) | Concurrency-region configs sized to whole dataset passes |
 
-Nothing in the serving path is missing: the adapter and the example workload already run. The gaps
+Nothing is missing on the client side of the request path: the adapter and the example workload
+already run. The gaps
 are in measuring a curve, proving it valid, and describing the benchmark to the tooling. §3 and §5
 follow the same order as this table.
 
