@@ -1,4 +1,4 @@
-# Pareto sweep support: gaps and plan
+# Text-to-video benchmark: closing the client gaps
 
 Status: proposal · Baseline: `4235a9c` · Scope: this repository only.
 
@@ -6,19 +6,21 @@ Status: proposal · Baseline: `4235a9c` · Scope: this repository only.
 > `v1.0_rules_dev` @ `6b0b1ef` (2026-09-22). That branch is **unmerged and still moving**; every
 > rule citation here is as-of that commit and should be re-checked before being relied on.
 
-An Endpoints submission is a **pareto curve**: several measurement points at different
-concurrencies, each sustaining a minimum steady-state window, plus an Offline point and accuracy
-runs. The client measures **one point per invocation**. Everything needed to get from one point to
-a curve, and to verify that the points are valid, is either missing or only reachable by working
-around a setting that does something else.
+Running a text-to-video workload as an Endpoints submission needs a **pareto curve**: several
+measurement points at different concurrencies, each sustaining a minimum steady-state window, plus
+an Offline point and accuracy runs. Two things stand in the way. The client measures **one point
+per invocation**, and a video response is a **single artifact rather than a token stream**, which
+the metric and steady-state machinery assumes throughout.
 
-Five of the seven gaps in §3 apply to **any** model. Existing text-model curves were produced by
-running each concurrency separately and stitching the results together downstream, which is the
-workaround for exactly these gaps.
+This records the distance between what the client does today and what a text-to-video submission
+needs, and itemises the work in §5. The adapter itself (`videogen/`) and the example workload
+(`examples/09_Wan22_VideoGen_Example/`) already exist; what is missing is everything around them.
 
-**Video generation is the motivating case**, not the scope. It was the workload that surfaced
-this, and it adds two gaps of its own (§3.1, §3.2) because its responses are single artifacts
-rather than token streams. Those are marked `tokenless` in the gap table.
+Two of the seven gaps are specific to a tokenless workload (§3.1, §3.2). The other five block a
+multi-point curve for **any** model and are marked `any model` in the gap table, so fixing them
+unblocks video and every other benchmark at once. Existing text-model curves are produced by
+running each concurrency separately and stitching the results downstream, which is the workaround
+for exactly those five.
 
 This covers the client slice only. §6 lists what it deliberately excludes.
 
@@ -37,7 +39,7 @@ Two rules govern how a single point must run:
 
 Neither is expressible today for a concurrency-scheduled run: see gaps 1 and 2.
 
-### 1.1 Metrics for a tokenless workload
+### 1.1 Metrics for video generation
 
 For video generation the per-point metrics cannot be token-derived, because a response is one
 artifact rather than a token stream:
