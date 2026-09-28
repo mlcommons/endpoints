@@ -88,7 +88,7 @@ interest, and latency metrics explicitly do not apply.
 | --- | --- | --- | --- | --- |
 | 1 | Stop predicate is a pure OR of stop-requested / count-reached / `max_duration_ns` exceeded. No branch holds off the count stop until a wall-clock floor passes, so a phase is count-driven or capped, never floored. | `load_generator/session.py:866-880` | any model | code |
 | 2 | `min_issue_duration_ms` is a poisson count-sizer (`target_qps × duration`), not a floor. Rejected for non-poisson patterns, and relaxing that validator alone is insufficient because `total_samples_to_issue()` then raises, since concurrency has no `target_qps`. | `config/schema.py:1021-1027`, `config/runtime_settings.py:249` | any model | code |
-| 3 | Config lock requires `target_concurrency == 1`, so it fails at every point of a curve above 1. `_resolve_model` also raises `KeyError` for a model absent from a ruleset. | `compliance/checker.py:149` | any model | code |
+| 3 | Config lock requires `target_concurrency == 1`, so it fails at every point of a curve above 1. `_resolve_model` also raises `KeyError` for a model absent from a ruleset, and the lock expects a `temperature` field artifact adapters do not carry. | `compliance/checker.py:149`, `:115-119` | any model | code |
 | 4 | No sweep driver. One invocation is one point, with no per-point report-dir convention and no cross-point aggregation. `publish_submission.py` publishes a single run into a single scenario directory. | n/a | any model | tooling |
 | 5 | The per-user rate is not emitted as a named field; `Report` carries `qps` and `tps` only. Minor, since it is one reciprocal of the already-emitted `latency` P90. | `metrics/report.py:250` | any model | code |
 | 6 | Steady state cannot certify a tokenless window. See §3.1. | `metrics/steady_state_diagnostics.py` | tokenless | code |
@@ -191,6 +191,7 @@ Every code task carries tests. `AGENTS.md` sets >90% coverage and requires an ex
 | C1 | Modality-aware steady-state gating: gate on an alternative metric where the gated one has no samples (end-to-end latency exists for every workload), or report un-gated with a reason instead of returning `None`. Requires a way for a workload to declare its gating metric. | 6 | n/a | M |
 | C2 | Remove the tokenizer footgun: stop routing a path through `response_output`, or mark the field non-tokenizable for artifact-output adapters. | 7 | n/a | S |
 | C3 | Add concurrency-region example configs sized per §6.4. The shipped video configs cover only `max_throughput` (the Offline point) and `concurrency: 1`. | 4 | A1 | XS |
+| C4 | Register the benchmark as a ruleset model and dataset (`config/rulesets/mlcommons/`). Not needed to *run*, but without it there is no golden accuracy, no validity thresholds, and `_resolve_model` raises. | 3 | n/a | S |
 
 ### D. Documentation
 
