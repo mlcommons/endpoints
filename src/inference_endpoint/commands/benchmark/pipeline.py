@@ -61,6 +61,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.subscriber impor
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.config.schema import LoadPatternType
 from inference_endpoint.metrics.report import Report
+from inference_endpoint.metrics.steady_state_diagnostics import profile_for_load_pattern
 
 if TYPE_CHECKING:
     from inference_endpoint.config.schema import BenchmarkConfig
@@ -92,6 +93,51 @@ def _load_final_snapshot_from_disk(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def steady_state_profile(
+    config: BenchmarkConfig,
+    *,
+    accuracy_only: bool,
+    enable_streaming: bool,
+    tokenizer_name: str | None,
+) -> str | None:
+    """Workload profile for live steady-state collection; None when ineligible.
+
+    Eligibility comes from the detector's own profile table. This keeps the
+    parent gate and the aggregator's profile from drifting apart. The decision
+    must happen before the run starts because collection happens during the run.
+
+    Accuracy-only runs have no performance phase to collect. Without a tokenizer
+    there is no TPOT to bucket. Without streaming there is no ``TpotTrigger``;
+    every plateau gate would see an empty TPOT series, and every verdict would
+    be ``found: false``.
+
+    Agentic is refused by name as well as by profile. Its steady-state metric is
+    per-trajectory NATL, which this collector does not produce.
+    """
+    if not config.settings.steady_state.enabled:
+        return None
+
+    load_pattern = config.settings.load_pattern.type
+    reason: str | None = None
+    if accuracy_only:
+        reason = "the run is accuracy-only, so it has no performance window"
+    elif not enable_streaming:
+        reason = "streaming is off, so there is no TPOT series to gate on"
+    elif not tokenizer_name:
+        reason = "the run resolved no tokenizer, so TPOT cannot be counted"
+    elif load_pattern is LoadPatternType.AGENTIC_INFERENCE:
+        reason = "agentic runs are measured by per-trajectory NATL, not a steady window"
+    else:
+        profile = profile_for_load_pattern(load_pattern.value)
+        if profile is not None and profile.supported:
+            return profile.name
+        reason = f"the detector has no supported profile for load_pattern={load_pattern.value}"
+
+    # The user asked for this explicitly, so say why they are not getting it.
+    logger.warning("Steady-state detection disabled: %s", reason)
+    return None
+
+
 def _build_aggregator_args(
     *,
     socket_dir: str,
@@ -104,6 +150,7 @@ def _build_aggregator_args(
     tokenizer_workers: int,
     enable_isl: bool,
     early_stopping: bool,
+    steady_state_profile: str | None,
 ) -> list[str]:
     """CLI args for the metrics_aggregator subprocess."""
     args: list[str] = [
@@ -124,6 +171,8 @@ def _build_aggregator_args(
         args.extend(["--tokenizer", tokenizer_name])
     if drain_timeout_s is not None:
         args.extend(["--drain-timeout", str(drain_timeout_s)])
+    if steady_state_profile is not None:
+        args.extend(["--steady-state-profile", steady_state_profile])
     args.extend(["--tokenizer-workers", str(tokenizer_workers)])
     args.append("--metrics-isl" if enable_isl else "--no-metrics-isl")
     return args
@@ -209,6 +258,7 @@ class MetricsPipeline:
         *,
         tokenizer_name: str | None,
         enable_streaming: bool,
+        accuracy_only: bool,
         event_log_dir: Path,
         metrics_output_dir: Path,
         loop: asyncio.AbstractEventLoop,
@@ -216,6 +266,7 @@ class MetricsPipeline:
         self._config = config
         self._tokenizer_name = tokenizer_name
         self._enable_streaming = enable_streaming
+        self._accuracy_only = accuracy_only
         self._event_log_dir = event_log_dir
         self._metrics_output_dir = metrics_output_dir
         self._loop = loop
@@ -298,6 +349,12 @@ class MetricsPipeline:
                 tokenizer_workers=self._config.settings.metrics_tokenizer_workers,
                 enable_isl=self._config.settings.metrics_isl,
                 early_stopping=self._config.settings.early_stopping.enabled,
+                steady_state_profile=steady_state_profile(
+                    self._config,
+                    accuracy_only=self._accuracy_only,
+                    enable_streaming=self._enable_streaming,
+                    tokenizer_name=self._tokenizer_name,
+                ),
             )
             event_logger_args = _build_event_logger_args(
                 event_log_dir=self._event_log_dir,

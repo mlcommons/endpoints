@@ -44,6 +44,7 @@ if TYPE_CHECKING:
         TokenBatchQueue,
     )
     from inference_endpoint.core.record import EventRecord
+    from inference_endpoint.metrics.steady_state_diagnostics import SuperPassCollector
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,10 @@ class SampleRow(msgspec.Struct, gc=False):  # type: ignore[call-arg]
 
     sample_uuid: str
     tracked_block_idx: int = -1
+    # Super-pass this sample was issued into; -1 means not collected.
+    # Lives on SampleRow so the collector stays stateless per sample: a uuid map
+    # in SuperPassCollector would duplicate this table for the length of the run.
+    superpass_index: int = -1
     issued_ns: int | None = None
     recv_first_ns: int | None = None
     last_recv_ns: int | None = None
@@ -224,9 +229,13 @@ class TokenTrigger(EmitTrigger):
         return token_count
 
     def _make_recorder(
-        self, ev_rec: EventRecord, pre_change: dict[str, Any]
+        self, ev_rec: EventRecord, row: SampleRow, pre_change: dict[str, Any]
     ) -> Callable[[int], None]:
-        """Build the callback the queue runs once the token count is known."""
+        """Build the callback the queue runs once the token count is known.
+
+        Subclasses may need in-flight state before the next flush. At flush time
+        ``set_field`` may have dropped the row, so the caller passes it here.
+        """
         registry, name = self.registry, self.metric_name
 
         def record(count: int) -> None:
@@ -244,7 +253,7 @@ class TokenTrigger(EmitTrigger):
             self.registry.record(self.metric_name, len(item.token_ids))
         elif isinstance(item, TextInput | MessageInput | PromptInput):
             if self._queue is not None:
-                self._queue.enqueue(item, self._make_recorder(ev_rec, pre_change))
+                self._queue.enqueue(item, self._make_recorder(ev_rec, row, pre_change))
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +374,7 @@ class TpotTrigger(TokenTrigger):
         self,
         registry: MetricsRegistry,
         queue: TokenBatchQueue | None,
+        collector: SuperPassCollector | None = None,
     ):
         super().__init__(
             MetricSeriesKey.TPOT_NS,
@@ -373,6 +383,26 @@ class TpotTrigger(TokenTrigger):
             requires=(SampleField.RECV_FIRST_NS,),
             dtype=float,
         )
+        self._collector = collector
+
+    def _make_recorder(self, ev_rec, row, pre_change):
+        collector = self._collector
+        # Read the super-pass while the sample is still in flight. The token
+        # count arrives at the drain flush; by then set_field has dropped the
+        # row. Carry only the int in the closure, so the row is not retained
+        # until the flush.
+        superpass_index = row.superpass_index
+        if collector is None or superpass_index < 0:
+            return super()._make_recorder(ev_rec, row, pre_change)
+        registry, name = self.registry, self.metric_name
+
+        def record(count: int) -> None:
+            value = self._compute_value(count, ev_rec, pre_change)
+            if value is not None:
+                registry.record(name, value)
+                collector.add_tpot(superpass_index, value, count)
+
+        return record
 
     def _extract_tokenization_input(self, ev_rec, row, pre_change):
         if pre_change.get(SampleField.RECV_FIRST_NS) is None:

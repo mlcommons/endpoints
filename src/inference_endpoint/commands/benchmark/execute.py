@@ -80,7 +80,7 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import PhaseType, QueryResult
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -98,13 +98,13 @@ from inference_endpoint.exceptions import (
 )
 from inference_endpoint.load_generator.agentic_inference_strategy import (
     AgenticInferenceStrategy,
+    expected_agentic_sample_count,
 )
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     EndpointResponseIdleTimeoutError,
     PhaseConfig,
-    PhaseType,
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
@@ -546,6 +546,26 @@ def setup_benchmark(
                 sample_order=audit_run_spec.sample_order,
             )
         total_samples = rt_settings.total_samples_to_issue()
+        # WAR (TODO: clean up the logic of agentic issue mode and single issue mode)
+        # calculate the correct number of samples to issue for agentic inference dataset
+        if isinstance(dataloader, AgenticInferenceDataset):
+            perf_ds_cfg = next(
+                (d for d in config.datasets if d.type == DatasetType.PERFORMANCE),
+                None,
+            )
+            agentic_cfg = (
+                perf_ds_cfg.agentic_inference if perf_ds_cfg is not None else None
+            )
+            assert dataloader.conversation_metadata is not None
+            total_samples = expected_agentic_sample_count(
+                dataloader.conversation_metadata,
+                (
+                    agentic_cfg.num_trajectories_to_issue
+                    if agentic_cfg is not None
+                    else None
+                ),
+                rt_settings.rng_sample_index,
+            )
 
     total_samples += sum(
         ec.dataset.num_samples() * ec.dataset.repeats
@@ -829,6 +849,7 @@ async def _run_benchmark_async(
         config,
         tokenizer_name=ctx.tokenizer_name,
         enable_streaming=ctx.enable_streaming,
+        accuracy_only=ctx.accuracy_only,
         event_log_dir=event_log_dir,
         metrics_output_dir=metrics_output_dir,
         loop=loop,

@@ -32,6 +32,13 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
+from inference_endpoint.core.types import PhaseData, PhaseType
+from inference_endpoint.metrics.steady_state_diagnostics import (
+    PROFILES,
+    SteadyState,
+    SuperPassCollector,
+    compute_steady_state_metrics,
+)
 
 from .metrics_table import (
     ChunkDeltaTrigger,
@@ -136,6 +143,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         shutdown_event: asyncio.Event | None = None,
         drain_timeout_s: float | None = None,
         enable_isl: bool = True,
+        steady_state_profile: str | None = None,
         **kwargs,
     ):
         # drain_timeout_s is injected (not derived) because the right
@@ -181,6 +189,39 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         # Pre-register all metrics on the registry. Tests can introspect via
         # registry.has_counter / has_series.
         self._register_metrics(streaming, enable_isl, sig_figs, n_histogram_buckets)
+
+        # A profile name enables steady-state collection. The profile carries
+        # the CoV bounds and warmup driver used for the verdict. None leaves
+        # collection off.
+        #
+        # Only the parent knows the load pattern, so it chooses the profile.
+        # This subprocess also refuses unsupported profiles, so neither side
+        # can enable collection for a run the verdict does not describe.
+        #
+        # Use .get so an unknown name degrades to collection off. Raising
+        # KeyError here would kill the subprocess during startup and surface
+        # as a launch timeout in the parent.
+        self._steady_state_profile = (
+            PROFILES.get(steady_state_profile) if steady_state_profile else None
+        )
+        if steady_state_profile and self._steady_state_profile is None:
+            logger.warning(
+                "Steady-state collection refused: unknown profile %r",
+                steady_state_profile,
+            )
+        if self._steady_state_profile is not None and not (
+            self._steady_state_profile.supported
+        ):
+            logger.warning(
+                "Steady-state collection refused: profile %r is not supported",
+                steady_state_profile,
+            )
+            self._steady_state_profile = None
+        # PHASE_START supplies the bucket size. TpotTrigger needs the collector
+        # registered before any event can arrive, so the size is latched later.
+        self._collector = (
+            SuperPassCollector() if self._steady_state_profile is not None else None
+        )
 
         self._table = MetricsTable(self._registry)
         self._register_triggers(streaming, enable_isl)
@@ -272,7 +313,9 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         if streaming:
             table.add_trigger(SampleField.RECV_FIRST_NS, TtftTrigger(registry))
             table.add_trigger(SampleField.LAST_RECV_NS, ChunkDeltaTrigger(registry))
-            table.add_trigger(SampleField.COMPLETE_NS, TpotTrigger(registry, queue))
+            table.add_trigger(
+                SampleField.COMPLETE_NS, TpotTrigger(registry, queue, self._collector)
+            )
 
     @property
     def table(self) -> MetricsTable:
@@ -297,6 +340,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         saw_shutdown = False
         table = self._table
         registry = self._registry
+        collector = self._collector
 
         self._total_processed += len(records)
         if self._total_processed - self._last_log_count >= 10000:
@@ -335,6 +379,19 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                         "tagged state=interrupted"
                     )
                     self._interrupted = True
+                elif ev == SessionEventType.PHASE_START:
+                    # Only performance phases define the bucket size. Warmup
+                    # announces first with its own dataset size, and the
+                    # standalone parser follows the same rule.
+                    #
+                    # announce_phase also refuses to resize a series once
+                    # bucket collection has started.
+                    if (
+                        collector is not None
+                        and isinstance(record.data, PhaseData)
+                        and record.data.phase_type is PhaseType.PERFORMANCE
+                    ):
+                        collector.announce_phase(record.data.num_turns)
                 else:
                     if ev == SessionEventType.STARTED:
                         if self._session_start_ns is not None:
@@ -415,17 +472,58 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             if ev == SampleEventType.ISSUED:
                 table.set_field(uuid, SampleField.ISSUED_NS, ts, record)
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_ISSUED.value)
-                if table.get_row(uuid) is not None:
+                row = table.get_row(uuid)
+                if row is not None:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value)
+                    # A row can outlive the tracking window.
+                    # For ISSUED after STOP_PERFORMANCE_TRACKING, set_field
+                    # returns early but keeps the in-flight row. Bucketing that issue
+                    # would use last_issue_ns outside the window and change reported
+                    # system TPS. The event-log parser skips it too.
+                    if collector is not None and table.is_tracking:
+                        # A row's superpass_index marks its bucket slot. If it already
+                        # has one, this issue is a retry.
+                        if row.superpass_index < 0:
+                            row.superpass_index = collector.assign(ts)
+                        else:
+                            collector.reissue(row.superpass_index, ts)
             elif ev == SampleEventType.RECV_FIRST:
+                # Read the row before set_field overwrites recv_first_ns. A
+                # retried sample re-emits RECV_FIRST and must not add a second
+                # TTFT.
+                row = table.get_row(uuid) if collector is not None else None
+                first_chunk = row is not None and row.recv_first_ns is None
                 table.set_field(uuid, SampleField.RECV_FIRST_NS, ts, record)
                 table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
+                if (
+                    collector is not None
+                    and row is not None
+                    and row.superpass_index >= 0
+                    and row.issued_ns is not None
+                ):
+                    collector.on_recv_first(
+                        row.superpass_index,
+                        row.issued_ns,
+                        ts,
+                        record.turn,
+                        first=first_chunk,
+                    )
             elif ev == SampleEventType.RECV_NON_FIRST:
                 table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
             elif ev == SampleEventType.COMPLETE:
-                # Check if tracked before set_field (which removes the row)
-                is_tracked = table.get_row(uuid) is not None
+                # Read the row before set_field, which drops it from the table.
+                row = table.get_row(uuid)
+                is_tracked = row is not None
                 table.set_field(uuid, SampleField.COMPLETE_NS, ts, record)
+                if (
+                    collector is not None
+                    and row is not None
+                    and row.superpass_index >= 0
+                    and row.issued_ns is not None
+                ):
+                    collector.on_complete(
+                        row.superpass_index, row.issued_ns, row.recv_first_ns, ts
+                    )
                 registry.increment(MetricCounterKey.TOTAL_SAMPLES_COMPLETED.value)
                 if is_tracked:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_COMPLETED.value)
@@ -481,6 +579,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     registry,
                     n_pending_tasks=n_pending,
                     interrupted=self._interrupted,
+                    steady_state=await self._steady_state_verdict(n_pending),
                 )
             finally:
                 # The aggregator MUST close the publisher and signal shutdown even
@@ -495,6 +594,47 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                         "metrics: publisher.aclose failed during ENDED finalize"
                     )
                 self._finalize()
+
+    async def _steady_state_verdict(self, n_pending: int) -> SteadyState | None:
+        """Return the steady-state verdict for the terminal snapshot.
+
+        Returns None when collection is disabled or the series does not describe
+        the completed run. An interrupted run is truncated. A pending drain means
+        token counts are missing, so TPOT and OSL would be wrong.
+
+        This runs before the snapshot is built. The single atomic final write
+        then carries both the metrics and the verdict, so the analysis sits in
+        front of the file Report is built from.
+
+        The analysis carries no deadline of its own. It is pure CPU over the
+        super-pass rollups the collector already built, and its cost tracks the
+        super-pass count: measured 2.9s at 100 super-passes (438,800 samples,
+        the longest shape this runs at) and 19s at 245. A deadline in front of
+        the final snapshot write would be a knob guarding a cost that does not
+        reach it.
+
+        The compute runs in ``asyncio.to_thread`` so the event loop stays
+        responsive while it works: a SIGTERM arriving mid-analysis still
+        reaches its handler and writes the INTERRUPTED snapshot, rather than
+        waiting on a blocked loop.
+        """
+        collector, profile = self._collector, self._steady_state_profile
+        if collector is None or profile is None:
+            return None
+        if self._interrupted or n_pending > 0 or not collector.superpass_size:
+            logger.info("Steady state not computed: the run is not described by it")
+            return None
+        try:
+            return await asyncio.to_thread(
+                compute_steady_state_metrics,
+                collector.series(),
+                superpass_size=collector.superpass_size,
+                cov_bounds=profile.cov_bounds,
+                warmup_driver=profile.warmup_driver,
+            )
+        except Exception:  # noqa: BLE001 — best-effort; never fail the run.
+            logger.exception("metrics: steady-state detection failed")
+            return None
 
     # ------------------------------------------------------------------
     # Lifecycle

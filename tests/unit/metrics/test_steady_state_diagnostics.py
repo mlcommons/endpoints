@@ -1,37 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for scripts/steady_state_diagnostics.py.
+"""Tests for ``inference_endpoint.metrics.steady_state_diagnostics``.
 
-The script is self-contained (no ``inference_endpoint`` import), so these tests pin
-everything it owns: the plain-JSON event parse (wire shapes referenced from
-core/record.py + core/types.py), super-pass bucketing, TTFT/TPOT reconstruction via an
-injected token counter, the trend-detection algorithms, and the CoV table.
+Pins everything the detector owns: the plain-JSON event parse (wire shapes
+referenced from core/record.py + core/types.py), super-pass bucketing, TTFT/TPOT
+reconstruction via an injected token counter, the trend-detection algorithms, and
+the CoV table.
 """
 
-import importlib.util
 import json
-import sys
-from pathlib import Path
 
 import pytest
+from inference_endpoint.metrics import steady_state_diagnostics as mod
 
 pytestmark = pytest.mark.unit
-
-
-def _load_script():
-    spec = importlib.util.spec_from_file_location(
-        "steady_state_diagnostics",
-        Path("scripts/steady_state_diagnostics.py"),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    # Register before exec so dataclass field annotations (PEP 563 strings) resolve.
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-mod = _load_script()
 
 
 def _ev(event_type, ts, uuid="", data=None):
@@ -112,7 +95,7 @@ def test_build_super_pass_series_buckets_by_issue_order(tmp_path):
     assert sorted(round(v, 2) for v in sp0.tpot_ns) == [266.67, 750.0]
     assert sp0.out_tokens == 5
     assert sp1.n_issued == 1
-    assert sp1.ttft_ns == [200.0]
+    assert list(sp1.ttft_ns) == [200.0]
 
 
 def test_build_super_pass_series_records_e2e_latency(tmp_path):
@@ -125,7 +108,7 @@ def test_build_super_pass_series_records_e2e_latency(tmp_path):
     ]
     path = _write_events(tmp_path, lines)
     series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
-    assert series[0].latency_ns == [2000.0]  # complete(3000) - issued(1000)
+    assert list(series[0].latency_ns) == [2000.0]  # complete(3000) - issued(1000)
 
 
 def test_warm_turn_ttft_excludes_cold_first_turn(tmp_path):
@@ -153,7 +136,7 @@ def test_warm_turn_ttft_excludes_cold_first_turn(tmp_path):
     path = _write_events(tmp_path, lines)
     series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
     assert sorted(series[0].ttft_ns) == [50.0, 200.0]  # all turns
-    assert series[0].ttft_warm_ns == [50.0]  # turn 1 discarded
+    assert list(series[0].ttft_warm_ns) == [50.0]  # turn 1 discarded
 
 
 def test_build_super_pass_series_ignores_events_outside_tracking(tmp_path):
@@ -265,12 +248,6 @@ def test_trend_algorithms_report_insufficient_below_min_n():
 # --------------------------------------------------------------------------- #
 
 
-def test_rolling_windows_enumerates_all_positions():
-    # n=6, window=4 -> starts 0,1,2 -> [0,4),[1,5),[2,6)
-    windows = mod.rolling_windows(n=6, window=4)
-    assert windows == [(0, 4), (1, 5), (2, 6)]
-
-
 def test_cov_table_pass_fail_against_bounds():
     # A per-super-pass p50 series that is dead flat -> CoV 0 -> passes every bound.
     flat_series = [3.0, 3.0, 3.0, 3.0]
@@ -311,23 +288,19 @@ def _synthetic_events(tmp_path, n, ttft_ns_fn):
 def test_run_result_structure(tmp_path):
     # ttft climbs steadily -> an upward drift the scan should surface.
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100 + 20 * i)
-    result = mod.run(
-        path, superpass_size=1, count_tokens=_words, window_sizes=[4], warmup=1
-    )
-    assert result["n_super_passes"] == 8
-    assert result["n_post_warmup"] == 7
-    assert "ttft_p50" in result["trajectories"]
-    # window 4 over 7 post-warmup super-passes -> 4 rolling positions
-    rolling = result["drift"]["4"]["ttft_p50"]["rolling"]
-    assert [r["window"] for r in rolling] == [[0, 4], [1, 5], [2, 6], [3, 7]]
-    # CoV table carries a pass/fail cell per bound and a gate flag. Admissibility gates on
+    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
+    assert result["steady_state"].n_super_passes == 8
+    assert result["steady_state"].warmup == 1
+    assert result["drift"]["ttft_p50"]["mk_hamed_rao"] == "up"
+    # CoV cells carry a pass/fail per bound and a gate flag. Admissibility gates on
     # TPOT only, so tpot_p50 is gated while ttft_p50 is now diagnostic.
-    assert result["cov"]["4"]["tpot_p50"]["gated"] is True
-    cell = result["cov"]["4"]["ttft_p50"]
-    assert cell["gated"] is False
-    assert set(cell["passes"]) == {"0.03", "0.05", "0.08"}
+    cov = result["steady_state"].cov
+    assert cov["tpot_p50"].gated is True
+    cell = cov["ttft_p50"]
+    assert cell.gated is False
+    assert set(cell.passes) == {"0.03", "0.05", "0.08"}
     # p99 is present but marked diagnostic (not gated)
-    assert result["cov"]["4"]["ttft_p99"]["gated"] is False
+    assert cov["ttft_p99"].gated is False
 
 
 def test_text_after_first_chunk_empty_reasoning_str_output_is_first_chunk():
@@ -348,7 +321,7 @@ def test_retried_sample_counts_ttft_once(tmp_path):
     ]
     path = _write_events(tmp_path, lines)
     series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
-    assert series[0].ttft_ns == [500.0]
+    assert list(series[0].ttft_ns) == [500.0]
 
 
 def test_valid_json_line_missing_timestamp_is_skipped(tmp_path):
@@ -475,6 +448,8 @@ def _mk_series(levels, samples=40):
         sp = mod.SuperPassRollup(index=i)
         sp.tpot_ns = [float(tp)] * samples
         sp.ttft_ns = [float(tt)] * samples
+        sp.latency_ns = [float(tp) + float(tt)] * samples
+        sp.osl = [10.0] * samples
         sp.out_tokens = samples * 10
         sp.n_issued = samples
         sp.first_issue_ns = i * 1000
@@ -495,6 +470,14 @@ def test_window_issue_span_excludes_the_drain():
 
 GATE = "mk_hamed_rao"
 BOUNDS = (0.03, 0.05, 0.08)
+
+
+def _analyse(series, **kw):
+    """compute_steady_state_metrics over an already-post-warmup series."""
+    kw.setdefault("warmup", 0)
+    return mod.compute_steady_state_metrics(
+        series, superpass_size=40, gate_algo=GATE, cov_bounds=BOUNDS, **kw
+    )
 
 
 def test_window_admissible_flat_yes_spanning_jump_no():
@@ -541,10 +524,10 @@ def test_ttft_not_gated_but_still_drift_warned():
     assert (
         mod.window_admissible(series, 0, 8, GATE, BOUNDS) is True
     )  # TTFT ignored by the gate
-    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
-    assert ss["found"] is True
-    assert "ttft_p50" in ss["drifting_up"]  # TTFT drift surfaced as a soft warning
-    assert "tpot_p50" not in ss["drifting_up"]  # TPOT is flat
+    ss = _analyse(series, enforce_min_duration=False)
+    assert ss.found is True
+    assert "ttft_p50" in ss.drifting_up  # TTFT drift surfaced as a soft warning
+    assert "tpot_p50" not in ss.drifting_up  # TPOT is flat
 
 
 def test_segment_plateaus_splits_staircase():
@@ -562,25 +545,104 @@ def test_detect_level_shift_flags_staircase():
     series = _mk_series([(100, 50)] * 6 + [(200, 60)] * 6)
     plateaus = mod.segment_plateaus(series, GATE, BOUNDS)
     shift = mod.detect_level_shift(series, plateaus)
-    assert shift["detected"] is True
-    assert shift["change_point_sp"] == 6
-    assert shift["delta_pct"] > 0  # degradation (TPOT rose)
+    assert shift.detected is True
+    assert shift.change_point_sp == 6
+    assert shift.delta_pct > 0  # degradation (TPOT rose)
 
 
 def test_detect_level_shift_none_on_single_plateau():
     series = _mk_series([(100, 50)] * 8)
     plateaus = mod.segment_plateaus(series, GATE, BOUNDS)
-    assert mod.detect_level_shift(series, plateaus)["detected"] is False
+    assert mod.detect_level_shift(series, plateaus).detected is False
 
 
-def test_build_steady_state_reports_first_plateau_and_anomaly():
+def test_steady_state_reports_first_plateau_and_anomaly():
     series = _mk_series([(100, 50)] * 6 + [(200, 60)] * 6)
-    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
-    assert ss["found"] is True
-    assert ss["window"]["sp_lo"] == 0 and ss["window"]["sp_hi"] == 6  # first plateau
-    assert ss["tps"]["per_user"] > 0 and ss["tps"]["system"] > 0
-    assert ss["ttft"]["count"] == 6 * 40
-    assert ss["anomaly"]["detected"] is True  # the 100->200 step is surfaced
+    ss = _analyse(series, enforce_min_duration=False)
+    assert ss.found is True
+    assert ss.window.sp_lo == 0 and ss.window.sp_hi == 6  # first plateau
+    assert ss.tps.per_user > 0 and ss.tps.system > 0
+    assert ss.ttft["count"] == 6 * 40
+    assert ss.anomaly.detected is True  # the 100->200 step is surfaced
+
+
+def test_steady_state_reports_osl_latency_and_window_bounds():
+    series = _mk_series([(100, 50)] * 6)
+    ss = _analyse(series, enforce_min_duration=False)
+    w = ss.window
+    # Wall-clock bounds come from the window's own issue timestamps.
+    assert (w.start_ns, w.end_ns) == (
+        series[0].first_issue_ns,
+        series[5].last_issue_ns,
+    )
+    # OSL and latency are summarized per sample over the same window as TTFT/TPOT.
+    assert ss.osl["count"] == ss.ttft["count"] == 6 * 40
+    assert ss.osl["p50"] == 10.0
+    assert ss.latency["p50"] == 150.0
+
+
+def test_steady_state_cov_scores_the_reported_window():
+    series = _mk_series([(100, 50)] * 6)
+    ss = _analyse(series, enforce_min_duration=False)
+    # Dead-flat window -> CoV 0 on every tracked metric, passing every bound.
+    assert set(ss.cov) == {m.key for m in mod.TRACKED_METRICS}
+    assert ss.cov["tpot_p50"] == mod.CovCell(
+        gated=True,
+        n=6,
+        cov=0.0,
+        passes={"0.03": True, "0.05": True, "0.08": True},
+    )
+    assert ss.cov["ttft_p99"].gated is False
+
+
+def test_steady_state_carries_the_run_shape():
+    series = _mk_series([(100, 50)] * 8)
+    ss = mod.compute_steady_state_metrics(
+        series,
+        superpass_size=512,
+        warmup=2,
+        cov_bounds=BOUNDS,
+        enforce_min_duration=False,
+    )
+    assert (ss.superpass_size, ss.n_super_passes, ss.warmup) == (512, 8, 2)
+    assert ss.window.n_super_passes == 6  # indices are post-warmup
+
+
+def test_a_flat_but_noisy_run_reports_its_cov_over_the_whole_span():
+    """Scatter and drift fail for different reasons, so say which one it was.
+
+    A run that is trend-steady throughout yet yielded no plateau was rejected on
+    CoV. The verdict reports that CoV over the span the trend test cleared, so
+    "no admissible steady plateau" stops being the whole answer.
+    """
+    # No trend, but the super-pass means swing +-10% -> CoV above every bound.
+    series = _mk_series([(50 if i % 2 else 60, 50) for i in range(8)])
+    ss = _analyse(series)
+    assert ss.found is False
+    assert ss.cov, "a trend-steady run should carry its CoV"
+    basis = ss.cov_basis
+    assert basis is not None
+    assert basis == mod.CovBasis(sp_lo=0, sp_hi=8, n_super_passes=8)
+    assert "CoV" in (ss.reason or "")
+    assert ss.osl is None and ss.latency is None
+
+
+def test_a_drifting_run_claims_no_cov_and_names_the_drifter():
+    """Nothing was steady, so there is no span a CoV would describe."""
+    series = _mk_series([(10 * (i + 1), 50) for i in range(8)])
+    ss = _analyse(series)
+    assert ss.found is False
+    assert ss.cov == {}
+    assert ss.cov_basis is None
+    assert "trends across the run" in (ss.reason or "")
+
+
+def test_nothing_trend_steady_reports_no_cov_at_all():
+    """Too short to trend-test at all: CoV is not the story, so none is claimed."""
+    ss = _analyse(_mk_series([(50, 50)] * (mod.MIN_TREND_N - 1)))
+    assert ss.found is False
+    assert ss.cov == {}
+    assert ss.cov_basis is None
 
 
 def test_adaptive_warmup_crops_tpot_ramp():
@@ -604,33 +666,32 @@ def test_adaptive_warmup_capped_at_max_frac():
 def test_run_auto_warmup_resolves_to_int(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100.0)
     result = mod.run(path, superpass_size=1, count_tokens=_words, warmup="auto")
-    assert isinstance(result["warmup"], int)
-    assert result["warmup_mode"] == "auto"
+    assert isinstance(result["steady_state"].warmup, int)
 
 
-def test_build_steady_state_flags_global_drift_after_first_plateau():
+def test_steady_state_flags_global_drift_after_first_plateau():
     # First plateau is flat, but TPOT ramps up for the rest of the run (the C22528
     # pattern): a local plateau exists, yet the metric drifts up globally.
     series = _mk_series([(100, 50)] * 6 + [(100 + 25 * i, 50) for i in range(1, 8)])
-    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
-    assert ss["found"] is True
-    assert ss["window"]["sp_lo"] == 0 and ss["window"]["sp_hi"] == 6
-    assert ss["anomaly"]["detected"] is False  # gradual ramp, not a discrete staircase
-    assert "tpot_p50" in ss["drifting_up"]  # global Drifting-Up gate catches it
-    assert "ttft_p50" not in ss["drifting_up"]  # TTFT is flat
+    ss = _analyse(series, enforce_min_duration=False)
+    assert ss.found is True
+    assert ss.window.sp_lo == 0 and ss.window.sp_hi == 6
+    assert ss.anomaly.detected is False  # gradual ramp, not a discrete staircase
+    assert "tpot_p50" in ss.drifting_up  # global Drifting-Up gate catches it
+    assert "ttft_p50" not in ss.drifting_up  # TTFT is flat
 
 
-def test_build_steady_state_no_global_drift_on_flat_run():
+def test_steady_state_no_global_drift_on_flat_run():
     series = _mk_series([(100, 50)] * 8)
-    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
-    assert ss["drifting_up"] == []
+    ss = _analyse(series, enforce_min_duration=False)
+    assert ss.drifting_up == []
 
 
-def test_build_steady_state_none_when_run_never_settles():
+def test_steady_state_none_when_run_never_settles():
     # per-super-pass TPOT ramps every step -> no length-4 window is within CoV
     series = _mk_series([(100 + 20 * i, 50) for i in range(8)])
-    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
-    assert ss["found"] is False
+    ss = _analyse(series, enforce_min_duration=False)
+    assert ss.found is False
 
 
 def _spanned_series(
@@ -659,10 +720,10 @@ def test_min_steady_duration_floor_dominates_clean_short_run():
     sw = mod.min_steady_duration(
         _spanned_series(6, per_sp_span_s=1.0, latency_s=0.1), 0, 6
     )
-    assert sw["dominant"] == "floor"
-    assert sw["min_duration_s"] == mod.MIN_DUR_FLOOR_S
-    assert sw["kstar"] == mod.MIN_DUR_KSTAR_FLOOR  # flat metric -> k* pinned at floor
-    assert sw["is_short"] is True  # ~6s window << 600s floor
+    assert sw.dominant == "floor"
+    assert sw.min_duration_s == mod.MIN_DUR_FLOOR_S
+    assert sw.kstar == mod.MIN_DUR_KSTAR_FLOOR  # flat metric -> k* pinned at floor
+    assert sw.is_short is True  # ~6s window << 600s floor
 
 
 def test_min_steady_duration_relaxation_dominates_on_long_tail():
@@ -670,8 +731,8 @@ def test_min_steady_duration_relaxation_dominates_on_long_tail():
     sw = mod.min_steady_duration(
         _spanned_series(6, per_sp_span_s=1.0, latency_s=200.0), 0, 6
     )
-    assert sw["dominant"] == "relaxation"
-    assert abs(sw["min_duration_s"] - 1000.0) < 1e-3
+    assert sw.dominant == "relaxation"
+    assert abs(sw.min_duration_s - 1000.0) < 1e-3
 
 
 def test_min_steady_duration_precision_dominates_on_noisy_metric():
@@ -681,8 +742,8 @@ def test_min_steady_duration_precision_dominates_on_noisy_metric():
             100.0 if i % 2 == 0 else 160.0
         ] * 40  # high CoV_b across super-passes
     sw = mod.min_steady_duration(series, 0, 8)
-    assert sw["kstar"] > mod.MIN_DUR_KSTAR_FLOOR  # k* self-raises with CoV
-    assert sw["dominant"] == "precision"
+    assert sw.kstar > mod.MIN_DUR_KSTAR_FLOOR  # k* self-raises with CoV
+    assert sw.dominant == "precision"
 
 
 def test_min_steady_duration_precision_exempt_at_kstar_floor():
@@ -692,11 +753,11 @@ def test_min_steady_duration_precision_exempt_at_kstar_floor():
     sw = mod.min_steady_duration(
         _spanned_series(4, per_sp_span_s=200.0, latency_s=1.0), 0, 4
     )
-    assert sw["kstar"] == mod.MIN_DUR_KSTAR_FLOOR
-    assert sw["t_precision_s"] == 0.0
-    assert sw["dominant"] == "floor"
-    assert sw["min_duration_s"] == mod.MIN_DUR_FLOOR_S
-    assert sw["is_short"] is False
+    assert sw.kstar == mod.MIN_DUR_KSTAR_FLOOR
+    assert sw.t_precision_s == 0.0
+    assert sw.dominant == "floor"
+    assert sw.min_duration_s == mod.MIN_DUR_FLOOR_S
+    assert sw.is_short is False
 
 
 def test_min_steady_duration_not_short_when_window_long_enough():
@@ -704,30 +765,30 @@ def test_min_steady_duration_not_short_when_window_long_enough():
     sw = mod.min_steady_duration(
         _spanned_series(6, per_sp_span_s=120.0, latency_s=1.0), 0, 6
     )
-    assert sw["is_short"] is False
+    assert sw.is_short is False
 
 
-def test_build_steady_state_hard_fails_short_window():
+def test_steady_state_hard_fails_short_window():
     series = _mk_series([(100, 50)] * 8)  # flat plateau, microsecond spans
-    ss = mod.build_steady_state(series, GATE, BOUNDS)  # enforce default True
-    assert ss["found"] is False
-    assert ss["reason"] is not None and "too short" in ss["reason"]
-    assert ss["short_window"]["is_short"] is True
-    assert ss["window"] is not None  # window summary kept for context
+    ss = _analyse(series)  # enforce default True
+    assert ss.found is False
+    assert ss.reason is not None and "too short" in ss.reason
+    assert ss.short_window.is_short is True
+    assert ss.window is not None  # window summary kept for context
 
 
-def test_build_steady_state_soft_reports_short_window():
+def test_steady_state_soft_reports_short_window():
     series = _mk_series([(100, 50)] * 8)
-    ss = mod.build_steady_state(series, GATE, BOUNDS, enforce_min_duration=False)
-    assert ss["found"] is True  # not rejected, only flagged
-    assert ss["short_window"]["is_short"] is True
+    ss = _analyse(series, enforce_min_duration=False)
+    assert ss.found is True  # not rejected, only flagged
+    assert ss.short_window.is_short is True
 
 
-def test_build_steady_state_accepts_long_enough_window():
+def test_steady_state_accepts_long_enough_window():
     series = _spanned_series(8, per_sp_span_s=120.0, latency_s=1.0)  # flat, ~960s span
-    ss = mod.build_steady_state(series, GATE, BOUNDS)  # enforce default True
-    assert ss["found"] is True
-    assert ss["short_window"]["is_short"] is False
+    ss = _analyse(series)  # enforce default True
+    assert ss.found is True
+    assert ss.short_window.is_short is False
 
 
 def _concat_plateaus(segs):
@@ -756,54 +817,45 @@ def test_hard_path_skips_short_plateau_for_next_admissible():
     # 120 s each (~960 s window -> long enough). Distinct TPOT levels segment them.
     A = _spanned_series(4, tpot=5.0, per_sp_span_s=1.0, latency_s=0.1)
     B = _spanned_series(8, tpot=6.5, per_sp_span_s=120.0, latency_s=1.0)
-    ss = mod.build_steady_state(
-        _concat_plateaus([A, B]), GATE, BOUNDS
-    )  # enforce default
-    assert ss["found"] is True
-    assert ss["window"]["plateau_index"] == 1  # first (short) plateau skipped
-    assert ss["window"]["skipped_short"] == 1
-    assert ss["window"]["sp_lo"] == 4 and ss["window"]["sp_hi"] == 12
-    assert ss["short_window"]["is_short"] is False
+    ss = _analyse(_concat_plateaus([A, B]))
+    assert ss.found is True
+    assert ss.window.plateau_index == 1  # first (short) plateau skipped
+    assert ss.window.skipped_short == 1
+    assert ss.window.sp_lo == 4 and ss.window.sp_hi == 12
+    assert ss.short_window.is_short is False
 
 
 def test_hard_path_rejects_when_all_plateaus_short():
     A = _spanned_series(4, tpot=5.0, per_sp_span_s=1.0, latency_s=0.1)
     B = _spanned_series(5, tpot=6.5, per_sp_span_s=1.0, latency_s=0.1)  # also short
-    ss = mod.build_steady_state(_concat_plateaus([A, B]), GATE, BOUNDS)
-    assert ss["found"] is False
-    assert "too short" in ss["reason"]
-    assert ss["window"] is not None  # longest candidate kept for context
+    ss = _analyse(_concat_plateaus([A, B]))
+    assert ss.found is False
+    assert "too short" in ss.reason
+    assert ss.window is not None  # longest candidate kept for context
 
 
 def test_soft_path_reports_first_plateau_even_when_short():
     A = _spanned_series(4, tpot=5.0, per_sp_span_s=1.0, latency_s=0.1)
     B = _spanned_series(8, tpot=6.5, per_sp_span_s=120.0, latency_s=1.0)
-    ss = mod.build_steady_state(
-        _concat_plateaus([A, B]), GATE, BOUNDS, enforce_min_duration=False
-    )
-    assert ss["found"] is True
-    assert ss["window"]["plateau_index"] == 0  # first plateau, no skipping
-    assert ss["window"]["skipped_short"] == 0
-    assert ss["short_window"]["is_short"] is True  # flagged, advisory only
+    ss = _analyse(_concat_plateaus([A, B]), enforce_min_duration=False)
+    assert ss.found is True
+    assert ss.window.plateau_index == 0  # first plateau, no skipping
+    assert ss.window.skipped_short == 0
+    assert ss.short_window.is_short is True  # flagged, advisory only
 
 
 def test_run_result_has_steady_state_block(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100.0)
-    result = mod.run(
-        path, superpass_size=1, count_tokens=_words, window_sizes=[4], warmup=1
-    )
+    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
     assert "steady_state" in result
-    assert "anomaly" in result["steady_state"]
+    assert result["steady_state"].anomaly is not None
 
 
 def test_render_text_has_section_headers(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100 + 20 * i)
-    result = mod.run(
-        path, superpass_size=1, count_tokens=_words, window_sizes=[4], warmup=1
-    )
+    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
     text = mod.render_text(result, cov_bounds=[0.03, 0.05, 0.08])
-    assert "window size 4" in text
-    assert "CoV steadiness" in text
+    assert "CoV" in text
     assert "drift (whole-run" in text
     assert "ttft_p50" in text
 
@@ -833,7 +885,8 @@ def test_profile_for_load_pattern():
     assert mod.profile_for_load_pattern("max_throughput").name == "offline"
     assert mod.profile_for_load_pattern("offline").name == "offline"
     assert mod.profile_for_load_pattern("concurrency").name == "concurrency"
-    assert mod.profile_for_load_pattern("something-unknown").name == "concurrency"
+    # Fails closed: an unclassified workload inherits no verdict.
+    assert mod.profile_for_load_pattern("something-unknown") is None
 
 
 def test_find_run_files_from_dir_and_events(tmp_path):
@@ -841,14 +894,11 @@ def test_find_run_files_from_dir_and_events(tmp_path):
     client.mkdir()
     (client / "events.jsonl").write_text("{}\n")
     (client / "config.yaml").write_text("model_params:\n  name: /models/Kimi-K3\n")
-    (client / "run_meta.json").write_text('{"dataset_size": 613}')
-    ev, cfg, meta = mod.find_run_files(str(tmp_path))
+    ev, cfg = mod.find_run_files(str(tmp_path))
     assert ev.endswith("client/events.jsonl")
     assert cfg is not None and cfg.endswith("config.yaml")
-    assert meta is not None and meta.endswith("run_meta.json")
-    # passing the events path directly resolves the same sidecars
-    ev2, cfg2, meta2 = mod.find_run_files(ev)
-    assert (ev2, cfg2, meta2) == (ev, cfg, meta)
+    # passing the events path directly resolves the same sidecar
+    assert mod.find_run_files(ev) == (ev, cfg)
 
 
 def test_find_run_files_missing_raises(tmp_path):
@@ -870,13 +920,10 @@ def test_read_run_config(tmp_path):
         "    agentic_inference:\n"
         "      num_trajectories_to_issue: 613\n"
     )
-    meta = tmp_path / "run_meta.json"
-    meta.write_text('{"dataset_size": 6396}')
-    c = mod.read_run_config(str(cfg), str(meta))
+    c = mod.read_run_config(str(cfg))
     assert c["model"] == "/models/Kimi-K3"
     assert c["load_pattern"] == "agentic_inference"
     assert c["num_trajectories"] == 613
-    assert c["dataset_size"] == 6396
 
 
 def test_read_run_config_top_level_load_pattern(tmp_path):
@@ -884,10 +931,28 @@ def test_read_run_config_top_level_load_pattern(tmp_path):
     cfg.write_text(
         "load_pattern:\n  type: concurrency\nmodel_params:\n  name: gpt-oss\n"
     )
-    c = mod.read_run_config(str(cfg), None)
+    c = mod.read_run_config(str(cfg))
     assert c["load_pattern"] == "concurrency"
     assert c["model"] == "gpt-oss"
-    assert c["dataset_size"] is None
+
+
+def test_superpass_size_comes_from_the_performance_phase_start(tmp_path):
+    """A hand re-run needs no arguments: the size is on the wire."""
+
+    def phase(kind, turns, ts):
+        return json.dumps(
+            {
+                "event_type": "session.phase_start",
+                "timestamp_ns": ts,
+                "data": ["PhaseData", kind, True, turns, 0],
+            }
+        )
+
+    path = _write_events(
+        tmp_path, [phase("warmup", 99, 1), phase("performance", 613, 2)]
+    )
+    assert mod.superpass_size_from_events(path) == 613
+    assert mod.superpass_size_from_events(_write_events(tmp_path, ["{}"])) is None
 
 
 def _conv_ev(et, ts, uuid, conv, turn=None, data=None):

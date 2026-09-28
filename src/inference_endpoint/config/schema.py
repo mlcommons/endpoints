@@ -944,6 +944,35 @@ class EarlyStoppingConfig(BaseModel):
 
 
 @cyclopts.Parameter(name="*")
+class SteadyStateConfig(BaseModel):
+    """Steady-state window detection (off by default, opt-in).
+
+    The metrics aggregator collects a per-super-pass series during the run and
+    attaches the final verdict to the report as ``steady_state``.
+
+    Collection adds one rollup per sample event. It reuses token counts from the
+    TPOT trigger, so nothing is tokenized twice.
+
+    Supported runs use the `concurrency` or `poisson` load pattern, are not
+    accuracy-only, and have a resolvable tokenizer. Other runs leave it off.
+    There is no model allowlist. See ``docs/steady_state_diagnostics.md``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: Annotated[
+        bool,
+        # Use an explicit name, not an alias. An alias would also expose the
+        # field name, and a bare `--enabled` collides with other flattened
+        # single-field option models.
+        cyclopts.Parameter(
+            name="--steady-state",
+            help="Detect the run's steady window and report it",
+        ),
+    ] = Field(False, description="Steady-state window detection (default off)")
+
+
+@cyclopts.Parameter(name="*")
 class Settings(WithUpdatesMixin, BaseModel):
     """Test settings."""
 
@@ -961,6 +990,10 @@ class Settings(WithUpdatesMixin, BaseModel):
     early_stopping: EarlyStoppingConfig = Field(
         default_factory=EarlyStoppingConfig,
         description="MLPerf early-stopping percentile estimates (on by default; enabled: false opts out)",
+    )
+    steady_state: SteadyStateConfig = Field(
+        default_factory=SteadyStateConfig,
+        description="Steady-state window detection (off by default; enabled: true opts in)",
     )
     metrics_tokenizer_workers: Annotated[
         int,

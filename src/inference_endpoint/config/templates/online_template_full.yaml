@@ -105,6 +105,8 @@ settings:
     urls: null  # URL(s) the profiler start/stop triggers are derived from. When None, derived from endpoint_config.endpoints instead. Use when the profiler admin endpoint differs from the inference endpoint.
   early_stopping:  # MLPerf early-stopping percentile estimates (on by default; enabled: false opts out)
     enabled: true  # Early-stopping percentile estimates (default on)
+  steady_state:  # Steady-state window detection (off by default; enabled: true opts in)
+    enabled: false  # Steady-state window detection (default off)
   metrics_tokenizer_workers: 4  # In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT (default: 4; 0 = defer everything to the end-of-run drain).
   metrics_isl: true  # Collect input sequence length (ISL) metrics (default: true).
 endpoint_config:
