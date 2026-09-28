@@ -24,6 +24,22 @@ for exactly those five.
 
 This covers the client slice only. §6 lists what it deliberately excludes.
 
+## 0. What is missing
+
+| Category | Missing | Scope |
+| --- | --- | --- |
+| Run control | A duration floor, so a point can meet a minimum steady-state window | any model |
+| Validation | Checking a curve rather than a single single-stream point | any model |
+| Orchestration | A sweep driver, and a publish layout for multiple points | any model |
+| Metrics | The per-user rate as a named field | any model |
+| Tokenless support | Steady-state gating without TPOT, and artifact-safe responses | tokenless |
+| Registration | A ruleset model and dataset entry for the benchmark | tokenless |
+| Examples | Concurrency-region configs sized to whole dataset passes | tokenless |
+
+Nothing in the serving path is missing: the adapter and the example workload already run. The gaps
+are in measuring a curve, proving it valid, and describing the benchmark to the tooling. Each
+category is broken out in §3, with the work itemised in §5.
+
 ## 1. Target shape
 
 Per v1.0 §5.3 and §5.7, a non-agentic submission is four mandatory concurrency points (Ultra Low
