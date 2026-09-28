@@ -17,11 +17,10 @@ needs, and itemises the work in §5. The adapter itself (`videogen/`) and the ex
 (`examples/09_Wan22_VideoGen_Example/`) already exist; what is missing is everything around them.
 
 Three of the eight gaps are specific to a tokenless workload, two of them detailed in §3.1 and
-§3.2. The other five block a
-multi-point curve for **any** model and are marked `any model` in the gap table, so fixing them
-unblocks video and every other benchmark at once. Existing text-model curves are produced by
-running each concurrency separately and stitching the results downstream, which is the workaround
-for exactly those five.
+§3.2. The other five block a multi-point curve for **any** model and are marked `any model` in
+the gap table, so fixing them unblocks video and every other benchmark at once. Existing
+text-model curves are produced by running each concurrency separately and stitching the results
+downstream, which is the workaround for exactly those five.
 
 This covers the client slice only. §6 lists what it deliberately excludes.
 
