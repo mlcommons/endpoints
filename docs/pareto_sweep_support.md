@@ -1,4 +1,4 @@
-# Multi-point pareto sweep support: gaps and plan
+# Pareto sweep support: gaps and plan
 
 Status: proposal · Baseline: `4235a9c` · Scope: this repository only.
 
