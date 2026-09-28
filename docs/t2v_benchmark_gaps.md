@@ -246,8 +246,6 @@ E1 is the only item that is unavoidable rather than convenient.
 
 ## 6. Out of scope for this repository
 
-- Whether a video-generation benchmark is admissible under the Endpoints rules, and any rule text
-  it would need. That is a working-group question.
 - The accuracy quality target. The scorer exists; the threshold is a benchmark-definition
   decision, not a client one.
 - Submitter-side result layout, aggregation, and visualisation of a finished curve.
