@@ -9,7 +9,7 @@ Status: proposal · Baseline: `4235a9c` · Scope: this repository only.
 An Endpoints submission needs a **pareto curve**: several runs at different concurrency levels,
 plus one Offline run and a set of accuracy runs. Each run has to hold steady for a minimum time.
 
-**Two things block that today:**
+**Blockers:**
 
 - The client measures **one point per run**. There is no way to sweep several.
 - A video reply is **one file, not a stream of tokens**. The metric and steady-state code assume
