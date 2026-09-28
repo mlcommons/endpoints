@@ -7,12 +7,12 @@ Status: proposal · Baseline: `4235a9c` · Scope: this repository only.
 > rule citation here is as-of that commit and should be re-checked before being relied on.
 
 An Endpoints submission needs a **pareto curve**: several runs at different concurrency levels,
-plus one Offline run and a set of accuracy runs. Each run has to hold steady for a minimum time.
+plus 1 Offline run and a set of accuracy runs. Each run has to hold steady for a minimum time.
 
 **Blockers:**
 
-- The client measures **one point per run**. There is no way to sweep several.
-- A video reply is **one file, not a stream of tokens**. The metric and steady-state code assume
+- The client measures **1 point per run**. There is no way to sweep several.
+- A video reply is **1 file, not a stream of tokens**. The metric and steady-state code assume
   tokens everywhere.
 
 **What already exists:**
@@ -24,12 +24,12 @@ Everything around them is what is missing, and §5 lists that work.
 
 **How the gaps split:**
 
-- Eight gaps in total (§3).
-- **Three** only matter for a workload with no tokens. Two of those are explained in §3.1 and §3.2.
-- **Five** block a multi-point curve for **any** model, marked `any model` in the gap table.
-- So fixing those five helps video and every other benchmark at the same time.
+- 8 gaps in total (§3).
+- **3** only matter for a workload with no tokens. 2 of those are explained in §3.1 and §3.2.
+- **5** block a multi-point curve for **any** model, marked `any model` in the gap table.
+- So fixing those 5 helps video and every other benchmark at the same time.
 - Text curves are built today by running each concurrency on its own and joining the results
-  afterwards. That is the workaround for those same five gaps.
+  afterwards. That is the workaround for those same 5 gaps.
 
 **Scope:** the client only. §6 lists what is left out.
 
@@ -40,7 +40,7 @@ Everything around them is what is missing, and §5 lists that work.
 | [Naming](#a-naming) | A ruleset model and dataset entry, so the tooling recognises the benchmark at all |
 | [Missing metrics](#b-missing-metrics) | The per-user rate as a named field |
 | [Duration support](#c-duration-support) | A floor, so a point can meet a minimum steady-state window |
-| [Multi-point support](#d-multi-point-support) | A sweep driver, and a publish layout for more than one point |
+| [Multi-point support](#d-multi-point-support) | A sweep driver, and a publish layout for more than 1 point |
 | [Validation support](#e-validation-support) | Checking a curve rather than a single single-stream point |
 | [Tokenless support](#f-tokenless-support) | Steady-state gating without TPOT, and artifact-safe responses |
 | [Example configs](#g-example-configs) | Concurrency-region configs sized to whole dataset passes |
@@ -52,11 +52,11 @@ follow the same order as this table.
 
 ## 1. Target shape
 
-Per v1.0 §5.3 and §5.7, a non-agentic submission is four mandatory concurrency points (Ultra Low
-1-32, Low, Medium, High), three submitter's-choice points, one Offline point, and five accuracy
+Per v1.0 §5.3 and §5.7, a non-agentic submission is 4 mandatory concurrency points (Ultra Low
+1-32, Low, Medium, High), 3 submitter's-choice points, 1 Offline point, and 5 accuracy
 runs.
 
-Two rules govern how a single point must run:
+2 rules govern how a single point must run:
 
 - **§6.4**: total samples issued at a point MUST be a positive integer multiple of the dataset
   size. A point ends on a whole pass, not on a clock.
@@ -67,7 +67,7 @@ Neither is expressible today for a concurrency-scheduled run: see gaps 3 and 4.
 
 ### 1.1 Metrics for video generation
 
-For video generation the per-point metrics cannot be token-derived, because a response is one
+For video generation the per-point metrics cannot be token-derived, because a response is 1
 artifact rather than a token stream:
 
 | Token metric | Substitute |
@@ -81,7 +81,7 @@ because v1.0 derives per-user rate from the tail latency a user actually experie
 
 **Percentile: P90.** This *matches* v1.0 rather than diverging from it, since §4.1 moved TTFT from
 P95 to P90 with an explicit versioning note. The independent reason also holds: a stable P95 needs
-roughly twice the completed queries of a P90, and one video takes tens of seconds to minutes, so a
+roughly twice the completed queries of a P90, and 1 video takes tens of seconds to minutes, so a
 P95 at concurrency 1 would need on the order of 100+ videos per point. `DEFAULT_PERCENTILES`
 already carries both (`async_utils/services/metrics_aggregator/registry.py:411-423`).
 
@@ -116,10 +116,10 @@ specific to a tokenless workload.
 | # | Gap | Evidence | Scope | Kind |
 | --- | --- | --- | --- | --- |
 | 1 | No ruleset entry exists for the benchmark, so `_resolve_model` raises `KeyError` before any other check runs. Without one there is also no golden accuracy and no validity thresholds. | `compliance/checker.py:156-164` | tokenless | code |
-| 2 | The per-user rate is not emitted as a named field; `Report` carries `qps` and `tps` only. Minor, since it is one reciprocal of the already-emitted `latency` P90. | `metrics/report.py:250` | any model | code |
+| 2 | The per-user rate is not emitted as a named field; `Report` carries `qps` and `tps` only. Minor, since it is the reciprocal of the already-emitted `latency` P90. | `metrics/report.py:250` | any model | code |
 | 3 | Stop predicate is a pure OR of stop-requested / count-reached / `max_duration_ns` exceeded. No branch holds off the count stop until a wall-clock floor passes, so a phase is count-driven or capped, never floored. | `load_generator/session.py:866-880` | any model | code |
 | 4 | `min_issue_duration_ms` is a poisson count-sizer (`target_qps × duration`), not a floor. Rejected for non-poisson patterns, and relaxing that validator alone is insufficient because `total_samples_to_issue()` then raises, since concurrency has no `target_qps`. | `config/schema.py:1021-1027`, `config/runtime_settings.py:249` | any model | code |
-| 5 | No sweep driver. One invocation is one point, with no per-point report-dir convention and no cross-point aggregation. `publish_submission.py` publishes a single run into a single scenario directory. | n/a | any model | tooling |
+| 5 | No sweep driver. 1 invocation is 1 point, with no per-point report-dir convention and no cross-point aggregation. `publish_submission.py` publishes a single run into a single scenario directory. | n/a | any model | tooling |
 | 6 | Config lock requires `target_concurrency == 1`, so it fails at every point of a curve above 1, and expects a `temperature` field artifact adapters do not carry. | `compliance/checker.py:149`, `:115-119` | any model | code |
 | 7 | Steady state cannot certify a tokenless window. See §3.1. | `metrics/steady_state_diagnostics.py` | tokenless | code |
 | 8 | `VideoGenAdapter` mirrors the video *path string* into `response_output`, which the OSL trigger tokenizes. Harmless only because the model name resolves to no tokenizer; supplying one yields meaningless OSL and TPS. See §3.2. | `videogen/adapter.py` | tokenless | latent |
