@@ -1,0 +1,308 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+import shutil
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+from inference_endpoint.evaluation.swebench_service.swebench_service import (
+    pyxis_environment as environment_mod,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service import (
+    pyxis_persistent as transport,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service.runner import (
+    RunnerError,
+)
+
+pytestmark = pytest.mark.unit
+
+
+@pytest.fixture
+def worker(tmp_path, monkeypatch):
+    """Run the actual command server; namespace isolation needs a Linux allocation."""
+    if not all(shutil.which(tool) for tool in ("timeout", "sha256sum", "bash")):
+        pytest.skip("requires GNU timeout, sha256sum, and bash")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    unshare = bin_dir / "unshare"
+    unshare.write_text('#!/bin/sh\nshift 3\nexec "$@"\n')
+    unshare.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    root = tmp_path / "protocol"
+    commands = []
+
+    def factory(generation, secret):
+        command = [
+            "bash",
+            "-c",
+            transport._PERSISTENT_SERVER_SCRIPT,
+            "worker",
+            str(root),
+            generation,
+            secret,
+            "bash",
+            "-c",
+        ]
+        commands.append(command)
+        return command
+
+    channel = transport.PersistentExecChannel(
+        root,
+        factory,
+        environment_mod.safe_srun_env(),
+        failure_path=tmp_path / "failed",
+        launch_timeout_s=2,
+        driver_grace_s=1,
+        shutdown_grace_s=0.2,
+    )
+    channel.start()
+    yield channel, commands
+    channel.close()
+
+
+def execute(channel, command, cwd, timeout=2):
+    return channel.execute(command=command, cwd=str(cwd), timeout_s=timeout)
+
+
+@pytest.mark.parametrize("code", [0, 7, 124, 137])
+def test_preserves_exit_code_and_merged_output(worker, tmp_path, code):
+    channel, launches = worker
+    result = execute(
+        channel, f"printf stdout; printf stderr >&2; exit {code}", tmp_path
+    )
+    assert result.stdout == "stdoutstderr"
+    assert result.returncode == code
+    assert result.timed_out is False
+    assert len(launches) == 1
+
+
+def test_files_persist_but_shell_state_does_not(worker, tmp_path):
+    channel, launches = worker
+    execute(channel, "printf persisted > state; export PRIVATE=value; cd /", tmp_path)
+    result = execute(
+        channel, 'cat state; printf "|%s|%s" "$PWD" "${PRIVATE-unset}"', tmp_path
+    )
+    assert result.stdout == f"persisted|{tmp_path}|unset"
+    assert result.returncode == 0
+    assert channel.commands == 2
+    assert len(launches) == 1
+
+
+def test_preserves_multiline_command_and_binary_output(worker, tmp_path):
+    channel, _ = worker
+    result = execute(
+        channel, "printf 'a\\000b\\377\\n'\n# trailing comment\n", tmp_path
+    )
+    assert result.stdout == "a\x00b\ufffd\n"
+    assert result.returncode == 0
+
+
+def test_timeout_is_reported_and_worker_remains_usable(worker, tmp_path):
+    channel, launches = worker
+    result = execute(channel, "printf before; exec sleep 5", tmp_path, timeout=1)
+    assert result.stdout == "before"
+    assert result.timed_out is True
+    assert result.returncode == 124
+    assert execute(channel, "printf recovered", tmp_path).stdout == "recovered"
+    assert len(launches) == 1
+
+
+def test_concurrent_callers_are_serialized(worker, tmp_path):
+    channel, launches = worker
+
+    def increment(_):
+        return execute(
+            channel,
+            "n=$(cat count 2>/dev/null || echo 0); sleep 0.05; echo $((n+1)) > count",
+            tmp_path,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(increment, range(4)))
+    assert all(result.returncode == 0 for result in results)
+    assert (tmp_path / "count").read_text() == "4\n"
+    assert len(launches) == 1
+
+
+def test_dead_worker_does_not_restart_or_replay(worker, tmp_path):
+    channel, launches = worker
+    channel._process.kill()
+    channel._process.wait(timeout=2)
+    with pytest.raises(RunnerError, match="not running"):
+        execute(channel, "echo duplicated >> count", tmp_path)
+    with pytest.raises(RunnerError, match="closed"):
+        execute(channel, "echo duplicated >> count", tmp_path)
+    assert (tmp_path / "failed").exists()
+    assert not (tmp_path / "count").exists()
+    assert len(launches) == 1
+
+
+def test_driver_deadline_never_replays_an_active_command(worker, tmp_path, monkeypatch):
+    channel, launches = worker
+    channel._driver_grace_s = 0.2
+    monkeypatch.setattr(channel, "_read_completion", lambda *_: None)
+    with pytest.raises(RunnerError, match="driver deadline"):
+        execute(channel, "echo once >> count; sleep 0.4", tmp_path, timeout=1)
+    with pytest.raises(RunnerError, match="closed"):
+        execute(channel, "echo twice >> count", tmp_path)
+    assert (tmp_path / "count").read_text() == "once\n"
+    assert (tmp_path / "failed").exists()
+    assert len(launches) == 1
+
+
+def test_completion_corruption_fails_the_run(worker, tmp_path, monkeypatch):
+    channel, _ = worker
+    monkeypatch.setattr(transport, "_persistent_response_digest", lambda **_: "0" * 64)
+    with pytest.raises(RunnerError, match="digest did not verify"):
+        execute(channel, "printf result", tmp_path)
+    assert (tmp_path / "failed").exists()
+    assert channel._closed
+
+
+def test_close_reaps_worker_and_is_idempotent(worker):
+    channel, _ = worker
+    process = channel._process
+    channel.close()
+    channel.close()
+    assert process.poll() == 0
+
+
+def test_startup_failure_is_infrastructure_failure(tmp_path):
+    channel = transport.PersistentExecChannel(
+        tmp_path / "protocol",
+        lambda *_: ["bash", "-c", "echo denied >&2; exit 1"],
+        environment_mod.safe_srun_env(),
+        failure_path=tmp_path / "failed",
+    )
+    try:
+        with pytest.raises(RunnerError, match="did not become ready: denied"):
+            channel.start()
+        assert (tmp_path / "failed").exists()
+    finally:
+        channel.close()
+
+
+def test_default_and_legacy_opt_out(monkeypatch):
+    monkeypatch.delenv("SWEBENCH_PYXIS_PERSISTENT_EXEC", raising=False)
+    assert environment_mod.PyxisEnvironmentConfig(
+        image="image", run_id="run"
+    ).persistent_exec
+    monkeypatch.setenv("SWEBENCH_PYXIS_PERSISTENT_EXEC", "0")
+    assert not environment_mod.PyxisEnvironmentConfig(
+        image="image", run_id="run"
+    ).persistent_exec
+    assert environment_mod.PyxisEnvironmentConfig(
+        image="image", run_id="run", persistent_exec=True
+    ).persistent_exec
+
+
+def test_environment_routes_commands_to_one_worker(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.setenv("SLURMD_NODENAME", "node")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-worker")
+    steps = []
+    channels = []
+
+    def step(**kwargs):
+        steps.append(kwargs)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    class Channel:
+        def __init__(self, protocol_dir, factory, env, **kwargs):
+            self.argv = factory("generation", "secret")
+            self.env = env
+            self.closed = False
+            self.commands = 0
+            channels.append(self)
+
+        def start(self):
+            pass
+
+        def execute(self, **kwargs):
+            self.commands += 1
+            return subprocess.CompletedProcess([], 7, "failed", "")
+
+        def close(self):
+            self.closed = True
+
+    def cleanup(command, **kwargs):
+        assert channels[0].closed
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(environment_mod, "run_srun_step", step)
+    monkeypatch.setattr(environment_mod, "PersistentExecChannel", Channel)
+    monkeypatch.setattr(subprocess, "run", cleanup)
+    env = environment_mod.PyxisEnvironment(image="image", run_id="run")
+    try:
+        for _ in range(3):
+            assert env.execute({"command": "exit 7"})["returncode"] == 7
+        assert len(steps) == 1
+        assert len(channels) == 1
+        assert channels[0].commands == 3
+        assert "OPENAI_API_KEY" not in channels[0].env
+        assert "--kill-child" in channels[0].argv
+        assert "--jobid=123" in channels[0].argv
+        assert (env._tmp_dir.stat().st_mode & 0o777) == 0o700
+    finally:
+        env.cleanup()
+    assert not env._tmp_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "manifest", ["--1 0 0 0", "0 -1 0 0", "0 0 0 2", "256 0 0 0", "truncated"]
+)
+def test_rejects_corrupt_completion_metadata(tmp_path, manifest):
+    channel = transport.PersistentExecChannel(tmp_path / "protocol", lambda *_: [], {})
+    request = tmp_path / "request"
+    request.mkdir()
+    (request / "complete").write_text(manifest + " " + "0" * 64)
+    with pytest.raises(RunnerError, match="completion marker"):
+        channel._read_completion(request, deadline=0)
+
+
+@pytest.mark.parametrize(
+    "contents,size,reason",
+    [(None, 0, "missing"), (b"partial", 20, "partial"), (b"oversized", 1, "grew")],
+)
+def test_rejects_missing_or_incomplete_response_bytes(tmp_path, contents, size, reason):
+    output = tmp_path / "stdout"
+    if contents is not None:
+        output.write_bytes(contents)
+    with pytest.raises(RunnerError, match=reason):
+        transport._read_sized_file(output, size, deadline=0)
+
+
+def test_missing_worker_executable_marks_infrastructure_failure(tmp_path):
+    channel = transport.PersistentExecChannel(
+        tmp_path / "protocol",
+        lambda *_: [str(tmp_path / "missing")],
+        {},
+        failure_path=tmp_path / "failed",
+    )
+    try:
+        with pytest.raises(RunnerError, match="could not start"):
+            channel.start()
+        assert (tmp_path / "failed").exists()
+    finally:
+        channel.close()
+
+
+def test_worker_that_never_becomes_ready_is_reaped(tmp_path):
+    channel = transport.PersistentExecChannel(
+        tmp_path / "protocol",
+        lambda *_: ["sleep", "10"],
+        environment_mod.safe_srun_env(),
+        launch_timeout_s=0.1,
+        shutdown_grace_s=0.1,
+        failure_path=tmp_path / "failed",
+    )
+    try:
+        with pytest.raises(RunnerError, match="did not become ready"):
+            channel.start()
+    finally:
+        channel.close()
+    assert channel._process.poll() is not None
+    assert (tmp_path / "failed").exists()

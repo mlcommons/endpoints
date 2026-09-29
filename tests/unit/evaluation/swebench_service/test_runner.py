@@ -49,6 +49,7 @@ def test_pyxis_implementation_is_confined_to_environment_and_worker_modules():
     assert {path.name for path in package_dir.glob("pyxis_*") if path.is_file()} == {
         "pyxis_environment.py",
         "pyxis_worker.py",
+        "pyxis_persistent.py",
     }
 
 
@@ -897,7 +898,9 @@ def test_pyxis_environment_retries_connect_tunnel_prelaunch_failure(
     monkeypatch.setattr(pyxis_env_mod.random, "uniform", lambda _a, _b: 0.0)
     monkeypatch.setattr(pyxis_env_mod.time, "sleep", delays.append)
 
-    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+    environment = PyxisEnvironment(
+        persistent_exec=False, image=tmp_path / "task.sqsh", run_id="run-1"
+    )
 
     assert calls == 3
     assert delays == [2, 4]
@@ -997,7 +1000,9 @@ def test_pyxis_environment_does_not_retry_non_retryable_prelaunch_failure(
     with pytest.raises(
         RunnerError, match="failed to start Pyxis container"
     ) as exc_info:
-        PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+        PyxisEnvironment(
+            persistent_exec=False, image=tmp_path / "task.sqsh", run_id="run-1"
+        )
 
     assert "Captured srun output" in str(exc_info.value.__cause__)
 
@@ -1019,6 +1024,7 @@ def test_pyxis_environment_reuses_named_writable_container(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     environment = PyxisEnvironment(
+        persistent_exec=False,
         image=image,
         run_id="run-1",
         cwd="/testbed",
@@ -1075,7 +1081,7 @@ def test_pyxis_environment_mounts_persistent_tmp_on_every_step(monkeypatch, tmp_
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    environment = PyxisEnvironment(image=image, run_id="run-1")
+    environment = PyxisEnvironment(persistent_exec=False, image=image, run_id="run-1")
     environment.execute({"command": "touch /tmp/state"})
     environment.execute({"command": "test -f /tmp/state"})
 
@@ -1124,15 +1130,16 @@ def test_pyxis_environment_extracts_submission(monkeypatch, tmp_path, preamble):
             "ok\n"
             if calls == 1
             else (
-                f"{preamble}COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n"
-                "diff --git a/a b/a\n"
+                f"{preamble}COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndiff --git a/a b/a\n"
             )
         )
         _finish_srun_step(command, 0)
         return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+    environment = PyxisEnvironment(
+        persistent_exec=False, image=tmp_path / "task.sqsh", run_id="run-1"
+    )
 
     with pytest.raises(Submitted) as exc_info:
         environment.execute({"command": "submit"})
@@ -1158,7 +1165,9 @@ def test_pyxis_environment_decodes_timeout_output(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+    environment = PyxisEnvironment(
+        persistent_exec=False, image=tmp_path / "task.sqsh", run_id="run-1"
+    )
 
     output = environment.execute({"command": "sleep 60"})
 
@@ -1212,7 +1221,9 @@ def test_pyxis_environment_preserves_command_failure(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+    environment = PyxisEnvironment(
+        persistent_exec=False, image=tmp_path / "task.sqsh", run_id="run-1"
+    )
 
     output = environment.execute({"command": "false"})
 
@@ -1232,7 +1243,7 @@ def test_pyxis_cleanup_is_best_effort_outside_allocation(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", fake_run)
     image = tmp_path / "task.sqsh"
     image.touch()
-    environment = PyxisEnvironment(image=image, run_id="run-1")
+    environment = PyxisEnvironment(persistent_exec=False, image=image, run_id="run-1")
     persistent_tmp = environment._tmp_dir
     monkeypatch.delenv("SLURM_JOB_ID")
 
@@ -1275,7 +1286,7 @@ def test_pyxis_start_failure_removes_persistent_tmp(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RunnerError, match="failed to start Pyxis container"):
-        PyxisEnvironment(image=image, run_id="run-1")
+        PyxisEnvironment(persistent_exec=False, image=image, run_id="run-1")
 
     assert persistent_tmp is not None
     assert not persistent_tmp.exists()
