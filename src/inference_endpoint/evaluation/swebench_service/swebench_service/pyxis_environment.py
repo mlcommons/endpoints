@@ -248,8 +248,6 @@ class PyxisEnvironment:
         self.name = f"mswe_{safe_run_id}_{uuid.uuid4().hex[:8]}"
         self._tmp = tempfile.TemporaryDirectory(prefix=f"pyxis_{self.name}_")
         self._tmp_dir = Path(self._tmp.name)
-        # Remapped container root is the submitting uid; keep protocol files private.
-        self._tmp_dir.chmod(0o700)
         self._lock = threading.Lock()
         self._cleaned = False
         try:
