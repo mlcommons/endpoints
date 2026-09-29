@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
@@ -37,9 +38,7 @@ def worker(tmp_path, monkeypatch):
     def factory(generation, secret):
         command = [
             "bash",
-            "-c",
-            transport._PERSISTENT_SERVER_SCRIPT,
-            "worker",
+            str(Path(transport.__file__).with_name("pyxis_command_worker.sh")),
             str(root),
             generation,
             secret,

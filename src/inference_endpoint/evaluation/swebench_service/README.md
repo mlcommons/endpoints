@@ -75,6 +75,10 @@ remaining child processes are removed when the command's PID namespace exits.
 The service must stay on the allocated node, and node-local `TMPDIR` is recommended
 for the request files.
 
+The command worker is the packaged `swebench_service/pyxis_command_worker.sh`.
+The Python service copies it into the private `/tmp` mount and starts it with Bash
+inside the task container; no service Python installation is needed in task images.
+
 Command failures preserve their exit status and merged stdout/stderr. A command
 timeout terminates its process group with a five-second kill grace; loss of the
 worker, invalid responses, and driver deadlines fail the run as infrastructure

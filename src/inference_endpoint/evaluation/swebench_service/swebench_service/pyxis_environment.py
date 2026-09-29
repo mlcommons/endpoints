@@ -8,6 +8,7 @@ import os
 import platform
 import random
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -20,7 +21,6 @@ from pydantic import AliasChoices, BaseModel, Field
 
 from .pyxis_persistent import (
     _PERSISTENT_ROOT,
-    _PERSISTENT_SERVER_SCRIPT,
     PersistentExecChannel,
 )
 from .runner import RunnerError
@@ -50,6 +50,7 @@ _SAFE_SRUN_ENV = (
     "SLURM_CONF",
 )
 _STEP_STATUS = "/tmp/.mlperf_srun_status"
+_COMMAND_WORKER = Path(__file__).with_name("pyxis_command_worker.sh")
 _SRUN_MAX_ATTEMPTS = 5
 _RETRYABLE_PRELAUNCH_ERRORS = (
     "spank_sybil: rpc request error",
@@ -251,6 +252,7 @@ class PyxisEnvironment:
         self._lock = threading.Lock()
         self._cleaned = False
         try:
+            shutil.copyfile(_COMMAND_WORKER, self._tmp_dir / _COMMAND_WORKER.name)
             # A no-op initializes and validates the named persistent container.
             run_srun_step(
                 image=self.config.image,
@@ -290,9 +292,7 @@ class PyxisEnvironment:
                 "--mount-proc",
                 "--kill-child",
                 "bash",
-                "-c",
-                _PERSISTENT_SERVER_SCRIPT,
-                "pyxis-persistent-server",
+                f"/tmp/{_COMMAND_WORKER.name}",
                 _PERSISTENT_ROOT,
                 generation,
                 secret,

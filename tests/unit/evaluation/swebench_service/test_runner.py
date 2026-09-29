@@ -65,6 +65,7 @@ def test_pyxis_implementation_is_confined_to_environment_and_worker_modules():
         "pyxis_environment.py",
         "pyxis_worker.py",
         "pyxis_persistent.py",
+        "pyxis_command_worker.sh",
     }
 
 
@@ -1053,6 +1054,7 @@ def test_pyxis_environment_reuses_named_writable_container(
         first = environment.execute({"command": "touch state"})
     second = environment.execute({"command": "test -f state"})
     worker_command = environment._persistent_server_command("generation", "secret")
+    worker_script = (environment._tmp_dir / "pyxis_command_worker.sh").read_bytes()
     environment.cleanup()
 
     container_name = next(
@@ -1067,6 +1069,10 @@ def test_pyxis_environment_reuses_named_writable_container(
     assert "PAGER=cat" in worker_command
     assert worker_command[-2:] == ["bash", "-c"]
     assert "--kill-child" in worker_command
+    assert "/tmp/pyxis_command_worker.sh" in worker_command
+    assert worker_script == (
+        Path(pyxis_env_mod.__file__).with_name("pyxis_command_worker.sh").read_bytes()
+    )
     for _command, kwargs in calls:
         assert kwargs["env"].get("OPENAI_API_KEY") is None
     assert len(calls) == 2  # Container initialization and cleanup.
