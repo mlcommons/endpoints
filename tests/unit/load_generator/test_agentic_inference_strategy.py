@@ -31,6 +31,7 @@ from inference_endpoint.dataset_manager.agentic_inference_dataset import (
 from inference_endpoint.exceptions import InputValidationError
 from inference_endpoint.load_generator.agentic_inference_strategy import (
     AgenticInferenceStrategy,
+    expected_agentic_sample_count,
 )
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
 
@@ -170,6 +171,36 @@ def _trajectory_start_order(issuer: RecordingPhaseIssuer) -> list[str]:
         seen.add(conv)
         starts.append(conv)
     return starts
+
+
+@pytest.mark.unit
+def test_expected_sample_count_includes_trajectory_repeats():
+    metadata = _make_dataset_metadata({"conv1": [1, 2], "conv2": [1, 2, 3]})
+
+    # Different trajectory issue counts result in different numbers of samples:
+    # the two trajectories contribute two and three client-turn samples per pass.
+    assert expected_agentic_sample_count(_make_dataset_metadata({}), None) == 0
+    assert expected_agentic_sample_count(metadata, None) == 5
+    assert expected_agentic_sample_count(metadata, 1) == 2
+    assert expected_agentic_sample_count(metadata, 2) == 5
+    assert expected_agentic_sample_count(metadata, 3) == 7
+    assert expected_agentic_sample_count(metadata, 4) == 10
+    assert expected_agentic_sample_count(metadata, 5) == 12
+    assert expected_agentic_sample_count(metadata, 6) == 15
+
+
+@pytest.mark.unit
+def test_expected_sample_count_does_not_advance_scheduler_rng():
+    metadata = _make_dataset_metadata(
+        {"conv1": [1], "conv2": [1, 2], "conv3": [1, 2, 3]}
+    )
+    rng = random.Random(42)
+    original_state = rng.getstate()
+
+    expected = expected_agentic_sample_count(metadata, 2, rng)
+
+    assert expected == 3
+    assert rng.getstate() == original_state
 
 
 async def _drain_recording_strategy(

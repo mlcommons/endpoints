@@ -27,6 +27,7 @@ from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
 from inference_endpoint.metrics.early_stopping import EarlyStoppingSpec
+from inference_endpoint.metrics.steady_state_diagnostics import PROFILES
 from inference_endpoint.utils.logging import setup_logging
 
 from .aggregator import MetricCounterKey, MetricsAggregatorService
@@ -189,6 +190,12 @@ async def main() -> None:
         ),
     )
     parser.add_argument(
+        "--metrics-isl",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Collect input sequence length (ISL) metrics (default: enabled).",
+    )
+    parser.add_argument(
         "--streaming",
         action="store_true",
         default=False,
@@ -211,6 +218,17 @@ async def main() -> None:
         action="store_true",
         default=False,
         help="Compute MLPerf early-stopping percentile estimates for TTFT/TPOT/latency.",
+    )
+    parser.add_argument(
+        "--steady-state-profile",
+        default=None,
+        choices=sorted(PROFILES),
+        help=(
+            "Collect the steady-state super-pass series. Evaluate it with this "
+            "workload profile's CoV bounds and warmup driver. Omit this flag to "
+            "disable collection. The parent resolves it from the load pattern so "
+            "standalone detector re-runs use the same profile."
+        ),
     )
     args = parser.parse_args()
     setup_logging(level="INFO")
@@ -280,8 +298,10 @@ async def main() -> None:
                     args.publish_interval if args.tokenizer_workers > 0 else None
                 ),
                 streaming=args.streaming,
+                enable_isl=args.metrics_isl,
                 shutdown_event=shutdown_event,
                 drain_timeout_s=args.drain_timeout,
+                steady_state_profile=args.steady_state_profile,
             )
             aggregator.start()
 

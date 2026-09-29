@@ -251,11 +251,11 @@ Every Kimi K3 and Qwen3.6-35B-A3B submitted Pareto point must satisfy all of the
 
 Reference mean values are shown in parentheses.
 
-| Metric             |               Kimi K3 |        Qwen3.6-35B-A3B | DSV4 |
-| ------------------ | --------------------: | ---------------------: | ---: |
-| Inline accuracy    | `>= 58.32%` (`58.9%`) | `>= 55.86%` (`56.43%`) |  TBD |
-| OSL per-turn mean¹ |      `390-475` tokens |       `355-434` tokens |  TBD |
-| SWE-bench accuracy | `>= 93.5%` (`94.83%`) |     `>= 69%` (`71.7%`) |  TBD |
+| Metric             |                  Kimi K3 |          Qwen3.6-35B-A3B | DSV4 |
+| ------------------ | -----------------------: | -----------------------: | ---: |
+| Inline accuracy    |    `>= 58.32%` (`58.9%`) |   `>= 55.86%` (`56.43%`) |  TBD |
+| OSL per-turn mean¹ | `425-520` tokens (`472`) | `344-422` tokens (`383`) |  TBD |
+| SWE-bench accuracy |    `>= 93.5%` (`94.83%`) |       `>= 69%` (`71.7%`) |  TBD |
 
 ¹ Read from `output_sequence_lengths_full_run.output_sequence_lengths.avg` (the full-run, all-turns mean), **not** the windowed `output_sequence_lengths.avg`. See [Tail Management](#tail-management).
 

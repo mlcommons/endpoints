@@ -1081,18 +1081,52 @@ class TestRulesetSeedOverride:
             self._submission("does-not-exist")
 
     @pytest.mark.unit
-    def test_unregistered_ruleset_non_submission_is_lenient(self):
-        """Non-submission configs are unaffected: an unknown ruleset leaves the
-        runtime seeds at their defaults rather than erroring."""
-        cfg = BenchmarkConfig(
-            type=TestType.OFFLINE,
-            model_params={"name": "test"},
-            endpoint_config={"endpoints": ["http://localhost:8000"]},
-            datasets=[{"path": "test.jsonl"}],
-            submission_ref=SubmissionReference(model="test", ruleset="does-not-exist"),
-        )
-        assert cfg.settings.runtime.scheduler_random_seed == 42
-        assert cfg.settings.runtime.dataloader_random_seed == 42
+    @pytest.mark.parametrize(
+        ("test_type", "settings"),
+        [
+            (TestType.OFFLINE, {}),
+            (
+                TestType.ONLINE,
+                {
+                    "load_pattern": {
+                        "type": LoadPatternType.CONCURRENCY,
+                        "target_concurrency": 1,
+                    }
+                },
+            ),
+        ],
+    )
+    def test_unregistered_ruleset_raises_for_any_type(self, test_type, settings):
+        """Naming a ruleset is a declaration that the run is bound to its seeds.
+        A typo must fail loudly rather than silently running on the defaults —
+        the run would otherwise look bound while issuing load from seed 42.
+        """
+        with pytest.raises(ValidationError, match="not registered"):
+            BenchmarkConfig(
+                type=test_type,
+                model_params={"name": "test"},
+                endpoint_config={"endpoints": ["http://localhost:8000"]},
+                datasets=[{"path": "test.jsonl"}],
+                settings=settings,
+                submission_ref=SubmissionReference(
+                    model="test", ruleset="does-not-exist"
+                ),
+            )
+
+    @pytest.mark.unit
+    def test_unregistered_ruleset_error_names_the_available_rulesets(self):
+        """The failure has to be actionable: a near-miss on a cohort-qualified
+        name is the likely mistake, so the message lists what is registered."""
+        with pytest.raises(ValidationError, match="mlperf-endpoints-current"):
+            BenchmarkConfig(
+                type=TestType.OFFLINE,
+                model_params={"name": "test"},
+                endpoint_config={"endpoints": ["http://localhost:8000"]},
+                datasets=[{"path": "test.jsonl"}],
+                submission_ref=SubmissionReference(
+                    model="test", ruleset="mlperf-endpoints-v1.0-2026-10-C1"
+                ),
+            )
 
     @pytest.mark.unit
     def test_no_submission_ref_keeps_defaults(self):

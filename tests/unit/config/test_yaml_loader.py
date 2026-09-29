@@ -102,6 +102,27 @@ endpoint_config:
             "X-SMG-Routing-Key",
         )
 
+    def test_load_metrics_isl_disabled(self, tmp_path):
+        config_file = tmp_path / "metrics_isl_disabled.yaml"
+        config_file.write_text(
+            """
+type: offline
+model_params:
+  name: test-model
+datasets:
+  - path: test.jsonl
+settings:
+  metrics_isl: false
+endpoint_config:
+  endpoints:
+    - http://localhost:8000
+"""
+        )
+
+        config = BenchmarkConfig.from_yaml_file(config_file)
+
+        assert config.settings.metrics_isl is False
+
     def test_load_nonexistent_file(self):
         """Test error when file doesn't exist."""
         with pytest.raises(FileNotFoundError, match="not found"):

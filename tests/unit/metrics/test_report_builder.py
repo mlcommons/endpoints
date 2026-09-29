@@ -43,6 +43,12 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     snapshot_to_dict,
 )
 from inference_endpoint.metrics.report import Report, series_metric_dict
+from inference_endpoint.metrics.steady_state_diagnostics import (
+    Anomaly,
+    SteadyState,
+    SteadyWindow,
+    TpsBlock,
+)
 
 # 1 hour in ns — same as the aggregator's default bound for time-series.
 _NS_HIGH = 3_600_000_000_000
@@ -93,7 +99,7 @@ class TestSeriesMetricDict:
         assert d["std_dev"] == 0.0
 
 
-def _make_registry(n_samples: int = 50) -> MetricsRegistry:
+def _make_registry(n_samples: int = 50, *, isl: bool = True) -> MetricsRegistry:
     """A registry populated with the metrics ``Report.from_snapshot`` reads.
 
     Only the metrics consumed by ``Report.from_snapshot`` are registered:
@@ -121,14 +127,15 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
         n_histogram_buckets=10,
         percentiles=(50.0, 90.0, 99.0),
     )
-    registry.register_series(
-        MetricSeriesKey.ISL.value,
-        hdr_low=1,
-        hdr_high=10_000_000,
-        sig_figs=3,
-        n_histogram_buckets=10,
-        percentiles=(50.0, 90.0, 99.0),
-    )
+    if isl:
+        registry.register_series(
+            MetricSeriesKey.ISL.value,
+            hdr_low=1,
+            hdr_high=10_000_000,
+            sig_figs=3,
+            n_histogram_buckets=10,
+            percentiles=(50.0, 90.0, 99.0),
+        )
     registry.register_series(
         MetricSeriesKey.OSL.value,
         hdr_low=1,
@@ -156,7 +163,8 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
             registry.record(
                 MetricSeriesKey.SAMPLE_LATENCY_NS.value, 5_000_000 + i * 50_000
             )
-            registry.record(MetricSeriesKey.ISL.value, 50 + i)
+            if isl:
+                registry.record(MetricSeriesKey.ISL.value, 50 + i)
             registry.record(MetricSeriesKey.OSL.value, 100 + i)
 
     return registry
@@ -216,6 +224,14 @@ class TestFromSnapshot:
         assert report.input_sequence_lengths == {}
         assert report.output_sequence_lengths == {}
         assert report.tpot == {}
+
+    def test_isl_series_absent(self):
+        # settings.metrics_isl=false: the aggregator never registers the
+        # series, so the snapshot lacks it entirely (not merely count==0).
+        report = _build_report(_make_registry(n_samples=50, isl=False))
+
+        assert report.input_sequence_lengths == {}
+        assert report.output_sequence_lengths["total"] > 0
 
     def test_with_metrics(self):
         registry = _make_registry(n_samples=50)
@@ -921,3 +937,114 @@ def test_scrub_nonfinite_round_trip_yields_none():
     json.dumps(d, allow_nan=False)
     # Sanity: original NaN was indeed non-finite.
     assert not math.isfinite(float("nan"))
+
+
+@pytest.mark.unit
+class TestSteadyStateOnTheReport:
+    """The verdict rides the snapshot into result_summary.json and report.txt."""
+
+    @staticmethod
+    def _verdict(**over) -> SteadyState:
+        """A complete verdict; ``over`` replaces individual fields."""
+        base = SteadyState(
+            found=True,
+            reason=None,
+            superpass_size=500,
+            n_super_passes=12,
+            warmup=1,
+            window=SteadyWindow(
+                sp_lo=1,
+                sp_hi=9,
+                n_super_passes=8,
+                n_samples=4000,
+                start_ns=0,
+                end_ns=700_000_000_000,
+                plateau_index=0,
+                n_plateaus=1,
+                skipped_short=0,
+            ),
+            ttft=None,
+            tpot=None,
+            osl=None,
+            latency=None,
+            tps=TpsBlock(
+                per_user=42.0,
+                per_user_ci=[41.0, 43.0],
+                system=1234.5,
+                system_ci=[1200.0, 1270.0],
+            ),
+            cov={},
+            cov_basis=None,
+            anomaly=Anomaly(
+                detected=True,
+                change_point_sp=7,
+                delta_pct=12.5,
+                pettitt=None,
+                plateaus=[[1, 9]],
+            ),
+            short_window=None,
+            global_trend={},
+            drifting_up=["ttft_p50"],
+        )
+        return msgspec.structs.replace(base, **over) if over else base
+
+    def _report(self, verdict):
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(
+                state=SessionState.COMPLETE, n_pending_tasks=0, steady_state=verdict
+            )
+        )
+        return Report.from_snapshot(snap)
+
+    def test_absent_by_default(self):
+        assert self._report(None).steady_state is None
+
+    def test_read_from_the_snapshot_and_kept_in_to_json(self):
+        verdict = self._verdict()
+        report = self._report(verdict)
+        assert report.steady_state == verdict
+        assert json.loads(report.to_json())["steady_state"] == msgspec.to_builtins(
+            verdict
+        )
+
+    def test_a_scrubbed_verdict_is_dropped_rather_than_rendered_wrong(self):
+        """``snapshot_to_dict`` scrubs non-finite floats to ``None``.
+
+        A ``None`` where the schema promises a number means the verdict no
+        longer describes anything, so it is dropped and the run keeps its
+        report. Coercing instead would print a plausible wrong number --
+        ``cov()`` divides by a mean that can be zero, so this is reachable.
+        """
+        raw = msgspec.to_builtins(self._verdict())
+        raw["tps"]["system"] = None  # what _scrub_deep leaves behind
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        snap["steady_state"] = raw
+        report = Report.from_snapshot(snap)
+        assert report.steady_state is None
+        lines: list[str] = []
+        report.display(lines.append)  # must not raise
+        assert "Steady state" not in "".join(lines)
+
+    def test_display_renders_the_headline(self):
+        lines: list[str] = []
+        self._report(self._verdict()).display(lines.append)
+        text = "".join(lines)
+        assert "Steady state: super-passes 1...8 (post-warmup), 4000 samples" in text
+        assert "over 700s" in text
+        assert "Steady TPS: 1234.50 system, 42.00 per user" in text
+        assert "ttft_p50 drifting up" in text
+        assert "ANOMALY: level shift at super-pass 7, TPOT +12.5%" in text
+
+    def test_display_reports_a_missing_window(self):
+        lines: list[str] = []
+        verdict = self._verdict(
+            found=False, reason="no admissible steady plateau", window=None, tps=None
+        )
+        self._report(verdict).display(lines.append)
+        assert "Steady state: not found (no admissible steady plateau)" in "".join(
+            lines
+        )

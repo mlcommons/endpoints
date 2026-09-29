@@ -428,6 +428,58 @@ class TestIsl:
             finally:
                 agg.close()
 
+    @pytest.mark.asyncio
+    async def test_disabled_isl_skips_prompt_tokenization_keeps_osl(self, tmp_path):
+        """enable_isl=False: no ISL series, no prompt enqueued; OSL/TPOT intact."""
+        loop = asyncio.get_event_loop()
+        messages = (
+            {"role": "system", "content": "follow instructions"},
+            {"role": "user", "content": "summarize this"},
+        )
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, registry, _ = make_aggregator(
+                ctx,
+                loop,
+                "agg_isl_disabled",
+                tokenizer=MockBatchTokenizer(),
+                enable_isl=False,
+            )
+            try:
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(
+                            SampleEventType.ISSUED,
+                            "s1",
+                            ts=1000,
+                            data=PromptData(messages=messages),
+                        ),
+                    ]
+                )
+                assert not registry.has_series(MetricSeriesKey.ISL.value)
+                assert agg.pending_tokens == 0
+
+                await agg.process(
+                    [
+                        sample_event(SampleEventType.RECV_FIRST, "s1", ts=2000),
+                        sample_event(
+                            SampleEventType.COMPLETE,
+                            "s1",
+                            ts=5000,
+                            data=streaming_text("hello", " world", " foo"),
+                        ),
+                        session_event(SessionEventType.ENDED, ts=5000),
+                    ]
+                )
+                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 3
+                assert snapshot_series_total(
+                    registry, MetricSeriesKey.TPOT_NS.value
+                ) == pytest.approx(1500.0)
+            finally:
+                agg.close()
+
 
 # ---------------------------------------------------------------------------
 # Edge cases and event ordering

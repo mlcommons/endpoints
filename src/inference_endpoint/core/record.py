@@ -19,7 +19,7 @@ from typing import Any, ClassVar, Final
 
 import msgspec
 
-from .types import OUTPUT_TYPE, ErrorData, PromptData
+from .types import OUTPUT_TYPE, ErrorData, PhaseData, PromptData
 
 TOPIC_FRAME_SIZE: Final[int] = 40
 """int: Fixed bytesize for the encoded topic string. PUB messages will be prefixed by a
@@ -131,6 +131,10 @@ class SessionEventType(EventType):
     # state=interrupted instead of a lying COMPLETE snapshot.
     INTERRUPTED = "interrupted"
     STOP_LOADGEN = "stop_loadgen"
+    # Announces the shape of the phase about to run, carrying PhaseData.
+    # Published for every phase. For performance phases, it immediately precedes
+    # START_PERFORMANCE_TRACKING.
+    PHASE_START = "phase_start"
     START_PERFORMANCE_TRACKING = "start_performance_tracking"
     STOP_PERFORMANCE_TRACKING = "stop_performance_tracking"
 
@@ -161,7 +165,7 @@ class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type:
     sample_uuid: str = ""
     conversation_id: str = ""
     turn: int | None = None
-    data: OUTPUT_TYPE | PromptData | ErrorData | None = None
+    data: OUTPUT_TYPE | PromptData | ErrorData | PhaseData | None = None
     finish_reason: str | msgspec.UnsetType = msgspec.UNSET
     worker_id: int | msgspec.UnsetType = msgspec.UNSET
 

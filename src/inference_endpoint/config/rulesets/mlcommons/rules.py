@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""This module contains a code representation of the rules for the current round of MLPerf Inference.
+"""Code representation of the MLCommons benchmark rounds and their pinned seeds.
 
-These values are derived directly from the MLPerf Inference Policies document:
+The MLPerf Inference rounds derive from the MLPerf Inference Policies document:
 https://github.com/mlcommons/inference_policies/blob/master/inference_rules.adoc
+
+The MLPerf Endpoints seed sets come from a separate repository on an
+independent rotation; each block cites its own pinned upstream source.
 """
 
 import copy
@@ -330,3 +333,43 @@ _edge_v0_1 = RoundRuleset(
 )
 
 EDGE_CURRENT = _edge_v0_1
+
+
+# --- MLPerf Endpoints v1.0 seed set ---
+#
+# Endpoints publishes its own seeds on its own rotation, independent of the
+# MLPerf Inference rounds above: a seed set per publication cohort, refreshed
+# every two cohorts, each set adoptable for four. A submission binds to one set
+# and keeps it for its full Pareto-update window. Values are transcribed
+# verbatim from cohort 2026-10-C1, set A, pinned to a specific upstream commit
+# so the transcription stays re-verifiable (the branch itself is mutable):
+# https://github.com/mlcommons/endpoints_policies/blob/5279b845b8492b02742a66d31cee09d9512f7e1d/seedset.yaml
+#
+# The cohort ID and set ID are both carried in the version string: `seed_sets`
+# is a list keyed by `id`, so a cohort may publish more than one set, and the
+# version is the registry key. A later cohort — or a second set within this
+# cohort — adds a sibling round rather than editing this one. Endpoints
+# characterizes a Pareto curve rather than gating per-model TTFT/TPOT, so there
+# are no per-model rulesets to declare: this round exists to pin seeds, and the
+# legacy per-model `apply_user_config` path correctly refuses it.
+#
+# The set also publishes a third seed, `model_seed: 9315206023656308754`, which
+# is not pinned here. Its purpose is undocumented: `model_seed` appears nowhere
+# in endpoints_rules.md or endpoints_submission_rules.md at the commit above —
+# only in seedset.yaml, which gives no definition. Submission rules §4.6 says
+# the set drives "request-issue / sample order, and the per-query salt"; this
+# round maps the first two, leaving the salt RNG unaccounted for. Pinning the
+# third seed awaits a definition from MLCommons of what it seeds.
+_endpoints_v1_0_2026_10_C1_A = RoundRuleset(
+    version="endpoints-v1.0-2026-10-C1-A",
+    scheduler_rng_seed=10487924139932647040,
+    sample_index_rng_seed=586478644936801402,
+    benchmark_rulesets={},
+)
+
+# Every published cohort stays registered: a submission binds to one set for
+# its full update window, so an older set must keep resolving after a newer
+# one is published. Add new sets here, do not replace.
+ENDPOINTS_ALL = [_endpoints_v1_0_2026_10_C1_A]
+
+ENDPOINTS_CURRENT = _endpoints_v1_0_2026_10_C1_A

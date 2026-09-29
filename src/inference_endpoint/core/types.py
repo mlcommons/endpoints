@@ -340,6 +340,52 @@ class ErrorData(
         )
 
 
+class PhaseType(str, Enum):
+    """Phase types control tracking and reporting behavior.
+
+    This lives in core because ``PhaseData`` carries it over the metrics wire.
+    The metrics aggregator and standalone detector need it, and importing it
+    from the load generator would pull that import graph into the metrics
+    subprocess.
+    """
+
+    PERFORMANCE = "performance"
+    ACCURACY = "accuracy"
+    WARMUP = "warmup"
+
+
+class PhaseData(
+    msgspec.Struct,
+    tag=True,
+    kw_only=True,
+    frozen=True,
+    omit_defaults=True,
+    array_like=True,
+    gc=False,
+):  # type: ignore[call-arg]
+    """Data carried by a ``PHASE_START`` event.
+
+    All fields are scalar, so ``gc=False`` is safe.
+
+    ``num_turns`` has the same meaning for single-turn and agentic workloads:
+    turns issued in one pass over the dataset. A turn is a sample. Single-turn
+    workloads report the sample count for a pass. Agentic workloads report every
+    turn across every conversation. ``num_trajectories`` carries the conversation
+    count, so mean turns per trajectory is derivable.
+
+    Attributes:
+        phase_type: Which phase this is.
+        drain_after: Whether in-flight requests are drained before the next phase.
+        num_turns: Turns (samples) issued in one pass over the dataset.
+        num_trajectories: Conversations, for agentic workloads; 0 otherwise.
+    """
+
+    phase_type: PhaseType
+    drain_after: bool
+    num_turns: int
+    num_trajectories: int = 0
+
+
 class Query(
     msgspec.Struct,
     frozen=True,

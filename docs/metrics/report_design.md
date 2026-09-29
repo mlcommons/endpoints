@@ -100,6 +100,10 @@ text prompt with the configured reference tokenizer. This records the workload's
 distribution as early as possible. `input_sequence_lengths` is empty when no ISL values were
 recorded (for example, no tokenizer is available for text-only inputs).
 
+Set `settings.metrics_isl: false` in YAML, or pass `--no-metrics-isl`, to skip ISL collection.
+This avoids all ISL tokenizer work and leaves `input_sequence_lengths` empty. OSL, TPOT,
+full-run OSL, and output-derived TPS reporting are unchanged.
+
 **QPS/TPS window selection.** The snapshot always carries both a native window
 (`tracked_duration_ns`) and the MLPerf LoadGen "completed" window
 (`legacy_loadgen_window_duration_ns`, poisson only), so it stays reinterpretable either way. The
