@@ -185,20 +185,6 @@ def test_startup_failure_is_infrastructure_failure(tmp_path):
         channel.close()
 
 
-def test_default_and_legacy_opt_out(monkeypatch):
-    monkeypatch.delenv("SWEBENCH_PYXIS_PERSISTENT_EXEC", raising=False)
-    assert environment_mod.PyxisEnvironmentConfig(
-        image="image", run_id="run"
-    ).persistent_exec
-    monkeypatch.setenv("SWEBENCH_PYXIS_PERSISTENT_EXEC", "0")
-    assert not environment_mod.PyxisEnvironmentConfig(
-        image="image", run_id="run"
-    ).persistent_exec
-    assert environment_mod.PyxisEnvironmentConfig(
-        image="image", run_id="run", persistent_exec=True
-    ).persistent_exec
-
-
 def test_environment_routes_commands_to_one_worker(monkeypatch, tmp_path):
     monkeypatch.setenv("SLURM_JOB_ID", "123")
     monkeypatch.setenv("SLURMD_NODENAME", "node")
@@ -223,7 +209,7 @@ def test_environment_routes_commands_to_one_worker(monkeypatch, tmp_path):
 
         def execute(self, **kwargs):
             self.commands += 1
-            return subprocess.CompletedProcess([], 7, "failed", "")
+            return transport.CommandResult(7, "failed", "", False)
 
         def close(self):
             self.closed = True
@@ -246,6 +232,15 @@ def test_environment_routes_commands_to_one_worker(monkeypatch, tmp_path):
         assert "--kill-child" in channels[0].argv
         assert "--jobid=123" in channels[0].argv
         assert (env._tmp_dir.stat().st_mode & 0o777) == 0o700
+
+        def fail(**kwargs):
+            raise RunnerError("worker died; execution is uncertain")
+
+        monkeypatch.setattr(channels[0], "execute", fail)
+        with pytest.raises(RunnerError, match="execution is uncertain"):
+            env.execute({"command": "touch state"})
+        assert len(steps) == 1
+        assert len(channels) == 1
     finally:
         env.cleanup()
     assert not env._tmp_dir.exists()

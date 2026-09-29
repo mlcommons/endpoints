@@ -82,10 +82,7 @@ errors. An accepted request is never automatically replayed because its executio
 may already have changed the repository. The worker is stopped and reaped before
 its container and temporary files are removed.
 
-Set `SWEBENCH_PYXIS_PERSISTENT_EXEC=0` on the service to use one `srun` per tool
-command for diagnosis. The environment config also accepts `persistent_exec`
-(default `true`); an explicit config value takes precedence over the environment.
-The resolved setting is included in the trajectory's environment configuration.
+All tool commands use the persistent worker.
 Container initialization, worker startup, evaluation, and cleanup still use Slurm
 steps. This reduces per-command scheduler traffic; it does not bypass allocation
 limits or guarantee any particular end-to-end evaluation time.

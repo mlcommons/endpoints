@@ -59,9 +59,6 @@ _RETRYABLE_PRELAUNCH_ERRORS = (
     "curl: (56) connect tunnel failed",
     "unable to confirm allocation for job",
 )
-_IGNORABLE_SRUN_PREAMBLE_LINES = {
-    "srun: lua: Checking requeue policy with options:",
-}
 _STEP_SCRIPT = r"""set +e
 status_path=$1
 timeout_s=$2
@@ -241,11 +238,6 @@ class PyxisEnvironmentConfig(BaseModel):
         serialization_alias="timeout",
     )
     interpreter: list[str] = Field(default_factory=lambda: ["bash", "-c"])
-    persistent_exec: bool = Field(
-        default_factory=lambda: (
-            os.environ.get("SWEBENCH_PYXIS_PERSISTENT_EXEC", "1") != "0"
-        )
-    )
     infrastructure_failure_path: Path | None = None
 
 
@@ -257,8 +249,7 @@ class PyxisEnvironment:
         self._tmp = tempfile.TemporaryDirectory(prefix=f"pyxis_{self.name}_")
         self._tmp_dir = Path(self._tmp.name)
         # Remapped container root is the submitting uid; keep protocol files private.
-        self._tmp_dir.chmod(0o700 if self.config.persistent_exec else 0o1777)
-        self._persistent_channel: PersistentExecChannel | None = None
+        self._tmp_dir.chmod(0o700)
         self._lock = threading.Lock()
         self._cleaned = False
         try:
@@ -273,15 +264,14 @@ class PyxisEnvironment:
                 timeout_s=self.config.timeout_s,
                 failure_path=self.config.infrastructure_failure_path,
             )
-            if self.config.persistent_exec:
-                self._persistent_channel = PersistentExecChannel(
-                    self._tmp_dir / Path(_PERSISTENT_ROOT).name,
-                    self._persistent_server_command,
-                    safe_srun_env(),
-                    failure_path=self.config.infrastructure_failure_path,
-                    launch_timeout_s=self.config.timeout_s + 30,
-                )
-                self._persistent_channel.start()
+            self._persistent_channel = PersistentExecChannel(
+                self._tmp_dir / Path(_PERSISTENT_ROOT).name,
+                self._persistent_server_command,
+                safe_srun_env(),
+                failure_path=self.config.infrastructure_failure_path,
+                launch_timeout_s=self.config.timeout_s + 30,
+            )
+            self._persistent_channel.start()
         except (RunnerError, OSError) as exc:
             self.cleanup()
             raise RunnerError(
@@ -317,28 +307,13 @@ class PyxisEnvironment:
     ) -> dict[str, Any]:
         command = action.get("command", "")
         logger.debug("Executing Pyxis command: %s", command)
-        argv = ["env"]
-        argv.extend(f"{key}={value}" for key, value in self.config.env.items())
-        argv.extend([*self.config.interpreter, command])
-        channel = getattr(self, "_persistent_channel", None)
-        if channel is not None:
-            result = channel.execute(
-                command=command,
-                cwd=cwd or self.config.cwd,
-                timeout_s=timeout or self.config.timeout_s,
-            )
-        else:
-            result = run_srun_step(
-                argv=argv,
-                status_path=self._tmp_dir / Path(_STEP_STATUS).name,
-                timeout_s=timeout or self.config.timeout_s,
-                failure_path=self.config.infrastructure_failure_path,
-                name=self.name,
-                mounts=[(self._tmp_dir, "/tmp")],
-                workdir=cwd or self.config.cwd,
-            )
+        result = self._persistent_channel.execute(
+            command=command,
+            cwd=cwd or self.config.cwd,
+            timeout_s=timeout or self.config.timeout_s,
+        )
         output: dict[str, Any]
-        if getattr(result, "timed_out", result.returncode == 124):
+        if result.timed_out:
             output = {
                 "output": result.stdout,
                 "returncode": -1,
@@ -357,12 +332,6 @@ class PyxisEnvironment:
                 "exception_info": "",
             }
         lines = output.get("output", "").lstrip().splitlines(keepends=True)
-        # Some Slurm cli_filter plugins write informational messages to stderr.
-        # run_srun_step merges stderr into stdout so command errors remain visible,
-        # which can place this cluster-generated preamble before mini-swe-agent's
-        # otherwise first-line submission marker.
-        while lines and lines[0].strip() in _IGNORABLE_SRUN_PREAMBLE_LINES:
-            lines.pop(0)
         if (
             lines
             and lines[0].strip() == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
