@@ -51,7 +51,7 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def pyxis_channel(monkeypatch):
     channel = Mock(spec=PersistentExecChannel)
-    channel.execute.return_value = CommandResult(0, "ok\n", "", False)
+    channel.execute.return_value = CommandResult(0, "ok\n", False)
     monkeypatch.setattr(
         pyxis_env_mod, "PersistentExecChannel", Mock(return_value=channel)
     )
@@ -1053,7 +1053,7 @@ def test_pyxis_environment_reuses_named_writable_container(
     ):
         first = environment.execute({"command": "touch state"})
     second = environment.execute({"command": "test -f state"})
-    worker_command = environment._persistent_server_command("generation", "secret")
+    worker_command = environment._persistent_server_command()
     worker_script = (environment._tmp_dir / "pyxis_command_worker.sh").read_bytes()
     environment.cleanup()
 
@@ -1113,7 +1113,7 @@ def test_pyxis_environment_shares_private_tmp_with_worker(
     environment.execute({"command": "touch /tmp/state"})
     environment.execute({"command": "test -f /tmp/state"})
     assert len(calls) == 1
-    worker_command = environment._persistent_server_command("generation", "secret")
+    worker_command = environment._persistent_server_command()
 
     tmp_mounts = [
         next(arg for arg in command if arg.startswith("--container-mounts="))
@@ -1154,7 +1154,6 @@ def test_pyxis_environment_extracts_submission(
     pyxis_channel.execute.return_value = CommandResult(
         0,
         f"{preamble}COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndiff --git a/a b/a\n",
-        "",
         False,
     )
 
@@ -1171,7 +1170,7 @@ def test_pyxis_environment_decodes_timeout_output(monkeypatch, pyxis_channel):
     )
     environment._persistent_channel = pyxis_channel
     monkeypatch.setattr(environment, "cleanup", lambda: None)
-    pyxis_channel.execute.return_value = CommandResult(124, "partial�", "", True)
+    pyxis_channel.execute.return_value = CommandResult(124, "partial�", True)
 
     output = environment.execute({"command": "sleep 60"}, cwd="/other", timeout=5)
 
@@ -1217,7 +1216,7 @@ def test_pyxis_environment_preserves_command_failure(
     environment._persistent_channel = pyxis_channel
     monkeypatch.setattr(environment, "cleanup", lambda: None)
     pyxis_channel.execute.return_value = CommandResult(
-        returncode, "command failed\n", "", False
+        returncode, "command failed\n", False
     )
 
     output = environment.execute({"command": f"exit {returncode}"})

@@ -235,6 +235,7 @@ class PyxisEnvironmentConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     timeout_s: int = Field(
         default=30,
+        gt=0,
         validation_alias=AliasChoices("timeout_s", "timeout"),
         serialization_alias="timeout",
     )
@@ -266,7 +267,7 @@ class PyxisEnvironment:
             )
             self._persistent_channel = PersistentExecChannel(
                 self._tmp_dir / Path(_PERSISTENT_ROOT).name,
-                self._persistent_server_command,
+                self._persistent_server_command(),
                 safe_srun_env(),
                 failure_path=self.config.infrastructure_failure_path,
                 launch_timeout_s=self.config.timeout_s + 30,
@@ -278,7 +279,7 @@ class PyxisEnvironment:
                 f"failed to start Pyxis container for {self.config.image}"
             ) from exc
 
-    def _persistent_server_command(self, generation: str, secret: str) -> list[str]:
+    def _persistent_server_command(self) -> list[str]:
         return build_srun_command(
             name=self.name,
             mounts=[(self._tmp_dir, "/tmp")],
@@ -294,8 +295,6 @@ class PyxisEnvironment:
                 "bash",
                 f"/tmp/{_COMMAND_WORKER.name}",
                 _PERSISTENT_ROOT,
-                generation,
-                secret,
                 *self.config.interpreter,
             ],
         )
@@ -305,27 +304,26 @@ class PyxisEnvironment:
     ) -> dict[str, Any]:
         command = action.get("command", "")
         logger.debug("Executing Pyxis command: %s", command)
+        timeout_s = self.config.timeout_s if timeout is None else timeout
         result = self._persistent_channel.execute(
             command=command,
             cwd=cwd or self.config.cwd,
-            timeout_s=timeout or self.config.timeout_s,
+            timeout_s=timeout_s,
         )
         output: dict[str, Any]
         if result.timed_out:
             output = {
-                "output": result.stdout,
+                "output": result.output,
                 "returncode": -1,
                 "exception_info": "The command timed out",
                 "extra": {
                     "exception_type": "TimeoutExpired",
-                    "exception": (
-                        f"command timed out after {timeout or self.config.timeout_s}s"
-                    ),
+                    "exception": f"command timed out after {timeout_s}s",
                 },
             }
         else:
             output = {
-                "output": result.stdout,
+                "output": result.output,
                 "returncode": result.returncode,
                 "exception_info": "",
             }

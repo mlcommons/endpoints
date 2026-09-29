@@ -4,91 +4,44 @@
 
 set -uo pipefail
 root=$1
-generation=$2
-secret=$3
-shift 3
+shift
 interpreter=("$@")
+request="$root/running"
+touch "$root/ready" || exit 70
 
-atomic_write() {
-    path=$1
-    value=$2
-    temporary="${path}.tmp.$$"
-    printf '%s\n' "$value" > "$temporary" || exit 70
-    mv -f -- "$temporary" "$path" || exit 70
-}
-
-mkdir -p "$root/requests" || exit 70
-atomic_write "$root/server_status" started
-atomic_write "$root/ready" "$generation"
-
-while :; do
-    if [ -f "$root/stop" ]; then
-        atomic_write "$root/server_status" stopped
-        exit 0
+while [ ! -e "$root/stop" ]; do
+    if [ ! -d "$root/request" ]; then
+        sleep 0.05
+        continue
     fi
-    handled=0
-    for request in "$root"/requests/*; do
-        [ -f "$root/stop" ] && exit 0
-        [ -d "$request" ] || continue
-        mkdir "$request/claim" 2>/dev/null || continue
-        status=$(cat "$request/status" 2>/dev/null || printf unknown)
-        if [ "$status" != pending ]; then
-            rmdir "$request/claim" 2>/dev/null || true
-            continue
-        fi
-        handled=1
-        atomic_write "$request/status" started
-        timeout_s=$(cat "$request/timeout" 2>/dev/null || printf invalid)
-        case "$timeout_s" in
-            ''|*[!0-9]*) exit 70 ;;
-            *)
-                cwd=$(cat "$request/cwd" && printf x) || exit 70
-                cwd=${cwd%x}
-                command=$(cat "$request/command" && printf x) || exit 70
-                command=${command%x}
-                (
-                    cd -- "$cwd" || exit 125
-                    unshare --pid --fork --mount-proc \
-                        timeout -k 5 "$timeout_s" bash -c '
-                            status=$1; shift
-                            "$@"
-                            rc=$?
-                            printf "%s\n" "$rc" > "$status"
-                            exit "$rc"
-                        ' command-status "$request/command_status" "${interpreter[@]}" "$command"
-                ) > "$request/stdout.tmp" 2>&1
-                returncode=$?
-                : > "$request/stderr.tmp"
-                timed_out=0
-                if [ "$(cat "$request/command_status" 2>/dev/null)" != "$returncode" ]; then
-                    case "$returncode" in 124|137) timed_out=1 ;; *) exit 70 ;; esac
-                fi
-                ;;
-        esac
-        [ -f "$request/stdout.tmp" ] || : > "$request/stdout.tmp"
-        [ -f "$request/stderr.tmp" ] || : > "$request/stderr.tmp"
-        mv -f -- "$request/stdout.tmp" "$request/stdout" || exit 70
-        mv -f -- "$request/stderr.tmp" "$request/stderr" || exit 70
-        stdout_size=$(wc -c < "$request/stdout") || exit 70
-        stderr_size=$(wc -c < "$request/stderr") || exit 70
-        stdout_size=$((stdout_size))
-        stderr_size=$((stderr_size))
-        nonce=${request##*/}
-        digest=$(
-            {
-                printf '%s\0%s\0%s\0%s\0%s\0%s\0' \
-                    "$secret" "$nonce" "$returncode" "$stdout_size" \
-                    "$stderr_size" "$timed_out"
-                cat "$request/stdout"
-                printf '\0'
-                cat "$request/stderr"
-                printf '\0%s' "$secret"
-            } | sha256sum
-        ) || exit 70
-        digest=${digest%% *}
-        atomic_write "$request/status" "finished:$returncode"
-        atomic_write "$request/complete" \
-            "$returncode $stdout_size $stderr_size $timed_out $digest"
-    done
-    [ "$handled" -eq 1 ] || sleep 0.05
+    # The host serializes callers and removes the previous result before publishing.
+    [ ! -e "$request" ] || exit 70
+    mv -- "$root/request" "$request" || exit 70
+    timeout_s=$(cat "$request/timeout") || exit 70
+    case "$timeout_s" in ''|*[!0-9]*|0) exit 70 ;; esac
+    # A sentinel preserves trailing newlines in the command and working directory.
+    cwd=$(cat "$request/cwd" && printf x) || exit 70
+    command=$(cat "$request/command" && printf x) || exit 70
+    unshare --pid --fork --mount-proc \
+        timeout -k 5 "$timeout_s" bash -c '
+            status=$1; cwd=$2; shift 2
+            if cd -- "$cwd"; then
+                "$@"
+                rc=$?
+            else
+                rc=125
+            fi
+            printf "%s\n" "$rc" > "$status" || exit 70
+            exit "$rc"
+        ' command-status "$request/command_status" "${cwd%x}" \
+        "${interpreter[@]}" "${command%x}" > "$request/output" 2>&1
+    returncode=$?
+    timed_out=0
+    # Explicit exits 124/137 are command results, not timeout notifications.
+    if [ "$(cat "$request/command_status" 2>/dev/null)" != "$returncode" ]; then
+        case "$returncode" in 124|137) timed_out=1 ;; *) exit 70 ;; esac
+    fi
+    size=$(wc -c < "$request/output") || exit 70
+    printf '%s %s %s\n' "$returncode" "$timed_out" "$((size))" > "$request/complete.tmp" || exit 70
+    mv -- "$request/complete.tmp" "$request/complete" || exit 70
 done

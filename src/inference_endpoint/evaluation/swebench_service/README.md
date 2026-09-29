@@ -69,7 +69,9 @@ model requests, but replaces its Docker environment with `PyxisEnvironment`. Eve
 trajectory receives a named, writable Pyxis container and one long-lived overlapping
 `srun` command worker. Tool calls use atomic request and response files in the
 container's private `/tmp` mount, avoiding Slurm step creation and Enroot startup
-on every turn. Filesystem changes persist, while each command runs in a fresh shell
+on every turn. Each worker handles one request at a time; it publishes a completion
+marker only after the command exits and its output is closed.
+Filesystem changes persist, while each command runs in a fresh shell
 and private PID namespace. Commands cannot signal the worker or other trajectories;
 remaining child processes are removed when the command's PID namespace exits.
 The service must stay on the allocated node, and node-local `TMPDIR` is recommended
