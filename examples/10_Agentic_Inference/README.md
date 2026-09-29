@@ -286,7 +286,7 @@ Approved speculative-decoding heads:
 
 Approved model checkpoint:
 
-- [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
+- [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) (`dba1be0a40aa45a94ad051997016db3960a90277`)
 
 The checkpoint includes its native DSpark speculative-decoding head.
 
