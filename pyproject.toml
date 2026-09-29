@@ -170,6 +170,9 @@ rouge = [
     # NOTE: not self-contained at runtime - nltk needs the punkt/punkt_tab
     # corpora and evaluate.load("rouge") fetches its metric script from the HF
     # Hub, so an offline image must prefetch both.
+    # nltk advisory PYSEC-2026-3740 has no fixed release and is ignored in CI's
+    # pip-audit (affected APIs unused); tracked in
+    # https://github.com/mlcommons/endpoints/issues/520
     "nltk==3.10.3",
     "evaluate==0.4.6",
     "rouge-score==0.1.2",
