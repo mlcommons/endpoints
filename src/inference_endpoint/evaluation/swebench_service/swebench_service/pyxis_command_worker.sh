@@ -21,12 +21,14 @@ while [ ! -e "$root/stop" ]; do
     case "$timeout_s" in ''|*[!0-9]*|0) exit 70 ;; esac
     # A sentinel preserves trailing newlines in the command and working directory.
     cwd=$(cat "$request/cwd" && printf x) || exit 70
-    command=$(cat "$request/command" && printf x) || exit 70
+    # Keep tool text out of supervisor argv so pkill -f cannot match it there.
     unshare --pid --fork --mount-proc \
         timeout -k 5 "$timeout_s" bash -c '
             status=$1; cwd=$2; shift 2
+            command=$(cat <&3 && printf x) || exit 70
+            exec 3<&-
             if cd -- "$cwd"; then
-                "$@"
+                "$@" "${command%x}"
                 rc=$?
             else
                 rc=125
@@ -34,7 +36,7 @@ while [ ! -e "$root/stop" ]; do
             printf "%s\n" "$rc" > "$status" || exit 70
             exit "$rc"
         ' command-status "$request/command_status" "${cwd%x}" \
-        "${interpreter[@]}" "${command%x}" > "$request/output" 2>&1
+        "${interpreter[@]}" 3< "$request/command" > "$request/output" 2>&1
     returncode=$?
     timed_out=0
     # Explicit exits 124/137 are command results, not timeout notifications.

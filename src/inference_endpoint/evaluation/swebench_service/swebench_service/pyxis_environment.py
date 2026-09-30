@@ -6,13 +6,11 @@ from __future__ import annotations
 import logging
 import os
 import platform
-import random
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
-import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,6 +18,11 @@ from typing import Any
 from pydantic import AliasChoices, BaseModel, Field
 
 from .pyxis_persistent import PersistentExecChannel
+from .pyxis_slurm import SRUN_MAX_ATTEMPTS as _SRUN_MAX_ATTEMPTS
+from .pyxis_slurm import (
+    is_retryable_prelaunch_failure as _is_retryable_prelaunch_failure,
+)
+from .pyxis_slurm import wait_for_prelaunch_retry
 from .runner import RunnerError
 
 logger = logging.getLogger(__name__)
@@ -47,17 +50,8 @@ _SAFE_SRUN_ENV = (
     "SLURM_CONF",
 )
 _STEP_STATUS = "/tmp/.mlperf_srun_status"
-_PERSISTENT_ROOT = "/tmp/.mlperf_persistent_exec"
+_PERSISTENT_ROOT = "/.mlperf_persistent_exec"
 _COMMAND_WORKER = Path(__file__).with_name("pyxis_command_worker.sh")
-_SRUN_MAX_ATTEMPTS = 5
-_RETRYABLE_PRELAUNCH_ERRORS = (
-    "spank_sybil: rpc request error",
-    "required plugin spank_sybil.so",
-    "failed to connect to any sack sockets",
-    "failed to create token",
-    "curl: (56) connect tunnel failed",
-    "unable to confirm allocation for job",
-)
 _STEP_SCRIPT = r"""set +e
 status_path=$1
 timeout_s=$2
@@ -72,14 +66,6 @@ exit "$returncode"
 
 def safe_srun_env() -> dict[str, str]:
     return {name: os.environ[name] for name in _SAFE_SRUN_ENV if name in os.environ}
-
-
-def _is_retryable_prelaunch_failure(status: str, output: str) -> bool:
-    """Return whether Slurm rejected the step before its command started."""
-    if status != "pending":
-        return False
-    lowered = output.lower()
-    return any(marker in lowered for marker in _RETRYABLE_PRELAUNCH_ERRORS)
 
 
 def build_srun_command(
@@ -188,15 +174,7 @@ def run_srun_step(
         ).strip()
         retryable = _is_retryable_prelaunch_failure(status, output)
         if retryable and attempt < _SRUN_MAX_ATTEMPTS:
-            backoff_s = min(2**attempt, 16)
-            delay_s = backoff_s + random.uniform(0.0, backoff_s)
-            logger.warning(
-                "Retrying Pyxis pre-launch failure in %.1fs (attempt %d/%d)",
-                delay_s,
-                attempt,
-                _SRUN_MAX_ATTEMPTS,
-            )
-            time.sleep(delay_s)
+            wait_for_prelaunch_retry(attempt)
             continue
 
         if failure_path is not None:
@@ -251,20 +229,21 @@ class PyxisEnvironment:
         self._lock = threading.Lock()
         self._cleaned = False
         try:
+            (self._tmp_dir / "tmp").mkdir(mode=0o700)
             shutil.copyfile(_COMMAND_WORKER, self._tmp_dir / _COMMAND_WORKER.name)
             # A no-op initializes and validates the named persistent container.
             run_srun_step(
                 image=self.config.image,
                 name=self.name,
-                mounts=[(self._tmp_dir, "/tmp")],
+                mounts=[(self._tmp_dir / "tmp", "/tmp")],
                 workdir=self.config.cwd,
                 argv=["true"],
-                status_path=self._tmp_dir / Path(_STEP_STATUS).name,
+                status_path=self._tmp_dir / "tmp" / Path(_STEP_STATUS).name,
                 timeout_s=self.config.timeout_s,
                 failure_path=self.config.infrastructure_failure_path,
             )
             self._persistent_channel = PersistentExecChannel(
-                self._tmp_dir / Path(_PERSISTENT_ROOT).name,
+                self._tmp_dir / "channel",
                 self._persistent_server_command(),
                 safe_srun_env(),
                 failure_path=self.config.infrastructure_failure_path,
@@ -280,7 +259,11 @@ class PyxisEnvironment:
     def _persistent_server_command(self) -> list[str]:
         return build_srun_command(
             name=self.name,
-            mounts=[(self._tmp_dir, "/tmp")],
+            # Tool cleanup of /tmp must not remove the worker or its protocol files.
+            mounts=[
+                (self._tmp_dir / "tmp", "/tmp"),
+                (self._tmp_dir, _PERSISTENT_ROOT),
+            ],
             workdir=self.config.cwd,
             argv=[
                 "env",
@@ -291,8 +274,8 @@ class PyxisEnvironment:
                 "--mount-proc",
                 "--kill-child",
                 "bash",
-                f"/tmp/{_COMMAND_WORKER.name}",
-                _PERSISTENT_ROOT,
+                f"{_PERSISTENT_ROOT}/{_COMMAND_WORKER.name}",
+                f"{_PERSISTENT_ROOT}/channel",
                 *self.config.interpreter,
             ],
         )
