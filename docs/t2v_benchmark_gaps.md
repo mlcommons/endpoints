@@ -3,7 +3,7 @@
 Status: proposal · Baseline: `4235a9c` · Scope: this repository only.
 
 > **Rules basis.** Requirements below are cited against `endpoints_policies` branch
-> `v1.0_rules_dev` @ `6b0b1ef` (2026-09-22). That branch is **unmerged and still moving**; every
+> `v1.0_rules_dev` @ `cdb203c` (2026-09-30). That branch is **unmerged and still moving**; every
 > rule citation here is as-of that commit and should be re-checked before being relied on.
 
 An Endpoints submission needs a **pareto curve**: several runs at different concurrency levels,
@@ -24,8 +24,10 @@ Everything around them is what is missing, and §5 lists that work.
 
 **The gaps:**
 
-- 3 gaps (§3), plus example configs.
-- Only 1 is a hard blocker: steady state cannot certify a window without tokens (§3.1).
+- 4 gaps (§3), plus example configs.
+- 1 is a hard blocker: steady state cannot certify a window without tokens (§3.1).
+- 1 is a **rules** conflict, not a client change: §6.5 mandates `stream_all_chunks = true`, which
+  a non-streaming workload cannot set. It needs an amendment.
 - The client also has limits that affect every model, not just video. They do **not** block a
   T2V benchmark, because the same workaround text curves already use works here too. See §3.3.
 
@@ -38,6 +40,7 @@ Everything around them is what is missing, and §5 lists that work.
 | [Naming](#a-naming) | A ruleset model and dataset entry, so the tooling recognises the benchmark at all |
 | [Tokenless support](#b-tokenless-support) | Steady-state gating without TPOT, and artifact-safe responses |
 | [Example configs](#c-example-configs) | Concurrency-region configs sized to whole dataset passes |
+| Rules amendment | An exemption from §6.5's `stream_all_chunks = true`. Not a client task; recorded so the gap list is complete |
 
 The adapter and the example workload already run. What is missing is the description of the
 benchmark to the tooling, and the handling of a reply that carries no tokens.
@@ -51,11 +54,17 @@ runs.
 2 rules govern how a single point must run:
 
 - **§6.4**: total samples issued at a point MUST be a positive integer multiple of the dataset
-  size. A point ends on a whole pass, not on a clock.
+  size. A point ends on a whole pass, not on a clock. §6.4 separately requires a minimum number
+  of *completed* queries, one pass over the dataset.
 - **§6.2**: minimum steady-state duration is 600 s in the Ultra Low Concurrency region and
   **1200 s** in the Low, Medium, and High regions.
+- **§4.4**: the steady window must span **more than 4 super-passes** (`MIN_TREND_N = 4`), and
+  §6.2's minimum is measured over that window's **issue-time span**, not wall-clock. The effective
+  floor is `max(4 super-passes, §6.2 minimum)`.
 
-Neither is expressible today for a concurrency-scheduled run: see §3.3.
+§6.4's issued-count rule **is** expressible today, and §4 shows how. What cannot be expressed is a
+duration floor (§3.3), and what cannot be *certified* is §6.2 or §4.4, because neither is
+computable without a steady window (§3.1).
 
 ### 1.1 Metrics for video generation
 
@@ -104,6 +113,7 @@ Ordered by the categories in §0.
 | 1 | No ruleset entry exists for the benchmark, so `_resolve_model` raises `KeyError` before any other check runs. Without one there is also no golden accuracy and no validity thresholds. | `compliance/checker.py:156-164` | code |
 | 2 | Steady state cannot certify a window with no tokens. See §3.1. **This is the only hard blocker.** | `metrics/steady_state_diagnostics.py` | code |
 | 3 | `VideoGenAdapter` mirrors the video *path string* into `response_output`, which the OSL trigger tokenizes. Harmless only because the model name resolves to no tokenizer; supplying one yields meaningless OSL and TPS. See §3.2. | `videogen/adapter.py` | latent |
+| 4 | §6.5 requires `stream_all_chunks = true` for **all** performance runs. Every video config sets `streaming: "off"`, and `VideoGenAdapter.decode_sse_message` raises by design. The rule text forbids the only configuration the workload can run, so this needs a rules amendment, not a client change. | `videogen/adapter.py`, §6.5 | rules |
 
 ### 3.1 Why steady state cannot gate a tokenless run
 
@@ -152,8 +162,9 @@ benchmark, and they are recorded here only so the §4 recipe makes sense.
 - One invocation measures one point. There is no sweep driver and no multi-point publish layout.
   Existing text curves are built by running each concurrency on its own and joining the results
   afterwards; the same applies here.
-- The per-user rate is not emitted as a named field, but it is the reciprocal of a value already
-  reported (`metrics/report.py:250`), so it is one division in post-processing.
+- The per-user rate is not emitted as a named field, but it is the reciprocal of the latency P90
+  already reported inside the `latency` rollup (`metrics/report.py:234`), so it is one division in
+  post-processing. It is *not* derived from `qps` (`:250`); §1.1 defines it from tail latency.
 - `compliance/checker.py` requires `target_concurrency == 1`, but it is scoped to Edge-Agentic
   (BFCL v4) submissions and is reachable only through `scripts/check_compliance.py`. It is not the
   validator for an Endpoints pareto submission, so it is not on this path.
@@ -163,33 +174,47 @@ not a prerequisite here.
 
 ## 4. Workaround available today
 
-Since a point must end on a whole dataset pass (§6.4) *and* meet a duration floor (§6.2), and no
-floor setting exists (§3.3), size the count to the duration instead of capping the clock:
+A point must end on a whole dataset pass (§6.4), span more than 4 super-passes (§4.4), and meet a
+duration floor (§6.2). No floor setting exists (§3.3), so size the count instead of capping the
+clock:
 
 1. Calibrate. Run the point briefly to estimate sustained throughput at that concurrency.
-2. Choose the smallest integer `N` where `N × dataset_size / throughput` comfortably exceeds the
-   region's minimum duration.
+2. Choose `N = max(5, ceil(min_duration x throughput / dataset_size))`. The **5** is §4.4's
+   trend-test floor: a window needs more than 4 super-passes, and one super-pass is one dataset
+   pass by default. Sizing on duration alone gives `N = 1` at low concurrency, which §4.4 classes
+   as `insufficient_passes` and does **not** count as an official result.
 3. Issue exactly that many samples, with no clock cap:
 
 ```yaml
 settings:
   runtime:
-    n_samples_to_issue: 1240        # N x dataset_size (e.g. 5 x 248), an exact multiple
+    n_samples_to_issue: 1240        # N x dataset_size (5 x 248), an exact multiple
+    sample_order: with_replacement  # sec 6.5 requires WithReplacementSampleOrder for perf runs
   load_pattern:
     type: "concurrency"
     target_concurrency: 1
 ```
 
-The phase then ends on the count, at a pass boundary, having run at least the required duration,
-satisfying both rules without a client patch. `n_samples_to_issue` is returned verbatim and the
+The phase ends on the count, at a pass boundary. `n_samples_to_issue` is returned verbatim and the
 sample order is infinite, so nothing clamps it.
 
+**What this does and does not satisfy.** It satisfies §6.4's issued-count rule outright. It makes
+the run long enough in *wall-clock* to clear §6.2, which is necessary but **not sufficient**: §6.2
+is measured over the steady window's issue-time span, after warmup and ramp-crop and before the
+drain, and §4.4 gates on that window spanning more than 4 super-passes. Neither can be certified
+for this workload until gap 2 is closed, because there is no window to measure (§3.1). Size for
+them anyway, so the data qualifies once it can be checked.
+
 - **The duration is achieved, not enforced.** If throughput is lower than calibrated the point
-  simply runs longer, which is safe. If higher, it may undershoot the floor, so size `N` with
-  margin and check the achieved duration afterwards.
+  runs longer, which is safe. If higher, it may undershoot, so size `N` with margin and check the
+  achieved duration afterwards.
+- **Termination counts issued, not completed** (`load_generator/session.py:868-873`), while §6.4's
+  minimum-query rule counts *completed*. A point with request failures issues exactly
+  `N x dataset_size` yet can complete fewer, and finishes early because failures return fast.
+  Check `n_samples_completed`, not just elapsed time.
 - Do **not** use `min_issue_duration_ms` for this (§3.3).
-- Capping with `max_issue_duration_ms` instead would end the run mid-pass and violate §6.4. It
-  remains useful only as a runaway guard set well above the expected finish.
+- Capping with `max_issue_duration_ms` would end the run mid-pass and violate §6.4. It is useful
+  only as a runaway guard set well above the expected finish.
 
 ## 5. Pending work
 
