@@ -1,0 +1,55 @@
+name: Pareto sample run (dry-run)
+
+# Exercises the full submission path on every PR: run a 7-point pareto sweep
+# against a simulated endpoint, then push each resulting run folder through
+# `endpoints-submission-cli runs create --dry-run`.
+#
+# `--dry-run` prints the parsed payload and returns before it reads a token or
+# calls the API, so this job needs no PRISM credentials and creates nothing.
+
+on:
+  pull_request:
+    branches: [main, master, "release/**"]
+  workflow_dispatch:
+
+jobs:
+  pareto-dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install endpoints
+        run: uv sync --frozen
+
+      - name: Install submission CLI
+        # Installed from main, not from PyPI, and that is load-bearing.
+        #
+        # The latest release (v1.0.0.0) still requires a flat
+        # `result_summary.json` at the run-folder root. endpoints writes it to
+        # `performance/result_summary.json`, so every dry-run against the
+        # release fails with:
+        #     missing required file(s): result_summary.json
+        # mlcommons/endpoints-submission-cli PR #78 fixed the parser to expect
+        # the layout endpoints actually writes, but landed after v1.0.0.0 and
+        # is not in any tag yet.
+        #
+        # SWAP THIS BACK once a release includes PR #78:
+        #   uv pip install 'endpoints-submission-cli==<version>'
+        run: uv pip install 'endpoints-submission-cli @ git+https://github.com/mlcommons/endpoints-submission-cli@main'
+
+      - name: Run pareto sweep and dry-run every point
+        env:
+          # --no-sync: the submission CLI is installed into the project venv with
+          # `uv pip install` and is not in pyproject.toml/uv.lock, so a re-sync
+          # here would uninstall it before the dry-run step could use it.
+          RUNNER: uv run --no-sync
+          SUBMIT_CLI: uv run --no-sync endpoints-submission-cli
+        run: |
+          chmod +x .github/submission-cli-test/scripts/run_sweep.sh
+          .github/submission-cli-test/scripts/run_sweep.sh

@@ -1,0 +1,80 @@
+# MLPerf Endpoints sample pareto point - concurrency 4 (low_concurrency).
+#
+# One measurement point of the 7-point sample sweep. Region boundaries are
+# derived by hand from rules §5.5 for the envelope C_min=1, C_max=256 — nothing
+# recomputes them, and nothing checks §5.3 coverage:
+#   Ultra Low 1-32 (fixed, §5.4) | Low 2-7 | Medium 8-41 | High 42-256
+#
+# The endpoint is inference_endpoint.testing.dataset_replay_server, which replays each
+# prompt's own reference answer, so the accuracy phase scores 100% by
+# construction. This exercises the perf+accuracy pipeline without a GPU.
+#
+# NOT a rules-conformant measurement point. Rules §6.2 requires 600s (Ultra Low
+# Concurrency) / 1200s (all other regions) of steady state; n_samples_to_issue
+# here is sized for a fast PR gate instead.
+name: "sim-c4"
+version: "1.0"
+type: online
+
+model_params:
+  name: sim-model
+  # Vendored character tokenizer: keeps ISL / OSL / TPOT / TPS populated with no
+  # network access and no gated HuggingFace repo in CI. Token counts are
+  # therefore character counts, not a real model's tokenization.
+  tokenizer_name: tests/assets/tokenizers/char_chat
+  temperature: 0.0
+  top_p: 1.0
+  max_new_tokens: 128
+  streaming: "on"
+
+datasets:
+  # Accuracy is a fixed correctness check, so it holds the same small sample
+  # count at every point rather than scaling with concurrency.
+  - name: pareto-ci-accuracy
+    type: accuracy
+    path: tests/assets/datasets/dummy_1k.jsonl
+    # NOTE: the accuracy phase always issues the whole dataset -
+    # execute.py computes n_samples_to_issue as num_samples() * repeats, and the
+    # `samples:` config field is never read anywhere in the codebase. So this
+    # phase issues all 1000 dummy_1k rows at every point; there is no knob to
+    # trim it.
+    parser:
+      prompt: text_input
+    accuracy_config:
+      eval_method: string_match
+      ground_truth: ref_output
+      extractor: identity_extractor
+      num_repeats: 1
+  - name: pareto-ci-performance
+    type: performance
+    path: tests/assets/datasets/dummy_1k.jsonl
+    parser:
+      prompt: text_input
+
+settings:
+  runtime:
+    n_samples_to_issue: 800
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+  load_pattern:
+    # Rules §6.1: pareto points must use the ConcurrencyScheduler.
+    type: concurrency
+    target_concurrency: 4
+  client:
+    num_workers: 2
+    log_level: INFO
+    # Rules §6.5: performance runs stream every chunk, so per-token timing
+    # (and therefore TPOT / interactivity) is actually measurable.
+    stream_all_chunks: true
+
+endpoint_config:
+  endpoints:
+    - "http://127.0.0.1:8765"
+  api_key: null
+  api_type: openai
+
+report_dir: results/pareto_ci/point_c4
+# The runner pins load-generator threads, which is Linux-only; leaving it off
+# keeps these configs runnable on a developer macOS box as well as in CI.
+enable_cpu_affinity: false
+verbose: false
