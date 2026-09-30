@@ -38,10 +38,14 @@ This means one receiver socket handles readiness from all subprocesses.
 ### ReadyCheckReceiver (host side)
 
 - Binds a ZMQ PULL socket on an IPC path
-- `wait(timeout)` blocks until `count` signals arrive
+- `wait(timeout)` blocks until `count` distinct signals arrive; a duplicate identity is logged and ignored
 - Returns list of identities in arrival order
 - Closes the socket after all signals are received, but deliberately **not** on timeout (the caller may retry)
-- Timeout is a total deadline, not per-message
+- Signals received before a timeout are kept, so a later `wait()` continues from them
+- Any other error, including cancellation, closes the socket; a later `wait()` then fails
+- Calls to `wait()` must not overlap
+- Timeout is a total deadline per call, not per-message
+- The deadline is enforced by `poll()` followed by a non-blocking `recv()`, never by cancelling an in-flight `recv()`: a timed-out poll leaves the signal queued, whereas cancelling an in-flight `recv()` could drop a frame it had already dequeued
 
 ### `send_ready_signal()` (subprocess side)
 

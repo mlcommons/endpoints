@@ -189,7 +189,10 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 
     # Worker lifecycle timeouts
     worker_initialization_timeout: float = Field(
-        60.0, description="Worker init timeout (seconds)"
+        60.0,
+        ge=0,
+        allow_inf_nan=False,
+        description="Worker init timeout (seconds, 0=no deadline)",
     )
     worker_graceful_shutdown_wait: float = Field(
         0.5, description="Post-run graceful shutdown wait (seconds)"

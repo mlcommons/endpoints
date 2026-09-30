@@ -302,6 +302,7 @@ src/inference_endpoint/
 tests/
 ├── conftest.py                # Shared fixtures (echo/oracle servers, datasets, settings)
 ├── test_helpers.py            # Test utility functions
+├── ready_check_helpers.py     # Ready-check helpers; light enough to import from spawned children
 ├── unit/                      # Unit tests (mirror src/ structure)
 ├── integration/               # Integration tests (real servers, end-to-end)
 │   ├── endpoint_client/       # HTTP client integration tests
@@ -365,6 +366,7 @@ See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details
 - `dummy_dataset` — in-memory test dataset
 - `hf_squad_dataset` — HuggingFace squad dataset
 - `max_throughput_runtime_settings`, `poisson_runtime_settings`, `concurrency_runtime_settings` — preset configs
+- `zmq_ctx_scope` — scoped `ManagedZMQContext` with IPC sockets in a fresh temp dir; teardown closes any socket still open with LINGER 0, so a failing test cannot block it
 
 **Test data**: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples), `tests/assets/datasets/squad_pruned/`, `tests/assets/tokenizers/char` + `char_chat` (hermetic char-level tokenizers; `char_chat` adds a minimal chat template for the structured tokenization paths)
 

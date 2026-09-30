@@ -15,9 +15,8 @@
 
 """Tests for ZmqWorkerPoolTransport and ReadyCheckReceiver.
 
-Includes regression test for the 'Socket operation on non-socket' bug where
-ReadyCheckReceiver.wait() closed its socket on TimeoutError, breaking the
-retry loop in WorkerManager._wait_for_workers_with_liveness_check().
+ReadyCheckReceiver.wait() must leave its socket open on TimeoutError so a
+caller can retry; on a closed socket the retried wait() fails with a ZMQError.
 """
 
 import asyncio
@@ -57,10 +56,8 @@ class TestReadyCheckReceiverTimeout:
     async def test_socket_survives_timeout(self):
         """After wait() times out, the socket must still be usable for retry.
 
-        This is the core regression test for the ENOTSOCK bug. The old code
-        had `except BaseException: self.close()` which closed the socket on
-        TimeoutError. The caller (_wait_for_workers_with_liveness_check)
-        catches TimeoutError and retries, hitting a dead socket.
+        Closing the socket on TimeoutError would make a retried wait() fail
+        with a ZMQError.
         """
         zmq_ctx = ManagedZMQContext(io_threads=1)
         dummy = zmq_ctx.socket(zmq.PUB)
@@ -75,7 +72,7 @@ class TestReadyCheckReceiverTimeout:
         # Socket must still be usable after timeout
         assert not receiver._sock.closed, (
             "ReadyCheckReceiver closed its socket on TimeoutError — "
-            "this breaks the retry loop in _wait_for_workers_with_liveness_check"
+            "this breaks callers that retry wait()"
         )
         _ = receiver._sock.rcvtimeo  # Would raise ENOTSOCK if socket is dead
 

@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 from inference_endpoint.endpoint_client import config as cfg
 from inference_endpoint.endpoint_client.cpu_affinity import UnsupportedPlatformError
+from pydantic import ValidationError
 
 
 class TestAutoNumWorkersNonLinux:
@@ -248,3 +249,15 @@ class TestAutoWarmupResolution:
             )
         assert c.warmup_connections == 1000  # 10% of the 10000 budget
         assert c.max_concurrent_warmup_connects == 32
+
+
+@pytest.mark.unit
+class TestWorkerInitializationTimeout:
+    def test_zero_is_accepted(self):
+        c = cfg.HTTPClientConfig(num_workers=1, worker_initialization_timeout=0.0)
+        assert c.worker_initialization_timeout == 0.0
+
+    @pytest.mark.parametrize("value", [-1.0, float("inf"), float("nan")])
+    def test_negative_or_non_finite_is_rejected(self, value):
+        with pytest.raises(ValidationError, match="worker_initialization_timeout"):
+            cfg.HTTPClientConfig(num_workers=1, worker_initialization_timeout=value)

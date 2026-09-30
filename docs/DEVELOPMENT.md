@@ -129,6 +129,7 @@ Defined in `tests/conftest.py` — use these instead of mocking:
 - `mock_http_oracle_server` — dataset-driven response server
 - `dummy_dataset` — in-memory test dataset
 - `events_db` — pre-populated SQLite events database
+- `zmq_ctx_scope` — scoped `ManagedZMQContext` with IPC sockets in a fresh temp dir; teardown closes any socket still open with LINGER 0, so a failing test cannot block it
 
 ### Coverage
 

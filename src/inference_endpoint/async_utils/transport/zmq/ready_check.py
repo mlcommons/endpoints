@@ -23,7 +23,6 @@ See docs/async_utils/transport/zmq/ready_check_design.md for design rationale.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
@@ -84,15 +83,21 @@ class ReadyCheckReceiver:
     ) -> None:
         self._count = count
         self._path = path
+        # Keyed by identity: keeps arrival order and counts duplicates once.
+        self._identities: dict[int, None] = {}
 
         # Bind PULL socket for receiving ready signals
         self._sock = zmq_context.async_socket(zmq.PULL)
         zmq_context.bind(self._sock, path)
 
     async def wait(self, timeout: float | None = None) -> list[int]:
-        """Block until ``count`` ready signals are received.
+        """Block until ``count`` distinct ready signals are received.
 
-        Uses a total deadline (not per-message timeout).
+        Uses a total deadline (not per-message timeout). Safe to call again
+        after a TimeoutError: signals received by earlier calls still count,
+        and a timeout never discards a signal. Calling again after success
+        returns the same identities. Calls must not overlap. Any other error,
+        including cancellation, closes the socket.
 
         Args:
             timeout: Maximum total seconds to wait. None means wait indefinitely.
@@ -104,29 +109,34 @@ class ReadyCheckReceiver:
             TimeoutError: If not all signals arrive within timeout.
         """
         deadline = (time.monotonic() + timeout) if timeout is not None else None
-        identities: list[int] = []
+        identities = self._identities
 
         try:
             while len(identities) < self._count:
-                remaining = None
-                if deadline is not None:
-                    remaining = max(0, deadline - time.monotonic())
-
-                try:
-                    if remaining is None:
-                        raw = await self._sock.recv()
-                    else:
-                        raw = await asyncio.wait_for(
-                            self._sock.recv(), timeout=remaining
-                        )
-                except TimeoutError:
+                # The deadline is enforced by poll(), never by cancelling
+                # recv(): a timed-out poll leaves the frame queued, while a
+                # cancelled in-flight recv() can drop a frame it dequeued.
+                # Clamped at 0: pyzmq's poll() waits forever on a negative
+                # timeout.
+                remaining_ms = (
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.monotonic()) * 1000
+                )
+                if not await self._sock.poll(timeout=remaining_ms):
                     raise TimeoutError(
                         f"Ready check failed: {len(identities)}/{self._count} "
-                        f"signals received within {timeout}s"
-                    ) from None
+                        f"signals received so far; timed out after {timeout}s"
+                    )
+                raw = await self._sock.recv(zmq.NOBLOCK)
 
                 identity = _decoder.decode(raw)
-                identities.append(identity)
+                if identity in identities:
+                    logger.warning(
+                        "Duplicate ready signal ignored (identity=%d)", identity
+                    )
+                    continue
+                identities[identity] = None
                 logger.debug(
                     "Ready signal received (identity=%d, %d/%d)",
                     identity,
@@ -143,7 +153,7 @@ class ReadyCheckReceiver:
 
         logger.debug("All %d ready signals received", self._count)
         self.close()
-        return identities
+        return list(identities)
 
     def close(self) -> None:
         """Close the PULL socket. Idempotent."""

@@ -375,12 +375,9 @@ def _resolve_template(template_path: Path, server_url: str) -> dict:
     data["settings"]["runtime"]["n_samples_to_issue"] = 10
 
     # Raise the worker-init timeout for CI. On small runners, `spawn`-mode
-    # workers re-import the package, so start-up can take over 10 s.
-    # WorkerManager waits for readiness in slices of 10% of this timeout, and
-    # ready signals that straddle a slice boundary can be lost, stalling init
-    # until the full timeout. 300 s gives 30 s slices, longer than worker
-    # start-up. This does not change the production default (60 s).
-    data["settings"].setdefault("client", {})["worker_initialization_timeout"] = 300.0
+    # workers re-import the package, so starting 10 workers can take tens of
+    # seconds. This does not change the production default (60 s).
+    data["settings"].setdefault("client", {})["worker_initialization_timeout"] = 120.0
 
     # Accuracy datasets can't run e2e against echo server (no scorer), so keep only performance datasets.
     data["datasets"] = [

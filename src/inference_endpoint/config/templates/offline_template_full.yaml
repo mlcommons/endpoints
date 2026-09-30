@@ -77,7 +77,7 @@ settings:
       linger: -1  # ZMQ linger on close (-1=block until sent)
       immediate: 1  # ZMQ IMMEDIATE (1=only enqueue on ready)
     stream_all_chunks: false  # Stream all chunks to main thread (caution: perf overhead)
-    worker_initialization_timeout: 60.0  # Worker init timeout (seconds)
+    worker_initialization_timeout: 60.0  # Worker init timeout (seconds, 0=no deadline)
     worker_graceful_shutdown_wait: 0.5  # Post-run graceful shutdown wait (seconds)
     worker_force_kill_timeout: 0.5  # Force kill timeout after graceful wait (seconds)
     insecure: false  # Skip TLS certificate verification

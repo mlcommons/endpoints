@@ -18,7 +18,6 @@
 import asyncio
 import logging
 import signal
-import time
 from multiprocessing import Process
 
 from inference_endpoint.async_utils.transport import (
@@ -93,7 +92,7 @@ class WorkerManager:
 
         except TimeoutError as e:
             raise TimeoutError(
-                f"Workers failed to initialize within {self.http_config.worker_initialization_timeout}s"
+                f"Workers failed to initialize: {self._describe_timeout(e)}"
             ) from e
 
         finally:
@@ -135,35 +134,55 @@ class WorkerManager:
                 set_cpu_affinity(pid=pid, cpus=set(cpus))
                 logger.debug(f"Worker {worker_id} (pid {pid}) pinned to CPUs {cpus}")
 
-    async def _wait_for_workers_with_liveness_check(self) -> None:
-        """Wait for workers, checking liveness at 10% intervals."""
+    def _describe_timeout(self, error: TimeoutError) -> str:
+        """The transport's timeout message, or the configured deadline if empty."""
+        if str(error):
+            return str(error)
         timeout = self.http_config.worker_initialization_timeout
+        return f"timed out after {timeout}s" if timeout else "timed out"
+
+    def _raise_if_any_worker_died(
+        self, timeout_error: TimeoutError | None = None
+    ) -> None:
+        """Raise RuntimeError naming dead workers, chained from timeout_error."""
+        dead = [w.pid for w in self.workers if not w.is_alive()]
+        if not dead:
+            return
+        message = f"Worker(s) died during init: PIDs {dead}"
+        if timeout_error is None:
+            raise RuntimeError(message)
+        raise RuntimeError(
+            f"{message}; {self._describe_timeout(timeout_error)}"
+        ) from timeout_error
+
+    async def _wait_for_workers_with_liveness_check(self) -> None:
+        """Wait for all workers to signal ready, failing fast if one dies.
+
+        The ready wait runs as a single task for the whole timeout, and
+        liveness is checked at 10% intervals without cancelling it: each
+        worker signals only once, so a cancelled wait can lose a signal.
+        A timeout of 0 means no deadline.
+        """
+        timeout = self.http_config.worker_initialization_timeout or None
         check_interval = timeout * 0.10 if timeout else 1.0
-        start = time.monotonic()
-
-        while True:
-            # Check for dead workers
-            dead = [w for w in self.workers if not w.is_alive()]
-            if dead:
-                raise RuntimeError(
-                    f"Worker(s) died during init: PIDs {[w.pid for w in dead]}"
-                )
-
-            # Check remaining time
-            elapsed = time.monotonic() - start
-            remaining = timeout - elapsed if timeout else None
-            if remaining is not None and remaining <= 0:
-                raise TimeoutError("Workers failed to initialize")
-
-            # Try to wait with short timeout (25% of total, or remaining time)
+        ready = asyncio.create_task(
+            self.pool_transport.wait_for_workers_ready(timeout=timeout)
+        )
+        try:
+            while not ready.done():
+                self._raise_if_any_worker_died()
+                await asyncio.wait({ready}, timeout=check_interval)
             try:
-                wait_time = (
-                    min(check_interval, remaining) if remaining else check_interval
-                )
-                await self.pool_transport.wait_for_workers_ready(timeout=wait_time)
-                return  # All ready
-            except TimeoutError:
-                continue  # Loop to check liveness again
+                ready.result()
+            except TimeoutError as e:
+                # A worker that died near the deadline explains the timeout.
+                self._raise_if_any_worker_died(e)
+                raise
+        finally:
+            ready.cancel()
+            # Waits for cancellation to finish and retrieves the task's
+            # exception so it is never reported as unhandled.
+            await asyncio.gather(ready, return_exceptions=True)
 
     async def shutdown(self) -> None:
         """Shutdown workers and transports."""

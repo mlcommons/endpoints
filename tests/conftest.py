@@ -23,12 +23,15 @@ import logging
 import os
 import random
 import sys
+import tempfile
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from inference_endpoint import metrics
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
@@ -89,6 +92,27 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "(useful in containers where cpu_affinity is restricted)"
         ),
     )
+
+
+@pytest.fixture
+def zmq_ctx_scope() -> Iterator[ManagedZMQContext]:
+    """Scoped ZMQ context whose IPC sockets live in a fresh temp directory.
+
+    Uses tempfile rather than pytest's tmp_path, whose paths exceed the IPC
+    socket path limit on macOS. Teardown closes every socket still open with
+    LINGER 0: fixture teardown is not covered by pytest-timeout, so a test
+    that fails with a message still queued must not block context
+    termination. A socket the test already closed keeps its own LINGER.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with ManagedZMQContext.scoped(socket_dir=tmpdir) as ctx:
+            # scoped() reuses a still-live singleton instead of a fresh one.
+            assert ctx.socket_dir == tmpdir, "a ManagedZMQContext leaked from a test"
+            try:
+                yield ctx
+            finally:
+                for sock in ctx._sockets:
+                    sock.close(linger=0)
 
 
 @pytest.fixture

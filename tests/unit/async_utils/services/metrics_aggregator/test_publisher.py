@@ -36,13 +36,6 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 
 
-@pytest.fixture
-def zmq_ctx_scope():
-    """Provide a scoped ManagedZMQContext for the duration of a test."""
-    with ManagedZMQContext.scoped() as ctx:
-        yield ctx
-
-
 @pytest.mark.unit
 class TestMetricsPublisher:
     @pytest.mark.asyncio

@@ -75,13 +75,6 @@ async def _wait_for_terminal_state(
     return False
 
 
-@pytest.fixture
-def zmq_ctx_scope(tmp_path: Path):
-    """Provide a scoped ManagedZMQContext for the duration of a test."""
-    with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-        yield ctx
-
-
 def _make_pair(
     socket_name: str,
     zmq_ctx: ManagedZMQContext,
