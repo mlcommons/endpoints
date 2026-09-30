@@ -66,10 +66,32 @@ never forwarded.
 
 During generation, the service still uses mini-swe-agent for the agent loop and
 model requests, but replaces its Docker environment with `PyxisEnvironment`. Every
-trajectory receives a named, writable Pyxis container. Each tool call becomes an
-overlapping `srun` step in that container, preserving filesystem changes across
-turns. Tool commands run in private PID namespaces so one trajectory cannot signal
-processes belonging to another trajectory.
+trajectory receives a named, writable Pyxis container and one long-lived overlapping
+`srun` command worker. Tool calls use atomic request and response files in the
+container's private `/tmp` mount, avoiding Slurm step creation and Enroot startup
+on every turn. Each worker handles one request at a time; it publishes a completion
+marker only after the command exits and its output is closed.
+Filesystem changes persist, while each command runs in a fresh shell
+and private PID namespace. Commands cannot signal the worker or other trajectories;
+remaining child processes are removed when the command's PID namespace exits.
+The service must stay on the allocated node, and node-local `TMPDIR` is recommended
+for the request files.
+
+The command worker is the packaged `swebench_service/pyxis_command_worker.sh`.
+The Python service copies it into the private `/tmp` mount and starts it with Bash
+inside the task container; no service Python installation is needed in task images.
+
+Command failures preserve their exit status and merged stdout/stderr. A command
+timeout terminates its process group with a five-second kill grace; loss of the
+worker, invalid responses, and driver deadlines fail the run as infrastructure
+errors. An accepted request is never automatically replayed because its execution
+may already have changed the repository. The worker is stopped and reaped before
+its container and temporary files are removed.
+
+All tool commands use the persistent worker.
+Container initialization, worker startup, evaluation, and cleanup still use Slurm
+steps. This reduces per-command scheduler traffic; it does not bypass allocation
+limits or guarantee any particular end-to-end evaluation time.
 
 After generation, the Pyxis worker evaluates each prediction in a fresh `srun`
 container step because the Docker-based SWE-bench evaluator cannot run on the

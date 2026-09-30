@@ -140,6 +140,19 @@ The aggregator is a separate process (`python -m inference_endpoint.async_utils.
 - **Post-run service wait**: `drain_and_build_report` waits for service subprocesses **unbounded** (`wait_for_exit(None)`). `wait_for_exit` SIGKILLs on expiry, and the aggregator writes `final_snapshot.json` — the Report's primary source — as the last thing it does, so a parent-side deadline here trades a wedged-service hang for a lost snapshot. The abort path keeps its own ceiling (`interrupted_teardown_grace_s`, 30s), and the whole-run watchdog stays armed throughout.
 - **Histogram bucket edges are dynamic per snapshot**: log-spaced over the observed `[min, max]`. Bucket count is fixed at construction; consumers MUST re-render from the snapshot's `(lo, hi, count)` triples each frame and MUST NOT track bucket-by-index across snapshots.
 
+### SWE-bench Pyxis command transport
+
+`evaluation/swebench_service/swebench_service/pyxis_persistent.py` owns one
+long-lived Slurm step per agent environment. The container runs the packaged
+`pyxis_command_worker.sh`, staged in a private control mount separate from tool
+`/tmp`. Worker startup retries only confirmed prelaunch Slurm failures before any
+request is published. A lock serializes callers through one atomically published
+request directory and completion marker.
+Commands run in fresh PID namespaces; accepted requests are never replayed after an
+uncertain failure. `pyxis_environment.py` owns container creation, command result
+mapping, and worker-before-container cleanup. All tool commands use the persistent
+worker. Evaluation remains in `pyxis_worker.py`.
+
 ### CLI Modes
 
 CLI is auto-generated from `config/schema.py` Pydantic models via cyclopts. Fields annotated with `cyclopts.Parameter(alias="--flag")` get flat shorthands; all other fields get auto-generated dotted flags (kebab-case).
@@ -283,7 +296,7 @@ src/inference_endpoint/
 │   ├── types.py               # Pydantic: VideoPathRequest, VideoPathResponse, VideoPayloadResponse
 │   └── adapter.py             # VideoGenAdapter (HttpRequestAdapter) + VideoGenAccumulator (no-op)
 ├── evaluation/                # Accuracy evaluation (extractor, scoring, livecodebench)
-│   └── swebench_service/      # Isolated uv service for Docker-backed SWE-bench runs
+│   └── swebench_service/      # Isolated uv service for Docker/Pyxis SWE-bench runs
 ├── compliance/                # Submission compliance checks (config-lock, accuracy gate, run validity)
 │   ├── __init__.py
 │   └── checker.py             # check_submission() + Check/ComplianceReport (Edge-Agentic ruleset)

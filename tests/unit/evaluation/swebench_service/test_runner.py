@@ -9,12 +9,16 @@ import threading
 import types
 from pathlib import Path
 from typing import Literal, get_type_hints
+from unittest.mock import Mock
 
 import msgspec.json
 import pytest
 import yaml
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
     pyxis_environment as pyxis_env_mod,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service import (
+    pyxis_slurm as slurm_mod,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
     pyxis_worker as worker_mod,
@@ -27,6 +31,10 @@ from inference_endpoint.evaluation.swebench_service.swebench_service.pyxis_envir
     build_srun_command,
     resolve_image,
     safe_srun_env,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service.pyxis_persistent import (
+    CommandResult,
+    PersistentExecChannel,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service.runner import (
     CancellationToken,
@@ -43,12 +51,25 @@ from inference_endpoint.evaluation.swebench_service.swebench_service.schemas imp
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture
+def pyxis_channel(monkeypatch):
+    channel = Mock(spec=PersistentExecChannel)
+    channel.execute.return_value = CommandResult(0, "ok\n", False)
+    monkeypatch.setattr(
+        pyxis_env_mod, "PersistentExecChannel", Mock(return_value=channel)
+    )
+    return channel
+
+
 def test_pyxis_implementation_is_confined_to_environment_and_worker_modules():
     package_dir = Path(runner_mod.__file__).parent
 
     assert {path.name for path in package_dir.glob("pyxis_*") if path.is_file()} == {
         "pyxis_environment.py",
         "pyxis_worker.py",
+        "pyxis_persistent.py",
+        "pyxis_slurm.py",
+        "pyxis_command_worker.sh",
     }
 
 
@@ -873,7 +894,7 @@ def test_pyxis_srun_environment_withholds_inherited_step_identity(monkeypatch, n
 
 
 def test_pyxis_environment_retries_connect_tunnel_prelaunch_failure(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, pyxis_channel
 ):
     monkeypatch.setenv("SLURM_JOB_ID", "1738605")
     monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
@@ -894,13 +915,14 @@ def test_pyxis_environment_retries_connect_tunnel_prelaunch_failure(
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(pyxis_env_mod.random, "uniform", lambda _a, _b: 0.0)
-    monkeypatch.setattr(pyxis_env_mod.time, "sleep", delays.append)
+    monkeypatch.setattr(slurm_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(slurm_mod.time, "sleep", delays.append)
 
     environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
 
     assert calls == 3
     assert delays == [2, 4]
+    pyxis_channel.start.assert_called_once_with()
     environment.cleanup()
 
 
@@ -925,8 +947,8 @@ def test_pyxis_srun_step_retries_prelaunch_failure_from_stderr(monkeypatch, tmp_
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(pyxis_env_mod.random, "uniform", lambda _a, _b: 0.0)
-    monkeypatch.setattr(pyxis_env_mod.time, "sleep", delays.append)
+    monkeypatch.setattr(slurm_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(slurm_mod.time, "sleep", delays.append)
 
     result = pyxis_env_mod.run_srun_step(
         argv=["true"],
@@ -966,8 +988,8 @@ def test_pyxis_srun_step_retries_allocation_confirmation_timeout(monkeypatch, tm
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(pyxis_env_mod.random, "uniform", lambda _a, _b: 0.0)
-    monkeypatch.setattr(pyxis_env_mod.time, "sleep", delays.append)
+    monkeypatch.setattr(slurm_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(slurm_mod.time, "sleep", delays.append)
 
     result = pyxis_env_mod.run_srun_step(
         argv=["true"],
@@ -1003,7 +1025,7 @@ def test_pyxis_environment_does_not_retry_non_retryable_prelaunch_failure(
 
 
 def test_pyxis_environment_reuses_named_writable_container(
-    monkeypatch, tmp_path, caplog
+    monkeypatch, tmp_path, caplog, pyxis_channel
 ):
     monkeypatch.setenv("SLURM_JOB_ID", "1738605")
     monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
@@ -1035,6 +1057,8 @@ def test_pyxis_environment_reuses_named_writable_container(
     ):
         first = environment.execute({"command": "touch state"})
     second = environment.execute({"command": "test -f state"})
+    worker_command = environment._persistent_server_command()
+    worker_script = (environment._tmp_dir / "pyxis_command_worker.sh").read_bytes()
     environment.cleanup()
 
     container_name = next(
@@ -1043,15 +1067,27 @@ def test_pyxis_environment_reuses_named_writable_container(
         if argument.startswith("--container-name=")
     )
     assert f"--container-image={image.resolve()}" in calls[0][0]
-    for command, kwargs in calls[1:3]:
-        assert f"--container-name={container_name}" in command
-        assert not any(arg.startswith("--container-image=") for arg in command)
-        assert "--no-container-mount-home" in command
-        assert kwargs["env"].get("OPENAI_API_KEY") is None
-    assert calls[1][0][-5:] == ["env", "PAGER=cat", "bash", "-c", "touch state"]
-    assert any(
-        "unshare --pid --fork --mount-proc" in argument for argument in calls[1][0]
+    assert f"--container-name={container_name}" in worker_command
+    assert not any(arg.startswith("--container-image=") for arg in worker_command)
+    assert "--no-container-mount-home" in worker_command
+    assert "PAGER=cat" in worker_command
+    assert worker_command[-2:] == ["bash", "-c"]
+    assert "--kill-child" in worker_command
+    assert "/.mlperf_persistent_exec/pyxis_command_worker.sh" in worker_command
+    assert worker_script == (
+        Path(pyxis_env_mod.__file__).with_name("pyxis_command_worker.sh").read_bytes()
     )
+    for _command, kwargs in calls:
+        assert kwargs["env"].get("OPENAI_API_KEY") is None
+    assert len(calls) == 2  # Container initialization and cleanup.
+    assert pyxis_channel.execute.call_count == 2
+    pyxis_channel.execute.assert_any_call(
+        command="touch state", cwd="/testbed", timeout_s=30
+    )
+    pyxis_channel.execute.assert_any_call(
+        command="test -f state", cwd="/testbed", timeout_s=30
+    )
+    pyxis_channel.close.assert_called_once_with()
     assert calls[-1][0][-4:] == [
         "enroot",
         "remove",
@@ -1062,7 +1098,9 @@ def test_pyxis_environment_reuses_named_writable_container(
     assert "Executing Pyxis command: touch state" in caplog.text
 
 
-def test_pyxis_environment_mounts_persistent_tmp_on_every_step(monkeypatch, tmp_path):
+def test_pyxis_environment_shares_private_tmp_with_worker(
+    monkeypatch, tmp_path, pyxis_channel
+):
     monkeypatch.setenv("SLURM_JOB_ID", "1738605")
     monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
     image = tmp_path / "task.sqsh"
@@ -1078,33 +1116,31 @@ def test_pyxis_environment_mounts_persistent_tmp_on_every_step(monkeypatch, tmp_
     environment = PyxisEnvironment(image=image, run_id="run-1")
     environment.execute({"command": "touch /tmp/state"})
     environment.execute({"command": "test -f /tmp/state"})
+    assert len(calls) == 1
+    worker_command = environment._persistent_server_command()
 
     tmp_mounts = [
         next(arg for arg in command if arg.startswith("--container-mounts="))
-        for command in calls[:3]
+        for command in [calls[0], worker_command]
     ]
-    assert tmp_mounts[0] == tmp_mounts[1] == tmp_mounts[2]
+    assert tmp_mounts[1].startswith(tmp_mounts[0] + ",")
     source, destination = (
         tmp_mounts[0].removeprefix("--container-mounts=").split(":", 1)
     )
     assert destination == "/tmp"
     persistent_tmp = Path(source)
     assert persistent_tmp.is_dir()
-    assert stat.S_IMODE(persistent_tmp.stat().st_mode) == 0o1777
+    assert stat.S_IMODE(persistent_tmp.stat().st_mode) == 0o700
 
     environment.cleanup()
 
     assert not persistent_tmp.exists()
 
 
-@pytest.mark.parametrize(
-    "preamble",
-    [
-        "",
-        "srun: lua: Checking requeue policy with options:\n",
-    ],
-)
-def test_pyxis_environment_extracts_submission(monkeypatch, tmp_path, preamble):
+@pytest.mark.parametrize("preamble", ["", "\n  "])
+def test_pyxis_environment_extracts_submission(
+    monkeypatch, tmp_path, pyxis_channel, preamble
+):
     class Submitted(Exception):
         pass
 
@@ -1113,74 +1149,45 @@ def test_pyxis_environment_extracts_submission(monkeypatch, tmp_path, preamble):
     exceptions.Submitted = Submitted
     monkeypatch.setitem(sys.modules, "minisweagent", minisweagent)
     monkeypatch.setitem(sys.modules, "minisweagent.exceptions", exceptions)
-    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
-    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
-    calls = 0
-
-    def fake_run(command, **kwargs):
-        nonlocal calls
-        calls += 1
-        output = (
-            "ok\n"
-            if calls == 1
-            else (
-                f"{preamble}COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n"
-                "diff --git a/a b/a\n"
-            )
-        )
-        _finish_srun_step(command, 0)
-        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
+    environment = object.__new__(PyxisEnvironment)
+    environment.config = pyxis_env_mod.PyxisEnvironmentConfig(
+        image="image", run_id="run"
+    )
+    environment._persistent_channel = pyxis_channel
+    monkeypatch.setattr(environment, "cleanup", lambda: None)
+    pyxis_channel.execute.return_value = CommandResult(
+        0,
+        f"{preamble}COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndiff --git a/a b/a\n",
+        False,
+    )
 
     with pytest.raises(Submitted) as exc_info:
         environment.execute({"command": "submit"})
 
     assert exc_info.value.args[0]["extra"]["submission"] == "diff --git a/a b/a\n"
-    environment.cleanup()
 
 
-def test_pyxis_environment_decodes_timeout_output(monkeypatch, tmp_path):
-    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
-    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
-    calls = 0
+def test_pyxis_environment_decodes_timeout_output(monkeypatch, pyxis_channel):
+    environment = object.__new__(PyxisEnvironment)
+    environment.config = pyxis_env_mod.PyxisEnvironmentConfig(
+        image="image", run_id="run"
+    )
+    environment._persistent_channel = pyxis_channel
+    monkeypatch.setattr(environment, "cleanup", lambda: None)
+    pyxis_channel.execute.return_value = CommandResult(124, "partial�", True)
 
-    def fake_run(command, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            _finish_srun_step(command, 124)
-            return subprocess.CompletedProcess(
-                command, 124, stdout="partial�", stderr=""
-            )
-        _finish_srun_step(command, 0)
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
-
-    output = environment.execute({"command": "sleep 60"})
+    output = environment.execute({"command": "sleep 60"}, cwd="/other", timeout=5)
 
     assert output["returncode"] == -1
     assert output["output"] == "partial�"
     assert output["extra"]["exception_type"] == "TimeoutExpired"
-    environment.cleanup()
-
-
-def test_pyxis_environment_raises_when_srun_never_starts_command(monkeypatch, tmp_path):
-    failure_path = tmp_path / ".pyxis_infrastructure_failure"
-    environment = object.__new__(PyxisEnvironment)
-    environment.config = types.SimpleNamespace(
-        cwd="/testbed",
-        env={},
-        timeout_s=30,
-        interpreter=["bash", "-c"],
-        infrastructure_failure_path=failure_path,
+    pyxis_channel.execute.assert_called_once_with(
+        command="sleep 60", cwd="/other", timeout_s=5
     )
-    environment.name = "mswe_run-1_abcd1234"
-    environment._tmp_dir = tmp_path
 
+
+def test_pyxis_srun_step_raises_when_command_never_starts(monkeypatch, tmp_path):
+    failure_path = tmp_path / ".pyxis_infrastructure_failure"
     monkeypatch.setenv("SLURM_JOB_ID", "1738605")
     monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
     monkeypatch.setattr(
@@ -1192,36 +1199,40 @@ def test_pyxis_environment_raises_when_srun_never_starts_command(monkeypatch, tm
     )
 
     with pytest.raises(RunnerError, match="before the command completed"):
-        environment.execute({"command": "pytest -q"})
+        pyxis_env_mod.run_srun_step(
+            argv=["true"],
+            status_path=tmp_path / ".mlperf_srun_status",
+            timeout_s=30,
+            failure_path=failure_path,
+        )
 
     assert failure_path.exists()
 
 
-def test_pyxis_environment_preserves_command_failure(monkeypatch, tmp_path):
-    monkeypatch.setenv("SLURM_JOB_ID", "1738605")
-    monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
-    calls = 0
+@pytest.mark.parametrize("returncode", [1, 124, 137])
+def test_pyxis_environment_preserves_command_failure(
+    monkeypatch, pyxis_channel, returncode
+):
+    environment = object.__new__(PyxisEnvironment)
+    environment.config = pyxis_env_mod.PyxisEnvironmentConfig(
+        image="image", run_id="run"
+    )
+    environment._persistent_channel = pyxis_channel
+    monkeypatch.setattr(environment, "cleanup", lambda: None)
+    pyxis_channel.execute.return_value = CommandResult(
+        returncode, "command failed\n", False
+    )
 
-    def fake_run(command, **kwargs):
-        nonlocal calls
-        calls += 1
-        returncode = 0 if calls == 1 else 1
-        _finish_srun_step(command, returncode)
-        return subprocess.CompletedProcess(
-            command, returncode, stdout="command failed\n", stderr=""
-        )
+    output = environment.execute({"command": f"exit {returncode}"})
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
-
-    output = environment.execute({"command": "false"})
-
-    assert output["returncode"] == 1
+    assert output["returncode"] == returncode
     assert output["output"] == "command failed\n"
-    environment.cleanup()
+    assert output["exception_info"] == ""
 
 
-def test_pyxis_cleanup_is_best_effort_outside_allocation(monkeypatch, tmp_path):
+def test_pyxis_cleanup_is_best_effort_outside_allocation(
+    monkeypatch, tmp_path, pyxis_channel
+):
     monkeypatch.setenv("SLURM_JOB_ID", "1738605")
     monkeypatch.setenv("SLURMD_NODENAME", "gb-nvl-053-compute04")
 
@@ -1238,6 +1249,7 @@ def test_pyxis_cleanup_is_best_effort_outside_allocation(monkeypatch, tmp_path):
 
     environment.cleanup()
 
+    pyxis_channel.close.assert_called_once_with()
     assert not persistent_tmp.exists()
 
 
