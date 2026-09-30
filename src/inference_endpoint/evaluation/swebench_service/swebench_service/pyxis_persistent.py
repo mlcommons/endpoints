@@ -17,7 +17,6 @@ from pathlib import Path
 from .runner import RunnerError
 
 logger = logging.getLogger(__name__)
-_PERSISTENT_ROOT = "/tmp/.mlperf_persistent_exec"
 _POLL_S = 0.05
 
 

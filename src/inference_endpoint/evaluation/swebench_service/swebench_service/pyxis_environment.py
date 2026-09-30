@@ -19,10 +19,7 @@ from typing import Any
 
 from pydantic import AliasChoices, BaseModel, Field
 
-from .pyxis_persistent import (
-    _PERSISTENT_ROOT,
-    PersistentExecChannel,
-)
+from .pyxis_persistent import PersistentExecChannel
 from .runner import RunnerError
 
 logger = logging.getLogger(__name__)
@@ -50,6 +47,7 @@ _SAFE_SRUN_ENV = (
     "SLURM_CONF",
 )
 _STEP_STATUS = "/tmp/.mlperf_srun_status"
+_PERSISTENT_ROOT = "/tmp/.mlperf_persistent_exec"
 _COMMAND_WORKER = Path(__file__).with_name("pyxis_command_worker.sh")
 _SRUN_MAX_ATTEMPTS = 5
 _RETRYABLE_PRELAUNCH_ERRORS = (
