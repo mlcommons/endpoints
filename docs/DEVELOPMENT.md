@@ -226,8 +226,10 @@ Use `uv add <package>==<version>` to update both `pyproject.toml` and `uv.lock` 
 After adding a dependency, run `pip-audit` to verify it has no known vulnerabilities:
 
 ```bash
-uv run pip-audit
+uv run pip-audit --ignore-vuln PYSEC-2026-3740
 ```
+
+`PYSEC-2026-3740` is an `nltk` advisory with no fixed release whose affected APIs this repo doesn't use; CI ignores it too. Drop the flag once [#520](https://github.com/mlcommons/endpoints/issues/520) is resolved.
 
 ## Performance Considerations
 

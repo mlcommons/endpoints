@@ -72,7 +72,12 @@ jobs:
         run: uv sync --frozen --extra dev --extra test --extra performance
 
       - name: Audit dependencies for known vulnerabilities
-        run: uv run pip-audit
+        # PYSEC-2026-3740 (CVE-2026-81726): nltk path traversal in model-artifact
+        # APIs (TransitionParser, AveragedPerceptron, PerceptronTagger, maxent).
+        # Unreachable here: only sent_tokenize and rouge_score's Porter stemmer
+        # are used. No fixed nltk release yet.
+        # TODO: drop the ignore - https://github.com/mlcommons/endpoints/issues/520
+        run: uv run pip-audit --ignore-vuln PYSEC-2026-3740
 
   bfcl-smoke:
     runs-on: ubuntu-latest

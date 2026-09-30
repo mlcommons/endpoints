@@ -18,6 +18,7 @@
 See docs/load_generator/DESIGN.md for the full design.
 """
 
+from ..core.types import PhaseType
 from .delay import make_delay_fn, poisson_delay_fn
 from .sample_order import (
     SampleOrder,
@@ -30,7 +31,6 @@ from .session import (
     PhaseConfig,
     PhaseIssuer,
     PhaseResult,
-    PhaseType,
     SessionResult,
 )
 from .strategy import (

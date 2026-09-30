@@ -26,7 +26,6 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Protocol
 
 import msgspec
@@ -39,7 +38,14 @@ from ..core.record import (
     SampleEventType,
     SessionEventType,
 )
-from ..core.types import PromptData, Query, QueryResult, StreamChunk
+from ..core.types import (
+    PhaseData,
+    PhaseType,
+    PromptData,
+    Query,
+    QueryResult,
+    StreamChunk,
+)
 from ..dataset_manager.dataset import Dataset
 from .sample_order import create_sample_order
 from .strategy import LoadStrategy, create_load_strategy
@@ -54,14 +60,6 @@ class EndpointResponseIdleTimeoutError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Phase configuration
 # ---------------------------------------------------------------------------
-
-
-class PhaseType(str, Enum):
-    """Phase types control tracking and reporting behavior."""
-
-    PERFORMANCE = "performance"
-    ACCURACY = "accuracy"
-    WARMUP = "warmup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -542,6 +540,29 @@ class BenchmarkSession:
         self._current_phase_type = phase.phase_type
         self._current_strategy = strategy
 
+        # Use getattr instead of isinstance to keep AgenticInferenceDataset out
+        # of the load generator import graph; it imports pandas. None covers
+        # datasets without conversation metadata and the pre-load single-turn
+        # case.
+        conv = getattr(phase.dataset, "conversation_metadata", None)
+        self._publish_session_event(
+            SessionEventType.PHASE_START,
+            PhaseData(
+                phase_type=phase.phase_type,
+                drain_after=phase.drain_after,
+                # One pass is over ``n_samples_from_dataset``, not the dataset's
+                # raw size. The ruleset path sets it from ``ds_subset_size``
+                # without truncating the dataloader, so the dataset count would
+                # create super-passes that do not match issued samples.
+                num_turns=(
+                    len(conv.samples)
+                    if conv is not None
+                    else phase.runtime_settings.n_samples_from_dataset
+                ),
+                num_trajectories=(conv.num_conversations if conv is not None else 0),
+            ),
+        )
+
         # Performance phases get tracking events
         if phase.phase_type == PhaseType.PERFORMANCE:
             self._publish_session_event(SessionEventType.START_PERFORMANCE_TRACKING)
@@ -860,16 +881,23 @@ class BenchmarkSession:
 
         return check
 
-    def _publish_session_event(self, event_type: SessionEventType) -> None:
-        """Publish a session event and flush the publisher immediately.
+    def _publish_session_event(
+        self, event_type: SessionEventType, data: PhaseData | None = None
+    ) -> None:
+        """Publish a session event, then flush the publisher.
 
-        Session events are control signals (STARTED, ENDED, START/STOP
-        PERFORMANCE_TRACKING) that subscribers must receive promptly for
-        correct state transitions. Flushing ensures any buffered sample
-        events are sent first, followed by the session event, so ordering
-        is preserved and the signal is not delayed by batching.
+        Session events are control signals (STARTED, ENDED, PHASE_START,
+        START/STOP PERFORMANCE_TRACKING) that subscribers must receive promptly.
+        Flushing sends buffered sample events first, then the session event, so
+        ordering is preserved without waiting for another batch.
+
+        ``data`` carries payloads for events that have them, such as
+        PHASE_START. Routing it through this method preserves the same
+        publish-then-flush ordering.
         """
         self._publisher.publish(
-            EventRecord(event_type=event_type, timestamp_ns=time.monotonic_ns())
+            EventRecord(
+                event_type=event_type, timestamp_ns=time.monotonic_ns(), data=data
+            )
         )
         self._publisher.flush()

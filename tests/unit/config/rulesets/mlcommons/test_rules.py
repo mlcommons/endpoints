@@ -20,12 +20,22 @@ from inference_endpoint.config.ruleset_registry import (
     list_rulesets,
     register_ruleset,
 )
+from inference_endpoint.config.rulesets.mlcommons import (
+    ENDPOINTS_CURRENT as package_endpoints_current,
+)
 from inference_endpoint.config.rulesets.mlcommons import datasets, models
 from inference_endpoint.config.rulesets.mlcommons.rules import (
     ALL_ROUNDS,
     CURRENT,
     EDGE_CURRENT,
+    ENDPOINTS_ALL,
+    ENDPOINTS_CURRENT,
     OptimizationPriority,
+)
+from inference_endpoint.config.schema import (
+    BenchmarkConfig,
+    SubmissionReference,
+    TestType,
 )
 from inference_endpoint.config.user_config import UserConfig
 
@@ -233,3 +243,112 @@ def test_edge_ruleset_apply_user_config():
     assert rt_settings.min_issue_duration_ms == 0
     assert rt_settings.max_issue_duration_ms == 4 * 60 * 60 * 1000
     assert rt_settings.n_samples_from_dataset == 995
+
+
+# Verbatim from mlcommons/endpoints_policies seedset.yaml, cohort 2026-10-C1 set A.
+_EP_SCHED_SEED = 10487924139932647040
+_EP_SAMPLE_SEED = 586478644936801402
+
+
+@pytest.mark.unit
+def test_endpoints_v1_0_official_seeds():
+    """Seeds are the published Endpoints v1.0 cohort 2026-10-C1 set A values.
+
+    A drift here means a run would issue load from seeds MLCommons never
+    published, which the reviewer-side seeded-RNG check would reject.
+    """
+    ep = get_ruleset("mlperf-endpoints-v1.0-2026-10-C1-A")
+    assert ep.scheduler_rng_seed == _EP_SCHED_SEED
+    assert ep.sample_index_rng_seed == _EP_SAMPLE_SEED
+
+
+@pytest.mark.unit
+def test_endpoints_ruleset_registered():
+    assert get_ruleset("mlperf-endpoints-v1.0-2026-10-C1-A") is ENDPOINTS_CURRENT
+    assert get_ruleset("mlperf-endpoints-current") is ENDPOINTS_CURRENT
+    assert "mlperf-endpoints-v1.0-2026-10-C1-A" in list_rulesets()
+    assert ENDPOINTS_CURRENT.version == "endpoints-v1.0-2026-10-C1-A"
+
+
+@pytest.mark.unit
+def test_endpoints_seeds_differ_from_every_other_registered_ruleset():
+    """Endpoints cohorts rotate independently of the other rulesets; a shared
+    value would mean one of the two was transcribed from the wrong source."""
+    for other in [*ALL_ROUNDS, EDGE_CURRENT]:
+        assert ENDPOINTS_CURRENT.scheduler_rng_seed != other.scheduler_rng_seed
+        assert ENDPOINTS_CURRENT.sample_index_rng_seed != other.sample_index_rng_seed
+
+
+@pytest.mark.unit
+def test_every_published_endpoints_cohort_stays_registered():
+    """A submission keeps its bound seed set for its full update window, so
+    publishing a newer cohort must not unregister an older one."""
+    names = list_rulesets()
+    for ruleset in ENDPOINTS_ALL:
+        assert f"mlperf-{ruleset.version}" in names
+    assert ENDPOINTS_CURRENT in ENDPOINTS_ALL
+
+
+@pytest.mark.unit
+def test_endpoints_cohort_versions_are_unique():
+    """Duplicate versions would make the registry silently drop a cohort."""
+    assert len(ENDPOINTS_ALL) == len({r.version for r in ENDPOINTS_ALL})
+
+
+@pytest.mark.unit
+def test_endpoints_round_refuses_the_per_model_config_path():
+    """The round declares no per-model rules, so the legacy per-model path must
+    refuse it rather than emit runtime settings with no rules behind them."""
+    with pytest.raises(ValueError, match="not found in rules"):
+        ENDPOINTS_CURRENT.apply_user_config(
+            model=models.Llama3_1_8b, user_config=UserConfig(1.0)
+        )
+
+
+@pytest.mark.unit
+def test_endpoints_current_is_re_exported_from_the_package():
+    assert package_endpoints_current is ENDPOINTS_CURRENT
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "ruleset_name",
+    ["mlperf-endpoints-v1.0-2026-10-C1-A", "mlperf-endpoints-current"],
+)
+def test_binding_the_round_pins_the_published_seeds_on_a_config(ruleset_name):
+    """Closes the loop through the only consumer that matters: the seeds must
+    survive pydantic revalidation in _apply_ruleset_seed_overrides and land on
+    the runtime config. scheduler_rng_seed exceeds int64, so a future bound on
+    that field would break this round while every other test stayed green.
+    """
+    cfg = BenchmarkConfig(
+        type=TestType.OFFLINE,
+        model_params={"name": "test-model"},
+        endpoint_config={"endpoints": ["http://localhost:8000"]},
+        datasets=[{"path": "perf.jsonl"}],
+        submission_ref=SubmissionReference(model="test-model", ruleset=ruleset_name),
+    )
+    assert cfg.settings.runtime.scheduler_random_seed == _EP_SCHED_SEED
+    assert cfg.settings.runtime.dataloader_random_seed == _EP_SAMPLE_SEED
+    # Warmup derives its sample order from the same pinned seed as the perf phase.
+    assert cfg.settings.warmup.warmup_random_seed == _EP_SAMPLE_SEED
+
+
+@pytest.mark.unit
+def test_pinned_seeds_survive_a_yaml_round_trip(tmp_path):
+    """config.yaml in the report dir is the reproducibility record, so it must
+    carry the pinned values rather than the pre-resolution defaults."""
+    cfg = BenchmarkConfig(
+        type=TestType.OFFLINE,
+        model_params={"name": "test-model"},
+        endpoint_config={"endpoints": ["http://localhost:8000"]},
+        datasets=[{"path": "perf.jsonl"}],
+        submission_ref=SubmissionReference(
+            model="test-model", ruleset="mlperf-endpoints-current"
+        ),
+    )
+    out = tmp_path / "config.yaml"
+    cfg.to_yaml_file(out)
+    reloaded = BenchmarkConfig.from_yaml_file(out)
+    assert reloaded.settings.runtime.scheduler_random_seed == _EP_SCHED_SEED
+    assert reloaded.settings.runtime.dataloader_random_seed == _EP_SAMPLE_SEED

@@ -60,6 +60,16 @@ from inference_endpoint.core.types import TextModelOutput
 # ---------------------------------------------------------------------------
 
 
+def count_text_tokens(texts: list[str]) -> list[int]:
+    """Whitespace token counts.
+
+    The sync counterpart of :class:`MockBatchTokenizer`'s text path, so the live
+    collector and an ``events.jsonl`` re-parse count with one implementation
+    rather than two copies of a fake.
+    """
+    return [len(text.split()) for text in texts]
+
+
 class MockBatchTokenizer:
     """Mock BatchTokenizer that splits on whitespace with optional async delay."""
 
@@ -76,7 +86,7 @@ class MockBatchTokenizer:
             if isinstance(item, TokenIdsInput):
                 outcomes.append(len(item.token_ids))
             elif isinstance(item, TextInput):
-                outcomes.append(len(item.text.split()))
+                outcomes.append(count_text_tokens([item.text])[0])
             elif isinstance(item, MessageInput):
                 tool_calls = (
                     msgspec.json.encode(list(item.tool_calls)).decode()
@@ -185,8 +195,10 @@ def make_aggregator(
     tokenizer=None,
     live_flush_interval_s: float | None = None,
     streaming: bool = True,
+    enable_isl: bool = True,
     shutdown_event: asyncio.Event | None = None,
     drain_timeout_s: float | None = None,
+    steady_state_profile: str | None = None,
 ) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
     """Construct an aggregator wired to a real SUB socket and a mocked publisher.
 
@@ -218,7 +230,9 @@ def make_aggregator(
         tokenizer=tokenizer,
         live_flush_interval_s=live_flush_interval_s,
         streaming=streaming,
+        enable_isl=enable_isl,
         shutdown_event=shutdown_event,
         drain_timeout_s=drain_timeout_s,
+        steady_state_profile=steady_state_profile,
     )
     return agg, registry, publisher

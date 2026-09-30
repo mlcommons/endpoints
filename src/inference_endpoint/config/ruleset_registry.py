@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING
 from .rulesets.mlcommons.rules import ALL_ROUNDS as mlcommons_rounds
 from .rulesets.mlcommons.rules import CURRENT as mlcommons_current
 from .rulesets.mlcommons.rules import EDGE_CURRENT as mlcommons_edge_current
+from .rulesets.mlcommons.rules import ENDPOINTS_ALL as mlcommons_endpoints_all
+from .rulesets.mlcommons.rules import ENDPOINTS_CURRENT as mlcommons_endpoints_current
 
 if TYPE_CHECKING:
     from .ruleset_base import BenchmarkSuiteRuleset
@@ -105,6 +107,14 @@ def _auto_register_mlcommons():
         f"mlperf-{mlcommons_edge_current.version}", mlcommons_edge_current
     )  # -> "mlperf-edge-v0.1"
     _RULESET_REGISTRY.setdefault("mlperf-edge-current", mlcommons_edge_current)
+    # Endpoints seed sets: by cohort-qualified version and as the endpoints
+    # "current". A later cohort registers alongside rather than replacing, so a
+    # submission bound to an earlier set stays resolvable for its full window.
+    for ruleset in mlcommons_endpoints_all:
+        _RULESET_REGISTRY.setdefault(f"mlperf-{ruleset.version}", ruleset)
+    _RULESET_REGISTRY.setdefault(
+        "mlperf-endpoints-current", mlcommons_endpoints_current
+    )
 
 
 # Auto-register on import
