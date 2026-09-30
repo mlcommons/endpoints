@@ -24,12 +24,15 @@ Everything around them is what is missing, and §5 lists that work.
 
 **The gaps:**
 
-- 4 gaps (§3), plus example configs.
-- 1 is a hard blocker: steady state cannot certify a window without tokens (§3.1).
+- 5 gaps (§3), plus example configs.
+- 2 block a valid result:
+  - Steady state cannot certify a window without tokens (§3.1). This is the large one.
+  - Perf runs cannot select with-replacement sample order, which §6.5 requires (§3.3). This one
+    is small.
 - 1 is a **rules** conflict, not a client change: §6.5 mandates `stream_all_chunks = true`, which
   a non-streaming workload cannot set. It needs an amendment.
 - The client also has limits that affect every model, not just video. They do **not** block a
-  T2V benchmark, because the same workaround text curves already use works here too. See §3.3.
+  T2V benchmark, because the same workaround text curves already use works here too. See §3.4.
 
 **Scope:** the client only. §6 lists what is left out.
 
@@ -39,7 +42,8 @@ Everything around them is what is missing, and §5 lists that work.
 | --- | --- |
 | [Naming](#a-naming) | A ruleset model and dataset entry, so the tooling recognises the benchmark at all |
 | [Tokenless support](#b-tokenless-support) | Steady-state gating without TPOT, and artifact-safe responses |
-| [Example configs](#c-example-configs) | Concurrency-region configs sized to whole dataset passes |
+| [Run settings](#c-run-settings) | A config setting for with-replacement sample order on perf runs |
+| [Example configs](#d-example-configs) | Concurrency-region configs sized to whole dataset passes |
 | Rules amendment | An exemption from §6.5's `stream_all_chunks = true`. Not a client task; recorded so the gap list is complete |
 
 The adapter and the example workload already run. What is missing is the description of the
@@ -63,7 +67,7 @@ runs.
   floor is `max(4 super-passes, §6.2 minimum)`.
 
 §6.4's issued-count rule **is** expressible today, and §4 shows how. What cannot be expressed is a
-duration floor (§3.3), and what cannot be *certified* is §6.2 or §4.4, because neither is
+duration floor (§3.4), and what cannot be *certified* is §6.2 or §4.4, because neither is
 computable without a steady window (§3.1).
 
 ### 1.1 Metrics for video generation
@@ -111,9 +115,10 @@ Ordered by the categories in §0.
 | # | Gap | Evidence | Kind |
 | --- | --- | --- | --- |
 | 1 | No ruleset entry exists for the benchmark, so `_resolve_model` raises `KeyError` before any other check runs. Without one there is also no golden accuracy and no validity thresholds. | `compliance/checker.py:156-164` | code |
-| 2 | Steady state cannot certify a window with no tokens. See §3.1. **This is the only hard blocker.** | `metrics/steady_state_diagnostics.py` | code |
+| 2 | Steady state cannot certify a window with no tokens. See §3.1. **This is the largest blocker.** | `metrics/steady_state_diagnostics.py` | code |
 | 3 | `VideoGenAdapter` mirrors the video *path string* into `response_output`, which the OSL trigger tokenizes. Harmless only because the model name resolves to no tokenizer; supplying one yields meaningless OSL and TPS. See §3.2. | `videogen/adapter.py` | latent |
-| 4 | §6.5 requires `stream_all_chunks = true` for **all** performance runs. Every video config sets `streaming: "off"`, and `VideoGenAdapter.decode_sse_message` raises by design. The rule text forbids the only configuration the workload can run, so this needs a rules amendment, not a client change. | `videogen/adapter.py`, §6.5 | rules |
+| 4 | §6.5 requires `WithReplacementSampleOrder` for performance runs, but no config field selects it: `RuntimeConfig` has no `sample_order` and forbids extra keys, and `RuntimeSettings.from_config` always builds the without-replacement default. Only the TEST04 audit overrides it. Affects every benchmark, not just video. See §3.3. | `config/runtime_settings.py:174`, `config/schema.py:593-600` | code |
+| 5 | §6.5 requires `stream_all_chunks = true` for **all** performance runs. Every video config sets `streaming: "off"`, and `VideoGenAdapter.decode_sse_message` raises by design. The rule text forbids the only configuration the workload can run, so this needs a rules amendment, not a client change. | `videogen/adapter.py`, §6.5 | rules |
 
 ### 3.1 Why steady state cannot gate a tokenless run
 
@@ -150,7 +155,24 @@ output-sequence-length trigger tokenizes. Nothing breaks today only because the 
 not resolve to a tokenizer, so token metrics stay disabled. Supplying `--tokenizer` would silently
 produce OSL and TPS figures computed from a filesystem path.
 
-### 3.3 Client limits that are not T2V problems
+### 3.3 Sample order cannot be set for perf runs
+
+§6.5 (`endpoints_rules.md:1228-1229`) requires `WithReplacementSampleOrder` for performance runs
+and `WithoutReplacementSampleOrder` for accuracy runs. The client implements both orders
+(`load_generator/sample_order.py`), but the user-facing config cannot choose between them:
+
+- `RuntimeConfig` (`config/schema.py:593`) has no `sample_order` field and sets
+  `extra="forbid"` (`:600`), so a `sample_order:` key in YAML is a validation error.
+- `RuntimeSettings.from_config` sets `"sample_order": SampleOrderSpec()`
+  (`config/runtime_settings.py:174`), which is `WITHOUT_REPLACEMENT`.
+- The only override is the audit path (`commands/benchmark/execute.py`), which TEST04 uses for
+  its own phases.
+
+So every perf run today samples without replacement. This is not specific to video, but a T2V
+perf point cannot be a valid result until it is fixed. The fix is small: expose the order in
+`RuntimeConfig`, or have a ruleset set it per test mode.
+
+### 3.4 Client limits that are not T2V problems
 
 Working out how to run a sweep surfaced several limits in the client. None of them block a T2V
 benchmark, and they are recorded here only so the §4 recipe makes sense.
@@ -175,7 +197,7 @@ not a prerequisite here.
 ## 4. Workaround available today
 
 A point must end on a whole dataset pass (§6.4), span more than 4 super-passes (§4.4), and meet a
-duration floor (§6.2). No floor setting exists (§3.3), so size the count instead of capping the
+duration floor (§6.2). No floor setting exists (§3.4), so size the count instead of capping the
 clock:
 
 1. Calibrate. Run the point briefly to estimate sustained throughput at that concurrency.
@@ -189,11 +211,13 @@ clock:
 settings:
   runtime:
     n_samples_to_issue: 1240        # N x dataset_size (5 x 248), an exact multiple
-    sample_order: with_replacement  # sec 6.5 requires WithReplacementSampleOrder for perf runs
   load_pattern:
     type: "concurrency"
     target_concurrency: 1
 ```
+
+There is no setting for sample order yet, so this run samples without replacement and does not
+meet §6.5 until gap 4 is closed (§3.3).
 
 The phase ends on the count, at a pass boundary. `n_samples_to_issue` is returned verbatim and the
 sample order is infinite, so nothing clamps it.
@@ -212,7 +236,7 @@ them anyway, so the data qualifies once it can be checked.
   minimum-query rule counts *completed*. A point with request failures issues exactly
   `N x dataset_size` yet can complete fewer, and finishes early because failures return fast.
   Check `n_samples_completed`, not just elapsed time.
-- Do **not** use `min_issue_duration_ms` for this (§3.3).
+- Do **not** use `min_issue_duration_ms` for this (§3.4).
 - Capping with `max_issue_duration_ms` would end the run mid-pass and violate §6.4. It is useful
   only as a runaway guard set well above the expected finish.
 
@@ -234,21 +258,28 @@ requires an explicit marker.
 | B1 | Modality-aware steady-state gating: gate on an alternative metric where the gated one has no samples (end-to-end latency exists for every workload), or report un-gated with a reason instead of returning `None`. Requires a way for a workload to declare its gating metric. | 2 | n/a | M |
 | B2 | Remove the tokenizer footgun: stop routing a path through `response_output`, or mark the field non-tokenizable for artifact-output adapters. | 3 | n/a | S |
 
-### C. Example configs
+### C. Run settings
 
 | # | Task | Fixes | Depends on | Size |
 | --- | --- | --- | --- | --- |
-| C1 | Add concurrency-region example configs sized per §6.4, using the §4 recipe. The shipped video configs cover only `max_throughput` (the Offline point) and `concurrency: 1`. | n/a | n/a | XS |
+| C1 | Let a perf run select `WithReplacementSampleOrder`: add `sample_order` to `RuntimeConfig`, or have the ruleset pick it per test mode (with replacement for perf, without for accuracy). | 4 | n/a | XS |
 
-### D. Documentation
+### D. Example configs
+
+| # | Task | Fixes | Depends on | Size |
+| --- | --- | --- | --- | --- |
+| D1 | Add concurrency-region example configs sized per §6.4, using the §4 recipe. The shipped video configs cover only `max_throughput` (the Offline point) and `concurrency: 1`. | n/a | C1 | XS |
+
+### E. Documentation
 
 | # | Task | Depends on |
 | --- | --- | --- |
-| D1 | Update this document as items land; update `AGENTS.md` if any module moves or is added. | any |
-| D2 | Note the modality constraint in `steady_state_diagnostics.md` once B1 settles. | B1 |
+| E1 | Update this document as items land; update `AGENTS.md` if any module moves or is added. | any |
+| E2 | Note the modality constraint in `steady_state_diagnostics.md` once B1 settles. | B1 |
 
 **B1 is the critical item.** Under v1.0 §4.4 the steady-state result is the official reporting
-basis, so without it a T2V run has no official result. A1 and C1 are small and independent.
+basis, so without it a T2V run has no official result. C1 is small but also blocks a valid perf
+result. A1 is small and independent; D1 follows C1.
 
 ## 6. Out of scope for this repository
 
