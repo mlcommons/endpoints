@@ -122,15 +122,16 @@ Run accuracy evaluation with Pass@1 scoring using pre-defined benchmarks:
 
 ## Documentation
 
-| Guide                                                          | Description                           |
-| -------------------------------------------------------------- | ------------------------------------- |
-| [CLI Quick Reference](docs/CLI_QUICK_REFERENCE.md)             | Command-line interface guide          |
-| [CLI Design](docs/CLI_DESIGN.md)                               | CLI architecture and design decisions |
-| [Local Testing](docs/LOCAL_TESTING.md)                         | Test with the echo server             |
-| [Client Performance Tuning](docs/CLIENT_PERFORMANCE_TUNING.md) | Endpoint client optimization          |
-| [Performance Architecture](docs/PERF_ARCHITECTURE.md)          | Performance architecture deep dive    |
-| [Development Guide](docs/DEVELOPMENT.md)                       | Development setup and workflow        |
-| [CONTRIBUTING.md](CONTRIBUTING.md)                             | How to contribute                     |
+| Guide                                                          | Description                               |
+| -------------------------------------------------------------- | ----------------------------------------- |
+| [CLI Quick Reference](docs/CLI_QUICK_REFERENCE.md)             | Command-line interface guide              |
+| [CLI Design](docs/CLI_DESIGN.md)                               | CLI architecture and design decisions     |
+| [Run Output Structure](docs/OUTPUT_STRUCTURE.md)               | What a run writes to its report directory |
+| [Local Testing](docs/LOCAL_TESTING.md)                         | Test with the echo server                 |
+| [Client Performance Tuning](docs/CLIENT_PERFORMANCE_TUNING.md) | Endpoint client optimization              |
+| [Performance Architecture](docs/PERF_ARCHITECTURE.md)          | Performance architecture deep dive        |
+| [Development Guide](docs/DEVELOPMENT.md)                       | Development setup and workflow            |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                             | How to contribute                         |
 
 ## Contributing
 
