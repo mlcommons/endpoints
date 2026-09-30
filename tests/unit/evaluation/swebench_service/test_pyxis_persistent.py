@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -22,16 +24,22 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-def worker(tmp_path, monkeypatch):
-    """Run the actual command server; namespace isolation needs a Linux allocation."""
+def portable_unshare(tmp_path, monkeypatch):
+    """Only bypass namespace creation; run the actual shell worker."""
     if not all(shutil.which(tool) for tool in ("timeout", "bash")):
         pytest.skip("requires GNU timeout and bash")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     unshare = bin_dir / "unshare"
-    unshare.write_text('#!/bin/sh\nshift 3\nexec "$@"\n')
+    unshare.write_text(
+        '#!/bin/sh\nwhile [ "${1#--}" != "$1" ]; do shift; done\nexec "$@"\n'
+    )
     unshare.chmod(0o700)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+
+@pytest.fixture
+def worker(tmp_path, monkeypatch, portable_unshare):
     root = tmp_path / "protocol"
     commands = []
 
@@ -118,6 +126,192 @@ def test_missing_cwd_is_a_command_error_and_worker_remains_usable(worker, tmp_pa
     assert "No such file or directory" in result.output
     assert execute(channel, "printf recovered", tmp_path).output == "recovered"
     assert len(launches) == 1
+
+
+def test_environment_survives_tool_tmp_cleanup(monkeypatch, tmp_path, portable_unshare):
+    """Use production mount sources and worker, substituting local paths for mounts."""
+    scratch = None
+
+    def initialize(**kwargs):
+        nonlocal scratch
+        scratch = next(source for source, dest in kwargs["mounts"] if dest == "/tmp")
+
+    def local_command(*, argv, mounts, **kwargs):
+        result = []
+        for arg in argv:
+            for source, dest in mounts:
+                if arg == dest or arg.startswith(dest + "/"):
+                    arg = str(source) + arg[len(dest) :]
+                    break
+            result.append(arg)
+        return result
+
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.setattr(environment_mod, "run_srun_step", initialize)
+    monkeypatch.setattr(environment_mod, "build_srun_command", local_command)
+    env = environment_mod.PyxisEnvironment(
+        image="image", run_id="cleanup", cwd=str(tmp_path)
+    )
+    try:
+        command = (
+            "import os, shutil, tempfile; "
+            f"location = tempfile.mkdtemp(dir={str(scratch)!r}); "
+            "shutil.rmtree(os.path.dirname(location)); print('cleaned')"
+        )
+        result = env.execute(
+            {"command": f"{shlex.quote(sys.executable)} -c {shlex.quote(command)}"}
+        )
+        assert result["returncode"] == 0
+        assert result["output"] == "cleaned\n"
+        assert env.execute({"command": "printf recovered"})["output"] == "recovered"
+    finally:
+        env.cleanup()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "curl: (56) CONNECT tunnel failed, response 403",
+        "srun: error: Unable to confirm allocation for job 123",
+    ],
+)
+def test_startup_retries_confirmed_prelaunch_failure(
+    monkeypatch, tmp_path, portable_unshare, message
+):
+    root = tmp_path / "protocol"
+    launches = []
+    delays = []
+    popen = subprocess.Popen
+
+    def launch(argv, **kwargs):
+        launches.append(argv)
+        assert not (root / "request").exists()
+        assert not (tmp_path / "failed").exists()
+        if len(launches) < 3:
+            return popen(
+                ["bash", "-c", 'printf "%s\\n" "$1" >&2; exit 1', "prelaunch", message],
+                **kwargs,
+            )
+        return popen(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(transport, "wait_for_prelaunch_retry", delays.append)
+    channel = transport.PersistentExecChannel(
+        root,
+        ["bash", str(environment_mod._COMMAND_WORKER), str(root), "bash", "-c"],
+        environment_mod.safe_srun_env(),
+        failure_path=tmp_path / "failed",
+        launch_timeout_s=2,
+    )
+    try:
+        channel.start()
+        assert (
+            execute(channel, "printf once >> count; cat count", tmp_path).output
+            == "once"
+        )
+        assert len(launches) == 3
+        assert delays == [1, 2]
+        assert not (tmp_path / "failed").exists()
+    finally:
+        channel.close()
+
+
+@pytest.mark.parametrize(
+    "finish, attempts",
+    [
+        ("exit 1", 5),
+        ("exit 0", 1),
+        ("exec sleep 10", 1),
+    ],
+)
+def test_startup_retry_boundaries(monkeypatch, tmp_path, finish, attempts):
+    launches = []
+    popen = subprocess.Popen
+
+    def launch(argv, **kwargs):
+        launches.append(argv)
+        return popen(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(transport, "wait_for_prelaunch_retry", lambda attempt: None)
+    channel = transport.PersistentExecChannel(
+        tmp_path / "protocol",
+        ["bash", "-c", "echo 'unable to confirm allocation for job' >&2; " + finish],
+        environment_mod.safe_srun_env(),
+        failure_path=tmp_path / "failed",
+        launch_timeout_s=0.2,
+        shutdown_grace_s=0.1,
+    )
+    try:
+        with pytest.raises(RunnerError, match="did not become ready"):
+            channel.start()
+        assert len(launches) == attempts
+        assert channel._process.poll() is not None
+        assert (tmp_path / "failed").exists()
+    finally:
+        channel.close()
+
+
+def test_ready_worker_is_never_relaunched(monkeypatch, tmp_path):
+    delays = []
+    monkeypatch.setattr(transport, "wait_for_prelaunch_retry", delays.append)
+    root = tmp_path / "protocol"
+    channel = transport.PersistentExecChannel(
+        root,
+        [
+            "bash",
+            "-c",
+            'touch "$1/ready"; echo "unable to confirm allocation for job"; exit 1',
+            "worker",
+            str(root),
+        ],
+        environment_mod.safe_srun_env(),
+        failure_path=tmp_path / "failed",
+    )
+    try:
+        channel.start()
+        channel._process.wait(timeout=2)
+        with pytest.raises(RunnerError, match="not running"):
+            execute(channel, "touch unexpected", tmp_path)
+        assert delays == []
+        assert not (tmp_path / "unexpected").exists()
+        assert (tmp_path / "failed").exists()
+    finally:
+        channel.close()
+
+
+def test_process_cleanup_is_a_command_failure(tmp_path):
+    """Run destructive process matching only inside real, private PID namespaces."""
+    if sys.platform != "linux" or not all(
+        shutil.which(tool) for tool in ("unshare", "timeout", "pkill")
+    ):
+        pytest.skip("requires Linux PID namespaces and procps")
+    isolation = ["unshare", "--pid", "--fork", "--mount-proc", "--kill-child"]
+    probe = subprocess.run([*isolation, "true"], capture_output=True, timeout=5)
+    if probe.returncode:
+        pytest.skip("PID namespaces are not permitted")
+    root = tmp_path / "protocol"
+    channel = transport.PersistentExecChannel(
+        root,
+        [
+            *isolation,
+            "bash",
+            str(environment_mod._COMMAND_WORKER),
+            str(root),
+            "bash",
+            "-c",
+        ],
+        environment_mod.safe_srun_env(),
+        launch_timeout_s=2,
+    )
+    try:
+        channel.start()
+        result = execute(channel, "sleep 20 & pkill -f 'sleep 20'", tmp_path)
+        assert result.returncode == 143
+        assert not result.timed_out
+        assert execute(channel, "printf recovered", tmp_path).output == "recovered"
+    finally:
+        channel.close()
 
 
 @pytest.mark.parametrize("timeout", [0, -1])

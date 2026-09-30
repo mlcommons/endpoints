@@ -18,6 +18,9 @@ from inference_endpoint.evaluation.swebench_service.swebench_service import (
     pyxis_environment as pyxis_env_mod,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
+    pyxis_slurm as slurm_mod,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service import (
     pyxis_worker as worker_mod,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service import (
@@ -65,6 +68,7 @@ def test_pyxis_implementation_is_confined_to_environment_and_worker_modules():
         "pyxis_environment.py",
         "pyxis_worker.py",
         "pyxis_persistent.py",
+        "pyxis_slurm.py",
         "pyxis_command_worker.sh",
     }
 
@@ -911,8 +915,8 @@ def test_pyxis_environment_retries_connect_tunnel_prelaunch_failure(
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(pyxis_env_mod.random, "uniform", lambda _a, _b: 0.0)
-    monkeypatch.setattr(pyxis_env_mod.time, "sleep", delays.append)
+    monkeypatch.setattr(slurm_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(slurm_mod.time, "sleep", delays.append)
 
     environment = PyxisEnvironment(image=tmp_path / "task.sqsh", run_id="run-1")
 
@@ -943,8 +947,8 @@ def test_pyxis_srun_step_retries_prelaunch_failure_from_stderr(monkeypatch, tmp_
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(pyxis_env_mod.random, "uniform", lambda _a, _b: 0.0)
-    monkeypatch.setattr(pyxis_env_mod.time, "sleep", delays.append)
+    monkeypatch.setattr(slurm_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(slurm_mod.time, "sleep", delays.append)
 
     result = pyxis_env_mod.run_srun_step(
         argv=["true"],
@@ -984,8 +988,8 @@ def test_pyxis_srun_step_retries_allocation_confirmation_timeout(monkeypatch, tm
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(pyxis_env_mod.random, "uniform", lambda _a, _b: 0.0)
-    monkeypatch.setattr(pyxis_env_mod.time, "sleep", delays.append)
+    monkeypatch.setattr(slurm_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(slurm_mod.time, "sleep", delays.append)
 
     result = pyxis_env_mod.run_srun_step(
         argv=["true"],
@@ -1069,7 +1073,7 @@ def test_pyxis_environment_reuses_named_writable_container(
     assert "PAGER=cat" in worker_command
     assert worker_command[-2:] == ["bash", "-c"]
     assert "--kill-child" in worker_command
-    assert "/tmp/pyxis_command_worker.sh" in worker_command
+    assert "/.mlperf_persistent_exec/pyxis_command_worker.sh" in worker_command
     assert worker_script == (
         Path(pyxis_env_mod.__file__).with_name("pyxis_command_worker.sh").read_bytes()
     )
@@ -1119,7 +1123,7 @@ def test_pyxis_environment_shares_private_tmp_with_worker(
         next(arg for arg in command if arg.startswith("--container-mounts="))
         for command in [calls[0], worker_command]
     ]
-    assert tmp_mounts[0] == tmp_mounts[1]
+    assert tmp_mounts[1].startswith(tmp_mounts[0] + ",")
     source, destination = (
         tmp_mounts[0].removeprefix("--container-mounts=").split(":", 1)
     )

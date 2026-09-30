@@ -14,6 +14,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .pyxis_slurm import (
+    SRUN_MAX_ATTEMPTS,
+    is_retryable_prelaunch_failure,
+    wait_for_prelaunch_retry,
+)
 from .runner import RunnerError
 
 logger = logging.getLogger(__name__)
@@ -53,14 +58,17 @@ class PersistentExecChannel:
         # A new directory prevents stale requests or replies from being reused.
         protocol_dir.mkdir(mode=0o700)
 
-    def _fail(self, detail: str) -> RunnerError:
+    def _read_log(self) -> str:
         try:
             with (self.protocol_dir / "server.log").open("rb") as log:
-                log.seek(max(0, log.seek(0, os.SEEK_END) - 2000))
-                detail += "\n" + log.read().decode("utf-8", errors="replace")
+                log.seek(max(0, log.seek(0, os.SEEK_END) - 8000))
+                return log.read().decode("utf-8", errors="replace")
         except OSError:
             # Startup can fail before the log is created.
-            pass
+            return ""
+
+    def _fail(self, detail: str) -> RunnerError:
+        detail += "\n" + self._read_log()
         try:
             if self._failure_path is not None:
                 self._failure_path.touch()
@@ -88,18 +96,32 @@ class PersistentExecChannel:
             if self._closed or self._process is not None:
                 raise RunnerError("persistent Pyxis channel already started or closed")
             log_path = self.protocol_dir / "server.log"
-            try:
-                with log_path.open("wb") as log:
-                    self._process = subprocess.Popen(
-                        self._command,
-                        stdin=subprocess.DEVNULL,
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        env=self._env,
-                    )
-                self._wait_for(self.protocol_dir / "ready", self._launch_timeout_s)
-            except (OSError, RunnerError) as exc:
-                raise self._fail(f"worker did not become ready: {exc}") from exc
+            ready = self.protocol_dir / "ready"
+            for attempt in range(1, SRUN_MAX_ATTEMPTS + 1):
+                try:
+                    with log_path.open("wb") as log:
+                        self._process = subprocess.Popen(
+                            self._command,
+                            stdin=subprocess.DEVNULL,
+                            stdout=log,
+                            stderr=subprocess.STDOUT,
+                            env=self._env,
+                        )
+                    self._wait_for(ready, self._launch_timeout_s)
+                    return
+                except (OSError, RunnerError) as exc:
+                    # No requests can be published while start holds the lock.
+                    # Never relaunch a ready worker or a possibly running step.
+                    if (
+                        attempt < SRUN_MAX_ATTEMPTS
+                        and self._process is not None
+                        and self._process.poll() not in (None, 0)
+                        and not ready.exists()
+                        and is_retryable_prelaunch_failure("pending", self._read_log())
+                    ):
+                        wait_for_prelaunch_retry(attempt)
+                        continue
+                    raise self._fail(f"worker did not become ready: {exc}") from exc
 
     def _read_completion(self, request: Path) -> CommandResult:
         try:

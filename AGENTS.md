@@ -144,8 +144,10 @@ The aggregator is a separate process (`python -m inference_endpoint.async_utils.
 
 `evaluation/swebench_service/swebench_service/pyxis_persistent.py` owns one
 long-lived Slurm step per agent environment. The container runs the packaged
-`pyxis_command_worker.sh`, staged into its private `/tmp` mount. A lock serializes
-callers through one atomically published request directory and completion marker.
+`pyxis_command_worker.sh`, staged in a private control mount separate from tool
+`/tmp`. Worker startup retries only confirmed prelaunch Slurm failures before any
+request is published. A lock serializes callers through one atomically published
+request directory and completion marker.
 Commands run in fresh PID namespaces; accepted requests are never replayed after an
 uncertain failure. `pyxis_environment.py` owns container creation, command result
 mapping, and worker-before-container cleanup. All tool commands use the persistent
