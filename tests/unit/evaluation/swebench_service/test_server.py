@@ -188,6 +188,7 @@ async def test_health_response_schema(tmp_path):
     assert "swebench.cancel" in body["capabilities"]
     assert "artifacts.download" in body["capabilities"]
     assert "swebench.progress" in body["capabilities"]
+    assert "swebench.routing_headers" in body["capabilities"]
 
 
 @pytest.mark.asyncio

@@ -344,12 +344,15 @@ class SweBenchRunner:
         model_kwargs = model_cfg["model_kwargs"]
 
         model_cfg["model_name"] = request.model_name
+        model_cfg["routing_headers"] = list(request.routing_headers)
         if request.template == "qwen_tools":
             model_cfg["model_class"] = (
                 "swebench_service.qwen_tools_model.QwenToolsModel"
             )
         else:
-            model_cfg.pop("model_class", None)
+            model_cfg["model_class"] = (
+                "swebench_service.routing_model.SessionRoutingLitellmModel"
+            )
         if request.endpoint_urls:
             base = _normalize_endpoint_base(str(request.endpoint_urls[0]))
             model_kwargs["api_base"] = base + "/v1"

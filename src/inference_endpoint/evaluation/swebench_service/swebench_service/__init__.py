@@ -21,4 +21,5 @@ CAPABILITIES = [
     "swebench.cancel",
     "artifacts.download",
     "swebench.progress",
+    "swebench.routing_headers",
 ]

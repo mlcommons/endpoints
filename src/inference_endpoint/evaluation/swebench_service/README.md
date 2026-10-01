@@ -23,12 +23,17 @@ external-service convention for heavyweight evaluation work.
 ### Common workflow
 
 The benchmark client sends the selected SWE-bench instances, model configuration,
-and endpoint URL to the service. The service first runs mini-swe-agent to generate
-one patch per instance and writes the patches to `preds.json`. It then evaluates
-those predictions with the SWE-bench harness and returns the aggregate result and
-retained run artifacts. The selected runtime changes where and how the task
-containers execute; it does not change the benchmark client configuration or the
-model endpoint request path.
+endpoint URL, and routing-header names to the service. The routing names come from
+the performance dataset's `agentic_inference.routing_headers` setting and default
+to `X-Session-ID`. The service creates one opaque routing ID for each mini-swe-agent
+trajectory and sends it in every configured header on every model turn. IDs are
+stable within a trajectory and distinct across concurrent trajectories.
+
+The service first runs mini-swe-agent to generate one patch per instance and
+writes the patches to `preds.json`. It then evaluates those predictions with the
+SWE-bench harness and returns the aggregate result and retained run artifacts. The
+selected runtime changes where and how the task containers execute; it does not
+change the benchmark client configuration or the model endpoint request path.
 
 ### Docker runtime
 

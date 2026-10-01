@@ -38,7 +38,12 @@ from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics im
     encode_lengths,
     load_reference_backend,
 )
-from inference_endpoint.config.schema import DatasetType, ScorerMethod, TestMode
+from inference_endpoint.config.schema import (
+    AgenticInferenceConfig,
+    DatasetType,
+    ScorerMethod,
+    TestMode,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.evaluation import Extractor
 from inference_endpoint.evaluation.accuracy_results import (
@@ -55,6 +60,21 @@ if TYPE_CHECKING:
     from inference_endpoint.config.schema import EndpointConfig, ModelParams
 
 logger = logging.getLogger(__name__)
+
+
+def _swebench_routing_headers(ctx: BenchmarkContext) -> tuple[str, ...]:
+    """Match SWE-bench routing to the agentic performance conversation contract."""
+    perf_dataset = next(
+        (
+            dataset
+            for dataset in ctx.config.datasets
+            if dataset.type == DatasetType.PERFORMANCE
+        ),
+        None,
+    )
+    if perf_dataset is not None and perf_dataset.agentic_inference is not None:
+        return perf_dataset.agentic_inference.routing_headers
+    return AgenticInferenceConfig().routing_headers
 
 
 @dataclass(frozen=True)
@@ -269,6 +289,7 @@ def score_accuracy(
                 scorer_kwargs.update(
                     model_params=eval_cfg.model_params,
                     endpoint_config=eval_cfg.endpoint_config,
+                    routing_headers=_swebench_routing_headers(ctx),
                 )
             scorer_instance = eval_cfg.scorer(
                 eval_cfg.dataset_name,
