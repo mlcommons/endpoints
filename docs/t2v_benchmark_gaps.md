@@ -30,6 +30,10 @@ result, and accuracy runs. This document covers what the client must change so a
   blocker only if the working group (WG) rules a `not found` run invalid, which §4.4 lists as
   pending ratification.
 - `stream_all_chunks = true` (§6.5) is a plain client flag that a video config can set (§3.4).
+  A pending rules change (`arekay/streaming_chunks_client_false`, `d9e1ea6`) would instead require
+  `model_params.streaming` to resolve to `on` for every fixed-concurrency perf run. The video
+  adapter cannot stream, so that would block every T2V point until the rule exempts
+  non-streaming classes.
 
 **Not client work:** the §9.1 metric consistency check requires a TPOT distribution and rejects a
 submission at Week 0. That needs WG rule text, tracked in the NVIDIA readiness plan.
@@ -42,14 +46,17 @@ submission at Week 0. That needs WG rule text, tracked in the NVIDIA readiness p
 | [Tokenless support](#b-tokenless-support) | Artifact-safe tokenizer handling; steady-state gating without TPOT, if the WG requires it |
 | [Run settings](#c-run-settings) | A config setting for with-replacement sample order on perf runs |
 | [Example configs](#d-example-configs) | Point configs sized to whole passes, with seeds bound and no binding time cap |
-| Rules amendments | Video forms of §9.1 metric consistency, §4.1 metrics, and §4.4 gating. Not client tasks |
+| Rules amendments | Video forms of §9.1 metric consistency, §4.1 metrics, and §4.4 gating; a non-streaming exemption if the pending streaming change merges. Not client tasks |
 
 ## 1. Target shape
 
 Per v1.0 §5.3 and §5.7.2, a non-agentic submission with an **elected** Offline result is **7
 runs**: 1 Ultra Low point, 3 mandatory points (Low, Medium, High), and 3 submitter's-choice points,
 with the `C_max` point also reported as the Offline result. Accuracy is required at the 4 mandatory
-points plus Offline; the elected `C_max` point counts for both, so **4 accuracy runs**.
+points plus Offline; the elected `C_max` point fills both roles, so the plan uses **4 accuracy
+runs**. A pending Rules TF patch (`nvashutoshd_v1.0_rules_patch`, `b36c220`) makes `N` = 5 an
+exact count checked automatically, without saying how an elected point counts; if it needs 2
+results, the plan needs 5 runs. Choice points must not carry accuracy results under that patch.
 
 The planned point set, from the readiness plan: `C_min = 1`, `C_max = 72`, 1 x 72-GPU layout,
 points at concurrency 1, 2, 4, 8, 12, 36, 72; accuracy at 1, 4, 12, 72.
@@ -62,24 +69,6 @@ points at concurrency 1, 2, 4, 8, 12, 36, 72; accuracy at 1, 4, 12, 72.
   on the steady window's issue-time span when a window exists.
 - **§4.4**: a steady-state result needs a window of **≥ 4 super-passes**, so a run of **more than
   4**, and a gating metric that is a Plateau. Otherwise the point reports `total`.
-
-```mermaid
-flowchart LR
-  W["declared warmup<br/>not in data"] --> R["SP1: ramp crop<br/>at least 1"]
-  R --> S1[SP2] --> S2[SP3] --> S3[SP4] --> S4[SP5]
-  S4 --> D["drain<br/>excluded on issue time"]
-  subgraph window["steady window: at least 4 SPs AND issue span at least 600 or 1200 s"]
-    S1 & S2 & S3 & S4
-  end
-```
-
-```mermaid
-flowchart TD
-  A{"gating metric<br/>has samples?"} -- no --> T["total is the official result<br/>(not found: validity pending ratification)"]
-  A -- yes --> B{"window at least<br/>4 super-passes?"} -- no --> T
-  B -- yes --> C{"window issue span<br/>meets §6.2?"} -- no --> T
-  C -- yes --> S["steady-state metrics official<br/>total supplementary"]
-```
 
 ### 1.1 Metrics for video generation
 
@@ -179,7 +168,8 @@ None of these block a T2V benchmark; they explain the §4 recipe.
   reports inflated `qps` and deflated latency. Check `n_samples_failed`.
 - **`stream_all_chunks`** is a plain `settings.client` flag (`endpoint_client/config.py:186`), read
   only on the SSE path (`endpoint_client/worker.py:429`); nothing ties it to `streaming`. Setting
-  it in a video config meets §6.5 and the §9.1 streaming check as written.
+  it in a video config meets §6.5 and the §9.1 streaming check as written at `cdb203c`; see the
+  pending change noted at the top of this document.
 - **`compliance/checker.py`** is the Edge-Agentic (BFCL v4) checker, reachable only through
   `scripts/check_compliance.py`. It is not the Endpoints validator.
 
