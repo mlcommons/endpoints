@@ -17,6 +17,7 @@
 
 import logging
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -24,6 +25,7 @@ import pandas as pd
 from ..config.schema import APIType, ModelParams
 from ..exceptions import InputValidationError
 from .dataset import Dataset
+from .download import download_r2_artifact, verify_sha256
 from .transforms import (
     AddStaticColumns,
     apply_transforms,
@@ -241,6 +243,48 @@ class AgenticInferenceDataset(Dataset, dataset_id="agentic_inference_conversatio
     """
 
     COLUMN_NAMES = ["conversation_id", "turn", "role", "content"]
+    CACHE_FILENAME = "mlperf_agentic_inference_dataset.jsonl"
+    R2_DATASET_URI = (
+        "https://endpoints.mlcommons-storage.org/metadata/"
+        "mlperf_agentic_inference_dataset.uri"
+    )
+    DATASET_SHA256 = "1beb24c882122df96571cf11b390acbea388944038bc55c78b891475459014ae"
+
+    @classmethod
+    def _download_dataset(cls, cache_dir: Path, jsonl_path: Path) -> pd.DataFrame:
+        """Download, verify, and load the official MLPerf Agentic dataset."""
+        download_r2_artifact(
+            uri=cls.R2_DATASET_URI,
+            destination_dir=cache_dir,
+            artifact_name=jsonl_path.name,
+            expected_sha256=cls.DATASET_SHA256,
+        )
+        logger.info("Loaded Agentic Inference dataset from %s", jsonl_path)
+        return pd.read_json(jsonl_path, lines=True)
+
+    @classmethod
+    def generate(cls, datasets_dir: Path, force: bool = False) -> pd.DataFrame:
+        """Load the official Agentic Inference dataset from the local cache."""
+        cache_dir = datasets_dir / cls.DATASET_ID
+        jsonl_path = cache_dir / cls.CACHE_FILENAME
+        if jsonl_path.exists() and not force:
+            try:
+                verify_sha256(jsonl_path, cls.DATASET_SHA256)
+            except ValueError as exc:
+                logger.warning(
+                    "Cached Agentic Inference dataset failed verification (%s); "
+                    "re-downloading.",
+                    exc,
+                )
+                jsonl_path.unlink()
+            else:
+                logger.info(
+                    "Loading cached Agentic Inference dataset from %s", jsonl_path
+                )
+                return pd.read_json(jsonl_path, lines=True)
+
+        jsonl_path.unlink(missing_ok=True)
+        return cls._download_dataset(cache_dir, jsonl_path)
 
     def __init__(self, dataframe: pd.DataFrame, **kwargs):
         """Initialize agentic inference dataset.

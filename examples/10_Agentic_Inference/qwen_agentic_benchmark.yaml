@@ -14,9 +14,8 @@ model_params:
     preserve_thinking: true
 
 datasets:
-  - name: agentic_coding
+  - name: agentic_inference_conversations
     type: performance
-    path: ./agentic_combined.jsonl
     accuracy_config:
       eval_method: agentic_inference_inline # required benchmark default.
     agentic_inference:
