@@ -110,6 +110,20 @@ def merge_tool_calls(tool_calls: _TOOL_CALL_ELEM_TYPE | None) -> TOOL_CALLS_TYPE
     return tuple(merged[i] for i in sorted(merged))
 
 
+class FirstChunkBoundary(
+    msgspec.Struct, frozen=True, kw_only=True, array_like=True, gc=False
+):  # type: ignore[call-arg]
+    """Payload consumed at RECV_FIRST, before fields are accumulated separately.
+
+    Text offsets count Unicode characters, not bytes or tokens. Tool calls
+    count batches of deltas, each corresponding to one streamed response.
+    """
+
+    output_chars: int = 0
+    reasoning_chars: int = 0
+    tool_call_chunks: int = 0
+
+
 class TextModelOutput(
     msgspec.Struct,
     tag=True,
@@ -139,6 +153,9 @@ class TextModelOutput(
     output: OUTPUT_ELEM_TYPE = ""
     reasoning: OUTPUT_ELEM_TYPE | None = None
     tool_calls: _TOOL_CALL_ELEM_TYPE | None = None
+    # Appended for array-wire compatibility. Producers without an explicit
+    # boundary use the chunk tuples in output/reasoning instead.
+    first_chunk_boundary: FirstChunkBoundary | None = None
 
     def __post_init__(self):
         """Convert list to tuple for output, reasoning, and tool_calls to preserve immutability."""
@@ -185,6 +202,13 @@ class TextModelOutput(
         Streamed tool-call chunks are merged after dropping the first tool-call
         chunk when the response starts with a pure tool-call delta.
         """
+        if self.first_chunk_boundary is not None:
+            content, reasoning, tool_calls = self.as_message_parts_after_first_chunk()
+            text = (reasoning or "") + content
+            if tool_calls:
+                text += msgspec.json.encode(list(tool_calls)).decode()
+            return text
+
         parts: list[str] = []
         if self.reasoning:
             if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
@@ -237,6 +261,22 @@ class TextModelOutput(
         self,
     ) -> tuple[str, str | None, TOOL_CALLS_TYPE | None]:
         """Return message parts emitted after the first stream chunk."""
+        if (boundary := self.first_chunk_boundary) is not None:
+            content = (
+                self.output if isinstance(self.output, str) else "".join(self.output)
+            )
+            reasoning = self.reasoning
+            if isinstance(reasoning, tuple):
+                reasoning = "".join(reasoning)
+            tool_calls = self.tool_calls
+            if tool_calls:
+                tool_calls = tool_calls[boundary.tool_call_chunks :]
+            return (
+                content[boundary.output_chars :],
+                (reasoning[boundary.reasoning_chars :] or None) if reasoning else None,
+                merge_tool_calls(tool_calls),
+            )
+
         reasoning_after: str | None = None
         if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
             reasoning_after = "".join(self.reasoning[1:])

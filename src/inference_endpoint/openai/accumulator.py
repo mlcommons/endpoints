@@ -17,7 +17,12 @@
 
 from typing import Any
 
-from inference_endpoint.core.types import QueryResult, StreamChunk, TextModelOutput
+from inference_endpoint.core.types import (
+    FirstChunkBoundary,
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+)
 from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
@@ -33,6 +38,7 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         self.tool_call_chunks: list[tuple[dict[str, Any], ...]] = []
         self._finish_reason: str | None = None
 
+        self.first_chunk_boundary: FirstChunkBoundary | None = None
         self.first_chunk_sent = False
         self.query_id = query_id
         self.stream_all_chunks = stream_all_chunks
@@ -57,6 +63,12 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         if delta.content:
             self.output_chunks.append(delta.content)
         content = (rc or "") + (delta.content or "")
+        if not self.first_chunk_sent and (content or delta.tool_calls):
+            self.first_chunk_boundary = FirstChunkBoundary(
+                output_chars=len(delta.content or ""),
+                reasoning_chars=len(rc or ""),
+                tool_call_chunks=len(self.tool_call_chunks),
+            )
         if not content and delta.tool_calls and not self.first_chunk_sent:
             # Pure tool-call delta with no text: emit a zero-length sentinel so
             # RECV_FIRST / TTFT fires for agentic responses that have no content.
@@ -96,6 +108,7 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
                 output="".join(self.output_chunks),
                 reasoning=resp_reasoning,
                 tool_calls=tool_calls,
+                first_chunk_boundary=self.first_chunk_boundary,
             )
         elif self.output_chunks:
             resp_output: list[str] = [self.output_chunks[0]]
@@ -105,12 +118,14 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
                 output=resp_output,
                 reasoning=None,
                 tool_calls=tool_calls,
+                first_chunk_boundary=self.first_chunk_boundary,
             )
         else:
             text_output = TextModelOutput(
                 output=[],
                 reasoning=None,
                 tool_calls=tool_calls,
+                first_chunk_boundary=self.first_chunk_boundary,
             )
 
         metadata: dict[str, Any] = {

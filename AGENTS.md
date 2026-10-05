@@ -351,6 +351,7 @@ See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details
 ### Data Types & Serialization
 
 - **Core types** (`Query`, `QueryResult`, `StreamChunk`): `msgspec.Struct` with `frozen=True`, `array_like=True`, `gc=False`, `omit_defaults=True`
+- **Streaming response boundary**: OpenAI chat accumulators attach `FirstChunkBoundary` to `TextModelOutput`, recording content/reasoning character offsets and tool-call batch count at `RECV_FIRST`. TPOT excludes all fields in that first delta; do not infer its field composition from the final response. The boundary is a trailing optional wire field.
 - **Config types**: `pydantic.BaseModel` for validation
 - **Enums**: `str, Enum` pattern for serializable enums (e.g., `LoadPatternType`, `APIType`)
 - **Serialization**: `msgspec.json` for hot-path (ZMQ transport), `pydantic` for config
