@@ -1389,7 +1389,9 @@ class TestAsyncTriggers:
                             SampleEventType.COMPLETE,
                             "s1",
                             ts=5000,
-                            data=TextModelOutput(output="ok", tool_calls=(tool_call,)),
+                            data=TextModelOutput(
+                                output=("ok",), tool_calls=((), (tool_call,))
+                            ),
                         ),
                     ]
                 )

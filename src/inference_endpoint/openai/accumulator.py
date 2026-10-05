@@ -21,7 +21,7 @@ from inference_endpoint.core.types import QueryResult, StreamChunk, TextModelOut
 from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
-from inference_endpoint.openai.types import SSEChoice
+from inference_endpoint.openai.types import SSEChoice, SSEDelta
 
 
 class OpenAISSEAccumulator(SSEAccumulatorProtocol):
@@ -33,6 +33,7 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         self.tool_call_chunks: list[tuple[dict[str, Any], ...]] = []
         self._finish_reason: str | None = None
 
+        self._first_delta: SSEDelta | None = None
         self.first_chunk_sent = False
         self.query_id = query_id
         self.stream_all_chunks = stream_all_chunks
@@ -57,6 +58,8 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         if delta.content:
             self.output_chunks.append(delta.content)
         content = (rc or "") + (delta.content or "")
+        if not self.first_chunk_sent and (content or delta.tool_calls):
+            self._first_delta = delta
         if not content and delta.tool_calls and not self.first_chunk_sent:
             # Pure tool-call delta with no text: emit a zero-length sentinel so
             # RECV_FIRST / TTFT fires for agentic responses that have no content.
@@ -86,32 +89,22 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             return None
 
     def get_final_output(self) -> QueryResult:
-        tool_calls = tuple(self.tool_call_chunks) if self.tool_call_chunks else None
+        first = self._first_delta
+        first_content = (first.content or "") if first else ""
+        first_reasoning = (
+            (first.reasoning_content or first.reasoning or "") if first else ""
+        )
+        tool_calls = None
+        if self.tool_call_chunks:
+            tool_calls = tuple(self.tool_call_chunks)
+            if first is not None and not first.tool_calls:
+                tool_calls = ((), *tool_calls)
 
-        if self.reasoning_chunks:
-            resp_reasoning: list[str] = [self.reasoning_chunks[0]]
-            if len(self.reasoning_chunks) > 1:
-                resp_reasoning.append("".join(self.reasoning_chunks[1:]))
-            text_output = TextModelOutput(
-                output="".join(self.output_chunks),
-                reasoning=resp_reasoning,
-                tool_calls=tool_calls,
-            )
-        elif self.output_chunks:
-            resp_output: list[str] = [self.output_chunks[0]]
-            if len(self.output_chunks) > 1:
-                resp_output.append("".join(self.output_chunks[1:]))
-            text_output = TextModelOutput(
-                output=resp_output,
-                reasoning=None,
-                tool_calls=tool_calls,
-            )
-        else:
-            text_output = TextModelOutput(
-                output=[],
-                reasoning=None,
-                tool_calls=tool_calls,
-            )
+        text_output = TextModelOutput(
+            output=_with_first_chunk(self.output_chunks, first_content),
+            reasoning=_with_first_chunk(self.reasoning_chunks, first_reasoning) or None,
+            tool_calls=tool_calls,
+        )
 
         metadata: dict[str, Any] = {
             "first_chunk": not self.first_chunk_sent,
@@ -128,3 +121,13 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             response_output=text_output,
             metadata=metadata,
         )
+
+
+def _with_first_chunk(chunks: list[str], first: str) -> tuple[str, ...]:
+    """Keep the first delta's contribution separate from the accumulated tail."""
+    if not chunks:
+        return ()
+    tail_start = 1 if first else 0
+    if len(chunks) == tail_start:
+        return (first,)
+    return first, "".join(chunks[tail_start:])

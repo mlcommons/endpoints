@@ -122,7 +122,11 @@ class TextModelOutput(
     """Structured output from a text model.
 
     Supports main output, optional reasoning (e.g. chain-of-thought), and tool calls.
-    Each field may be a string (non-streaming) or tuple of strings (streaming chunks).
+    Text fields are strings for non-streaming responses or tuples for streaming.
+    Entry zero in every streamed field belongs to the same first meaningful delta.
+    Fields that start later use an empty first entry ("" for text, () for tools).
+    Remaining entries hold the tail; text entries may be aggregated. Tool calls
+    are a flat tuple for non-streaming or a tuple of delta batches for streaming.
 
     AT-RISK (gc=False): Has mutable container field `tool_calls`. Any change that
     mutates `tool_calls` after construction or stores cyclic references in it
@@ -182,38 +186,13 @@ class TextModelOutput(
         For non-streaming (str fields), there is no "first chunk" concept so
         this returns an empty string.
 
-        Streamed tool-call chunks are merged after dropping the first tool-call
-        chunk when the response starts with a pure tool-call delta.
+        All streamed fields exclude entry zero, including tool-call batches.
         """
-        parts: list[str] = []
-        if self.reasoning:
-            if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
-                parts.extend(self.reasoning[1:])
-            # str reasoning: single chunk, skip entirely (it IS the first chunk)
-        if self.output:
-            if isinstance(self.output, str):
-                # Non-streaming: if reasoning was present and was the first chunk,
-                # include the full output. Otherwise no first chunk to skip.
-                if parts or (self.reasoning and isinstance(self.reasoning, tuple)):
-                    parts.append(self.output)
-            elif isinstance(self.output, tuple):
-                if parts or self.reasoning:
-                    # First chunk was in reasoning; include all output chunks.
-                    parts.extend(self.output)
-                elif len(self.output) > 1:
-                    # No reasoning; first chunk is output[0], skip it.
-                    parts.extend(self.output[1:])
-        tool_calls = self.tool_calls
-        if (
-            tool_calls
-            and isinstance(tool_calls[0], list | tuple)
-            and not (self.output or self.reasoning)
-        ):
-            tool_calls = tool_calls[1:]
-        merged_tool_calls = merge_tool_calls(tool_calls)
-        if merged_tool_calls:
-            parts.append(msgspec.json.encode(list(merged_tool_calls)).decode())
-        return "".join(parts)
+        content, reasoning, tool_calls = self.as_message_parts_after_first_chunk()
+        text = (reasoning or "") + content
+        if tool_calls:
+            text += msgspec.json.encode(list(tool_calls)).decode()
+        return text
 
     def as_message_parts(
         self,
@@ -236,38 +215,17 @@ class TextModelOutput(
     def as_message_parts_after_first_chunk(
         self,
     ) -> tuple[str, str | None, TOOL_CALLS_TYPE | None]:
-        """Return message parts emitted after the first stream chunk."""
-        reasoning_after: str | None = None
-        if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
-            reasoning_after = "".join(self.reasoning[1:])
-
-        # has_reasoning_tail: reasoning[1:] is non-empty (mirrors `parts` logic in text_after_first_chunk)
-        has_reasoning_tail = reasoning_after is not None
-
-        content_after = ""
-        if self.output:
-            if isinstance(self.output, str):
-                # Include if reasoning is any non-empty tuple (it was the first chunk)
-                if has_reasoning_tail or (
-                    self.reasoning and isinstance(self.reasoning, tuple)
-                ):
-                    content_after = self.output
-            elif isinstance(self.output, tuple):
-                if has_reasoning_tail or self.reasoning:
-                    # First chunk was in reasoning; include all output chunks.
-                    content_after = "".join(self.output)
-                elif len(self.output) > 1:
-                    # No reasoning; first chunk is output[0], skip it.
-                    content_after = "".join(self.output[1:])
-
-        tool_calls = self.tool_calls
-        if (
-            tool_calls
-            and isinstance(tool_calls[0], list | tuple)
-            and not (self.output or self.reasoning)
-        ):
-            tool_calls = tool_calls[1:]
-        return content_after, reasoning_after, merge_tool_calls(tool_calls)
+        """Drop the aligned first entry in each streamed field for TPOT."""
+        content = "".join(self.output[1:]) if isinstance(self.output, tuple) else ""
+        reasoning = (
+            "".join(self.reasoning[1:]) or None
+            if isinstance(self.reasoning, tuple)
+            else None
+        )
+        tool_calls = None
+        if self.tool_calls and isinstance(self.tool_calls[0], list | tuple):
+            tool_calls = merge_tool_calls(self.tool_calls[1:])
+        return content, reasoning, tool_calls
 
 
 OUTPUT_TYPE = TextModelOutput

@@ -45,9 +45,8 @@ def test_text_after_first_chunk_streaming_output_drops_first():
 
 
 def test_text_after_first_chunk_reasoning_first_keeps_all_output():
-    # reasoning is a tuple (streaming) -> first chunk lived in reasoning, so all
-    # output chunks are post-first-chunk and are kept.
-    data = ["TextModelOutput", ["out1 ", "out2"], ["think1 ", "think2 "]]
+    # The first delta contains only reasoning, so content has an empty first entry.
+    data = ["TextModelOutput", ["", "out1 ", "out2"], ["think1 ", "think2 "]]
     assert mod.text_after_first_chunk(data) == "think2 out1 out2"
 
 
