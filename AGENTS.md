@@ -493,11 +493,13 @@ details.
 - **Core types** (`Query`, `QueryResult`, `StreamChunk`): `msgspec.Struct` with
   `frozen=True`, `array_like=True`, `gc=False`, `omit_defaults=True`
 - **Streaming response boundary**: Entry zero of each streamed `TextModelOutput`
-  field represents the same first meaningful delta. Fields that start later
-  need an empty first entry (`""` for text, `()` for tool-call batches). TPOT
-  drops entry zero independently in every field; full-output consumers combine
-  all entries. Text tails may be aggregated; tool-call batches retain their
-  fragment indices for merging.
+  field represents the same first meaningful delta. Fields that start later need
+  an empty first entry (`""` for text, `()` for tool-call batches). TPOT drops
+  entry zero independently in every field; full-output consumers combine all
+  entries. Text tails may be aggregated; tool-call batches retain their fragment
+  indices for merging. A `str` `output` beside streamed `reasoning` is the
+  joined-content layout of existing event logs; TPOT replay counts all of that
+  output as tail, so archived runs keep their original TPOT.
 - **Config types**: `pydantic.BaseModel` for validation
 - **Enums**: `str, Enum` pattern for serializable enums (e.g.,
   `LoadPatternType`, `APIType`)

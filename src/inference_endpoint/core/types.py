@@ -127,6 +127,8 @@ class TextModelOutput(
     Fields that start later use an empty first entry ("" for text, () for tools).
     Remaining entries hold the tail; text entries may be aggregated. Tool calls
     are a flat tuple for non-streaming or a tuple of delta batches for streaming.
+    A str output beside streamed reasoning is the joined-content layout of
+    existing event logs; all of that output follows the first delta.
 
     AT-RISK (gc=False): Has mutable container field `tool_calls`. Any change that
     mutates `tool_calls` after construction or stores cyclic references in it
@@ -216,7 +218,13 @@ class TextModelOutput(
         self,
     ) -> tuple[str, str | None, TOOL_CALLS_TYPE | None]:
         """Drop the aligned first entry in each streamed field for TPOT."""
-        content = "".join(self.output[1:]) if isinstance(self.output, tuple) else ""
+        if isinstance(self.output, tuple):
+            content = "".join(self.output[1:])
+        elif isinstance(self.reasoning, tuple) and self.reasoning:
+            # Joined-content layout of existing event logs (see class docstring).
+            content = self.output
+        else:
+            content = ""
         reasoning = (
             "".join(self.reasoning[1:]) or None
             if isinstance(self.reasoning, tuple)

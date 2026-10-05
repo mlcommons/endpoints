@@ -714,12 +714,12 @@ class TestTextAfterFirstChunk:
             ("think", "abc", ""),
             # Non-streaming reasoning, streamed output
             ("think", ("a", "b"), "b"),
-            # Tuple reasoning (multi), str output
-            (("t1", "t2"), "abc", "t2"),
+            # Streamed reasoning, joined str output: all content follows the first delta
+            (("t1", "t2"), "abc", "t2abc"),
             # Tuple reasoning (multi), tuple output
             (("t1", "t2"), ("a", "b"), "t2b"),
-            # Single-element tuple reasoning, non-streaming output
-            (("t1",), "abc", ""),
+            # Single-element streamed reasoning, joined str output
+            (("t1",), "abc", "abc"),
             # Single-element tuple reasoning, streamed output
             (("t1",), ("a", "b"), "b"),
             # Falsy str reasoning (empty string), tuple output — treated as no reasoning

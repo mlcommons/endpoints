@@ -50,6 +50,11 @@ def test_text_after_first_chunk_reasoning_first_keeps_all_output():
     assert mod.text_after_first_chunk(data) == "think2 out1 out2"
 
 
+def test_text_after_first_chunk_joined_output_follows_streamed_reasoning():
+    data = ["TextModelOutput", "out1 out2", ["think1 ", "think2 "]]
+    assert mod.text_after_first_chunk(data) == "think2 out1 out2"
+
+
 def test_text_after_first_chunk_non_streaming_str_has_no_first_chunk():
     data = ["TextModelOutput", "the whole answer"]
     assert mod.text_after_first_chunk(data) == ""

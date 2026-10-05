@@ -602,6 +602,8 @@ def text_after_first_chunk(data: object) -> str:
         parts.extend(reasoning[1:])
     if isinstance(output, list):
         parts.extend(output[1:])
+    elif isinstance(output, str) and isinstance(reasoning, list) and reasoning:
+        parts.append(output)
     # Tool-call reconstruction is intentionally omitted: tool-call samples use a
     # chat-template tokenization path this diagnostic does not replicate.
     return "".join(parts)
