@@ -51,15 +51,13 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         if delta.tool_calls:
             self.tool_call_chunks.append(tuple(delta.tool_calls))
 
-        content = None
+        rc = delta.reasoning_content or delta.reasoning
+        if rc:
+            self.reasoning_chunks.append(rc)
         if delta.content:
             self.output_chunks.append(delta.content)
-            content = delta.content
-        elif delta.reasoning_content or delta.reasoning:
-            rc = delta.reasoning_content or delta.reasoning
-            self.reasoning_chunks.append(rc)  # type: ignore[arg-type]
-            content = rc
-        elif delta.tool_calls and not self.first_chunk_sent:
+        content = (rc or "") + (delta.content or "")
+        if not content and delta.tool_calls and not self.first_chunk_sent:
             # Pure tool-call delta with no text: emit a zero-length sentinel so
             # RECV_FIRST / TTFT fires for agentic responses that have no content.
             sentinel = StreamChunk(
@@ -69,7 +67,7 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             )
             self.first_chunk_sent = True
             return sentinel
-        else:
+        elif not content:
             return None
 
         if content is not None and (

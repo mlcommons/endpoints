@@ -179,3 +179,47 @@ class TestAccumulatorMixedReasoningAndToolCalls:
         assert result.response_output.tool_calls is None
         assert result.response_output.as_message_parts_after_first_chunk()[2] is None
         assert "tool_calls" not in result.metadata
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+@pytest.mark.parametrize("stream_all_chunks", [False, True])
+@pytest.mark.parametrize("with_tool_calls", [False, True])
+def test_mixed_reasoning_and_content_are_both_preserved(
+    reasoning_field, stream_all_chunks, with_tool_calls
+):
+    acc = OpenAISSEAccumulator("qid", stream_all_chunks=stream_all_chunks)
+    tool_calls = (
+        [
+            {
+                "index": 0,
+                "id": "call1",
+                "type": "function",
+                "function": {"name": "answer", "arguments": "{}"},
+            }
+        ]
+        if with_tool_calls
+        else None
+    )
+    first = acc.add_chunk(
+        SSEChoice(
+            delta=SSEDelta(
+                content="42", tool_calls=tool_calls, **{reasoning_field: "Think: "}
+            )
+        )
+    )
+    second = acc.add_chunk(
+        SSEChoice(delta=SSEDelta(content="!", **{reasoning_field: "done"}))
+    )
+
+    assert first.response_chunk == "Think: 42"
+    assert first.metadata["first_chunk"] is True
+    if stream_all_chunks:
+        assert second.response_chunk == "done!"
+        assert second.metadata["first_chunk"] is False
+    else:
+        assert second is None
+    output = acc.get_final_output().response_output
+    assert output.output == "42!"
+    assert "".join(output.reasoning) == "Think: done"
+    assert output.tool_calls == ((tuple(tool_calls),) if tool_calls else None)
