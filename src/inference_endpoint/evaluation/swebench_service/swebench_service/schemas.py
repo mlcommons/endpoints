@@ -39,6 +39,7 @@ class RunRequest(BaseModel):
     model_name: str = Field(min_length=1)
     endpoint_urls: list[str] = Field(min_length=1, max_length=1)
     endpoint_api_key: str | None = None
+    routing_headers: tuple[str, ...] = ("X-Session-ID",)
     generation_params: dict[str, Any] = Field(default_factory=dict)
     subset: SWEBenchSubset = "verified"
     split: str = "test"

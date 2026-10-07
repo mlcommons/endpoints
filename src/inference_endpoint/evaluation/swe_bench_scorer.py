@@ -65,6 +65,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         "swebench.run",
         "swebench.cancel",
         "artifacts.download",
+        "swebench.routing_headers",
     }
     SAFE_ARTIFACT_NAMES: ClassVar[set[str]] = {
         "preds.json",
@@ -95,6 +96,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         poll_interval_s: float | None = None,
         model_params: ModelParams | None = None,
         endpoint_config: EndpointConfig | None = None,
+        routing_headers: tuple[str, ...] = ("X-Session-ID",),
     ):
         ground_truth_column = ground_truth_column or "instance_id"
         super().__init__(
@@ -131,6 +133,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         self.poll_interval_s = options["poll_interval_s"]
         self.model_params = model_params
         self.endpoint_config = endpoint_config
+        self.routing_headers = tuple(routing_headers)
 
     @classmethod
     def _normalize_service_url(cls, value: Any) -> str:
@@ -629,6 +632,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             "model_name": model_name,
             "endpoint_urls": endpoint_urls,
             "endpoint_api_key": self.endpoint_config.api_key,
+            "routing_headers": self.routing_headers,
             "generation_params": self._generation_params(self.model_params),
             "subset": self.subset,
             "split": self.split,
