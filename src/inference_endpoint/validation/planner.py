@@ -75,9 +75,12 @@ def _member_subject(subject: Context, member: Context) -> Context:
     )
 
 
-def _select_collection(rule: Rule, subject: Context):
+def _select_collection(
+    rule: Rule, subject: Context
+) -> tuple[Decision, str, tuple[str, ...] | None]:
     if subject.members is None or not (rule.applies_to or rule.unless):
-        return (*_select(rule, subject), None)
+        decision, reason = _select(rule, subject)
+        return decision, reason, None
     selected = []
     unknown = False
     for member in subject.members:

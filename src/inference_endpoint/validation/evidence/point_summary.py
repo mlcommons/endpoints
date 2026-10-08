@@ -79,18 +79,6 @@ class PointSummary(BaseModel):
 
     @computed_field  # type: ignore[misc]
     @property
-    def duration_ms(self) -> float:
-        """Measurement duration in milliseconds."""
-        return self.duration_ns / 1000000
-
-    @computed_field  # type: ignore[misc]
-    @property
-    def sample_count(self) -> int:
-        """Alias for ``n_samples_completed``."""
-        return self.n_samples_completed
-
-    @computed_field  # type: ignore[misc]
-    @property
     def total_output_tokens(self) -> int:
         """Total output tokens from ``output_sequence_lengths.total``."""
         return int(self.output_sequence_lengths.total)
@@ -107,31 +95,6 @@ class PointSummary(BaseModel):
         """System-wide tokens per second: ``total_output_tokens / elapsed_s``."""
         elapsed_s = self.elapsed_duration_seconds
         return self.total_output_tokens / elapsed_s if elapsed_s > 0 else 0.0
-
-    @computed_field  # type: ignore[misc]
-    @property
-    def ttft_p50_ms(self) -> float:
-        """Median time to first token in milliseconds."""
-        return self.ttft.percentiles.get("50", 0.0) / 1000000
-
-    @computed_field  # type: ignore[misc]
-    @property
-    def ttft_p90_ms(self) -> float:
-        """90th-percentile time to first token in milliseconds (§4.1)."""
-        return self.ttft.percentiles.get("90", 0.0) / 1000000
-
-    @computed_field  # type: ignore[misc]
-    @property
-    def ttft_p95_ms(self) -> float:
-        """95th-percentile time to first token in milliseconds."""
-        return self.ttft.percentiles.get("95", 0.0) / 1000000
-
-    @computed_field  # type: ignore[misc]
-    @property
-    def tpot_p90_ms(self) -> float | None:
-        """90th-percentile time per output token in milliseconds (§9.1)."""
-        raw = self.tpot.percentiles.get("90")
-        return None if raw is None else raw / 1000000
 
     @computed_field  # type: ignore[misc]
     @property

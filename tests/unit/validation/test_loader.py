@@ -164,12 +164,14 @@ def test_parser_dispatch_has_no_latest_revision_fallback():
         with pytest.raises(ValueError, match="Unsupported"):
             parser_for(Release(version=version, revision=revision))
     with pytest.raises(ValueError, match="Overlapping"):
-
-        class Conflicting(
-            BundleParser, version="2026-10-C1", first_revision=1, last_revision=2
-        ):
-            def __call__(self, documents, digests):
-                raise AssertionError("Must not execute")
+        type(
+            "Conflicting",
+            (BundleParser,),
+            {},
+            version="2026-10-C1",
+            first_revision=1,
+            last_revision=2,
+        )
 
 
 @pytest.mark.parametrize(

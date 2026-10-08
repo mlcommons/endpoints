@@ -7,14 +7,7 @@ from __future__ import annotations
 from os import PathLike
 from pathlib import Path
 
-from . import bindings  # noqa: F401 - register evaluator classes
 from .artifacts import load_artifacts
-from .checks import (  # noqa: F401 - register evaluator classes
-    collections,
-    datasets,
-    metrics,
-    structure,
-)
 from .checks.power import prepare
 from .evaluator_base import Evaluator
 from .models import Policy

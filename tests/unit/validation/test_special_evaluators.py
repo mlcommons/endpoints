@@ -13,7 +13,6 @@ from inference_endpoint.validation import (
     Conditions,
     Context,
     bundled_policy_path,
-    checks,  # noqa: F401 - registers built-in evaluators
     load_policy,
 )
 from inference_endpoint.validation.artifacts import (

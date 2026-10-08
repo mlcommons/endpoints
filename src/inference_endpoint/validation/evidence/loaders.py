@@ -13,10 +13,6 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from ..results import CheckResult
-from .accuracy import AccuracyResult
-from .point_config import PointConfig
-from .point_summary import PointSummary
-from .system import SystemDescription
 
 MAX_ARTIFACT_DEPTH = 100
 
@@ -166,32 +162,3 @@ def read_artifact(  # noqa: UP047 - supported by the repository type checker
             return ParsedArtifact(None, frozenset(), (), False)
         data = {"accuracy_scores": data}
     return ParsedArtifact.from_json(data, model, path, rule)
-
-
-def load_point_config(path: Path) -> tuple[PointConfig | None, list[CheckResult]]:
-    parsed = read_artifact(path, PointConfig, "point-config-valid")
-    return parsed.value, list(parsed.errors)
-
-
-def load_result_summary(path: Path) -> tuple[PointSummary | None, list[CheckResult]]:
-    parsed = read_artifact(path, PointSummary, "result-file-valid")
-    return parsed.value, list(parsed.errors)
-
-
-def load_system_description(
-    path: Path,
-) -> tuple[SystemDescription | None, list[CheckResult]]:
-    parsed = read_artifact(path, SystemDescription, "system-description-valid")
-    return parsed.value, list(parsed.errors)
-
-
-def load_accuracy_result(path: Path) -> tuple[AccuracyResult | None, list[CheckResult]]:
-    parsed = read_artifact(path, AccuracyResult, "accuracy-valid")
-    return parsed.value, list(parsed.errors)
-
-
-def load_accuracy_scores(
-    path: Path,
-) -> tuple[AccuracyResult | None, list[CheckResult], bool]:
-    parsed = read_artifact(path, AccuracyResult, "accuracy-valid", accuracy_scores=True)
-    return parsed.value, list(parsed.errors), parsed.present

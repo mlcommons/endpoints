@@ -108,12 +108,18 @@ def test_untrusted_nan_region_basis_blocks_without_crashing(
     assert not report.passed
 
 
+def test_all_builtin_kinds_are_registered():
+    assert set(Evaluator.registry) == set(CheckKind)
+
+
 def test_registry_rejects_duplicate_kinds():
     with pytest.raises(ValueError, match="Duplicate evaluator"):
-
-        class Duplicate(Evaluator, kind=CheckKind.COMPARISON):
-            def __call__(self, check, artifacts):
-                return []
+        type(
+            "Duplicate",
+            (Evaluator,),
+            {"__call__": lambda self, check, artifacts: []},
+            kind=CheckKind.COMPARISON,
+        )
 
 
 def test_model_accuracy_catalog_changes_public_results(standardized_submission):

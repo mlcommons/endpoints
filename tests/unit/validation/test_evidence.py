@@ -18,10 +18,9 @@ from inference_endpoint.validation.catalogs.seeds import (
     parse_seed_catalog,
 )
 from inference_endpoint.validation.evidence.accuracy import AccuracyResult
-from inference_endpoint.validation.evidence.loaders import (
-    load_point_config,
-    load_result_summary,
-)
+from inference_endpoint.validation.evidence.loaders import read_artifact
+from inference_endpoint.validation.evidence.point_config import PointConfig
+from inference_endpoint.validation.evidence.point_summary import PointSummary
 from inference_endpoint.validation.power.models import SourcedValue
 
 pytestmark = pytest.mark.unit
@@ -30,10 +29,10 @@ pytestmark = pytest.mark.unit
 def test_point_parsing_does_not_enforce_submission_policy(tmp_path):
     path = tmp_path / "point.yaml"
     path.write_text("concurrency: 1\nruntime_settings:\n  runtime: {}\n")
-    model, findings = load_point_config(path)
-    assert model is not None
-    assert not findings
-    assert not hasattr(model, "_check_results")
+    parsed = read_artifact(path, PointConfig, "point-config-valid")
+    assert parsed.value is not None
+    assert not parsed.errors
+    assert not hasattr(parsed.value, "_check_results")
 
 
 def test_native_accuracy_aliases_and_duplicate_datasets():
@@ -65,9 +64,9 @@ def test_empty_accuracy_is_rejected_by_selected_check(tmp_path):
 def test_unreadable_encoding_becomes_structured_schema_error(tmp_path):
     path = tmp_path / "result_summary.json"
     path.write_bytes(b"\xff")
-    model, findings = load_result_summary(path)
-    assert model is None
-    assert findings[0].key == "artifact-unreadable"
+    parsed = read_artifact(path, PointSummary, "result-file-valid")
+    assert parsed.value is None
+    assert parsed.errors[0].key == "artifact-unreadable"
 
 
 @pytest.mark.parametrize("value", [float("inf"), float("nan")])

@@ -6,7 +6,8 @@ import json
 
 import pytest
 
-from inference_endpoint.validation.evidence.loaders import load_result_summary
+from inference_endpoint.validation.evidence.loaders import read_artifact
+from inference_endpoint.validation.evidence.point_summary import PointSummary
 from inference_endpoint.validation.types import Severity
 
 pytestmark = pytest.mark.unit
@@ -23,7 +24,7 @@ def test_invalid_stored_metrics_are_structured_load_errors(tmp_path, field, valu
     path.write_text(
         json.dumps({"n_samples_completed": 1, "duration_ns": 1e9, field: value})
     )
-    model, results = load_result_summary(path)
-    assert model is None
-    assert results
-    assert all(result.severity == Severity.ERROR for result in results)
+    parsed = read_artifact(path, PointSummary, "result-file-valid")
+    assert parsed.value is None
+    assert parsed.errors
+    assert all(result.severity == Severity.ERROR for result in parsed.errors)

@@ -69,13 +69,6 @@ class SteadyStateWindow(BaseModel):
     n_samples: int | None = None
     duration_s: float | None = None
 
-    @property
-    def super_passes(self) -> int | None:
-        """How many super-passes the window spans, or None when unstated."""
-        if self.super_pass_start is None or self.super_pass_end is None:
-            return None
-        return self.super_pass_end - self.super_pass_start + 1
-
 
 class SteadyState(BaseModel):
     """A point's §4.4 reporting block."""
