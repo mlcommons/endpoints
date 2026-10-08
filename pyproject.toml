@@ -176,6 +176,7 @@ bfcl = [
 
 [project.scripts]
 inference-endpoint = "inference_endpoint.main:run"
+inference-endpoint-validation = "inference_endpoint.validation.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/mlperf/inference-endpoint"
