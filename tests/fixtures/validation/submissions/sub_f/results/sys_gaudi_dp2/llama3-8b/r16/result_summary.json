@@ -1,0 +1,29 @@
+{
+  "n_samples_issued": 13368,
+  "n_samples_completed": 13368,
+  "n_samples_failed": 0,
+  "duration_ns": 3505224837302.0005,
+  "ttft": {
+    "total": 3373550899608.0,
+    "percentiles": {
+      "50": 252360181.0,
+      "95": 550608223.3999999,
+      "90": 490958614.9199999
+    }
+  },
+  "output_sequence_lengths": {
+    "total": 1711102.0,
+    "percentiles": {}
+  },
+  "tpot": {
+    "total": 54127032000.00001,
+    "percentiles": {
+      "50": 4000000.0,
+      "90": 5500000.0,
+      "95": 6000000.0,
+      "99": 6500000.0
+    }
+  },
+  "system_tps": 488.1576,
+  "tps_per_user": 181.8182
+}

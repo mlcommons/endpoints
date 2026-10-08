@@ -1,0 +1,60 @@
+{
+  "submitter_org_names": "Submitter-D",
+  "submitter_contact": "contact@example.com",
+  "system_name": "sys_tpu_8chip",
+  "system_category": "datacenter",
+  "max_supported_concurrency": 1024,
+  "serving_framework": "vLLM (TPU)",
+  "node_types": [
+    {
+      "system_node_ensemble_id": 0,
+      "number_of_nodes": 1,
+      "host_processor_model_name": "Custom TPU Host CPU",
+      "host_processors_per_node": 1,
+      "host_processor_core_count": 24,
+      "host_memory_capacity": "192 GB",
+      "host_networking": "Ethernet 100Gb",
+      "host_storage_capacity": "10 TB",
+      "host_storage_type": "NVMe SSD",
+      "operating_system": "Debian 11",
+      "host_memory_configuration": "8x 64GB DDR5",
+      "host_network_card_count": "1x NIC",
+      "driver": "1.0",
+      "filesystem": "ext4",
+      "accelerator_info": [
+        {
+          "accelerator_model_name": "Google TPU v5p",
+          "accelerators_per_node": 8,
+          "accelerator_memory_capacity": "96 GB HBM2e",
+          "accelerator_memory_type": "HBM3e"
+        }
+      ]
+    }
+  ],
+  "division": "Standardized",
+  "model_precision": "FP16",
+  "link_to_model": "https://example.com/model",
+  "dataset_id": "cnn_dailymail",
+  "dataset_name": "CNN/DailyMail",
+  "input_token_average": 870.0,
+  "output_token_average": 128.0,
+  "dataset_type": "performance",
+  "dataset_link": "https://example.com/dataset",
+  "measured_accuracy_score": "38.7",
+  "system_size": "1 node",
+  "model_id": "qwen3-coder-480b",
+  "system_node_ensemble_count": 1,
+  "system_node_ensemble_total": 1,
+  "publication_status": "Available",
+  "node_config": "8x H100 test node",
+  "config_summary": {
+    "disaggregated": null,
+    "expert_parallel": 1,
+    "tensor_parallel": 8,
+    "pipeline_parallel": 1,
+    "data_parallel": 1,
+    "batch": null
+  },
+  "cooling": "Liquid-cooled",
+  "tps_utilization": 0.657651
+}

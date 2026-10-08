@@ -1,0 +1,11 @@
+{
+  "math500": {
+    "dataset_name": "math500",
+    "num_samples": 4388,
+    "score": {
+      "exact_match": 81.3582
+    },
+    "extractor": "BoxedAnswerExtractor",
+    "n_repeats": 1
+  }
+}

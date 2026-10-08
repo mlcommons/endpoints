@@ -3,10 +3,16 @@
 """Structural evidence parsing and policy/evidence separation."""
 
 import json
+from dataclasses import replace
 
 import pytest
 from pydantic import ValidationError
 
+from inference_endpoint.validation import (
+    bundled_policy_path,
+    load_policy,
+    validate_submission,
+)
 from inference_endpoint.validation.catalogs.seeds import (
     SeedSetError,
     parse_seed_catalog,
@@ -42,6 +48,18 @@ def test_native_accuracy_aliases_and_duplicate_datasets():
     assert model.root["aime25"]["n_repeats"] == 2
     with pytest.raises(ValidationError, match="appears more than once"):
         AccuracyResult.model_validate({"accuracy_scores": [entry, entry]})
+
+
+def test_empty_accuracy_is_rejected_by_selected_check(tmp_path):
+    point = tmp_path / "results" / "system" / "llama3_1-8b" / "r16"
+    point.mkdir(parents=True)
+    (point / "accuracy_results.json").write_text("{}")
+    policy = load_policy(bundled_policy_path())
+    rule = next(rule for rule in policy.checks if rule.id == "accuracy-valid")
+    report = validate_submission(tmp_path, policy=replace(policy, checks=(rule,)))
+    assert not report.passed
+    assert report.errors[0].rule == "accuracy-valid"
+    assert "empty" in report.errors[0].message
 
 
 def test_unreadable_encoding_becomes_structured_schema_error(tmp_path):

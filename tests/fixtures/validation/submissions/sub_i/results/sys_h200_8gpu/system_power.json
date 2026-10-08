@@ -1,0 +1,44 @@
+{
+  "system_desc_id": "sys_h200_8gpu",
+  "cooling": "air",
+  "node_sets": [
+    {
+      "node_set_id": 0,
+      "system_node_ensemble_id": 0,
+      "nodes_provisioned": 1,
+      "power_method": "component_sum",
+      "components": {
+        "cpu": {
+          "model": "Intel Xeon Platinum 8562Y+",
+          "count_per_node": 2,
+          "tdp_per_unit": {
+            "value_w": 350,
+            "source_type": "vendor_spec",
+            "source": "https://example.com/cpu-spec"
+          }
+        },
+        "accelerator": {
+          "model": "NVIDIA H200-SXM-141GB",
+          "count_per_node": 8,
+          "tdp_per_unit": {
+            "value_w": 700,
+            "source_type": "vendor_spec",
+            "source": "https://example.com/accelerator-spec"
+          }
+        },
+        "scale_up_network": {
+          "method": "declared_tdp",
+          "switch_count": 1,
+          "tdp_per_switch": {
+            "value_w": 3500,
+            "source_type": "vendor_spec",
+            "source": "https://example.com/switch-spec"
+          }
+        }
+      }
+    }
+  ],
+  "scale_out": {
+    "present": false
+  }
+}

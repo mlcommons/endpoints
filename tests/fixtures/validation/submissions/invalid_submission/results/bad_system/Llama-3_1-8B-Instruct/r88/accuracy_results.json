@@ -1,0 +1,13 @@
+{
+  "cnn_dailymail::llama3_8b": {
+    "dataset_name": "cnn_dailymail::llama3_8b",
+    "num_samples": 500,
+    "extractor": "RougeExtractor",
+    "score": {
+      "rouge1": "30.00",
+      "rouge2": "12.00",
+      "rougeL": "20.00"
+    },
+    "n_repeats": 1
+  }
+}

@@ -12,8 +12,10 @@ from inference_endpoint.config.schema import LoadPatternType
 from inference_endpoint.validation import (
     bundled_policy_path,
     load_policy,
+    validate_submission,
 )
 from inference_endpoint.validation.artifacts import PointArtifacts, load_artifacts
+from inference_endpoint.validation.types import EvidenceKey
 
 pytestmark = pytest.mark.unit
 
@@ -80,6 +82,29 @@ def test_reported_metrics_do_not_resolve_to_calculated_values(tmp_path, document
     omitted = PointArtifacts.from_json(tmp_path, *documents)
     assert omitted.summary.system_tps == 50
     assert omitted.get_summary("system_tps") is None
+
+
+def test_malformed_config_blocks_dependent_check(tmp_path):
+    point = tmp_path / "results" / "system" / "gpt-oss-120b" / "r16"
+    point.mkdir(parents=True)
+    (point / "point.yaml").write_text(
+        json.dumps({"concurrency": "bad", "runtime_settings": {"runtime": {}}})
+    )
+    policy = load_policy(bundled_policy_path())
+    artifacts = load_artifacts(tmp_path, policy)
+    parsed = artifacts.index.points[str(point)]
+    assert parsed.config is None
+    assert parsed.evidence.config.errors
+    assert EvidenceKey.POINT_CONFIG in parsed.context.invalid
+    report = validate_submission(tmp_path, policy=policy)
+    assert any(
+        result.rule == "point-config-valid" and not result.passed
+        for result in report.results
+    )
+    assert any(
+        result.rule == "target-cohort" and result.key == "blocked"
+        for result in report.results
+    )
 
 
 @pytest.mark.parametrize("standalone_accuracy", [False, True])

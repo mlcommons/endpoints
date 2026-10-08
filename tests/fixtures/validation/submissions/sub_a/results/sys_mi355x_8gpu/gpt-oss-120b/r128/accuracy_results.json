@@ -1,0 +1,11 @@
+{
+  "cnn_dailymail_validation": {
+    "dataset_name": "cnn_dailymail_validation",
+    "num_samples": 4395,
+    "score": {
+      "exact_match": 83.13
+    },
+    "extractor": "RougeExtractor",
+    "n_repeats": 1
+  }
+}

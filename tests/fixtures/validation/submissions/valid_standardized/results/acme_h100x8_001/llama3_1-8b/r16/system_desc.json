@@ -1,0 +1,63 @@
+{
+  "submitter_org_names": "ACME Corp",
+  "submitter_contact": "contact@example.com",
+  "system_name": "ACME H100x8 Node",
+  "system_category": "datacenter",
+  "max_supported_concurrency": 1000,
+  "serving_framework": "vLLM 0.4.2",
+  "node_types": [
+    {
+      "system_node_ensemble_id": 0,
+      "number_of_nodes": 1,
+      "host_processor_model_name": "AMD EPYC 9654",
+      "host_processors_per_node": 2,
+      "host_processor_core_count": 96,
+      "host_memory_capacity": "768 GB",
+      "host_networking": "InfiniBand HDR",
+      "host_storage_capacity": "20 TB",
+      "host_storage_type": "NVMe SSD",
+      "cooling": "Air-cooled",
+      "operating_system": "Ubuntu 22.04",
+      "host_memory_configuration": "8x 64GB DDR5",
+      "host_network_card_count": "1x NIC",
+      "driver": "1.0",
+      "filesystem": "ext4",
+      "accelerator_info": [
+        {
+          "accelerator_model_name": "NVIDIA H100 SXM5 80GB",
+          "accelerators_per_node": 8,
+          "accelerator_memory_capacity": "80 GB HBM3",
+          "accelerator_memory_type": "HBM3e",
+          "accelerator_interconnect": "NVLink 4.0 900 GB/s",
+          "accelerator_host_interconnect": "PCIe Gen5"
+        }
+      ]
+    }
+  ],
+  "division": "Standardized",
+  "model_precision": "FP16",
+  "link_to_model": "https://example.com/model",
+  "dataset_id": "cnn_dailymail",
+  "dataset_name": "CNN/DailyMail",
+  "input_token_average": 870.0,
+  "output_token_average": 128.0,
+  "dataset_type": "performance",
+  "dataset_link": "https://example.com/dataset",
+  "measured_accuracy_score": "38.7",
+  "system_size": "1 node",
+  "model_id": "llama3.1-8b",
+  "system_node_ensemble_count": 1,
+  "system_node_ensemble_total": 1,
+  "model_name": "llama3.1-8b",
+  "publication_status": "Available",
+  "node_config": "8x H100 test node",
+  "config_summary": {
+    "disaggregated": null,
+    "expert_parallel": 1,
+    "tensor_parallel": 8,
+    "pipeline_parallel": 1,
+    "data_parallel": 1,
+    "batch": null
+  },
+  "tps_utilization": 0.173913
+}
