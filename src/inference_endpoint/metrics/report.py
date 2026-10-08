@@ -36,7 +36,10 @@ from inference_endpoint.async_utils.services.metrics_aggregator.registry import 
 from inference_endpoint.evaluation.accuracy_results import (
     samples_weighted_average_accuracy,
 )
-from inference_endpoint.metrics.steady_state_diagnostics import SteadyState
+from inference_endpoint.metrics.steady_state_diagnostics import (
+    SteadyState,
+    normalize_steady_state_payload,
+)
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
@@ -193,7 +196,7 @@ def _steady_state_of(snap: dict) -> SteadyState | None:
     diagnostic. Dropping it makes the absence visible. Raising would suppress
     the report, and coercing could print a plausible wrong number.
     """
-    raw = snap.get("steady_state")
+    raw = normalize_steady_state_payload(snap.get("steady_state"))
     if raw is None:
         return None
     try:
