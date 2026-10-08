@@ -3,8 +3,11 @@ import shutil
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from inference_endpoint.validation import bundled_policy_path, load_policy
+from inference_endpoint.validation.power.calculation import PowerCalculator
+from inference_endpoint.validation.power.models import SystemPower
 
 pytestmark = pytest.mark.unit
 
@@ -45,6 +48,41 @@ def test_missing_required_operand_is_rejected_when_loading(policy_dir):
     path.write_text(yaml.safe_dump(document, sort_keys=False))
     with pytest.raises(ValueError, match="right"):
         load_policy(policy_dir)
+
+
+@pytest.mark.parametrize("cooling", ["air", "liquid", "mixed"])
+def test_cooling_modes_use_catalog_overhead(cooling):
+    descriptor = SystemPower.model_validate(
+        {
+            "system_desc_id": "system",
+            "cooling": cooling,
+            "node_sets": [
+                {
+                    "node_set_id": 1,
+                    "system_node_ensemble_id": 1,
+                    "nodes_provisioned": 1,
+                    "power_method": "component_sum",
+                    "components": {
+                        "cpu": {"model": "AMD EPYC 64-core", "count_per_node": 1},
+                        "accelerator": {"model": "NVIDIA B200", "count_per_node": 1},
+                        "scale_up_network": {"method": "none"},
+                    },
+                }
+            ],
+            "scale_out": {"present": False},
+        }
+    )
+    catalog = load_policy(bundled_policy_path()).catalogs["power"]
+    computed = PowerCalculator(descriptor, catalog).compute()
+    assert computed.overhead_fraction == catalog["cooling_overhead"][cooling]
+    assert computed.provisioned_power_kw == (
+        2.02 if cooling in ("air", "mixed") else 1.75
+    )
+
+
+def test_unknown_cooling_stays_invalid():
+    with pytest.raises(ValidationError, match="cooling"):
+        SystemPower.model_validate({"cooling": "unknown"})
 
 
 def test_valid_override_retains_false_and_numeric_values(policy_dir):
