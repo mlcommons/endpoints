@@ -129,7 +129,7 @@ class TestTextModelOutputChunks:
         assert TextModelOutput(output=("only",)).text_after_first_chunk() == ""
         assert TextModelOutput(output="full text").text_after_first_chunk() == ""
 
-    def test_streamed_reasoning_holds_the_first_chunk(self) -> None:
-        # reasoning[0] is the first chunk -> reasoning[1:] plus ALL output chunks
+    def test_streamed_fields_share_the_first_chunk(self) -> None:
+        # Both fields contributed to the first delta; exclude both first entries.
         out = TextModelOutput(output=("o1", "o2"), reasoning=("r1", "r2"))
-        assert out.text_after_first_chunk() == "r2o1o2"
+        assert out.text_after_first_chunk() == "r2o2"

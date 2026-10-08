@@ -586,9 +586,8 @@ def build_natl_result(
 def text_after_first_chunk(data: object) -> str:
     """Return output text after the first streamed chunk.
 
-    This is the text used as the TPOT numerator. ``data`` is the COMPLETE event
-    payload: ``[tag, output, reasoning?, tool_calls?]`` with trailing defaults
-    omitted by msgspec ``array_like`` and ``omit_defaults``.
+    This text is tokenized for the TPOT denominator. ``data`` is the COMPLETE
+    event payload: ``[tag, output, reasoning?, tool_calls?]``.
 
     ``output`` and ``reasoning`` are each either a string for non-streaming
     output or a list of streamed chunks. The logic mirrors
@@ -599,21 +598,12 @@ def text_after_first_chunk(data: object) -> str:
     output = data[1] if len(data) > 1 else ""
     reasoning = data[2] if len(data) > 2 else None
     parts: list[str] = []
-    if reasoning:
-        if isinstance(reasoning, list) and len(reasoning) > 1:
-            parts.extend(reasoning[1:])
-        # str reasoning is a single (first) chunk -> skip entirely
-    if output:
-        if isinstance(output, str):
-            # Non-streaming output: keep it only if a first chunk already lived in a
-            # (streaming) reasoning trace; otherwise the str output IS the first chunk.
-            if parts or (reasoning and isinstance(reasoning, list)):
-                parts.append(output)
-        elif isinstance(output, list):
-            if parts or reasoning:
-                parts.extend(output)
-            elif len(output) > 1:
-                parts.extend(output[1:])
+    if isinstance(reasoning, list):
+        parts.extend(reasoning[1:])
+    if isinstance(output, list):
+        parts.extend(output[1:])
+    elif isinstance(output, str) and isinstance(reasoning, list) and reasoning:
+        parts.append(output)
     # Tool-call reconstruction is intentionally omitted: tool-call samples use a
     # chat-template tokenization path this diagnostic does not replicate.
     return "".join(parts)
@@ -1353,7 +1343,7 @@ def cov_pass_row(
     # CoV is undefined with fewer than two points. Report inconclusive, not
     # PASS, so a short or empty window cannot masquerade as steady.
     if len(values) < 2:
-        return {b: None for b in bounds}
+        return dict.fromkeys(bounds)
     c = cov(values)
     return {b: c <= b for b in bounds}
 

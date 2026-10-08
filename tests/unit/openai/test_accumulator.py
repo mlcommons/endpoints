@@ -220,6 +220,6 @@ def test_mixed_reasoning_and_content_are_both_preserved(
     else:
         assert second is None
     output = acc.get_final_output().response_output
-    assert output.output == "42!"
+    assert output.output == ("42", "!")
     assert "".join(output.reasoning) == "Think: done"
     assert output.tool_calls == ((tuple(tool_calls),) if tool_calls else None)

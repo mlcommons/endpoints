@@ -609,7 +609,7 @@ class TestQueryResultWorkerPatterns:
         result = QueryResult(
             id="query-reasoning-pattern",
             response_output=TextModelOutput(
-                output="".join(output_chunks),
+                output=("", "".join(output_chunks)),
                 reasoning=resp_reasoning,
             ),
             metadata={"first_chunk": False, "final_chunk": True},
@@ -619,7 +619,7 @@ class TestQueryResultWorkerPatterns:
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
         assert isinstance(decoded.response_output, TextModelOutput)
-        assert decoded.response_output.output == "The answer is 42"
+        assert decoded.response_output.output == ("", "The answer is 42")
         assert decoded.response_output.reasoning == (
             "Let me think...",
             " step by step to solve this",
@@ -668,7 +668,7 @@ class TestQueryResultWorkerPatterns:
         result = QueryResult(
             id="query-single-reasoning",
             response_output=TextModelOutput(
-                output="Answer",
+                output=("", "Answer"),
                 reasoning=["Quick thought"],
             ),
         )
@@ -710,18 +710,18 @@ class TestTextAfterFirstChunk:
             (None, ("a",), ""),
             # No reasoning, empty tuple
             (None, (), ""),
-            # Str reasoning (is the first chunk), str output (non-streaming)
+            # Non-streaming reasoning and output
             ("think", "abc", ""),
-            # Str reasoning (is the first chunk), tuple output
-            ("think", ("a", "b"), "ab"),
-            # Tuple reasoning (multi), str output
+            # Non-streaming reasoning, streamed output
+            ("think", ("a", "b"), "b"),
+            # Streamed reasoning, joined str output: all content follows the first delta
             (("t1", "t2"), "abc", "t2abc"),
             # Tuple reasoning (multi), tuple output
-            (("t1", "t2"), ("a", "b"), "t2ab"),
-            # Single-element tuple reasoning (is the first chunk), str output
+            (("t1", "t2"), ("a", "b"), "t2b"),
+            # Single-element streamed reasoning, joined str output
             (("t1",), "abc", "abc"),
-            # Single-element tuple reasoning (is the first chunk), tuple output
-            (("t1",), ("a", "b"), "ab"),
+            # Single-element tuple reasoning, streamed output
+            (("t1",), ("a", "b"), "b"),
             # Falsy str reasoning (empty string), tuple output — treated as no reasoning
             ("", ("a", "b"), "b"),
             # Empty tuple reasoning, tuple output — treated as no reasoning
@@ -929,17 +929,16 @@ class TestTextModelOutputToolCalls:
         assert str(tmo) == "hello"
 
     def test_text_after_first_chunk_includes_tool_calls(self):
-        # streaming output with tool_calls: first chunk skipped, tool_calls appended
-        tmo = TextModelOutput(output=("a", "b"), tool_calls=self._TC)
+        # Tools begin after the first content delta.
+        tmo = TextModelOutput(output=("a", "b"), tool_calls=((), self._TC))
         after = tmo.text_after_first_chunk()
         assert "b" in after
         assert '"function"' in after
 
-    def test_text_after_first_chunk_tool_calls_only_no_content(self):
-        # tool_calls only (pure agentic response with no text content)
+    def test_text_after_first_chunk_nonstreaming_tools_have_no_tail(self):
+        # Flat tool calls are non-streaming and have no post-first payload.
         tmo = TextModelOutput(output=[], tool_calls=self._TC)
-        after = tmo.text_after_first_chunk()
-        assert '"function"' in after
+        assert tmo.text_after_first_chunk() == ""
 
     def test_text_after_first_chunk_uses_tool_call_delta_tail(self):
         tmo = TextModelOutput(
@@ -1022,14 +1021,14 @@ class TestTextModelOutputToolCalls:
         # non-streaming str output: no "after first chunk" for content
         assert content == ""
         assert reasoning is None
-        assert tc == tmo.tool_calls
+        assert tc is None
 
     def test_as_message_parts_after_first_chunk_tuple_output(self):
-        tmo = TextModelOutput(output=("a", "b", "c"), tool_calls=self._TC)
+        tmo = TextModelOutput(output=("a", "b", "c"), tool_calls=((), self._TC))
         content, reasoning, tc = tmo.as_message_parts_after_first_chunk()
         assert content == "bc"
         assert reasoning is None
-        assert tc == tmo.tool_calls
+        assert tc == tuple(self._TC)
 
     def test_as_message_parts_after_first_chunk_uses_tool_call_delta_tail(self):
         tmo = TextModelOutput(
