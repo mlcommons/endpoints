@@ -1,0 +1,44 @@
+{
+  "system_desc_id": "system_j",
+  "cooling": "liquid",
+  "node_sets": [
+    {
+      "node_set_id": 0,
+      "system_node_ensemble_id": 0,
+      "nodes_provisioned": 1,
+      "power_method": "component_sum",
+      "components": {
+        "cpu": {
+          "model": "NVIDIA Grace CPU (Armv9)",
+          "count_per_node": 36,
+          "tdp_per_unit": {
+            "value_w": 350,
+            "source_type": "vendor_spec",
+            "source": "https://example.com/cpu-spec"
+          }
+        },
+        "accelerator": {
+          "model": "NVIDIA GB300",
+          "count_per_node": 72,
+          "tdp_per_unit": {
+            "value_w": 700,
+            "source_type": "vendor_spec",
+            "source": "https://example.com/accelerator-spec"
+          }
+        },
+        "scale_up_network": {
+          "method": "declared_tdp",
+          "switch_count": 1,
+          "tdp_per_switch": {
+            "value_w": 3500,
+            "source_type": "vendor_spec",
+            "source": "https://example.com/switch-spec"
+          }
+        }
+      }
+    }
+  ],
+  "scale_out": {
+    "present": false
+  }
+}

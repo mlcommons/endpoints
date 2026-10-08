@@ -289,7 +289,7 @@ def test_power_cooling_must_match_description(
     policy = load_policy(bundled_policy_path())
     source = (
         Path(__file__).resolve().parents[3]
-        / "tests/fixtures/validation/submissions/valid_standardized/results/acme_h100x8_001/llama3_1-8b/r16/system_desc.json"
+        / "tests/fixtures/validation/submissions/valid_standardized/results/system_k/llama3_1-8b/r16/system_desc.json"
     )
     system = tmp_path / "results" / "system"
     point = system / "gpt-oss-120b" / "r16"
