@@ -1,0 +1,471 @@
+defaults:
+  accuracy_results.json:
+    cnn_dailymail_validation:
+      dataset_name: cnn_dailymail_validation
+      num_samples: 13368
+      score:
+        rouge1: 38.7792
+        rouge2: 15.9075
+        rougel: 24.4957
+        rougelsum: 35.793
+        gen_len: 8167644.0
+      extractor: RougeExtractor
+      n_repeats: 1
+  config.yaml: {}
+  point.yaml:
+    dataset: mlperf-perf-dataset-v1
+    dataset_link: https://example.com/dataset
+    dataset_name: CNN/DailyMail
+    dataset_type: Performance
+    division: Standardized
+    link_to_model: https://example.com/model
+    link_to_model_transformation: https://example.com/quantization
+    max_supported_concurrency: 1024
+    model_name: llama3-8b
+    model_notes: ""
+    model_precision: FP16
+    runtime_settings:
+      load_pattern: concurrency
+      runtime:
+        model_seed: 9315206023656308754
+        sample_index_rng_seed: 586478644936801402
+        scheduler_rng_seed: 10487924139932647040
+      stream_all_chunks: true
+    seed_set: A
+    shared_docs: docs
+    shared_src: src
+    steady_state:
+      state:
+        tpot_p50: Plateau
+        tpot_p90: Plateau
+        ttft_p50: Plateau
+        ttft_p90: Plateau
+      status: windowable
+      verdict: STEADY STATE
+      window:
+        n_samples: 4000
+        super_pass_end: 4
+        super_pass_size: 1000
+        super_pass_start: 1
+    target_cohort: 2026-10-C1
+    warmup:
+      data_source: mlperf-perf-dataset-v1 validation split
+      duration_s: 60.0
+      initialization_steps:
+        - model loaded
+        - kv-cache warmed
+      link_logs: https://example.com/warmup-logs
+      logs_retained: true
+  result_summary.json:
+    n_samples_issued: 13368
+    n_samples_completed: 13368
+    n_samples_failed: 0
+    output_sequence_lengths:
+      total: 1711102.0
+      percentiles: {}
+    tpot:
+      total: 54127032000.00001
+      percentiles:
+        "50": 4000000.0
+        "90": 5500000.0
+        "95": 6000000.0
+        "99": 6500000.0
+    tps_per_user: 181.8182
+  system_desc.json:
+    submitter_org_names: Submitter-F
+    submitter_contact: contact@example.com
+    system_name: system_f
+    system_category: datacenter
+    max_supported_concurrency: 1024
+    serving_framework: vLLM
+    node_types:
+      - system_node_ensemble_id: 0
+        number_of_nodes: 2
+        host_processor_model_name: Intel Xeon Platinum 8480+
+        host_processors_per_node: 2
+        host_processor_core_count: 60
+        host_memory_capacity: 512 GB
+        host_networking: Ethernet 200Gb
+        host_storage_capacity: 15 TB
+        host_storage_type: NVMe SSD
+        operating_system: Ubuntu 22.04
+        host_memory_configuration: 8x 64GB DDR5
+        host_network_card_count: 1x NIC
+        driver: "1.0"
+        filesystem: ext4
+        accelerator_info:
+          - accelerator_model_name: Intel Gaudi 3
+            accelerators_per_node: 8
+            accelerator_memory_capacity: 96 GB HBM2e
+            accelerator_memory_type: HBM3e
+    division: Standardized
+    model_precision: FP16
+    link_to_model: https://example.com/model
+    dataset_id: cnn_dailymail
+    dataset_name: CNN/DailyMail
+    input_token_average: 870.0
+    output_token_average: 128.0
+    dataset_type: performance
+    dataset_link: https://example.com/dataset
+    measured_accuracy_score: "38.7"
+    system_size: 1 node
+    model_id: llama3-8b
+    system_node_ensemble_count: 1
+    system_node_ensemble_total: 2
+    publication_status: Available
+    node_config: 8x H100 test node
+    config_summary:
+      disaggregated: null
+      expert_parallel: 1
+      tensor_parallel: 8
+      pipeline_parallel: 1
+      data_parallel: 2
+      batch: null
+    cooling: Air-cooled
+files:
+  docs/.gitkeep: ""
+  results/system_f/system_power.json:
+    system_desc_id: system_f
+    cooling: air
+    node_sets:
+      - node_set_id: 0
+        system_node_ensemble_id: 0
+        nodes_provisioned: 2
+        power_method: component_sum
+        components:
+          cpu:
+            model: Intel Xeon Platinum 8480+
+            count_per_node: 2
+            tdp_per_unit:
+              value_w: 350
+              source_type: vendor_spec
+              source: https://example.com/cpu-spec
+          accelerator:
+            model: Intel Gaudi 3
+            count_per_node: 8
+            tdp_per_unit:
+              value_w: 700
+              source_type: vendor_spec
+              source: https://example.com/accelerator-spec
+          scale_up_network:
+            method: declared_tdp
+            switch_count: 1
+            tdp_per_switch:
+              value_w: 3500
+              source_type: vendor_spec
+              source: https://example.com/switch-spec
+    scale_out:
+      present: true
+      cabling: passive
+      required_bandwidth_tbps: 6.4
+      nics:
+        count_per_node: 8
+        bandwidth_per_nic_gbps: 400
+        counted: true
+        tdp_per_nic:
+          value_w: 25
+          source_type: vendor_spec
+          source: https://example.com/nic-spec
+      switches:
+        - model: NVIDIA Spectrum SN5610
+          count: 1
+          bandwidth_tbps: 51.2
+          power_per_switch:
+            value_w: 900
+            source_type: vendor_spec
+            source: https://example.com/switch-spec
+  src/vllm/README.md: "# vllm
+
+
+    Anonymised fixture implementation directory. Real submissions document how to build the SUT and reproduce
+    a point here.
+
+    "
+points:
+  results/system_f/llama3-8b/r1:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 1
+    point.yaml:
+      concurrency: 1
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 1
+        requests_completed: 10
+        requests_issued: 10
+    result_summary.json:
+      duration_ns: 45583460351935.0
+      ttft:
+        total: 2574627124512.0
+        percentiles:
+          "50": 192596284.0
+          "95": 449459125.5
+          "90": 398086557.20000005
+      system_tps: 37.5378
+    system_desc.json:
+      tps_utilization: 0.022095
+  results/system_f/llama3-8b/r1024:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 1024
+    point.yaml:
+      concurrency: 1024
+      offline: elected
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 1024
+        requests_completed: 10240
+        requests_issued: 10240
+    result_summary.json:
+      duration_ns: 1011902488209.0
+      ttft:
+        total: 479444018825568.0
+        percentiles:
+          "50": 35865052276.0
+          "95": 46774478776.74999
+          "90": 44592593476.59999
+      system_tps: 1690.9752
+    system_desc.json:
+      tps_utilization: 0.995315
+  results/system_f/llama3-8b/r128:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 128
+    point.yaml:
+      concurrency: 128
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 128
+        requests_completed: 1280
+        requests_issued: 1280
+    result_summary.json:
+      duration_ns: 1192600590769.0
+      ttft:
+        total: 5379052027176.0
+        percentiles:
+          "50": 402382707.0
+          "95": 869390356.9
+          "90": 775988826.9200001
+      system_tps: 1434.7653
+    system_desc.json:
+      tps_utilization: 0.844509
+  results/system_f/llama3-8b/r16:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 16
+    point.yaml:
+      concurrency: 16
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 16
+        requests_completed: 160
+        requests_issued: 160
+    result_summary.json:
+      duration_ns: 3505224837302.0005
+      ttft:
+        total: 3373550899608.0
+        percentiles:
+          "50": 252360181.0
+          "95": 550608223.3999999
+          "90": 490958614.9199999
+      system_tps: 488.1576
+    system_desc.json:
+      tps_utilization: 0.287332
+  results/system_f/llama3-8b/r2:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 2
+    point.yaml:
+      concurrency: 2
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 2
+        requests_completed: 20
+        requests_issued: 20
+    result_summary.json:
+      duration_ns: 23023578002485.996
+      ttft:
+        total: 2892442942776.0
+        percentiles:
+          "50": 216370657.0
+          "95": 457229317.34999996
+          "90": 409057585.28
+      system_tps: 74.3196
+    system_desc.json:
+      tps_utilization: 0.043745
+  results/system_f/llama3-8b/r256:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 256
+    point.yaml:
+      concurrency: 256
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 256
+        requests_completed: 2560
+        requests_issued: 2560
+    result_summary.json:
+      duration_ns: 1045116285522.0
+      ttft:
+        total: 7725994840968.0
+        percentiles:
+          "50": 577946951.0
+          "95": 1242402278.2499998
+          "90": 1109511212.7999997
+      system_tps: 1637.236
+    system_desc.json:
+      tps_utilization: 0.963684
+  results/system_f/llama3-8b/r32:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 32
+    point.yaml:
+      concurrency: 32
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 32
+        requests_completed: 320
+        requests_issued: 320
+    result_summary.json:
+      duration_ns: 2182110754084.9998
+      ttft:
+        total: 3596106784332.0
+        percentiles:
+          "50": 269008586.5
+          "95": 604284570.0
+          "90": 537229373.3
+      system_tps: 784.1499
+    system_desc.json:
+      tps_utilization: 0.461554
+  results/system_f/llama3-8b/r4:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 4
+    point.yaml:
+      concurrency: 4
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 4
+        requests_completed: 40
+        requests_issued: 40
+    result_summary.json:
+      duration_ns: 11622328296428.0
+      ttft:
+        total: 2922014582988.0
+        percentiles:
+          "50": 218582778.5
+          "95": 470498090.7499999
+          "90": 420115028.29999995
+      system_tps: 147.2254
+    system_desc.json:
+      tps_utilization: 0.086657
+  results/system_f/llama3-8b/r512:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 512
+    point.yaml:
+      concurrency: 512
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 512
+        requests_completed: 5120
+        requests_issued: 5120
+    result_summary.json:
+      duration_ns: 1007161846898.0
+      ttft:
+        total: 19342596948528.0
+        percentiles:
+          "50": 1446932746.0
+          "95": 17416985904.85
+          "90": 14222975273.08
+      system_tps: 1698.9345
+    system_desc.json:
+      tps_utilization: 1.0
+  results/system_f/llama3-8b/r64:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 64
+    point.yaml:
+      concurrency: 64
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 64
+        requests_completed: 640
+        requests_issued: 640
+    result_summary.json:
+      duration_ns: 1528920443390.0
+      ttft:
+        total: 4340911548228.0
+        percentiles:
+          "50": 324724083.5
+          "95": 700762596.05
+          "90": 625554893.54
+      system_tps: 1119.157
+    system_desc.json:
+      tps_utilization: 0.658741
+  results/system_f/llama3-8b/r8:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 8
+    point.yaml:
+      concurrency: 8
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 8
+        requests_completed: 80
+        requests_issued: 80
+    result_summary.json:
+      duration_ns: 6211960687374.0
+      ttft:
+        total: 3152037458208.0
+        percentiles:
+          "50": 235789756.0
+          "95": 509306917.05
+          "90": 454603484.84000003
+      system_tps: 275.4528
+    system_desc.json:
+      tps_utilization: 0.162133

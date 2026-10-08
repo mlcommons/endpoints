@@ -199,6 +199,7 @@ bfcl = [
 
 [project.scripts]
 inference-endpoint = "inference_endpoint.main:run"
+inference-endpoint-validation = "inference_endpoint.validation.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/mlperf/inference-endpoint"
@@ -235,6 +236,9 @@ ignore = [
     "B008",  # do not perform function calls in argument defaults
     "C901",  # too complex
 ]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
 
 [tool.ruff.format]
 quote-style = "double"

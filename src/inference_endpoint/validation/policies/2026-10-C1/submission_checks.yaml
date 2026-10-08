@@ -1,0 +1,29 @@
+# Cohort policy; all five files must pin the same version and revision.
+version: 2026-10-C1
+revision: 1
+scope: submission
+severity: error
+checks:
+  path-exists: { kind: presence, target: submission.root, object: path }
+  required-dir: { kind: presence, targets: [results, docs], object: directory }
+  system-results-dir:
+    { kind: presence, target: submission.system_directories, minimum_count: 1 }
+  src-dir:
+    {
+      kind: presence,
+      target: submission.implementation_directories,
+      minimum_count: 1,
+    }
+  src-readme:
+    {
+      kind: presence,
+      target: implementation.readme,
+      scope: implementation,
+      case_sensitive: false,
+    }
+  accuracy-present:
+    {
+      kind: accuracy_presence,
+      minimum_models: 1,
+      accept: [standalone_accuracy_results, embedded_nonempty_accuracy_scores],
+    }

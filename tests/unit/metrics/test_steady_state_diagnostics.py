@@ -12,6 +12,7 @@ the CoV table.
 import json
 
 import pytest
+
 from inference_endpoint.metrics import steady_state_diagnostics as mod
 
 pytestmark = pytest.mark.unit
@@ -181,7 +182,7 @@ def test_cov_positive_for_varied_series():
 
 
 # --------------------------------------------------------------------------- #
-# Trend algorithms — verdict in {"up", "steady", "down"}
+# Trend algorithms — verdict is a canonical enum.
 # --------------------------------------------------------------------------- #
 
 STRONG_UP = [float(i) for i in range(12)]
@@ -190,15 +191,15 @@ FLAT = [5.0] * 12
 
 
 def test_mann_kendall_detects_upward_trend():
-    assert mod.mann_kendall(STRONG_UP).verdict == "up"
+    assert mod.mann_kendall(STRONG_UP).verdict is mod.Verdict.DRIFTING_UP
 
 
 def test_mann_kendall_detects_downward_trend():
-    assert mod.mann_kendall(STRONG_DOWN).verdict == "down"
+    assert mod.mann_kendall(STRONG_DOWN).verdict is mod.Verdict.DRIFTING_DOWN
 
 
 def test_mann_kendall_flat_is_steady():
-    assert mod.mann_kendall(FLAT).verdict == "steady"
+    assert mod.mann_kendall(FLAT).verdict is mod.Verdict.PLATEAU
 
 
 def test_hamed_rao_inflates_variance_vs_plain_mk():
@@ -206,7 +207,7 @@ def test_hamed_rao_inflates_variance_vs_plain_mk():
     plain = mod.mann_kendall(STRONG_UP)
     corrected = mod.mann_kendall_hamed_rao(STRONG_UP)
     assert corrected.variance >= plain.variance
-    assert corrected.verdict == "up"
+    assert corrected.verdict is mod.Verdict.DRIFTING_UP
 
 
 def test_hamed_rao_does_not_fabricate_trend_on_oscillation():
@@ -216,8 +217,8 @@ def test_hamed_rao_does_not_fabricate_trend_on_oscillation():
     saw = [0.0, 20.0, 2.0, 22.0, 4.0, 24.0, 6.0, 26.0, 8.0, 28.0, 10.0, 30.0]
     plain = mod.mann_kendall(saw)
     hr = mod.mann_kendall_hamed_rao(saw)
-    assert plain.verdict == "up"  # uncorrected MK false-positives
-    assert hr.verdict == "steady"  # corrected test refuses
+    assert plain.verdict is mod.Verdict.DRIFTING_UP  # uncorrected MK false-positives
+    assert hr.verdict is mod.Verdict.PLATEAU  # corrected test refuses
     assert hr.variance >= plain.variance  # inflated, not collapsed to a sliver
 
 
@@ -226,25 +227,31 @@ def test_theil_sen_recovers_exact_slope():
 
 
 def test_theil_sen_flat_is_steady():
-    assert mod.theil_sen(FLAT).verdict == "steady"
+    assert mod.theil_sen(FLAT).verdict is mod.Verdict.PLATEAU
 
 
 def test_newey_west_detects_trend_and_flat():
-    assert mod.newey_west(STRONG_UP).verdict == "up"
-    assert mod.newey_west(FLAT).verdict == "steady"
+    assert mod.newey_west(STRONG_UP).verdict is mod.Verdict.DRIFTING_UP
+    assert mod.newey_west(FLAT).verdict is mod.Verdict.PLATEAU
 
 
 def test_slope_vs_scatter_matches_reference_formula():
     # Clean line: huge SNR, large rel-drift -> up.
-    assert mod.slope_vs_scatter(STRONG_UP).verdict == "up"
-    assert mod.slope_vs_scatter(STRONG_DOWN).verdict == "down"
+    assert mod.slope_vs_scatter(STRONG_UP).verdict is mod.Verdict.DRIFTING_UP
+    assert mod.slope_vs_scatter(STRONG_DOWN).verdict is mod.Verdict.DRIFTING_DOWN
     # Flat -> steady.
-    assert mod.slope_vs_scatter(FLAT).verdict == "steady"
+    assert mod.slope_vs_scatter(FLAT).verdict is mod.Verdict.PLATEAU
 
 
 def test_trend_algorithms_report_insufficient_below_min_n():
     for fn in (mod.mann_kendall, mod.theil_sen, mod.newey_west, mod.slope_vs_scatter):
-        assert fn([1.0, 2.0, 3.0]).verdict == "insufficient"
+        assert fn([1.0, 2.0, 3.0]).verdict is mod.Verdict.INSUFFICIENT
+
+
+def test_verdict_json_round_trip_is_canonical():
+    encoded = mod.msgspec.json.encode(mod.Verdict.DRIFTING_UP)
+    assert encoded == b'"drifting_up"'
+    assert mod.msgspec.json.decode(encoded, type=mod.Verdict) is mod.Verdict.DRIFTING_UP
 
 
 # --------------------------------------------------------------------------- #
@@ -295,7 +302,7 @@ def test_run_result_structure(tmp_path):
     result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
     assert result["steady_state"].n_super_passes == 8
     assert result["steady_state"].warmup == 1
-    assert result["drift"]["ttft_p50"]["mk_hamed_rao"] == "up"
+    assert result["drift"]["ttft_p50"]["mk_hamed_rao"] is mod.Verdict.DRIFTING_UP
     # CoV cells carry a pass/fail per bound and a gate flag. Admissibility gates on
     # TPOT only, so tpot_p50 is gated while ttft_p50 is now diagnostic.
     cov = result["steady_state"].cov

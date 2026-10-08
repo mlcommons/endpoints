@@ -30,11 +30,12 @@ from typing import ClassVar, Final
 
 import msgspec
 import msgspec.msgpack
+
 from inference_endpoint.core.record import TOPIC_FRAME_SIZE
 from inference_endpoint.metrics.steady_state_diagnostics import SteadyState
 
 
-class SessionState(str, Enum):
+class SessionState(str, Enum):  # noqa: UP042 - repository wire-enum convention
     """The aggregator's session state at the time a snapshot was emitted.
 
     INITIALIZE  → aggregator has been constructed but no ``STARTED`` event

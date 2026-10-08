@@ -27,6 +27,7 @@ from pathlib import Path
 
 import msgspec.structs
 import pytest
+
 from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
     MetricCounterKey,
 )
@@ -48,6 +49,7 @@ from inference_endpoint.metrics.steady_state_diagnostics import (
     SteadyState,
     SteadyWindow,
     TpsBlock,
+    Verdict,
 )
 
 # 1 hour in ns — same as the aggregator's default bound for time-series.
@@ -999,6 +1001,24 @@ class TestSteadyStateOnTheReport:
 
     def test_absent_by_default(self):
         assert self._report(None).steady_state is None
+
+    @pytest.mark.parametrize(
+        ("legacy", "canonical"),
+        [
+            ("up", Verdict.DRIFTING_UP),
+            ("down", Verdict.DRIFTING_DOWN),
+            ("steady", Verdict.PLATEAU),
+        ],
+    )
+    def test_legacy_global_trend_is_normalized_without_mutation(
+        self, legacy, canonical
+    ):
+        raw = msgspec.to_builtins(self._verdict())
+        raw["global_trend"] = {"tpot_p90": legacy}
+        snap = {"steady_state": raw}
+        report = Report.from_snapshot(snap)
+        assert report.steady_state.global_trend["tpot_p90"] is canonical
+        assert raw["global_trend"]["tpot_p90"] == legacy
 
     def test_read_from_the_snapshot_and_kept_in_to_json(self):
         verdict = self._verdict()

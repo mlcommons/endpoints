@@ -1,0 +1,217 @@
+# Cohort policy; all five files must pin the same version and revision.
+version: 2026-10-C1
+revision: 1
+scope: curve
+severity: error
+checks:
+  point-dirs:
+    {
+      kind: presence,
+      target: curve.point_directories,
+      pattern: "^r[0-9]+$",
+      minimum_count: 1,
+    }
+  measurement-points-present:
+    { kind: presence, target: curve.parsed_points, minimum_count: 1 }
+  system-description-consistency:
+    kind: consistency
+    target: point.system_description
+    exclude_fields:
+      [
+        tps_utilization,
+        tensor_parallel,
+        pipeline_parallel,
+        expert_parallel,
+        data_parallel,
+        disaggregated,
+        batch,
+        config_summary,
+        config_summary_notes,
+      ]
+    comparison: whole_document
+  max-concurrency-declared:
+    { kind: report, target: curve.max_supported_concurrency, severity: info }
+  region-basis:
+    kind: region_basis
+    source: curve.parsed_points
+    minimum_concurrency: smallest_submitted
+    upper_clamp: 32
+    on_no_parsed_points: error
+    on_partial_parse: warning
+  region-computation:
+    {
+      kind: region_boundaries,
+      constants: catalogs.regions,
+      require_c_min: [1, 32],
+      require_c_max_greater_than: 32,
+    }
+  model-name-valid:
+    kind: membership
+    target: point.model_name
+    catalog: enrollment.models
+    matching: exact
+    skip_missing: true
+    deduplicate: declared_name
+  model-name-consistency:
+    kind: consistency
+    left: curve.model_directory_name
+    right: curve.first_declared_model_name
+    comparison: exact
+    on_missing: warning
+  config-consistency-model:
+    { kind: consistency, target: point.model_name, comparison: exact }
+  config-consistency-dataset:
+    { kind: consistency, target: point.dataset, comparison: exact }
+  benchmark-type-consistency:
+    kind: consistency
+    target: point.runtime_settings.load_pattern
+    unless: { offline: [dedicated] }
+    comparison: exact
+    on_disagreement_curve_type: single_turn
+  point-count:
+    kind: collection_size
+    source: curve.point_directories
+    minimum: 7
+    overrides:
+      - when:
+          curve_type: single_turn
+          has_offline: dedicated
+        minimum: 8
+  point-cap:
+    { kind: collection_size, source: curve.point_directories, maximum: 32 }
+  ultra-low-concurrency-coverage:
+    {
+      kind: coverage,
+      target: curve.parsed_points,
+      band: { minimum: 1, maximum: 32 },
+      minimum_count: 1,
+    }
+  low-concurrency-coverage:
+    {
+      kind: coverage,
+      target: curve.parsed_points,
+      requires: [computed_regions],
+      band: low_concurrency,
+      minimum_count: 1,
+    }
+  med-concurrency-coverage:
+    {
+      kind: coverage,
+      target: curve.parsed_points,
+      requires: [computed_regions],
+      band: med_concurrency,
+      minimum_count: 1,
+    }
+  high-concurrency-coverage:
+    kind: coverage
+    target: curve.parsed_points
+    requires: [computed_regions]
+    band: high_concurrency
+    minimum_count: 1
+    margin_counts: false
+  offline-point-present:
+    kind: offline
+    operation: declaration_count
+    single_turn_count: 1
+    agentic_count: 0
+    elected_must_equal: curve.max_supported_concurrency
+  offline-ordering:
+    kind: offline
+    operation: ordering
+    applies_to: { offline: [dedicated] }
+    severity: warning
+    concurrency_floor: curve.max_supported_concurrency
+    throughput_reference: c_max_point
+    throughput_minimum_multiplier: 0.98
+    on_missing_summary: skip
+  tps-utilization:
+    kind: derived_metric
+    operation: curve_peak_ratio
+    stored: point.system_description.tps_utilization
+    source: result_summary.raw_derived_system_tps
+    tolerance: { absolute: 0.1 }
+    peak_source: points_with_readable_throughput_and_utilization
+    on_missing_or_invalid_file: skip
+    on_nonpositive_peak: skip
+  seed-set-consistency:
+    { kind: consistency, target: point.seed_set, comparison: exact }
+  accuracy-coverage:
+    kind: accuracy_coverage
+    requires: [computed_regions]
+    mandatory_bands: catalogs.mandatory_accuracy_bands
+    minimum_results_per_band: 1
+    single_turn_requires_offline_accuracy: true
+    margin_counts: false
+  accuracy-gate:
+    kind: accuracy_gate
+    operation: single_turn_metrics
+    applies_to: { load_pattern: [concurrency, max_throughput] }
+    models: catalogs.models
+    aggregation: sample_weighted_mean
+    required_datasets: model.accuracy.datasets
+    dataset_catalog: catalogs.datasets
+    on_missing_required_dataset: error
+    on_unrelated_dataset: exclude
+    on_missing_weights: arithmetic_mean
+    metric_matching: case_insensitive
+    on_missing_metric: skip
+    on_unknown_model: warning
+    fraction_conversion: legacy_value_and_threshold_heuristic
+    unnamed_scalar: sole_metric_only_with_warning
+  accuracy-sample-count:
+    kind: accuracy_gate
+    operation: issued_count
+    applies_to: { load_pattern: [concurrency, max_throughput] }
+    models: catalogs.models
+    required_datasets: model.accuracy.datasets
+    dataset_catalog: catalogs.datasets
+    threshold: sample_count
+    count_scope: per_required_dataset_or_suite
+    on_missing_required_dataset: error
+    on_unrelated_dataset: exclude
+    units: samples_times_repeats
+    missing_repeats: 1
+    minimum_repeats: 1
+    on_no_sample_counts: skip
+  agentic-accuracy:
+    kind: accuracy_gate
+    operation: agentic_profile_available
+    applies_to: { load_pattern: [agentic_inference] }
+    models: catalogs.models
+    on_unknown_or_unpublished: warning
+  agentic-accuracy-inline:
+    kind: accuracy_gate
+    operation: per_point_fraction
+    applies_to: { load_pattern: [agentic_inference] }
+    models: catalogs.models
+    dataset: agentic_combined
+    score: score_or_first_metric
+    input_range: [0, 1]
+    output_scale: 100
+    minimum: model.accuracy.inline_minimum_percent
+    on_missing: warning
+  agentic-accuracy-swebench:
+    kind: accuracy_gate
+    operation: mean_of_band_means
+    applies_to: { load_pattern: [agentic_inference] }
+    models: catalogs.models
+    dataset: swe_bench
+    score: score_or_first_metric
+    input_range: [0, 1]
+    output_scale: 100
+    bands: catalogs.mandatory_accuracy_bands
+    required_band_count: 4
+    minimum: model.accuracy.swebench_mean_minimum_percent
+    on_multiple_results_per_band: average_and_warn
+    on_missing_bands: gate_available_mean_and_warn
+    on_no_results: warning
+  agentic-osl-range:
+    kind: accuracy_gate
+    operation: per_point_range
+    applies_to: { load_pattern: [agentic_inference] }
+    models: catalogs.models
+    source: result_summary.output_sequence_lengths_full_run.output_sequence_lengths.avg
+    bounds: model.accuracy.full_run_osl_range
+    inclusive: true
+    on_missing: warning
+    windowed_fallback: false

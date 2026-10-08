@@ -20,6 +20,7 @@ from __future__ import annotations
 import msgspec
 import msgspec.msgpack
 import pytest
+
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
     METRICS_SNAPSHOT_TOPIC,
     CounterStat,
@@ -35,6 +36,7 @@ from inference_endpoint.metrics.steady_state_diagnostics import (
     SteadyState,
     SteadyWindow,
     TpsBlock,
+    Verdict,
 )
 
 
@@ -159,7 +161,7 @@ class TestMetricsSnapshot:
                 plateaus=[],
             ),
             short_window=None,
-            global_trend={},
+            global_trend={verdict.value: verdict for verdict in Verdict},
             drifting_up=["ttft_p50"],
         )
         snap = MetricsSnapshot(
@@ -174,7 +176,12 @@ class TestMetricsSnapshot:
         _, payload = codec.encode(snap)
         # The wire keeps the Struct; the dict form is builtins, since that is
         # what final_snapshot.json holds and what Report.from_snapshot converts.
-        assert codec.decode(payload).steady_state == verdict
+        decoded = codec.decode(payload)
+        assert decoded.steady_state == verdict
+        assert all(
+            isinstance(value, Verdict)
+            for value in decoded.steady_state.global_trend.values()
+        )
         assert snapshot_to_dict(snap)["steady_state"] == msgspec.to_builtins(verdict)
 
     def test_steady_state_defaults_to_none_for_older_frames(self):
@@ -182,6 +189,37 @@ class TestMetricsSnapshot:
         codec = MetricsSnapshotCodec()
         payload = msgspec.msgpack.encode([4, 8, "live", 0, []])
         assert codec.decode(payload).steady_state is None
+
+    @pytest.mark.parametrize("wire_verdict", ["up", "down", "steady", "unknown", 1])
+    def test_invalid_trend_verdict_is_rejected_and_dropped(self, wire_verdict):
+        codec = MetricsSnapshotCodec()
+        verdict = SteadyState(
+            found=False,
+            reason="invalid trend",
+            superpass_size=1,
+            n_super_passes=4,
+            warmup=0,
+            window=None,
+            ttft=None,
+            tpot=None,
+            osl=None,
+            latency=None,
+            tps=None,
+            cov={},
+            cov_basis=None,
+            anomaly=Anomaly(False, None, 0.0, None, []),
+            short_window=None,
+            global_trend={"tpot_p90": Verdict.DRIFTING_UP},
+            drifting_up=["tpot_p90"],
+        )
+        snap = MetricsSnapshot(1, 2, SessionState.COMPLETE, 0, [], verdict)
+        _, payload = codec.encode(snap)
+        raw = msgspec.msgpack.decode(payload)
+        raw[-1]["global_trend"]["tpot_p90"] = wire_verdict
+        invalid_payload = msgspec.msgpack.encode(raw)
+        with pytest.raises(msgspec.ValidationError) as error:
+            codec.decode(invalid_payload)
+        assert codec.on_decode_error(invalid_payload, error.value) is None
 
     def test_non_finite_floats_inside_the_verdict_are_scrubbed(self):
         """Without this, json.dumps(allow_nan=False) costs the run its snapshot."""
@@ -200,12 +238,10 @@ class TestMetricsSnapshot:
 
     def test_on_decode_error_drops_malformed(self):
         codec = MetricsSnapshotCodec()
-        # Decode a clearly malformed payload (truncated msgpack)
-        try:
-            codec.decode(b"\xff\x00")
-        except Exception as e:
-            fallback = codec.on_decode_error(b"\xff\x00", e)
-            assert fallback is None
+        payload = b"\xff\x00"
+        with pytest.raises(msgspec.DecodeError) as error:
+            codec.decode(payload)
+        assert codec.on_decode_error(payload, error.value) is None
 
     def test_on_decode_error_reraises_unknown(self):
         codec = MetricsSnapshotCodec()

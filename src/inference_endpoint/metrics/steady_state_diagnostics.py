@@ -61,8 +61,9 @@ import sys
 from array import array
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from statistics import NormalDist, median, pstdev
-from typing import Final, Literal, NamedTuple, TypedDict
+from typing import Final, NamedTuple, TypedDict
 
 import msgspec
 import yaml
@@ -134,8 +135,40 @@ MIN_DUR_FLOOR_S = 600.0
 # k* rises for noisy metrics. A higher fixed floor would only penalize clean runs.
 MIN_DUR_KSTAR_FLOOR = MIN_TREND_N
 
+
 # A per-super-pass metric trajectory is classified into one of these states.
-Verdict = Literal["up", "down", "steady", "insufficient"]
+class Verdict(str, Enum):  # noqa: UP042 - repository wire-enum convention
+    DRIFTING_UP = "drifting_up"
+    DRIFTING_DOWN = "drifting_down"
+    PLATEAU = "plateau"
+    INSUFFICIENT = "insufficient"
+
+
+_LEGACY_TREND_VERDICTS = {
+    "up": Verdict.DRIFTING_UP,
+    "down": Verdict.DRIFTING_DOWN,
+    "steady": Verdict.PLATEAU,
+}
+
+
+def normalize_steady_state_payload(raw: object) -> object:
+    """Return a copy with supported trend aliases normalized to canonical enum values."""
+    if not isinstance(raw, dict):
+        return raw
+    global_trend = raw.get("global_trend")
+    if not isinstance(global_trend, dict):
+        return raw
+    normalized = {
+        key: _LEGACY_TREND_VERDICTS.get(value, value)
+        if isinstance(value, str)
+        else value
+        for key, value in global_trend.items()
+    }
+    if normalized == global_trend:
+        return raw
+    result = dict(raw)
+    result["global_trend"] = normalized
+    return result
 
 
 # The verdict rides ``MetricsSnapshot`` and lands in ``result_summary.json``.
@@ -1105,8 +1138,7 @@ def system_tps(out_tokens: int, elapsed_ns: int) -> float:
 
 
 # --------------------------------------------------------------------------- #
-# Trend algorithms -- each returns a TrendResult with verdict in
-# {"up", "steady", "down", "insufficient"}.
+# Trend algorithms -- each returns a TrendResult with a typed verdict.
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class TrendResult:
@@ -1122,21 +1154,25 @@ class TrendResult:
 
 
 def _insufficient() -> TrendResult:
-    return TrendResult("insufficient")
+    return TrendResult(Verdict.INSUFFICIENT)
 
 
 def _direction(x: float) -> Verdict:
-    return "up" if x > 0 else "down" if x < 0 else "steady"
+    if x > 0:
+        return Verdict.DRIFTING_UP
+    if x < 0:
+        return Verdict.DRIFTING_DOWN
+    return Verdict.PLATEAU
 
 
 def _significant_verdict(effect: float, pvalue: float, alpha: float) -> Verdict:
     """up/down when the effect is significant (pvalue < alpha) in that direction."""
     if pvalue < alpha:
         if effect > 0:
-            return "up"
+            return Verdict.DRIFTING_UP
         if effect < 0:
-            return "down"
-    return "steady"
+            return Verdict.DRIFTING_DOWN
+    return Verdict.PLATEAU
 
 
 def _median_or_floor(values: Sequence[float]) -> float:
@@ -1249,7 +1285,7 @@ def theil_sen(
     ]
     slope = median(slopes)
     rel = slope * (n - 1) / _median_or_floor(values)
-    verdict: Verdict = "steady" if abs(rel) < rel_threshold else _direction(rel)
+    verdict = Verdict.PLATEAU if abs(rel) < rel_threshold else _direction(rel)
     return TrendResult(verdict, slope=slope, rel_drift=rel)
 
 
@@ -1287,7 +1323,7 @@ def newey_west(
         return _insufficient()
     slope, sxx, resid = _ols(values)
     if sxx == 0:
-        return TrendResult("steady", slope=0.0)
+        return TrendResult(Verdict.PLATEAU, slope=0.0)
     xbar = (n - 1) / 2.0
     u = [(x - xbar) * resid[x] for x in range(n)]
     if lag is None:
@@ -1321,7 +1357,7 @@ def slope_vs_scatter(
     rel_drift = total_change / _median_or_floor(values)
     snr = abs(total_change) / (resid_std + ZERO_MEDIAN_FLOOR)
     drifting = abs(rel_drift) >= rel_threshold and snr >= snr_threshold
-    verdict: Verdict = _direction(rel_drift) if drifting else "steady"
+    verdict = _direction(rel_drift) if drifting else Verdict.PLATEAU
     return TrendResult(verdict, slope=slope, snr=snr, rel_drift=rel_drift)
 
 
@@ -1410,7 +1446,7 @@ def _window_gate(
         if traj is None or len(traj) < MIN_TREND_N:
             return _GATE_SHORT
         if (
-            gate(traj).verdict != "steady"
+            gate(traj).verdict is not Verdict.PLATEAU
             and abs(_rel_drift(traj)) >= TREND_REL_DRIFT_MIN
         ):
             # Break only on trends that are significant and practically large.
@@ -1459,7 +1495,7 @@ def gated_trend_drifters(
         if traj is None or len(traj) < MIN_TREND_N:
             return None
         if (
-            gate(traj).verdict != "steady"
+            gate(traj).verdict is not Verdict.PLATEAU
             and abs(_rel_drift(traj)) >= TREND_REL_DRIFT_MIN
         ):
             drifting.append(m.key)
@@ -1570,7 +1606,9 @@ def global_trend(
         traj = super_pass_percentile_series(
             series[from_idx:], m.source_attr, m.percentile
         )
-        out[m.key] = gate(traj).verdict if len(traj) >= MIN_TREND_N else "insufficient"
+        out[m.key] = (
+            gate(traj).verdict if len(traj) >= MIN_TREND_N else Verdict.INSUFFICIENT
+        )
     return out
 
 
@@ -1735,7 +1773,7 @@ def compute_steady_state_metrics(
             anomaly=detect_level_shift(series, plateaus),
             short_window=None,
             global_trend=gt,
-            drifting_up=[k for k, v in gt.items() if v == "up"],
+            drifting_up=[k for k, v in gt.items() if v is Verdict.DRIFTING_UP],
         )
     # Min-duration selection. When enforced, report the first plateau that
     # clears the gate. Earlier plateaus are too brief to certify. If none
@@ -1836,7 +1874,7 @@ def compute_steady_state_metrics(
         anomaly=anomaly,
         short_window=short,
         global_trend=gt,
-        drifting_up=[k for k, v in gt.items() if v == "up"],
+        drifting_up=[k for k, v in gt.items() if v is Verdict.DRIFTING_UP],
     )
 
 
@@ -1903,10 +1941,10 @@ def run(
 # Rendering
 # --------------------------------------------------------------------------- #
 _VERDICT_GLYPH = {
-    "up": "^ up",
-    "down": "v down",
-    "steady": "= steady",
-    "insufficient": ". n/a",
+    Verdict.DRIFTING_UP: "^ up",
+    Verdict.DRIFTING_DOWN: "v down",
+    Verdict.PLATEAU: "= steady",
+    Verdict.INSUFFICIENT: ". n/a",
 }
 
 

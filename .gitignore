@@ -184,6 +184,8 @@ temp/
 tmp/
 data/
 results/
+!tests/fixtures/validation/submissions/**/results/
+!tests/fixtures/validation/submissions/**/results/**
 outputs/
 
 # Bundled example datasets are intentionally committed (git-LFS); the broad
