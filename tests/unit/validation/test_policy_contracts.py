@@ -6,10 +6,50 @@ import yaml
 from pydantic import ValidationError
 
 from inference_endpoint.validation import bundled_policy_path, load_policy
+from inference_endpoint.validation.artifacts import PointArtifacts
+from inference_endpoint.validation.evidence.accuracy import AccuracyResult
+from inference_endpoint.validation.planner import plan_checks
 from inference_endpoint.validation.power.calculation import PowerCalculator
 from inference_endpoint.validation.power.models import SystemPower
+from inference_endpoint.validation.types import Decision, EvidenceKey
 
 pytestmark = pytest.mark.unit
+
+
+def test_accuracy_nested_scores_are_owned():
+    data = {"aime25": {"score": {"exact_match": 90}, "extras": {"source": "test"}}}
+    parsed = AccuracyResult.model_validate(data)
+    data["aime25"]["score"]["exact_match"] = 0
+    data["aime25"]["extras"]["source"] = "changed"
+    assert parsed.metric_scores() == {"aime25": {"exact_match": 90.0}}
+    assert parsed.root["aime25"]["extras"]["source"] == "test"
+
+
+@pytest.mark.parametrize("field", ["speculative_decoding", "drafter"])
+@pytest.mark.parametrize("declaration", [{}, {"target_checksum": "declared-checksum"}])
+def test_supplied_decode_head_keeps_approval_checks_selected(
+    tmp_path, field, declaration
+):
+    point = PointArtifacts.from_json(
+        tmp_path / "kimi-k3" / "r16",
+        {
+            "concurrency": 16,
+            "runtime_settings": {"runtime": {}, "load_pattern": "agentic_inference"},
+            field: declaration,
+        },
+        {"n_samples_completed": 1, "duration_ns": 1e9},
+        {},
+    )
+    point = PointArtifacts.from_evidence(
+        point.path, point.evidence, frozenset({EvidenceKey.APPROVED_SPED_DECODE_HEADS})
+    )
+    policy = load_policy(bundled_policy_path())
+    checks = {
+        check.rule.id: check for check in plan_checks(policy, [point.context]).checks
+    }
+    assert point.context.speculative_decoding is True
+    assert checks["approved-drafter"].decision is Decision.READY
+    assert checks["drafter-approval-lead-time"].decision is Decision.READY
 
 
 @pytest.fixture
@@ -83,6 +123,41 @@ def test_cooling_modes_use_catalog_overhead(cooling):
 def test_unknown_cooling_stays_invalid():
     with pytest.raises(ValidationError, match="cooling"):
         SystemPower.model_validate({"cooling": "unknown"})
+
+
+def test_finite_numeric_strings_in_accuracy_are_normalized():
+    parsed = AccuracyResult.model_validate(
+        {
+            "rouge": {"score": {"rouge1": "45.12", "rouge2": 22.01}},
+            "scalar": {"score": "83.13"},
+        }
+    )
+    assert parsed.metric_scores() == {
+        "rouge": {"rouge1": 45.12, "rouge2": 22.01},
+        "scalar": {"score": 83.13},
+    }
+    assert parsed.root["rouge"]["score"]["rouge1"] == 45.12
+
+
+@pytest.mark.parametrize("declaration", [None, "absent"])
+def test_no_decode_head_keeps_approval_checks_excluded(tmp_path, declaration):
+    config = {"concurrency": 16, "runtime_settings": {"runtime": {}}}
+    if declaration is None:
+        config["speculative_decoding"] = None
+    point = PointArtifacts.from_json(
+        tmp_path / "kimi-k3" / "r16",
+        config,
+        {"n_samples_completed": 1, "duration_ns": 1e9},
+        {},
+    )
+    checks = {
+        check.rule.id: check
+        for check in plan_checks(
+            load_policy(bundled_policy_path()), [point.context]
+        ).checks
+    }
+    assert point.context.speculative_decoding is False
+    assert checks["approved-drafter"].decision is Decision.EXCLUDED
 
 
 def test_valid_override_retains_false_and_numeric_values(policy_dir):
