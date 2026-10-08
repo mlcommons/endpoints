@@ -4,7 +4,6 @@
 
 import hashlib
 import json
-import shutil
 from pathlib import Path
 
 import pytest
@@ -26,13 +25,6 @@ def fingerprint(value):
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-
-
-@pytest.fixture
-def policy_dir(tmp_path):
-    target = tmp_path / "2026-10-C1"
-    shutil.copytree(bundled_policy_path(), target)
-    return target
 
 
 def modify(path, transform):

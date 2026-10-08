@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Selection, exclusion, dependency and override behavior."""
 
-import shutil
-
 import pytest
 import yaml
 
@@ -167,9 +165,8 @@ def test_conditions_and_contexts_reject_contradictory_evidence():
     assert condition(point(offline=None)) is Match.UNKNOWN
 
 
-def test_model_override_changes_only_selected_context(tmp_path):
-    directory = tmp_path / "2026-10-C1"
-    shutil.copytree(bundled_policy_path(), directory)
+def test_model_override_changes_only_selected_context(policy_dir):
+    directory = policy_dir
     path = directory / "catalog.yaml"
     data = yaml.safe_load(path.read_text())
     override = {

@@ -36,10 +36,6 @@ class TestBundledRegistry:
         seed_set = load_seed_sets()["A"]
         assert seed_set.seeds == _PR117_SET_A
 
-    def test_seeds_are_not_the_v07_constant(self) -> None:
-        """Published seed fields carry their independent registry values."""
-        assert all(value != 42 for value in load_seed_sets()["A"].seeds.values())
-
     def test_adoption_window_is_derived_from_the_publication_cohort(self) -> None:
         """§4.6: adoptable for the publication cohort and the three following it."""
         assert load_seed_sets()["A"].cohorts == (
@@ -53,74 +49,39 @@ class TestBundledRegistry:
         assert bundled_seed_sets_path().is_file()
 
 
-class TestRegistryShapes:
-    """Upstream nests under `cohort:`; the older flat form is still read."""
-
-    def test_upstream_cohort_shape(self, tmp_path: Path) -> None:
-        path = tmp_path / "seeds.yaml"
-        path.write_text(
-            yaml.safe_dump(
-                {
-                    "cohort": {
-                        "version": 1.0,
-                        "cohort-id": "2027-03-C0",
-                        "seed_sets": [
-                            {
-                                "id": "Z",
-                                "scheduler_rng_seed": 1,
-                                "sample_index_rng_seed": 2,
-                                "model_seed": 3,
-                            }
-                        ],
-                    }
-                }
-            )
-        )
-        z = parse_seed_catalog(path)["Z"]
-        assert z.cohorts == ("2027-03-C0", "2027-03-C1", "2027-04-C0", "2027-04-C1")
-
-    def test_flat_shape_still_parses_but_declares_no_window(
-        self, tmp_path: Path
-    ) -> None:
-        """A file predating the cohort wrapper leaves the adoption test unevaluable."""
-        path = tmp_path / "seeds.yaml"
-        path.write_text(
-            yaml.safe_dump(
-                {
-                    "seed_sets": [
-                        {
-                            "id": "Z",
-                            "scheduler_rng_seed": 1,
-                            "sample_index_rng_seed": 2,
-                            "model_seed": 3,
-                        }
-                    ]
-                }
-            )
-        )
-        assert parse_seed_catalog(path)["Z"].cohorts == ()
-
-    def test_per_set_cohorts_override_the_derived_window(self, tmp_path: Path) -> None:
-        path = tmp_path / "seeds.yaml"
-        path.write_text(
-            yaml.safe_dump(
-                {
-                    "cohort": {
-                        "cohort-id": "2026-10-C1",
-                        "seed_sets": [
-                            {
-                                "id": "Z",
-                                "scheduler_rng_seed": 1,
-                                "sample_index_rng_seed": 2,
-                                "model_seed": 3,
-                                "cohorts": ["2030-01-C0"],
-                            }
-                        ],
-                    }
-                }
-            )
-        )
-        assert parse_seed_catalog(path)["Z"].cohorts == ("2030-01-C0",)
+@pytest.mark.parametrize(
+    "wrapper,cohorts,expected",
+    [
+        pytest.param(
+            {"version": 1.0, "cohort-id": "2027-03-C0"},
+            None,
+            ("2027-03-C0", "2027-03-C1", "2027-04-C0", "2027-04-C1"),
+            id="cohort-wrapper",
+        ),
+        pytest.param(None, None, (), id="flat-without-window"),
+        pytest.param(
+            {"cohort-id": "2026-10-C1"},
+            ["2030-01-C0"],
+            ("2030-01-C0",),
+            id="explicit-window-overrides-derived",
+        ),
+    ],
+)
+def test_seed_registry_shapes(tmp_path, wrapper, cohorts, expected):
+    entry = {
+        "id": "Z",
+        "scheduler_rng_seed": 1,
+        "sample_index_rng_seed": 2,
+        "model_seed": 3,
+    }
+    if cohorts is not None:
+        entry["cohorts"] = cohorts
+    document = {"seed_sets": [entry]}
+    if wrapper is not None:
+        document = {"cohort": {**wrapper, **document}}
+    path = tmp_path / "seeds.yaml"
+    path.write_text(yaml.safe_dump(document))
+    assert parse_seed_catalog(path)["Z"].cohorts == expected
 
 
 class TestCatalogParsings:

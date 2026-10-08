@@ -4,14 +4,12 @@
 
 import json
 import shutil
-from dataclasses import replace
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from inference_endpoint.validation import (
-    bundled_policy_path,
     load_policy,
     validate_submission,
 )
@@ -26,15 +24,9 @@ from inference_endpoint.validation.operations import SeedOperation
 from inference_endpoint.validation.schemas.requirements_v1 import (
     SeedBindingRequirements,
 )
+from tests.unit.validation.helpers import selected_policy
 
 pytestmark = pytest.mark.unit
-
-
-def selected_policy(*ids):
-    policy = load_policy(bundled_policy_path())
-    return replace(
-        policy, checks=tuple(rule for rule in policy.checks if rule.id in ids)
-    )
 
 
 def write_summary(root, summary):
@@ -220,9 +212,8 @@ def test_sample_accounting_includes_failures(
 
 
 @pytest.mark.parametrize("override", [False, True])
-def test_unknown_policy_mode_is_rejected_before_selection(tmp_path, override):
-    directory = tmp_path / "2026-10-C1"
-    shutil.copytree(bundled_policy_path(), directory)
+def test_unknown_policy_mode_is_rejected_before_selection(policy_dir, override):
+    directory = policy_dir
     path = directory / ("catalog.yaml" if override else "curve_checks.yaml")
     document = yaml.safe_load(path.read_text())
     if override:
@@ -300,10 +291,8 @@ def test_requirement_sequences_and_aliases_are_immutable():
     ],
 )
 def test_sum_operands_support_nesting_defaults_and_missing_values(
-    tmp_path, operands, issued, passed
+    tmp_path, policy_dir, operands, issued, passed
 ):
-    policy_dir = tmp_path / "2026-10-C1"
-    shutil.copytree(bundled_policy_path(), policy_dir)
     path = policy_dir / "point_checks.yaml"
     document = yaml.safe_load(path.read_text())
     document["checks"]["metric-consistency-accounting"]["left"] = {
@@ -312,12 +301,7 @@ def test_sum_operands_support_nesting_defaults_and_missing_values(
     }
     path.write_text(yaml.safe_dump(document, sort_keys=False))
     policy = load_policy(policy_dir)
-    policy = replace(
-        policy,
-        checks=tuple(
-            rule for rule in policy.checks if rule.id == "metric-consistency-accounting"
-        ),
-    )
+    policy = selected_policy("metric-consistency-accounting", policy=policy)
     write_summary(tmp_path, {"n_samples_issued": issued})
     report = validate_submission(tmp_path, policy=policy)
     assert len(report.results) == 1

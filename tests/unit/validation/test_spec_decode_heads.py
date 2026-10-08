@@ -3,8 +3,6 @@
 """SpecDecodeHead names and accepted declaration forms preserve approval checks."""
 
 import json
-import shutil
-from dataclasses import replace
 
 import pytest
 import yaml
@@ -20,8 +18,24 @@ from inference_endpoint.validation.evidence.point_config import (
     SpecDecodeHeadDeclaration,
 )
 from inference_endpoint.validation.schemas.values_v1 import Catalogs
+from tests.unit.validation.helpers import selected_policy
 
 pytestmark = pytest.mark.unit
+
+
+def parse_config(**fields):
+    return PointConfig.model_validate(
+        {"concurrency": 16, "runtime_settings": {"runtime": {}}, **fields}
+    )
+
+
+def write_point(root, model, **fields):
+    point = root / "results/system" / model / "r16"
+    point.mkdir(parents=True)
+    (point / "point.yaml").write_text(
+        json.dumps({"concurrency": 16, "runtime_settings": {"runtime": {}}, **fields})
+    )
+    return point
 
 
 @pytest.mark.parametrize(
@@ -37,23 +51,8 @@ def test_spec_decode_head_declarations_select_and_run_approval(
         "repository": head["repository"],
         "revision": head["revision"] if approved else "0" * 40,
     }
-    point = tmp_path / "results" / "system" / head["model"] / "r16"
-    point.mkdir(parents=True)
-    (point / "point.yaml").write_text(
-        json.dumps(
-            {
-                "concurrency": 16,
-                "runtime_settings": {"runtime": {}},
-                field: declaration,
-            }
-        )
-    )
-    selected = replace(
-        policy,
-        checks=tuple(
-            rule for rule in policy.checks if rule.id == "approved-spec-decode-head"
-        ),
-    )
+    write_point(tmp_path, head["model"], **{field: declaration})
+    selected = selected_policy("approved-spec-decode-head", policy=policy)
     report = validate_submission(tmp_path, policy=selected)
     assert len(report.results) == 1
     assert report.passed is approved
@@ -62,24 +61,14 @@ def test_spec_decode_head_declarations_select_and_run_approval(
 @pytest.mark.parametrize("canonical", [None, {}, {"repository": "different"}])
 def test_conflicting_spec_decode_head_aliases_are_rejected(canonical):
     with pytest.raises(ValidationError, match="input alias must agree"):
-        PointConfig.model_validate(
-            {
-                "concurrency": 16,
-                "runtime_settings": {"runtime": {}},
-                "spec_decode_head": canonical,
-                "drafter": {"repository": "head", "revision": "a" * 40},
-            }
+        parse_config(
+            spec_decode_head=canonical,
+            drafter={"repository": "head", "revision": "a" * 40},
         )
 
 
 def test_spec_decode_head_input_alias_serializes_with_canonical_name():
-    parsed = PointConfig.model_validate(
-        {
-            "concurrency": 16,
-            "runtime_settings": {"runtime": {}},
-            "drafter": {"repository": "head", "revision": "a" * 40},
-        }
-    )
+    parsed = parse_config(drafter={"repository": "head", "revision": "a" * 40})
     payload = parsed.model_dump(mode="json", exclude_unset=True)
     assert payload["spec_decode_head"] == {"repository": "head", "revision": "a" * 40}
     assert "drafter" not in payload
@@ -95,31 +84,16 @@ def test_published_weight_checksums_and_approval_lead_time(
     policy = load_policy(bundled_policy_path())
     head = policy.catalogs["approved_spec_decode_heads"][head_index]
     assert head["approved_cohort"] == "2026-09-C1"
-    point = tmp_path / "results/system" / head["model"] / "r16"
-    point.mkdir(parents=True)
-    (point / "point.yaml").write_text(
-        json.dumps(
-            {
-                "concurrency": 16,
-                "runtime_settings": {"runtime": {}},
-                "target_cohort": target,
-                "speculative_decoding": {
-                    "weight_checksum": "git-sha1:" + head["revision"]
-                },
-            }
-        )
+    write_point(
+        tmp_path,
+        head["model"],
+        target_cohort=target,
+        speculative_decoding={"weight_checksum": "git-sha1:" + head["revision"]},
     )
-    selected = replace(
-        policy,
-        checks=tuple(
-            rule
-            for rule in policy.checks
-            if rule.id
-            in {
-                "approved-spec-decode-head",
-                "spec-decode-head-approval-lead-time",
-            }
-        ),
+    selected = selected_policy(
+        "approved-spec-decode-head",
+        "spec-decode-head-approval-lead-time",
+        policy=policy,
     )
     report = validate_submission(tmp_path, policy=selected)
     assert len(report.results) == 2
@@ -142,13 +116,7 @@ def test_published_weight_checksums_and_approval_lead_time(
 )
 def test_malformed_or_conflicting_weight_identity_is_rejected(identity):
     with pytest.raises(ValidationError):
-        PointConfig.model_validate(
-            {
-                "concurrency": 16,
-                "runtime_settings": {"runtime": {}},
-                "spec_decode_head": identity,
-            }
-        )
+        parse_config(spec_decode_head=identity)
 
 
 @pytest.mark.parametrize(
@@ -174,23 +142,8 @@ def test_weight_identity_must_match_model_and_supplied_repository(
     if "target_checksum" not in identity:
         checksum_revision = identity.get("revision", head["revision"])
         identity = {"weight_checksum": "git-sha1:" + checksum_revision, **identity}
-    point = tmp_path / "results/system" / (model or head["model"]) / "r16"
-    point.mkdir(parents=True)
-    (point / "point.yaml").write_text(
-        json.dumps(
-            {
-                "concurrency": 16,
-                "runtime_settings": {"runtime": {}},
-                "spec_decode_head": identity,
-            }
-        )
-    )
-    selected = replace(
-        policy,
-        checks=tuple(
-            rule for rule in policy.checks if rule.id == "approved-spec-decode-head"
-        ),
-    )
+    write_point(tmp_path, model or head["model"], spec_decode_head=identity)
+    selected = selected_policy("approved-spec-decode-head", policy=policy)
     report = validate_submission(tmp_path, policy=selected)
     assert len(report.errors) == 1
     assert not report.passed
@@ -202,13 +155,7 @@ def test_weight_checksum_round_trip_preserves_string_contract():
         "repository": "head",
         "revision": "a" * 40,
     }
-    point = PointConfig.model_validate(
-        {
-            "concurrency": 16,
-            "runtime_settings": {"runtime": {}},
-            "spec_decode_head": identity,
-        }
-    )
+    point = parse_config(spec_decode_head=identity)
     assert point.spec_decode_head.weight_checksum.revision == "a" * 40
     assert (
         point.model_dump(mode="json", exclude_unset=True)["spec_decode_head"]
@@ -229,10 +176,10 @@ def test_weight_checksum_round_trip_preserves_string_contract():
         ("cohort", False),
     ],
 )
-def test_configuration_identity_approval_and_age(tmp_path, checksum, change, passed):
+def test_configuration_identity_approval_and_age(
+    tmp_path, policy_dir, checksum, change, passed
+):
     # Synthetic policy entry exercises support without adding an official approval.
-    policy_dir = tmp_path / "2026-10-C1"
-    shutil.copytree(bundled_policy_path(), policy_dir)
     catalog_path = policy_dir / "catalog.yaml"
     document = yaml.safe_load(catalog_path.read_text())
     model = document["catalogs"]["approved_spec_decode_heads"][0]["model"]
@@ -259,29 +206,16 @@ def test_configuration_identity_approval_and_age(tmp_path, checksum, change, pas
         declaration["configuration"] = {**configuration, "layers": [1.0, 2]}
     if change == "model":
         model = "deepseek-v4_1-flash"
-    point = tmp_path / "submission/results/system" / model / "r16"
-    point.mkdir(parents=True)
-    (point / "point.yaml").write_text(
-        json.dumps(
-            {
-                "concurrency": 16,
-                "runtime_settings": {"runtime": {}},
-                "target_cohort": "2026-10-C0" if change == "cohort" else "2026-10-C1",
-                "speculative_decoding": declaration,
-            }
-        )
+    point = write_point(
+        tmp_path / "submission",
+        model,
+        target_cohort="2026-10-C0" if change == "cohort" else "2026-10-C1",
+        speculative_decoding=declaration,
     )
-    selected = replace(
-        policy,
-        checks=tuple(
-            rule
-            for rule in policy.checks
-            if rule.id
-            in {
-                "approved-spec-decode-head",
-                "spec-decode-head-approval-lead-time",
-            }
-        ),
+    selected = selected_policy(
+        "approved-spec-decode-head",
+        "spec-decode-head-approval-lead-time",
+        policy=policy,
     )
     report = validate_submission(tmp_path / "submission", policy=selected)
     assert report.passed is passed
@@ -313,13 +247,7 @@ def test_configuration_identity_approval_and_age(tmp_path, checksum, change, pas
 )
 def test_incomplete_or_mixed_configuration_identity_is_rejected(identity):
     with pytest.raises(ValidationError):
-        PointConfig.model_validate(
-            {
-                "concurrency": 16,
-                "runtime_settings": {"runtime": {}},
-                "speculative_decoding": identity,
-            }
-        )
+        parse_config(speculative_decoding=identity)
 
 
 def test_bundled_catalog_has_no_configuration_based_approvals():

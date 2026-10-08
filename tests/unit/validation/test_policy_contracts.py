@@ -3,7 +3,6 @@
 """Malformed submissions and policy values must not disable validation."""
 
 import json
-import shutil
 
 import pytest
 import yaml
@@ -97,13 +96,6 @@ def test_supplied_decode_head_keeps_approval_checks_selected(
     assert point.context.speculative_decoding is True
     assert checks["approved-spec-decode-head"].decision is Decision.READY
     assert checks["spec-decode-head-approval-lead-time"].decision is Decision.READY
-
-
-@pytest.fixture
-def policy_dir(tmp_path):
-    directory = tmp_path / "2026-10-C1"
-    shutil.copytree(bundled_policy_path(), directory)
-    return directory
 
 
 @pytest.mark.parametrize("value", [[], "false", 0, None])

@@ -22,19 +22,13 @@ from inference_endpoint.validation.evaluator_base import Evaluator
 from inference_endpoint.validation.models import Override, freeze
 from inference_endpoint.validation.types import EvidenceKey, Severity
 from inference_endpoint.validation.vocabulary import CheckKind
+from tests.unit.validation.helpers import selected_policy
 
 pytestmark = pytest.mark.unit
 
 
-def policy_only(*ids):
-    policy = load_policy(bundled_policy_path())
-    return replace(
-        policy, checks=tuple(rule for rule in policy.checks if rule.id in ids)
-    )
-
-
 def test_min_completed_samples_uses_catalog_sample_count(standardized_submission):
-    policy = policy_only("min-completed-samples")
+    policy = selected_policy("min-completed-samples")
     original = execute_submission(standardized_submission, policy)
     catalog = {
         **policy.catalogs,
@@ -49,7 +43,7 @@ def test_min_completed_samples_uses_catalog_sample_count(standardized_submission
 
 
 def test_duration_catalog_edit_changes_runtime_gate(standardized_submission):
-    policy = policy_only("region-basis", "point-duration")
+    policy = selected_policy("region-basis", "point-duration")
     original = execute_submission(standardized_submission, policy)
     catalog = {
         **policy.catalogs,
@@ -67,10 +61,8 @@ def test_duration_catalog_edit_changes_runtime_gate(standardized_submission):
 
 
 def test_new_yaml_rule_and_selection_override_execute(
-    standardized_submission, tmp_path
+    standardized_submission, policy_dir
 ):
-    policy_dir = tmp_path / "2026-10-C1"
-    shutil.copytree(bundled_policy_path(), policy_dir)
     point_yaml = policy_dir / "point_checks.yaml"
     document = yaml.safe_load(point_yaml.read_text())
     document["checks"] = {
@@ -111,7 +103,7 @@ def test_untrusted_nan_region_basis_blocks_without_crashing(
         data["max_supported_concurrency"] = float("nan")
         path.write_text(json.dumps(data))
     report = execute_submission(
-        submission, policy_only("region-computation", "point-duration")
+        submission, selected_policy("region-computation", "point-duration")
     )
     assert not report.passed
 
@@ -125,7 +117,7 @@ def test_registry_rejects_duplicate_kinds():
 
 
 def test_model_accuracy_catalog_changes_public_results(standardized_submission):
-    policy = policy_only("accuracy-gate")
+    policy = selected_policy("accuracy-gate")
     profile = {
         "accuracy": {
             "kind": "single_turn",
@@ -141,9 +133,9 @@ def test_model_accuracy_catalog_changes_public_results(standardized_submission):
     assert not validate_submission(standardized_submission, policy=stricter).passed
 
 
-def test_disabled_cohort_override_prevents_execution(standardized_submission, tmp_path):
-    policy_dir = tmp_path / "2026-10-C1"
-    shutil.copytree(bundled_policy_path(), policy_dir)
+def test_disabled_cohort_override_prevents_execution(
+    standardized_submission, policy_dir
+):
     catalog_file = policy_dir / "catalog.yaml"
     catalog = yaml.safe_load(catalog_file.read_text())
     catalog["enrollment"]["overrides"] = [
@@ -157,26 +149,21 @@ def test_disabled_cohort_override_prevents_execution(standardized_submission, tm
     ]
     catalog_file.write_text(yaml.safe_dump(catalog))
     policy = load_policy(policy_dir)
-    policy = replace(
-        policy,
-        checks=tuple(
-            rule for rule in policy.checks if rule.id == "min-completed-samples"
-        ),
-    )
+    policy = selected_policy("min-completed-samples", policy=policy)
     assert validate_submission(standardized_submission, policy=policy).results == []
 
 
 def test_unregistered_evaluator_blocks(standardized_submission, monkeypatch):
     monkeypatch.delitem(Evaluator.registry, CheckKind.COMPARISON)
     report = execute_submission(
-        standardized_submission, policy_only("metric-consistency-duration")
+        standardized_submission, selected_policy("metric-consistency-duration")
     )
     assert report.errors
     assert all(f.key == "blocked" for f in report.errors)
 
 
 def test_effective_override_changes_evaluator_threshold(standardized_submission):
-    policy = policy_only("point-cap")
+    policy = selected_policy("point-cap")
     override = Override(
         id="smaller-cohort-cap",
         rule="point-cap",
@@ -194,7 +181,7 @@ def test_effective_override_changes_evaluator_threshold(standardized_submission)
 
 
 def test_disabled_region_basis_does_not_publish_dependencies(standardized_submission):
-    policy = policy_only("region-basis")
+    policy = selected_policy("region-basis")
     exemption = Override(
         id="disabled-basis",
         rule="region-basis",
@@ -222,7 +209,7 @@ def test_region_basis_uses_selected_collection_members(
     data = yaml.safe_load(path.read_text())
     data["offline"] = "dedicated"
     path.write_text(yaml.safe_dump(data))
-    policy = policy_only("region-basis")
+    policy = selected_policy("region-basis")
     rule = replace(policy.checks[0], applies_to=Conditions(offline=("none",)))
     artifacts = load_artifacts(submission, replace(policy, checks=(rule,)))
     assert next(iter(artifacts.derived.regions.values()))["low_latency"] == (1, 20)
@@ -230,7 +217,7 @@ def test_region_basis_uses_selected_collection_members(
 
 @pytest.mark.parametrize("rule_id", ["region-placement", "offline-point-present"])
 def test_unknown_collection_operation_is_rejected(rule_id):
-    rule = next(rule for rule in policy_only(rule_id).checks if rule.id == rule_id)
+    rule = next(rule for rule in selected_policy(rule_id).checks if rule.id == rule_id)
     with pytest.raises(ValidationError, match="operation"):
         rule.requirements.with_updates({"operation": "unsupported"})
 
@@ -244,7 +231,7 @@ def test_offline_uses_effective_numeric_concurrency_floor(
     data = yaml.safe_load(path.read_text())
     data["offline"] = "dedicated"
     path.write_text(yaml.safe_dump(data))
-    policy = policy_only("offline-ordering")
+    policy = selected_policy("offline-ordering")
     rule = replace(
         policy.checks[0],
         requirements=policy.checks[0].requirements.with_updates(
@@ -257,7 +244,7 @@ def test_offline_uses_effective_numeric_concurrency_floor(
 
 
 def test_elected_offline_uses_effective_required_concurrency(standardized_submission):
-    policy = policy_only("offline-point-present")
+    policy = selected_policy("offline-point-present")
     rule = replace(
         policy.checks[0],
         requirements=policy.checks[0].requirements.with_updates(
@@ -278,7 +265,7 @@ def test_schema_errors_use_effective_warning_severity(
     data = yaml.safe_load(path.read_text())
     data["concurrency"] = "invalid"
     path.write_text(yaml.safe_dump(data))
-    policy = policy_only("point-config-valid")
+    policy = selected_policy("point-config-valid")
     rule = replace(policy.checks[0], severity=Severity.WARNING)
     report = execute_submission(submission, replace(policy, checks=(rule,)))
     assert report.passed and report.warnings
@@ -286,7 +273,7 @@ def test_schema_errors_use_effective_warning_severity(
 
 
 def test_conflicting_region_basis_partitions_block_explicitly(standardized_submission):
-    policy = policy_only("region-basis", "point-duration")
+    policy = selected_policy("region-basis", "point-duration")
     partition = Override(
         id="different-clamp",
         rule="region-basis",

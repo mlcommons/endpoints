@@ -14,23 +14,12 @@ from inference_endpoint.validation.artifacts import (
 )
 from inference_endpoint.validation.bindings import ArtifactBinding
 from inference_endpoint.validation.conditions import Context
-from inference_endpoint.validation.evidence.loaders import ParsedArtifact
 from inference_endpoint.validation.models import freeze
 from inference_endpoint.validation.planner import PlannedCheck
 from inference_endpoint.validation.types import Decision, Scope
+from tests.unit.validation.helpers import update_evidence
 
 pytestmark = pytest.mark.unit
-
-
-def update_evidence(point, field, **updates):
-    artifact = getattr(point.evidence, field)
-    data = artifact.value.model_dump(
-        mode="json", exclude_unset=True, exclude_computed_fields=True
-    )
-    data.update(updates)
-    parsed = ParsedArtifact.from_json(data, type(artifact.value), point.path, field)
-    assert not parsed.errors
-    point.evidence = replace(point.evidence, **{field: parsed})
 
 
 def binding_check(tmp_path, rule_id):

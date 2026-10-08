@@ -3,12 +3,15 @@
 """Materialize readable submission cases as complete artifact trees."""
 
 import json
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
 import pytest
 import yaml
 from pydantic import JsonValue
+
+from inference_endpoint.validation import bundled_policy_path
 
 CASE_DIRECTORY = Path(__file__).resolve().parents[2] / "fixtures/validation/cases"
 SUBMISSION_CASES = tuple(path.stem for path in sorted(CASE_DIRECTORY.glob("*.yaml")))
@@ -65,3 +68,11 @@ def standardized_submission(submission_corpus: Path) -> Path:
 @pytest.fixture(params=SUBMISSION_CASES, ids=SUBMISSION_CASES)
 def submission_case(request: pytest.FixtureRequest, submission_corpus: Path) -> Path:
     return submission_corpus / request.param
+
+
+@pytest.fixture
+def policy_dir(tmp_path: Path) -> Path:
+    """Give each policy mutation test an independent bundle."""
+    target = tmp_path / "2026-10-C1"
+    shutil.copytree(bundled_policy_path(), target)
+    return target

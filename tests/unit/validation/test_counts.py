@@ -3,7 +3,6 @@
 """Reported and configured counts share operators while retaining rule semantics."""
 
 import json
-import shutil
 from dataclasses import replace
 
 import pytest
@@ -150,9 +149,8 @@ def test_fixed_reference_count_missing_blocks_check(tmp_path, policy, rule_id):
         },
     ],
 )
-def test_count_requirements_reject_ambiguous_or_invalid_bindings(tmp_path, changes):
-    target = tmp_path / "2026-10-C1"
-    shutil.copytree(bundled_policy_path(), target)
+def test_count_requirements_reject_ambiguous_or_invalid_bindings(policy_dir, changes):
+    target = policy_dir
     path = target / "point_checks.yaml"
     document = yaml.safe_load(path.read_text())
     document["checks"]["trajectories-to-issue"].update(changes)
