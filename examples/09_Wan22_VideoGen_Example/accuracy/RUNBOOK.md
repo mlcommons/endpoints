@@ -1,14 +1,25 @@
 # VBench Accuracy Smoke-Test Runbook
 
-End-to-end validation for the WAN 2.2 VBench accuracy pipeline. Run this on a GPU host before treating the PR as functionally validated — unit tests mock VBench entirely, so the only way to catch VBench API drift, prompt-suite-coverage issues, or naming-convention mismatches is to execute the real thing.
+End-to-end validation for the WAN 2.2 VBench accuracy pipeline. Run this on a
+GPU host before treating the PR as functionally validated — unit tests mock
+VBench entirely, so the only way to catch VBench API drift,
+prompt-suite-coverage issues, or naming-convention mismatches is to execute the
+real thing.
 
 ## 0. Preconditions
 
-- **GPU host** with CUDA-capable GPU (VBench's per-dim models — CLIP/DINO/RAFT/AMT — require it).
-- **Network egress** to PyPI + HuggingFace Hub (VBench downloads model weights on first use; ~5 GB).
-- **trtllm-serve** running and reachable, exposing `POST /v1/videos/generations` with `response_format=video_path` support. Videos must land on a shared filesystem readable by both trtllm-serve and this process.
-- **`uv`** binary available on PATH. Recommended: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
-- The parent endpoints env is **already synced** (`uv sync --extra dev` from the repo root). VBench lives in this subproject only — do not install it into the parent venv.
+- **GPU host** with CUDA-capable GPU (VBench's per-dim models —
+  CLIP/DINO/RAFT/AMT — require it).
+- **Network egress** to PyPI + HuggingFace Hub (VBench downloads model weights
+  on first use; ~5 GB).
+- **trtllm-serve** running and reachable, exposing `POST /v1/videos/generations`
+  with `response_format=video_path` support. Videos must land on a shared
+  filesystem readable by both trtllm-serve and this process.
+- **`uv`** binary available on PATH. Recommended:
+  `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+- The parent endpoints env is **already synced** (`uv sync --extra dev` from the
+  repo root). VBench lives in this subproject only — do not install it into the
+  parent venv.
 
 ## 1. Sync the accuracy subproject
 
@@ -19,7 +30,9 @@ cd examples/09_Wan22_VideoGen_Example/accuracy
 uv sync
 ```
 
-Expected: resolution succeeds (lockfile is committed), ~115 packages installed into `.venv/` under this directory. Heavy: torch + decord + opencv pulled here. First sync takes ~2-5 minutes on a fast link.
+Expected: resolution succeeds (lockfile is committed), ~115 packages installed
+into `.venv/` under this directory. Heavy: torch + decord + opencv pulled here.
+First sync takes ~2-5 minutes on a fast link.
 
 Sanity check the runner can import its deps:
 
@@ -31,7 +44,8 @@ Expected: `cuda True` and a `vbench` path inside `.venv/`.
 
 ## 2. Stage-1: runner argument plumbing
 
-Goal: confirm `vbench_runner.py` accepts arguments and locates VBench's bundled `VBench_full_info.json` without crashing inside VBench's loader.
+Goal: confirm `vbench_runner.py` accepts arguments and locates VBench's bundled
+`VBench_full_info.json` without crashing inside VBench's loader.
 
 ```bash
 # From examples/09_Wan22_VideoGen_Example/accuracy
@@ -47,18 +61,25 @@ uv run python vbench_runner.py \
   --dims subject_consistency
 ```
 
-Expected (any of these is a _pass_ for this stage — we only care that arg parsing and VBench init worked):
+Expected (any of these is a _pass_ for this stage — we only care that arg
+parsing and VBench init worked):
 
-- VBench prints model-download progress, then fails reading the empty `.mp4` with a decord/cv2 error. Fine — proves the wiring works.
-- VBench writes `/tmp/vbench_smoke/out/smoke_eval_results.json` with a `subject_consistency` entry.
+- VBench prints model-download progress, then fails reading the empty `.mp4`
+  with a decord/cv2 error. Fine — proves the wiring works.
+- VBench writes `/tmp/vbench_smoke/out/smoke_eval_results.json` with a
+  `subject_consistency` entry.
 
-_Fail signals:_ `TypeError: load_json(None)`, `argparse` errors, `ImportError: vbench`, `FileNotFoundError: VBench_full_info.json`. Stop and diagnose.
+_Fail signals:_ `TypeError: load_json(None)`, `argparse` errors,
+`ImportError: vbench`, `FileNotFoundError: VBench_full_info.json`. Stop and
+diagnose.
 
 ## 3. Stage-2: scorer with a hand-picked subset
 
-Goal: exercise `VBenchScorer.score()` end-to-end against a small set of real videos, bypassing the load generator.
+Goal: exercise `VBenchScorer.score()` end-to-end against a small set of real
+videos, bypassing the load generator.
 
-Pre-generate 3-5 videos for known prompts that exist in VBench's standard suite, then run the scorer directly:
+Pre-generate 3-5 videos for known prompts that exist in VBench's standard suite,
+then run the scorer directly:
 
 ```bash
 # From the repo root — activate the *parent* venv, not the subproject's.
@@ -118,19 +139,27 @@ PY
 
 Expected:
 
-- Subproject subprocess runs (you'll see VBench's stdout — model loads + per-dim progress).
-- `mean score` is between `0.0` and `1.0` (typically `0.4-0.9` for real WAN 2.2 outputs).
-- `vbench_results/vbench_smoke_eval_results.json` has all 6 keys, each `[aggregate_score, [per_video_details...]]`.
+- Subproject subprocess runs (you'll see VBench's stdout — model loads + per-dim
+  progress).
+- `mean score` is between `0.0` and `1.0` (typically `0.4-0.9` for real WAN 2.2
+  outputs).
+- `vbench_results/vbench_smoke_eval_results.json` has all 6 keys, each
+  `[aggregate_score, [per_video_details...]]`.
 
 _Fail signals:_
 
-- `KeyError: 'scene'` in the dict → VBench did not produce that dim. Check that prompts cover the dim in VBench's `VBench_full_info.json`.
-- `FileNotFoundError` on a `.mp4` → check `_stage_videos` symlink target; verify the path exists from this host (Lustre/NFS visibility).
-- VBench logs "no videos matched for dimension X" → the WAN 2.2 prompts don't actually overlap with that dim's suite. This contradicts the design assumption; capture which dims and prompts and flag it.
+- `KeyError: 'scene'` in the dict → VBench did not produce that dim. Check that
+  prompts cover the dim in VBench's `VBench_full_info.json`.
+- `FileNotFoundError` on a `.mp4` → check `_stage_videos` symlink target; verify
+  the path exists from this host (Lustre/NFS visibility).
+- VBench logs "no videos matched for dimension X" → the WAN 2.2 prompts don't
+  actually overlap with that dim's suite. This contradicts the design
+  assumption; capture which dims and prompts and flag it.
 
 ## 4. Stage-3: full benchmark + accuracy via the YAML
 
-Goal: confirm `inference-endpoint benchmark from-config` runs the full flow end-to-end with `offline_wan22_accuracy.yaml`.
+Goal: confirm `inference-endpoint benchmark from-config` runs the full flow
+end-to-end with `offline_wan22_accuracy.yaml`.
 
 ```bash
 cd /lustre/fsw/coreai_mlperf_inference/tinyinl/endpoints
@@ -147,8 +176,10 @@ inference-endpoint benchmark from-config \
 Expected:
 
 - Benchmark issues N samples to trtllm-serve, collects video paths.
-- `finalize_benchmark` invokes `VBenchScorer.score()`, which spawns the subproject subprocess.
-- `logs/wan22_video_accuracy_vbench/` (or whatever `report_dir` resolves to) contains:
+- `finalize_benchmark` invokes `VBenchScorer.score()`, which spawns the
+  subproject subprocess.
+- `logs/wan22_video_accuracy_vbench/` (or whatever `report_dir` resolves to)
+  contains:
   - `events.jsonl`, `sample_idx_map.json`
   - `vbench_videos/` with `{prompt}-{i}.mp4` symlinks
   - `vbench_results/vbench_wan22_vbench_eval_results.json` with 6 dim entries
@@ -168,6 +199,8 @@ Expected:
 
 ## 6. When this passes
 
-Update the PR description's test plan checkbox: "End-to-end VBench run on a GPU host" → done, citing the report directory.
+Update the PR description's test plan checkbox: "End-to-end VBench run on a GPU
+host" → done, citing the report directory.
 
-If any of stages 1-3 reveals a real bug, capture the exact failure and open a follow-up commit on the branch before marking ready for review.
+If any of stages 1-3 reveals a real bug, capture the exact failure and open a
+follow-up commit on the branch before marking ready for review.

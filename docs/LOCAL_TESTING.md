@@ -1,17 +1,21 @@
 # Local Testing Guide
 
-How to run and test the CLI locally using the built-in echo server and the included dummy dataset, without a real inference endpoint.
+How to run and test the CLI locally using the built-in echo server and the
+included dummy dataset, without a real inference endpoint.
 
 ## Quick Start: Testing CLI with Echo Server
 
 ### 1. Prepare Test Environment
 
-**Dataset:** The repo includes `tests/assets/datasets/dummy_1k.jsonl` (1000 samples)
-**Format:** Automatically inferred from the file extension. Common local formats include `jsonl`, `json`, `csv`, `parquet`, and HuggingFace datasets.
+**Dataset:** The repo includes `tests/assets/datasets/dummy_1k.jsonl` (1000
+samples) **Format:** Automatically inferred from the file extension. Common
+local formats include `jsonl`, `json`, `csv`, `parquet`, and HuggingFace
+datasets.
 
 ### 2. Start the Echo Server
 
-The echo server is included for local testing and mirrors requests back as responses.
+The echo server is included for local testing and mirrors requests back as
+responses.
 
 ```bash
 # Terminal 1: Start echo server on port 8765
@@ -160,12 +164,13 @@ uv run inference-endpoint benchmark offline \
 
 ### 6. View Results
 
-A report directory is always created (at `--report-dir` if specified, or at a default path
-otherwise), containing benchmark artifacts: `result_summary.json`, `report.txt`,
-`sample_idx_map.json`, and `events.jsonl`. `result_summary.json` is the primary,
-self-complete metrics report — counts, durations, QPS, TPS, seeds, and the
-TTFT/TPOT/latency/OSL distributions (with histogram buckets); `report.txt` is the full
-human-readable rendering of the same data; the summary is also printed to the console.
+A report directory is always created (at `--report-dir` if specified, or at a
+default path otherwise), containing benchmark artifacts: `result_summary.json`,
+`report.txt`, `sample_idx_map.json`, and `events.jsonl`. `result_summary.json`
+is the primary, self-complete metrics report — counts, durations, QPS, TPS,
+seeds, and the TTFT/TPOT/latency/OSL distributions (with histogram buckets);
+`report.txt` is the full human-readable rendering of the same data; the summary
+is also printed to the console.
 
 ### 7. Stop the Echo Server
 
@@ -200,7 +205,8 @@ The echo server expects OpenAI-compatible format but simplifies it:
 }
 ```
 
-The HTTP client's OpenAI adapter converts this to proper OpenAI format with `messages` array internally.
+The HTTP client's OpenAI adapter converts this to proper OpenAI format with
+`messages` array internally.
 
 ## Troubleshooting
 
@@ -218,7 +224,8 @@ Error: Connection failed
 Error: prompt not found in query.data
 ```
 
-**Solution:** Use `"prompt"` format in Query data, not `"messages"` (client converts it)
+**Solution:** Use `"prompt"` format in Query data, not `"messages"` (client
+converts it)
 
 ### Probe Times Out
 
@@ -226,7 +233,8 @@ Error: prompt not found in query.data
 Error: Timeout (>60s)
 ```
 
-**Solution:** Echo server might not be running, check logs at `/tmp/echo_server.log`
+**Solution:** Echo server might not be running, check logs at
+`/tmp/echo_server.log`
 
 ## Complete Testing Workflow
 
@@ -304,26 +312,32 @@ uv run inference-endpoint benchmark online \
 **Key Requirements:**
 
 - Model name is **required** for all benchmark and probe commands
-- Online mode requires `--load-pattern` to specify the scheduler type (poisson or concurrency)
+- Online mode requires `--load-pattern` to specify the scheduler type (poisson
+  or concurrency)
   - `--load-pattern poisson` requires `--target-qps`
   - `--load-pattern concurrency` requires `--concurrency`
-- Set `HF_TOKEN` environment variable for non-public models (public models like Qwen/Qwen3-8B don't need it)
+- Set `HF_TOKEN` environment variable for non-public models (public models like
+  Qwen/Qwen3-8B don't need it)
 
 **Sample Count Control:**
 
 - Use `--num-samples` for a fixed local workload size.
-- Sample priority: `--num-samples` > Poisson QPS × min issue duration > dataset size.
+- Sample priority: `--num-samples` > Poisson QPS × min issue duration > dataset
+  size.
 - With neither sample count nor min issue duration, the dataset is issued once.
 
 **Testing & Debugging:**
 
 - Use `-v` for INFO logging, `-vv` for DEBUG
-- Echo server mirrors prompts back - perfect for quick testing without real inference
+- Echo server mirrors prompts back - perfect for quick testing without real
+  inference
 - Press `Ctrl+C` to gracefully interrupt benchmarks
 - Default test dataset: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples)
 
 **Advanced:**
 
-- Streaming: `auto` (default), `on`, or `off` - auto enables for online, disables for offline
-- Use `--report-dir` for detailed metrics reports with TTFT, TPOT, and token analysis
+- Streaming: `auto` (default), `on`, or `off` - auto enables for online,
+  disables for offline
+- Use `--report-dir` for detailed metrics reports with TTFT, TPOT, and token
+  analysis
 - Dataset format auto-inferred from file extension

@@ -1,15 +1,17 @@
 # Report Design
 
-Builder-level reference for `metrics/report.py`. For where the report sits in the run pipeline,
-see [metrics/DESIGN.md](DESIGN.md); for the snapshot it consumes, see the
+Builder-level reference for `metrics/report.py`. For where the report sits in
+the run pipeline, see [metrics/DESIGN.md](DESIGN.md); for the snapshot it
+consumes, see the
 [metrics aggregator spec](../async_utils/services/metrics_aggregator/DESIGN.md).
 
 ## Overview
 
-`report.py` provides benchmark result summarization, display, and serialization. Its input is the
-terminal metrics-aggregator snapshot in **dict** form (`snapshot_to_dict`, as persisted to
-`final_snapshot.json`); its output is a `Report` carrying rollup statistics, percentiles, and
-histograms, rendered to console and to `result_summary.json`.
+`report.py` provides benchmark result summarization, display, and serialization.
+Its input is the terminal metrics-aggregator snapshot in **dict** form
+(`snapshot_to_dict`, as persisted to `final_snapshot.json`); its output is a
+`Report` carrying rollup statistics, percentiles, and histograms, rendered to
+console and to `result_summary.json`.
 
 ## Architecture
 
@@ -35,87 +37,102 @@ final_snapshot.json  (dict form of MetricsSnapshot)
 
 ## Design Principles
 
-**The dict snapshot is the sole input.** `from_snapshot` consumes the `snapshot_to_dict` shape
-directly and never decodes the wire `MetricsSnapshot` Struct (which is `array_like=True` for compact
-msgpack). A consumer feeds `json.loads(path.read_bytes())` straight in. This lets a report be
-rebuilt offline from any persisted `final_snapshot.json`.
+**The dict snapshot is the sole input.** `from_snapshot` consumes the
+`snapshot_to_dict` shape directly and never decodes the wire `MetricsSnapshot`
+Struct (which is `array_like=True` for compact msgpack). A consumer feeds
+`json.loads(path.read_bytes())` straight in. This lets a report be rebuilt
+offline from any persisted `final_snapshot.json`.
 
-**Honest incompleteness over crashes.** Every counter and series read uses `.get(...)` with a safe
-default, so a truncated or partial (INTERRUPTED) snapshot produces an honest _empty_ rollup and a
-`complete=False` report rather than raising. Missing `state` defaults to `"interrupted"`.
+**Honest incompleteness over crashes.** Every counter and series read uses
+`.get(...)` with a safe default, so a truncated or partial (INTERRUPTED)
+snapshot produces an honest _empty_ rollup and a `complete=False` report rather
+than raising. Missing `state` defaults to `"interrupted"`.
 
-**Self-describing artifacts.** Derived QPS/TPS and E2E average interactivity, the window that
-produced QPS/TPS
-(`legacy_loadgen_window_duration_ns`), and `run_config` are all serialized, so a valid run is fully
-identified by its own `result_summary.json`.
+**Self-describing artifacts.** Derived QPS/TPS and E2E average interactivity,
+the window that produced QPS/TPS (`legacy_loadgen_window_duration_ns`), and
+`run_config` are all serialized, so a valid run is fully identified by its own
+`result_summary.json`.
 
 ## Components
 
 ### `_series_to_metric_dict(stat) → dict`
 
-Converts one series-stat dict from the snapshot into the rollup shape `display()` expects:
+Converts one series-stat dict from the snapshot into the rollup shape
+`display()` expects:
 
 - `total`, `min`, `max`, `avg`, `std_dev`, `median`
 - `percentiles`: `{str(p): float}` for each requested percentile
 - `histogram`: `{"buckets": [(lo, hi), ...], "counts": [int, ...]}`
-- `early_stopping_percentiles` (optional): MLPerf early-stopping estimate map, placed right after
-  `percentiles`; present only when early stopping is enabled (COMPLETE snapshots for ttft/tpot/latency)
+- `early_stopping_percentiles` (optional): MLPerf early-stopping estimate map,
+  placed right after `percentiles`; present only when early stopping is enabled
+  (COMPLETE snapshots for ttft/tpot/latency)
 
-`avg`/`std_dev`/`median` are derived from the cheap rollups + percentiles (integer-exact variance
-form for ns series). `median` falls back to `(min + max) / 2` only for hand-crafted dicts that omit
-p50. A zero-count series returns `{}` (or an all-null early-stopping map if the feature is enabled).
+`avg`/`std_dev`/`median` are derived from the cheap rollups + percentiles
+(integer-exact variance form for ns series). `median` falls back to
+`(min + max) / 2` only for hand-crafted dicts that omit p50. A zero-count series
+returns `{}` (or an all-null early-stopping map if the feature is enabled).
 
 ### `Report` (frozen `msgspec.Struct`)
 
-Fields: `version`, `git_sha`, `test_started_at`, `n_samples_issued/completed/failed`,
-`duration_ns`, `state`, `complete`, the five rollup dicts (`ttft`, `tpot`, `latency`,
-`input_sequence_lengths`, `output_sequence_lengths`), `legacy_loadgen_window_duration_ns`,
-`qps`, `tps`, `e2e_avg_interactivity`,
-`finish_reason_counts`, `run_config`, and `accuracy`.
+Fields: `version`, `git_sha`, `test_started_at`,
+`n_samples_issued/completed/failed`, `duration_ns`, `state`, `complete`, the
+five rollup dicts (`ttft`, `tpot`, `latency`, `input_sequence_lengths`,
+`output_sequence_lengths`), `legacy_loadgen_window_duration_ns`, `qps`, `tps`,
+`e2e_avg_interactivity`, `finish_reason_counts`, `run_config`, and `accuracy`.
 
-- `complete` = `state == "complete" and n_pending_tasks == 0` — `False` marks partial async metrics
-  (drain timeout, interrupt, or a live-tick fallback when no final snapshot was found).
-- `qps`/`tps`/`e2e_avg_interactivity` are computed once in `from_snapshot` (see below) rather than
-  as live properties, so the serialized report is self-complete.
-- `accuracy` is empty from `from_snapshot`; per-dataset entries are attached after scoring.
+- `complete` = `state == "complete" and n_pending_tasks == 0` — `False` marks
+  partial async metrics (drain timeout, interrupt, or a live-tick fallback when
+  no final snapshot was found).
+- `qps`/`tps`/`e2e_avg_interactivity` are computed once in `from_snapshot` (see
+  below) rather than as live properties, so the serialized report is
+  self-complete.
+- `accuracy` is empty from `from_snapshot`; per-dataset entries are attached
+  after scoring.
 
-Methods: `display(fn, ...)` for console output with histograms; `to_json(save_to)` for
-`result_summary.json`.
+Methods: `display(fn, ...)` for console output with histograms;
+`to_json(save_to)` for `result_summary.json`.
 
 ### `Report.from_snapshot(snap, *, run_config=None, use_legacy_loadgen_qps_metrics=True) → Report`
 
-Splits the snapshot's `metrics` list into counters and series, then builds the `Report`.
+Splits the snapshot's `metrics` list into counters and series, then builds the
+`Report`.
 
 Counter keys read: `tracked_samples_issued`, `tracked_samples_completed`,
-`tracked_samples_failed`, `tracked_duration_ns`, `legacy_loadgen_window_duration_ns`, and the
-`tracked_finish_reason_*` counters. Series read (snapshot key → report field, via
-`SERIES_TO_SUMMARY_FIELD`): `ttft_ns` → `ttft`, `tpot_ns` → `tpot`, `sample_latency_ns` →
-`latency`. The token-length series are mapped directly: `isl` → `input_sequence_lengths` and
-`osl` → `output_sequence_lengths`. Both report fields use the same full distribution shape:
-`total`, `min`, `max`, `median`, `avg`, `std_dev`, `percentiles`, and `histogram`.
+`tracked_samples_failed`, `tracked_duration_ns`,
+`legacy_loadgen_window_duration_ns`, and the `tracked_finish_reason_*` counters.
+Series read (snapshot key → report field, via `SERIES_TO_SUMMARY_FIELD`):
+`ttft_ns` → `ttft`, `tpot_ns` → `tpot`, `sample_latency_ns` → `latency`. The
+token-length series are mapped directly: `isl` → `input_sequence_lengths` and
+`osl` → `output_sequence_lengths`. Both report fields use the same full
+distribution shape: `total`, `min`, `max`, `median`, `avg`, `std_dev`,
+`percentiles`, and `histogram`.
 
-**Input sequence length (ISL).** The metrics aggregator records ISL at `ISSUED`, using
-`len(token_ids)` when a dataset provides pre-tokenized input and otherwise tokenizing the raw
-text prompt with the configured reference tokenizer. This records the workload's intended input
-distribution as early as possible. `input_sequence_lengths` is empty when no ISL values were
-recorded (for example, no tokenizer is available for text-only inputs).
+**Input sequence length (ISL).** The metrics aggregator records ISL at `ISSUED`,
+using `len(token_ids)` when a dataset provides pre-tokenized input and otherwise
+tokenizing the raw text prompt with the configured reference tokenizer. This
+records the workload's intended input distribution as early as possible.
+`input_sequence_lengths` is empty when no ISL values were recorded (for example,
+no tokenizer is available for text-only inputs).
 
-Set `settings.metrics_isl: false` in YAML, or pass `--no-metrics-isl`, to skip ISL collection.
-This avoids all ISL tokenizer work and leaves `input_sequence_lengths` empty. OSL, TPOT,
-full-run OSL, and output-derived TPS reporting are unchanged.
+Set `settings.metrics_isl: false` in YAML, or pass `--no-metrics-isl`, to skip
+ISL collection. This avoids all ISL tokenizer work and leaves
+`input_sequence_lengths` empty. OSL, TPOT, full-run OSL, and output-derived TPS
+reporting are unchanged.
 
 **QPS/TPS window selection.** The snapshot always carries both a native window
 (`tracked_duration_ns`) and the MLPerf LoadGen "completed" window
-(`legacy_loadgen_window_duration_ns`, poisson only), so it stays reinterpretable either way. The
-legacy window drives the headline QPS/TPS only when it is enabled
-(`use_legacy_loadgen_qps_metrics`), available, and there are ≥2 completions
-(`QPS = (completed - 1) / window`). Otherwise both QPS and TPS fall back to the native window so
-they always share one window, and `legacy_loadgen_window_duration_ns` is left `None` so the
-serialized report records which view it holds. `tps` is `None` when no OSL was recorded.
+(`legacy_loadgen_window_duration_ns`, poisson only), so it stays reinterpretable
+either way. The legacy window drives the headline QPS/TPS only when it is
+enabled (`use_legacy_loadgen_qps_metrics`), available, and there are ≥2
+completions (`QPS = (completed - 1) / window`). Otherwise both QPS and TPS fall
+back to the native window so they always share one window, and
+`legacy_loadgen_window_duration_ns` is left `None` so the serialized report
+records which view it holds. `tps` is `None` when no OSL was recorded.
 
-**E2E average interactivity.** For failure-free runs, `e2e_avg_interactivity` is total output
-tokens divided by summed end-to-end sample latency in seconds. It is serialized in
-`result_summary.json` and displayed in the human-readable summary. The value is `None`/`N/A` when
-no OSL or positive sample-latency total is available, or when any tracked request failed. Failed
-responses contribute to `sample_latency_ns` but not OSL, so reporting the ratio in that case would
+**E2E average interactivity.** For failure-free runs, `e2e_avg_interactivity` is
+total output tokens divided by summed end-to-end sample latency in seconds. It
+is serialized in `result_summary.json` and displayed in the human-readable
+summary. The value is `None`/`N/A` when no OSL or positive sample-latency total
+is available, or when any tracked request failed. Failed responses contribute to
+`sample_latency_ns` but not OSL, so reporting the ratio in that case would
 combine different sample populations.

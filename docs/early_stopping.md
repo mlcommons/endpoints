@@ -1,71 +1,84 @@
 # Early stopping — design
 
-On-by-default feature that adds an MLPerf-LoadGen-style **early-stopping percentile estimate** to
-tail-latency metrics (TTFT / TPOT / total latency). It reports a _conservative, confidence-backed_
-percentile alongside the empirical one, so a run with too few samples to trust its raw p99/p90 is
-surfaced honestly instead of silently under-reporting the tail. It is on by default because it is
-non-invasive — computed once at run COMPLETE from data the aggregator already keeps (the exact path
-sorts that array once and shares it between the percentile grid and the estimates), with the hot
-path untouched and the output field purely additive.
+On-by-default feature that adds an MLPerf-LoadGen-style **early-stopping
+percentile estimate** to tail-latency metrics (TTFT / TPOT / total latency). It
+reports a _conservative, confidence-backed_ percentile alongside the empirical
+one, so a run with too few samples to trust its raw p99/p90 is surfaced honestly
+instead of silently under-reporting the tail. It is on by default because it is
+non-invasive — computed once at run COMPLETE from data the aggregator already
+keeps (the exact path sorts that array once and shares it between the percentile
+grid and the estimates), with the hot path untouched and the output field purely
+additive.
 
-It is an **estimate only** — no target-latency pass/fail, no dynamic mid-run halt. The gap analysis
-motivating it: at large n the estimate merely certifies the empirical percentile (a small
-conservative shift), while on short runs — where the empirical tail is optimistically noisy — the
-estimate stays honest, which is exactly the regime edge/T2V workloads live in.
+It is an **estimate only** — no target-latency pass/fail, no dynamic mid-run
+halt. The gap analysis motivating it: at large n the estimate merely certifies
+the empirical percentile (a small conservative shift), while on short runs —
+where the empirical tail is optimistically noisy — the estimate stays honest,
+which is exactly the regime edge/T2V workloads live in.
 
 ## What it computes
 
-For each target percentile `p` — every entry of the series' own report percentile grid at or above
-the median (`es_targets_from_grid`; the default grid yields p50/p75/p80/p90/p95/p97/p99/p99.9) —
-at confidence `c = 0.99`, over the `n` ascending-sorted latencies of a series
-(percentiles use the grid convention — 0-100 — at every surface; only the LoadGen-parity
-kernel keeps LoadGen's fraction domain, converted exactly once and unrounded, the same `/100`
+For each target percentile `p` — every entry of the series' own report
+percentile grid at or above the median (`es_targets_from_grid`; the default grid
+yields p50/p75/p80/p90/p95/p97/p99/p99.9) — at confidence `c = 0.99`, over the
+`n` ascending-sorted latencies of a series (percentiles use the grid convention
+— 0-100 — at every surface; only the LoadGen-parity kernel keeps LoadGen's
+fraction domain, converted exactly once and unrounded, the same `/100`
 `np.percentile` applies internally):
 
 ```
 estimate = sorted[n - t],  t = max{ i : n >= find_min_passing(i, p, d, c) + i }
 ```
 
-This is LoadGen's SingleStream estimate (`results.cc:162-226`): a value the true p-percentile is `<=`
-at confidence `c`, always `>=` the empirical percentile. Below the floor
-`find_min_passing(1, p, d, c) + 1` (662 for p99, 64 for p90) the estimate is `None` (too few
-samples). The binomial math lives in `metrics/early_stopping.py` (fast `betai`, no scipy; validated
-against LoadGen values, e.g. `h_min(t=0,p99)=459`).
+This is LoadGen's SingleStream estimate (`results.cc:162-226`): a value the true
+p-percentile is `<=` at confidence `c`, always `>=` the empirical percentile.
+Below the floor `find_min_passing(1, p, d, c) + 1` (662 for p99, 64 for p90) the
+estimate is `None` (too few samples). The binomial math lives in
+`metrics/early_stopping.py` (fast `betai`, no scipy; validated against LoadGen
+values, e.g. `h_min(t=0,p99)=459`).
 
-**Confidence and tolerance are algorithm constants, not configuration** (`CONFIDENCE = 0.99`,
-`TOLERANCE = 0.0` in `metrics/early_stopping.py`). LoadGen hardcodes both (`results.cc:157-158`);
-lowering `c` or raising `d` weakens the certified claim (`d > 0` certifies percentile `p − d`).
-The pure math keeps defaulted arguments for parity tests only.
+**Confidence and tolerance are algorithm constants, not configuration**
+(`CONFIDENCE = 0.99`, `TOLERANCE = 0.0` in `metrics/early_stopping.py`). LoadGen
+hardcodes both (`results.cc:157-158`); lowering `c` or raising `d` weakens the
+certified claim (`d > 0` certifies percentile `p − d`). The pure math keeps
+defaulted arguments for parity tests only.
 
-**The percentile targets are not a separate list either** — they derive from the series' report
-percentile grid, filtered to `≥ p50` (`ES_MIN_PERCENTILE = 50.0`, grid convention): the estimate is a _tail_
-certification (a conservative upper confidence bound), so below-median grid entries are skipped.
-One source of truth: whatever percentiles a series reports, ES covers — every scenario's gate
-percentile (p99 Server, p90 SingleStream/T2V) is always included, with nothing to tune.
+**The percentile targets are not a separate list either** — they derive from the
+series' report percentile grid, filtered to `≥ p50` (`ES_MIN_PERCENTILE = 50.0`,
+grid convention): the estimate is a _tail_ certification (a conservative upper
+confidence bound), so below-median grid entries are skipped. One source of
+truth: whatever percentiles a series reports, ES covers — every scenario's gate
+percentile (p99 Server, p90 SingleStream/T2V) is always included, with nothing
+to tune.
 
-Each estimate is a _marginal_ `c`-confidence statement per percentile. Reporting several at once is
-fine for diagnostics, but a joint gate across all of them holds at lower than `c` confidence
-(multiple testing) — compliance gates should use the single scenario percentile.
+Each estimate is a _marginal_ `c`-confidence statement per percentile. Reporting
+several at once is fine for diagnostics, but a joint gate across all of them
+holds at lower than `c` confidence (multiple testing) — compliance gates should
+use the single scenario percentile.
 
 ## How the estimate is computed
 
-The statistical question: for a candidate bound `B`, can we claim "the true p-percentile is `<= B`"
-at confidence `c`? Each sample is a Bernoulli trial — over or under `B`. If the true p-percentile
-actually exceeded `B`, samples would land over `B` at a rate above `1 - p`, so observing few
-over-latency samples in a long run is evidence for the bound. LoadGen accepts `B` when
+The statistical question: for a candidate bound `B`, can we claim "the true
+p-percentile is `<= B`" at confidence `c`? Each sample is a Bernoulli trial —
+over or under `B`. If the true p-percentile actually exceeded `B`, samples would
+land over `B` at a rate above `1 - p`, so observing few over-latency samples in
+a long run is evidence for the bound. LoadGen accepts `B` when
 
 ```
 P( <= t over-latency among n samples | over-latency rate = 1 - p )  <  1 - c
 ```
 
-— a false certification slips through with probability below `1 - c = 1%`. That binomial tail has a
-closed form as a regularized incomplete beta, `I_p(n - t, t + 1)`, evaluated with the Numerical
-Recipes `betai` continued fraction (no scipy; numerically equal to LoadGen's Gauss-hypergeometric
-form but converging in tens of iterations — see the docstrings in `metrics/early_stopping.py`).
+— a false certification slips through with probability below `1 - c = 1%`. That
+binomial tail has a closed form as a regularized incomplete beta,
+`I_p(n - t, t + 1)`, evaluated with the Numerical Recipes `betai` continued
+fraction (no scipy; numerically equal to LoadGen's Gauss-hypergeometric form but
+converging in tens of iterations — see the docstrings in
+`metrics/early_stopping.py`).
 
-The reported estimate takes `B` to be an actual sample — the t-th highest — with `t` pushed as low
-into the tail as the test allows. Both searches exploit monotonicity (exponential bracketing +
-binary search), so the whole computation is `O(log² n)` beta evaluations on the sorted array:
+The reported estimate takes `B` to be an actual sample — the t-th highest — with
+`t` pushed as low into the tail as the test allows. Both searches exploit
+monotonicity (exponential bracketing + binary search), so the whole computation
+is `O(log² n)` beta evaluations on the sorted array:
 
 ```
 odds(h, t)          = P(<= t over-latency among h + t trials | rate 1 - p)   # = I_p(h, t + 1)
@@ -78,18 +91,20 @@ estimate(sorted, p):
     return sorted[n - t]                               # t-th highest sample; t - 1 sit above it
 ```
 
-Worked example (n = 10,000, p99): the floor is 662, the budget resolves to `t = 77`, and the
-estimate is the 77th-highest sample — 76 samples sit strictly above it (one budget slot is spent on
-the estimate itself, which keeps the claim strict). At the floor the budget is `t = 1` and the
-estimate is the maximum observed sample — honest but maximally conservative; as `n` grows,
-`t/n -> 1 - p` and the estimate converges onto the empirical percentile from above.
+Worked example (n = 10,000, p99): the floor is 662, the budget resolves to
+`t = 77`, and the estimate is the 77th-highest sample — 76 samples sit strictly
+above it (one budget slot is spent on the estimate itself, which keeps the claim
+strict). At the floor the budget is `t = 1` and the estimate is the maximum
+observed sample — honest but maximally conservative; as `n` grows,
+`t/n -> 1 - p` and the estimate converges onto the empirical percentile from
+above.
 
 ## Cheat sheet: minimum samples per percentile
 
-The floor is `find_min_passing(1, p) + 1` at confidence 0.99 — the smallest run that can
-certify percentile p at all. Below it the map reports `null` for that percentile (the run
-"does not meet the standard" for that gate); at or above it the estimate is a valid
-c = 0.99 upper confidence bound.
+The floor is `find_min_passing(1, p) + 1` at confidence 0.99 — the smallest run
+that can certify percentile p at all. Below it the map reports `null` for that
+percentile (the run "does not meet the standard" for that gate); at or above it
+the estimate is a valid c = 0.99 upper confidence bound.
 
 | percentile | minimum samples |
 | ---------- | --------------- |
@@ -103,8 +118,9 @@ c = 0.99 upper confidence bound.
 | p99.9      | 6,636           |
 | p99.99     | 66,381          |
 
-Rule of thumb: floor ≈ 6.64 / (1 − p/100) — one more "9" costs 10× the samples. Contrast
-with the fixed-sample regime the feature replaces (~270k queries for Server p99).
+Rule of thumb: floor ≈ 6.64 / (1 − p/100) — one more "9" costs 10× the samples.
+Contrast with the fixed-sample regime the feature replaces (~270k queries for
+Server p99).
 
 ## Layering (who owns what)
 
@@ -119,15 +135,18 @@ config/schema.py            EarlyStoppingConfig (Pydantic, enabled=True)   <- th
 metrics/early_stopping.py   pure math (find_min_passing / es_percentile_estimate) — no I/O, unit-tested
 ```
 
-**Why the aggregator computes it:** the estimate needs the full sorted raw latency array, which only
-exists in the aggregator subprocess (`SeriesSampler._raw`). Only the summarized `SeriesStat` crosses
-to the main process, so the estimate must be produced before that boundary — in `build_stat`, on the
-COMPLETE (exact) path. Hot path is untouched; this is cold-path work at run end.
+**Why the aggregator computes it:** the estimate needs the full sorted raw
+latency array, which only exists in the aggregator subprocess
+(`SeriesSampler._raw`). Only the summarized `SeriesStat` crosses to the main
+process, so the estimate must be produced before that boundary — in
+`build_stat`, on the COMPLETE (exact) path. Hot path is untouched; this is
+cold-path work at run end.
 
-**Target metrics:** any series registered with `register_series(..., tail_latency=True)` — today
-`ttft_ns`, `tpot_ns`, and `sample_latency_ns` (see the aggregator's registration block). The flag
-lives at the metric's definition site, so a new latency metric opts in where it is declared;
-counters / ISL / OSL simply don't set it.
+**Target metrics:** any series registered with
+`register_series(..., tail_latency=True)` — today `ttft_ns`, `tpot_ns`, and
+`sample_latency_ns` (see the aggregator's registration block). The flag lives at
+the metric's definition site, so a new latency metric opts in where it is
+declared; counters / ISL / OSL simply don't set it.
 
 ## Config (YAML)
 
@@ -137,14 +156,17 @@ settings:
     enabled: true # default; the single opt-out (or --no-early-stopping on the CLI)
 ```
 
-The only knob is the opt-out — for consumers that strictly validate the `result_summary.json`
-schema. Everything else is a constant (see above), so there is nothing to tune per config and no
-way to accidentally weaken the statistical claim.
+The only knob is the opt-out — for consumers that strictly validate the
+`result_summary.json` schema. Everything else is a constant (see above), so
+there is nothing to tune per config and no way to accidentally weaken the
+statistical claim.
 
 ## Output (`result_summary.json`)
 
-Each of `ttft`/`tpot`/`latency` gains an `early_stopping_percentiles` map (COMPLETE snapshots only, for the series the run recorded; absent when opted out) — keys mirror the `percentiles` grid, values are the conservative estimate or `null`
-when the run has too few samples to certify that percentile:
+Each of `ttft`/`tpot`/`latency` gains an `early_stopping_percentiles` map
+(COMPLETE snapshots only, for the series the run recorded; absent when opted
+out) — keys mirror the `percentiles` grid, values are the conservative estimate
+or `null` when the run has too few samples to certify that percentile:
 
 ```json
 "tpot": {
@@ -153,17 +175,19 @@ when the run has too few samples to certify that percentile:
 }
 ```
 
-A `null` value means the run had fewer samples than that percentile's floor at confidence 0.99.
-An enabled target series that recorded nothing still emits the map (all `null`) rather than
-silently looking feature-off. The rich per-percentile detail (empirical value, n, `min_queries`,
-discard count) is INFO-logged by the aggregator at run end and reproducible offline via
-`scripts/early_stopping_estimate_from_events.py`. The text report renders the map per metric
-(one line per percentile; `N/A` = insufficient samples).
+A `null` value means the run had fewer samples than that percentile's floor at
+confidence 0.99. An enabled target series that recorded nothing still emits the
+map (all `null`) rather than silently looking feature-off. The rich
+per-percentile detail (empirical value, n, `min_queries`, discard count) is
+INFO-logged by the aggregator at run end and reproducible offline via
+`scripts/early_stopping_estimate_from_events.py`. The text report renders the
+map per metric (one line per percentile; `N/A` = insufficient samples).
 
 ## Explicitly out of scope
 
 - No `target_latency` pass/fail gate (LoadGen's Server ES path).
 - No dynamic mid-run halt — evaluated once at COMPLETE.
-- No scenario gating: offline/max_throughput runs with the flag enabled still compute the estimates
-  (for `latency`, plus `ttft`/`tpot` when streaming); they are simply not gating metrics there, since
-  throughput-bound scenarios have no tail-latency constraint to certify.
+- No scenario gating: offline/max_throughput runs with the flag enabled still
+  compute the estimates (for `latency`, plus `ttft`/`tpot` when streaming); they
+  are simply not gating metrics there, since throughput-bound scenarios have no
+  tail-latency constraint to certify.

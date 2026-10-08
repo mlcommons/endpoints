@@ -35,6 +35,7 @@ repos:
     rev: v3.1.0
     hooks:
       - id: prettier
+        # Markdown prose wraps at 80 columns via .prettierrc.yaml.
         types_or: [yaml, json, markdown]
         exclude: ^(src/inference_endpoint/openai/openai_types_gen.py|src/inference_endpoint/openai/openapi.yaml|src/inference_endpoint/config/templates/)
 

@@ -1,8 +1,11 @@
 # CLI Quick Reference
 
-Command-line reference for all `inference-endpoint` subcommands, flags, load patterns, and usage examples.
+Command-line reference for all `inference-endpoint` subcommands, flags, load
+patterns, and usage examples.
 
-> **Note:** Commands below assume an activated venv (`source .venv/bin/activate`). Without activation, prefix all commands with `uv run`.
+> **Note:** Commands below assume an activated venv
+> (`source .venv/bin/activate`). Without activation, prefix all commands with
+> `uv run`.
 
 ## Commands
 
@@ -42,9 +45,11 @@ inference-endpoint benchmark offline \
 inference-endpoint benchmark from-config --config test.yaml
 ```
 
-**Default Test Dataset:** Use `tests/assets/datasets/dummy_1k.jsonl` (1000 samples) for local testing.
+**Default Test Dataset:** Use `tests/assets/datasets/dummy_1k.jsonl` (1000
+samples) for local testing.
 
-**Dataset format:** `--dataset [perf|acc:]<path>[,key=value...]` — TOML-style dotted paths. Type prefix is optional (defaults to `perf`):
+**Dataset format:** `--dataset [perf|acc:]<path>[,key=value...]` — TOML-style
+dotted paths. Type prefix is optional (defaults to `perf`):
 
 ```bash
 --dataset data.jsonl                                         # simple path
@@ -93,32 +98,50 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 
 **Optional (with aliases):**
 
-- `--model-params.max-new-tokens --max-output-tokens` - Max output tokens (default: 1024)
-- `--model-params.osl-distribution.min --min-output-tokens` - Min output tokens (default: 1)
-- `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default: auto)
-- `--runtime.min-issue-duration-ms` - Poisson sample-count sizing from QPS × duration (unset = dataset once)
-- `--runtime.max-issue-duration-ms` - Performance issuing cap; in-flight responses still drain
+- `--model-params.max-new-tokens --max-output-tokens` - Max output tokens
+  (default: 1024)
+- `--model-params.osl-distribution.min --min-output-tokens` - Min output tokens
+  (default: 1)
+- `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default:
+  auto)
+- `--runtime.min-issue-duration-ms` - Poisson sample-count sizing from QPS ×
+  duration (unset = dataset once)
+- `--runtime.max-issue-duration-ms` - Performance issuing cap; in-flight
+  responses still drain
 - `--runtime.n-samples-to-issue --num-samples` - Explicit sample count override
 - `--client.num-workers --workers` - HTTP workers (-1=auto, default: -1)
-- `--client.max-connections --max-connections` - Max TCP connections (-1=unlimited)
+- `--client.max-connections --max-connections` - Max TCP connections
+  (-1=unlimited)
 - `--endpoint-config.api-key --api-key` - API authentication
-- `--endpoint-config.api-type --api-type` - API type: openai/sglang (default: openai)
-- `--report-dir` - Report output directory
-  Note: applies to CLI-driven `benchmark offline` / `benchmark online`; `benchmark from-config`
-  does not expose a CLI override for `report_dir`. Set it in the YAML only if you need to control
-  the output location; otherwise a default report directory is used.
-- `--timeout` - Whole-run watchdog (`settings.timeouts.run_timeout_s`; unset = off)
-- Other timeout flags: `--timeouts.service-ready-timeout-s`, `--timeouts.warmup-drain-timeout-s`, `--timeouts.performance-drain-timeout-s`, `--timeouts.accuracy-drain-timeout-s`, `--timeouts.metrics-drain-timeout-s`, `--timeouts.interrupted-teardown-grace-s`
-- `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
-- `--no-early-stopping` - opt out of the MLPerf early-stopping percentile estimates in `result_summary.json` (default: on; see [early_stopping.md](early_stopping.md))
+- `--endpoint-config.api-type --api-type` - API type: openai/sglang (default:
+  openai)
+- `--report-dir` - Report output directory Note: applies to CLI-driven
+  `benchmark offline` / `benchmark online`; `benchmark from-config` does not
+  expose a CLI override for `report_dir`. Set it in the YAML only if you need to
+  control the output location; otherwise a default report directory is used.
+- `--timeout` - Whole-run watchdog (`settings.timeouts.run_timeout_s`; unset =
+  off)
+- Other timeout flags: `--timeouts.service-ready-timeout-s`,
+  `--timeouts.warmup-drain-timeout-s`, `--timeouts.performance-drain-timeout-s`,
+  `--timeouts.accuracy-drain-timeout-s`, `--timeouts.metrics-drain-timeout-s`,
+  `--timeouts.interrupted-teardown-grace-s`
+- `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default:
+  true)
+- `--no-early-stopping` - opt out of the MLPerf early-stopping percentile
+  estimates in `result_summary.json` (default: on; see
+  [early_stopping.md](early_stopping.md))
 
 **Online-specific:**
 
-- `--load-pattern.type --load-pattern` - Load pattern: poisson or concurrency (required for online)
+- `--load-pattern.type --load-pattern` - Load pattern: poisson or concurrency
+  (required for online)
 - `--load-pattern.target-qps --target-qps` - Target QPS (required for poisson)
-- `--load-pattern.target-concurrency --concurrency` - Concurrent requests (required for concurrency)
+- `--load-pattern.target-concurrency --concurrency` - Concurrent requests
+  (required for concurrency)
 
-**All other schema fields** are accessible via dotted paths (e.g., `--model-params.temperature`, `--model-params.top-k`, `--runtime.scheduler-random-seed`). Run `--help` to see the full list.
+**All other schema fields** are accessible via dotted paths (e.g.,
+`--model-params.temperature`, `--model-params.top-k`,
+`--runtime.scheduler-random-seed`). Run `--help` to see the full list.
 
 ## Environment Variables
 
@@ -135,7 +158,8 @@ model_params:
 
 ## Dataset Formats
 
-Format is auto-detected from file extension. Override with `format=<ext>` in the dataset string.
+Format is auto-detected from file extension. Override with `format=<ext>` in the
+dataset string.
 
 **Supported:** `.csv`, `.json`, `.jsonl`, `.parquet`, `huggingface`
 
@@ -145,7 +169,8 @@ Format is auto-detected from file extension. Override with `format=<ext>` in the
 
 - Max throughput testing
 - Metrics: QPS, latency, TTFT, TPOT
-- Ordinary configured scoring remains available, but external scorers are skipped
+- Ordinary configured scoring remains available, but external scorers are
+  skipped
 - Fastest - no response collection overhead
 
 **acc** - Accuracy only (collect all responses)
@@ -174,7 +199,8 @@ inference-endpoint benchmark offline \
   --mode both
 ```
 
-> **Note:** Submission runs (`type: submission`) are YAML-only — they require `submission_ref` and `benchmark_mode` fields not exposed in CLI.
+> **Note:** Submission runs (`type: submission`) are YAML-only — they require
+> `submission_ref` and `benchmark_mode` fields not exposed in CLI.
 
 Report directories contain a sanitized `config.yaml`: credentials and other
 secret values are replaced with `<redacted>`. Restore those values before
@@ -316,7 +342,8 @@ endpoint_config:
   api_key: null
 ```
 
-Note: For submission configs, `model_params.name` is optional when `submission_ref.model` is provided — the model name is resolved automatically.
+Note: For submission configs, `model_params.name` is optional when
+`submission_ref.model` is provided — the model name is resolved automatically.
 
 ## CLI vs YAML Modes
 

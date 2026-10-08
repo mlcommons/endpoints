@@ -1,6 +1,8 @@
 # Development Guide
 
-This guide covers the development setup and workflow for the MLPerf Inference Endpoint Benchmarking System. For contribution guidelines, see [CONTRIBUTING.md](../CONTRIBUTING.md).
+This guide covers the development setup and workflow for the MLPerf Inference
+Endpoint Benchmarking System. For contribution guidelines, see
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Getting Started
 
@@ -34,7 +36,8 @@ uv run pytest --version
 <details>
 <summary>Using pip + venv instead (backward-compatible)</summary>
 
-> **Note:** Does not use `uv.lock` — dependency versions may differ from the lockfile.
+> **Note:** Does not use `uv.lock` — dependency versions may differ from the
+> lockfile.
 
 ```bash
 python3.12 -m venv venv && source venv/bin/activate
@@ -119,7 +122,8 @@ async def test_async_something():
     ...
 ```
 
-Available markers: `unit`, `integration`, `slow`, `performance`, `run_explicitly`
+Available markers: `unit`, `integration`, `slow`, `performance`,
+`run_explicitly`
 
 ### Key Fixtures
 
@@ -140,14 +144,17 @@ Target **>90% coverage** for all new code.
 
 All of these run automatically on commit:
 
-- trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict, debug-statements
+- trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict,
+  debug-statements
 - `ruff` (lint + autofix) and `ruff-format`
 - `mypy` type checking
 - `prettier` for YAML/JSON/Markdown
 - License header enforcement
 - YAML template validation and regeneration
 
-**IMPORTANT: Always run `pre-commit run --all-files` before every commit.** Hooks may modify files. If files are modified, stage the changes and commit once.
+**IMPORTANT: Always run `pre-commit run --all-files` before every commit.**
+Hooks may modify files. If files are modified, stage the changes and commit
+once.
 
 ```bash
 # Run all hooks
@@ -159,11 +166,25 @@ uv run pre-commit install
 
 ### Code Style
 
+Markdown prose wraps at 80 columns, configured in `.prettierrc.yaml`. The
+existing Prettier pre-commit hook applies this automatically, and the Pre-commit
+GitHub Actions workflow enforces the same formatting across all tracked files.
+Tables, code blocks, and indivisible links or inline code may exceed the target
+width.
+
+To reformat Markdown after editing, run:
+
+```bash
+uv run pre-commit run prettier --all-files
+```
+
 - **Formatter/Linter**: `ruff` (line-length 88, target Python 3.12)
 - **Type checking**: `mypy`
 - **Formatting**: `ruff-format` (double quotes, space indent)
 - **License headers**: Required on all Python files (auto-added by pre-commit)
-- **Commit messages**: [Conventional commits](https://www.conventionalcommits.org/) — `feat:`, `fix:`, `docs:`, `test:`, `chore:`, `perf:`
+- **Commit messages**:
+  [Conventional commits](https://www.conventionalcommits.org/) — `feat:`,
+  `fix:`, `docs:`, `test:`, `chore:`, `perf:`
 - **Comments**: Only where the _why_ isn't obvious from the code
 
 ## Development Workflow
@@ -201,45 +222,57 @@ docs/short-description
 
 ## YAML Config Templates
 
-Config templates in `src/inference_endpoint/config/templates/` are auto-generated from schema defaults. When you change `config/schema.py`, regenerate them:
+Config templates in `src/inference_endpoint/config/templates/` are
+auto-generated from schema defaults. When you change `config/schema.py`,
+regenerate them:
 
 ```bash
 uv run python scripts/regenerate_templates.py
 ```
 
-The pre-commit hook auto-regenerates templates when `schema.py`, `config.py`, or `regenerate_templates.py` change. CI validates templates are up to date via `--check` mode.
+The pre-commit hook auto-regenerates templates when `schema.py`, `config.py`, or
+`regenerate_templates.py` change. CI validates templates are up to date via
+`--check` mode.
 
 Two variants are generated per mode (offline, online, concurrency):
 
 - `_template.yaml` — minimal: only required fields + placeholders
-- `_template_full.yaml` — all fields with schema defaults + inline `# options:` comments
+- `_template_full.yaml` — all fields with schema defaults + inline `# options:`
+  comments
 
 ## Package Management
 
 ### Adding Dependencies
 
-Use `uv add <package>==<version>` to update both `pyproject.toml` and `uv.lock` atomically (always pin to exact versions with `==`):
+Use `uv add <package>==<version>` to update both `pyproject.toml` and `uv.lock`
+atomically (always pin to exact versions with `==`):
 
 - **Runtime dependencies**: `[project.dependencies]`
 - **Optional groups** (dev, test, etc.): `[project.optional-dependencies]`
 
-After adding a dependency, run `pip-audit` to verify it has no known vulnerabilities:
+After adding a dependency, run `pip-audit` to verify it has no known
+vulnerabilities:
 
 ```bash
 uv run pip-audit --ignore-vuln PYSEC-2026-3740
 ```
 
-`PYSEC-2026-3740` is an `nltk` advisory with no fixed release whose affected APIs this repo doesn't use; CI ignores it too. Drop the flag once [#520](https://github.com/mlcommons/endpoints/issues/520) is resolved.
+`PYSEC-2026-3740` is an `nltk` advisory with no fixed release whose affected
+APIs this repo doesn't use; CI ignores it too. Drop the flag once
+[#520](https://github.com/mlcommons/endpoints/issues/520) is resolved.
 
 ## Performance Considerations
 
-Code in `load_generator/`, `endpoint_client/worker.py`, and `async_utils/transport/` is latency-critical. In these paths:
+Code in `load_generator/`, `endpoint_client/worker.py`, and
+`async_utils/transport/` is latency-critical. In these paths:
 
 - No `match` statements — use dict dispatch
-- Use `dataclass(slots=True)` or `msgspec.Struct` for frequently instantiated classes
+- Use `dataclass(slots=True)` or `msgspec.Struct` for frequently instantiated
+  classes
 - Minimize async suspends
 - Use `msgspec` over `json`/`pydantic` for serialization
-- The HTTP client uses custom `ConnectionPool` with `httptools` parser — not `aiohttp`/`requests`
+- The HTTP client uses custom `ConnectionPool` with `httptools` parser — not
+  `aiohttp`/`requests`
 
 ## Debugging
 

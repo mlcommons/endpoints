@@ -2,9 +2,9 @@
 
 ## Quick start
 
-To reproduce the reference accuracy number, edit
-`model_params.name` and `endpoint_config.endpoints` in `online_edge_full_run.yaml`
-to match your server, then run:
+To reproduce the reference accuracy number, edit `model_params.name` and
+`endpoint_config.endpoints` in `online_edge_full_run.yaml` to match your server,
+then run:
 
 ```bash
 cd examples/11_Edge_Agentic_Example/
@@ -14,15 +14,16 @@ inference-endpoint benchmark from-config \
 ```
 
 `--accuracy-only` runs the finalized single-turn accuracy benchmark (~995
-samples) with the exact validated parameters and skips the performance phase. Drop
-the flag to run performance + accuracy back-to-back (Step 5). See the steps below
-for details.
+samples) with the exact validated parameters and skips the performance phase.
+Drop the flag to run performance + accuracy back-to-back (Step 5). See the steps
+below for details.
 
 ---
 
 ## What is this?
 
-This example runs [Berkeley Function Calling Leaderboard (BFCL) v4](https://gorilla.cs.berkeley.edu/blogs/13_bfcl_v4.html)
+This example runs
+[Berkeley Function Calling Leaderboard (BFCL) v4](https://gorilla.cs.berkeley.edu/blogs/13_bfcl_v4.html)
 accuracy evaluation using the **MLPerf Inference Endpoints** benchmarking tool
 ([mlcommons/endpoints](https://github.com/mlcommons/endpoints)).
 
@@ -33,9 +34,9 @@ back → repeat).
 
 The **finalized accuracy benchmark is single-turn only** (3 categories), with
 per-category sampling tuned to draw **~995 samples** — a sample size large
-enough for a stable point estimate — finishing on an edge device in **~3 hours**.
-Multi-turn remains available as an optional exploratory run (Step 3) but is not
-part of the accuracy gate.
+enough for a stable point estimate — finishing on an edge device in **~3
+hours**. Multi-turn remains available as an optional exploratory run (Step 3)
+but is not part of the accuracy gate.
 
 ---
 
@@ -61,9 +62,11 @@ CLI that comes with it.
 
 ### Obtaining the model
 
-The reference runs use **Qwen3.6-27B** ([`Qwen/Qwen3.6-27B`](https://huggingface.co/Qwen/Qwen3.6-27B),
-Apache 2.0) quantized to **Q4_K_M GGUF** (~16.8 GB). Pull the GGUF from a public
-Hugging Face quant repo — e.g. [`unsloth/Qwen3.6-27B-GGUF`](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF):
+The reference runs use **Qwen3.6-27B**
+([`Qwen/Qwen3.6-27B`](https://huggingface.co/Qwen/Qwen3.6-27B), Apache 2.0)
+quantized to **Q4_K_M GGUF** (~16.8 GB). Pull the GGUF from a public Hugging
+Face quant repo — e.g.
+[`unsloth/Qwen3.6-27B-GGUF`](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF):
 
 ```bash
 pip install -U "huggingface_hub[cli]"
@@ -83,9 +86,9 @@ Alternatively, `llama-server` can fetch it directly with
 
 If you already have an OpenAI-compatible server running, skip this section.
 
-This example was validated on an **NVIDIA Jetson AGX Thor** (aarch64, Blackwell GPU,
-JetPack 7 / CUDA 13) using a **natively-built llama.cpp `llama-server`** at commit
-**`cfff1fc`** — the reference results below were produced on this commit.
+This example was validated on an **NVIDIA Jetson AGX Thor** (aarch64, Blackwell
+GPU, JetPack 7 / CUDA 13) using a **natively-built llama.cpp `llama-server`** at
+commit **`cfff1fc`** — the reference results below were produced on this commit.
 
 **Build llama.cpp with CUDA on Thor (one time):**
 
@@ -98,8 +101,9 @@ cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=110   # Thor = sm_110 (
 cmake --build build --config Release -j --target llama-server
 ```
 
-> **Other edge devices:** the steps above are the NVIDIA Jetson AGX Thor baseline; for other devices change accordingly. For example, for **DGX Spark (GB10)**
-> set `-DCMAKE_CUDA_ARCHITECTURES=121` (`sm_121`, cc 12.1).
+> **Other edge devices:** the steps above are the NVIDIA Jetson AGX Thor
+> baseline; for other devices change accordingly. For example, for **DGX Spark
+> (GB10)** set `-DCMAKE_CUDA_ARCHITECTURES=121` (`sm_121`, cc 12.1).
 
 **Start the server (matches the validated reproducibility runs):**
 
@@ -179,8 +183,8 @@ inference-endpoint benchmark from-config \
 ```
 
 `--accuracy-only` skips the performance (throughput) phase entirely and forces a
-single worker and single connection for deterministic per-sample ordering. To run
-accuracy **and** performance back-to-back, drop the flag (see **Step 5**).
+single worker and single connection for deterministic per-sample ordering. To
+run accuracy **and** performance back-to-back, drop the flag (see **Step 5**).
 
 Before running, open `online_edge_full_run.yaml` and set `model_params.name` to
 match the model name your server reports (e.g. `Qwen3.6-27B-Q4_K_M`). The
@@ -204,14 +208,14 @@ Results are written to `results/edge_agentic_full_run/`.
 
 > The finalized accuracy benchmark is **single-turn only** (Step 2). The
 > multi-turn run below is **optional and exploratory** — it is not part of the
-> reported accuracy gate. Its small sampled subsets are dominated by
-> per-entry granularity noise, which is why single-turn (~995 samples) is the
-> gateable metric.
+> reported accuracy gate. Its small sampled subsets are dominated by per-entry
+> granularity noise, which is why single-turn (~995 samples) is the gateable
+> metric.
 
 Multi-turn is an agentic loop: the model calls a function, the runner executes
-it locally, feeds the result back, and the loop continues until all turns in
-the test case are complete. It cannot use the same YAML pipeline as single-turn
-and is driven by its own CLI.
+it locally, feeds the result back, and the loop continues until all turns in the
+test case are complete. It cannot use the same YAML pipeline as single-turn and
+is driven by its own CLI.
 
 ```bash
 python -m inference_endpoint.evaluation.bfcl_v4_multi_turn_cli \
@@ -269,9 +273,9 @@ print('Overall MT accuracy:', e['breakdown']['overall_accuracy'], '%')
 A single config, `online_edge_full_run.yaml`, runs the performance phase and the
 accuracy phase back-to-back against the same server.
 
-The **performance phase** replays recorded multi-turn agentic-coding trajectories
-(SWE-bench-style) while an inline **"online checker"** scores the model's
-generated tool calls against the recorded ones
+The **performance phase** replays recorded multi-turn agentic-coding
+trajectories (SWE-bench-style) while an inline **"online checker"** scores the
+model's generated tool calls against the recorded ones
 (`accuracy_config.eval_method: agentic_inference_inline` on the performance
 dataset); the dataset is both the performance workload and its own ground truth.
 The **accuracy phase** is the BFCL v4 single-turn gate from Step 2.
@@ -299,9 +303,9 @@ scores into one report directory (`results/edge_agentic_full_run/`).
 
 The performance dataset is built so that **no conversation overflows the 32K
 served context** — every turn completes and the run is _valid_ (0 dropped
-turns). Serving optimizations (e.g. MTP speculative decoding) are expected to make
-the performance phase substantially faster. Only raise `target_concurrency` when
-pointing at a multi-slot endpoint.
+turns). Serving optimizations (e.g. MTP speculative decoding) are expected to
+make the performance phase substantially faster. Only raise `target_concurrency`
+when pointing at a multi-slot endpoint.
 
 > **Keep reasoning off.** On this tool-calling workload, enabling server-side
 > reasoning gives no inline-accuracy benefit and costs ~60% more wall-clock (see
@@ -338,10 +342,10 @@ ISL/OSL) in `performance/result_summary.json`.
 The MLPerf Inference submission checker (`tools/submission/submission_checker`
 in `mlcommons/inference`, v5.0+) reads endpoints results directly from the
 artifacts a run already writes — `performance/result_summary.json`,
-`accuracy/accuracy_results.json`, and `config.yaml` — so no separate "log" format
-is needed. `scripts/publish_submission.py` copies those into the directory layout
-the checker walks and self-verifies the fields it reads (primary-metric QPS, p99
-latency, TTFT/TPOT p99, and the accuracy score):
+`accuracy/accuracy_results.json`, and `config.yaml` — so no separate "log"
+format is needed. `scripts/publish_submission.py` copies those into the
+directory layout the checker walks and self-verifies the fields it reads
+(primary-metric QPS, p99 latency, TTFT/TPOT p99, and the accuracy score):
 
 ```bash
 python scripts/publish_submission.py \
@@ -363,8 +367,9 @@ separately.
 ### Reasoning ON vs OFF (Jetson Thor, Q4_K_M + llama.cpp)
 
 Measured on **NVIDIA Jetson AGX Thor**, `Qwen3.6-27B-Q4_K_M` served single-slot
-(`-np 1`, `--ctx-size 32768`, `--flash-attn on`, `-ngl 99`), driven single-stream
-over `agentic_coding_2.5h.jsonl` (1007 generated turns, all completed):
+(`-np 1`, `--ctx-size 32768`, `--flash-attn on`, `-ngl 99`), driven
+single-stream over `agentic_coding_2.5h.jsonl` (1007 generated turns, all
+completed):
 
 | Dataset              | reasoning OFF                | reasoning ON         |
 | -------------------- | ---------------------------- | -------------------- |
@@ -382,13 +387,13 @@ Submitters who quantize the reference model themselves (e.g. NVFP4 / FP8
 post-training quantization) can calibrate with
 [`bfcl_calib.jsonl`](bfcl_calib.jsonl) — a 364-record, chat/tool-aware sample of
 BFCL v4 single-turn prompts (OpenAI-style `messages` + BFCL `tools` function
-schemas). It is used **only** to estimate quantizer scales (weight / activation /
-KV-cache); it is **not** scored and is **not** part of the accuracy gate.
+schemas). It is used **only** to estimate quantizer scales (weight / activation
+/ KV-cache); it is **not** scored and is **not** part of the accuracy gate.
 
 At quantization time each record is rendered through the model's own tokenizer
 chat template (with its `tools` block) so the calibration activations match
-serving-time inputs. The set is sampled from the BFCL v4 single-turn domain — the
-same domain as the ~995-sample accuracy gate — and ~30% of its prompts also
+serving-time inputs. The set is sampled from the BFCL v4 single-turn domain —
+the same domain as the ~995-sample accuracy gate — and ~30% of its prompts also
 appear in that gate.
 
 ---
@@ -454,17 +459,16 @@ fails).
 | Overall         | 86.23%    | **≥ 83.64%**            |
 | Normalized (ST) | 87.96%    | **≥ 85.32%**            |
 
-Accuracy is hardware-independent (deterministic at `temperature 0` + fixed seed),
-so the same thresholds apply on any device. This gate is encoded in the ruleset
-at `src/inference_endpoint/config/rulesets/mlcommons/models.py`
+Accuracy is hardware-independent (deterministic at `temperature 0` + fixed
+seed), so the same thresholds apply on any device. This gate is encoded in the
+ruleset at `src/inference_endpoint/config/rulesets/mlcommons/models.py`
 (`Qwen3_6_27B.accuracy_target_settings`).
 
 ### Optional: multi-turn parity
 
 The optional multi-turn run (Step 3) is **not gated**. For reference, a single
-run of the full 200-entry `multi_turn_base` (no sampling) scored
-**140/200 = 70.00%**, in exact parity with evalscope (~80 min on an edge
-device).
+run of the full 200-entry `multi_turn_base` (no sampling) scored **140/200 =
+70.00%**, in exact parity with evalscope (~80 min on an edge device).
 
 ### Notes
 

@@ -16,12 +16,23 @@ benchmarking tool for LLM inference endpoints targeting 50k+ QPS.
 
 ## Ways to Contribute
 
-- **Report bugs** — use the [Bug Report](https://github.com/mlcommons/endpoints/issues/new?template=100-bug-report.yml) template
-- **Request features** — use the [Feature Request](https://github.com/mlcommons/endpoints/issues/new?template=200-feature-request.yml) template
-- **Report performance issues** — use the [Performance Issue](https://github.com/mlcommons/endpoints/issues/new?template=300-performance.yml) template
-- **Request dataset support** — use the [Dataset Integration](https://github.com/mlcommons/endpoints/issues/new?template=400-dataset-integration.yml) template
+- **Report bugs** — use the
+  [Bug Report](https://github.com/mlcommons/endpoints/issues/new?template=100-bug-report.yml)
+  template
+- **Request features** — use the
+  [Feature Request](https://github.com/mlcommons/endpoints/issues/new?template=200-feature-request.yml)
+  template
+- **Report performance issues** — use the
+  [Performance Issue](https://github.com/mlcommons/endpoints/issues/new?template=300-performance.yml)
+  template
+- **Request dataset support** — use the
+  [Dataset Integration](https://github.com/mlcommons/endpoints/issues/new?template=400-dataset-integration.yml)
+  template
 - **Improve documentation** — fix typos, clarify guides, add examples
-- **Pick up an issue** — look for [`good first issue`](https://github.com/mlcommons/endpoints/labels/good%20first%20issue) or [`help wanted`](https://github.com/mlcommons/endpoints/labels/help%20wanted)
+- **Pick up an issue** — look for
+  [`good first issue`](https://github.com/mlcommons/endpoints/labels/good%20first%20issue)
+  or
+  [`help wanted`](https://github.com/mlcommons/endpoints/labels/help%20wanted)
 - **Review PRs** — thoughtful reviews are as valuable as code
 
 ## Development Setup
@@ -52,7 +63,8 @@ uv run pytest -m unit -x --timeout=60
 <details>
 <summary>Using pip + venv instead (backward-compatible)</summary>
 
-> **Note:** Does not use `uv.lock` — dependency versions may differ from the lockfile.
+> **Note:** Does not use `uv.lock` — dependency versions may differ from the
+> lockfile.
 
 ```bash
 python3.12 -m venv venv && source venv/bin/activate
@@ -79,8 +91,8 @@ uv run inference-endpoint probe --endpoints http://localhost:8765 --model test-m
 ### Formatting and Linting
 
 We use [ruff](https://docs.astral.sh/ruff/) for formatting and linting, and
-[mypy](https://mypy-lang.org/) for type checking. Pre-commit hooks enforce
-these automatically.
+[mypy](https://mypy-lang.org/) for type checking. Pre-commit hooks enforce these
+automatically.
 
 ```bash
 # Run all checks manually
@@ -92,19 +104,23 @@ uv run pre-commit run --all-files
 - **Line length:** 88 characters
 - **Quotes:** Double quotes
 - **License headers:** Required on all Python files (auto-added by pre-commit)
-- **Commit messages:** [Conventional commits](https://www.conventionalcommits.org/) — `feat:`, `fix:`, `docs:`, `test:`, `chore:`, `perf:`
-- **Comments:** Only where the _why_ isn't obvious from the code. No over-documenting.
+- **Commit messages:**
+  [Conventional commits](https://www.conventionalcommits.org/) — `feat:`,
+  `fix:`, `docs:`, `test:`, `chore:`, `perf:`
+- **Comments:** Only where the _why_ isn't obvious from the code. No
+  over-documenting.
 
 ### Serialization
 
-- **Hot-path data** (Query, QueryResult, StreamChunk): `msgspec.Struct` — encode/decode with `msgspec.json`, not stdlib json
+- **Hot-path data** (Query, QueryResult, StreamChunk): `msgspec.Struct` —
+  encode/decode with `msgspec.json`, not stdlib json
 - **Configuration**: `pydantic.BaseModel` for validation
 - **Do not** use `dataclass` where neighboring types use `msgspec`
 
 ### Performance-Sensitive Code
 
-Code in `load_generator/`, `endpoint_client/worker.py`, and `async_utils/transport/`
-is latency-critical. In these paths:
+Code in `load_generator/`, `endpoint_client/worker.py`, and
+`async_utils/transport/` is latency-critical. In these paths:
 
 - No `match` statements — use dict dispatch
 - Minimize async suspends
@@ -143,7 +159,8 @@ async def test_something():
     ...
 ```
 
-Available markers: `unit`, `integration`, `slow`, `performance`, `run_explicitly`
+Available markers: `unit`, `integration`, `slow`, `performance`,
+`run_explicitly`
 
 ### Coverage
 
@@ -165,9 +182,11 @@ docs/short-description
 
 1. **Create a focused PR** — one logical change per PR
 2. **Fill out the PR template** — describe what, why, and how to test
-3. **Ensure CI passes** — `uv run pre-commit run --all-files` and `uv run pytest -m unit` locally before pushing
+3. **Ensure CI passes** — `uv run pre-commit run --all-files` and
+   `uv run pytest -m unit` locally before pushing
 4. **Link related issues** — use `Closes #123` or `Relates to #123`
-5. **Expect review within 2-3 business days** — reviewers are auto-assigned based on changed files
+5. **Expect review within 2-3 business days** — reviewers are auto-assigned
+   based on changed files
 
 ### What We Look For in Reviews
 
@@ -185,14 +204,16 @@ docs/short-description
 
 ### Before Filing
 
-1. Search [existing issues](https://github.com/mlcommons/endpoints/issues) for duplicates
+1. Search [existing issues](https://github.com/mlcommons/endpoints/issues) for
+   duplicates
 2. Use the appropriate issue template
 3. Provide enough detail to reproduce or understand the request
 
 ### Issue Lifecycle
 
-New issues are auto-added to our [project board](https://github.com/orgs/mlcommons/projects/57)
-and flow through: **Inbox → Triage → Ready → In Progress → In Review → Done**
+New issues are auto-added to our
+[project board](https://github.com/orgs/mlcommons/projects/57) and flow through:
+**Inbox → Triage → Ready → In Progress → In Review → Done**
 
 ### Priority Levels
 
@@ -212,7 +233,8 @@ A CLA bot will check your PR automatically.
 
 To sign up:
 
-1. Visit the [MLCommons Subscription form](https://mlcommons.org/membership/membership-overview/)
+1. Visit the
+   [MLCommons Subscription form](https://mlcommons.org/membership/membership-overview/)
 2. Submit your GitHub username
 3. The CLA bot will verify on your next PR
 
@@ -221,4 +243,5 @@ during the PR process.
 
 ## Questions?
 
-File an [issue](https://github.com/mlcommons/endpoints/issues). We aim to respond within a few business days.
+File an [issue](https://github.com/mlcommons/endpoints/issues). We aim to
+respond within a few business days.

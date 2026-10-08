@@ -7,7 +7,8 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen.svg)](https://pre-commit.com/)
 
-A high-performance benchmarking tool for LLM inference endpoints, targeting 50k+ QPS. Part of [MLCommons](https://mlcommons.org/).
+A high-performance benchmarking tool for LLM inference endpoints, targeting 50k+
+QPS. Part of [MLCommons](https://mlcommons.org/).
 
 ## Quick Start
 
@@ -22,7 +23,8 @@ uv sync
 <details>
 <summary>Using pip + venv instead (backward-compatible)</summary>
 
-> **Note:** Does not use `uv.lock` — dependency versions may differ from the lockfile.
+> **Note:** Does not use `uv.lock` — dependency versions may differ from the
+> lockfile.
 
 ```bash
 python3.12 -m venv venv && source venv/bin/activate
@@ -86,13 +88,16 @@ Dataset Manager ──> Load Generator ──> Endpoint Client ──> External 
 
 ### Benchmark Modes
 
-- **Offline** (`max_throughput`): Burst all queries at once for peak throughput measurement
-- **Online** (`poisson`): Fixed QPS with Poisson arrival distribution for latency profiling
+- **Offline** (`max_throughput`): Burst all queries at once for peak throughput
+  measurement
+- **Online** (`poisson`): Fixed QPS with Poisson arrival distribution for
+  latency profiling
 - **Concurrency**: Fixed concurrent request count
 
 ### Endpoint liveness
 
-Set an endpoint response idle timeout to fail the run when in-flight work stops responding. Use `>=300` seconds; raise it for long requests:
+Set an endpoint response idle timeout to fail the run when in-flight work stops
+responding. Use `>=300` seconds; raise it for long requests:
 
 ```yaml
 settings:
@@ -100,7 +105,9 @@ settings:
     endpoint_response_idle_timeout_s: 300
 ```
 
-Or pass `--endpoint-response-idle-timeout 300`. The guard is client-side; see [the configuration guide](docs/config/DESIGN.md#endpoint-response-idle-timeout) for tuning.
+Or pass `--endpoint-response-idle-timeout 300`. The guard is client-side; see
+[the configuration guide](docs/config/DESIGN.md#endpoint-response-idle-timeout)
+for tuning.
 
 ### Performance Design
 
@@ -118,7 +125,8 @@ Run accuracy evaluation with Pass@1 scoring using pre-defined benchmarks:
 
 - **GPQA** (default: GPQA Diamond)
 - **AIME** (default: AIME 2025)
-- **LiveCodeBench** (default: lite, release_v6) — requires [additional setup](src/inference_endpoint/dataset_manager/predefined/livecodebench/README.md)
+- **LiveCodeBench** (default: lite, release_v6) — requires
+  [additional setup](src/inference_endpoint/dataset_manager/predefined/livecodebench/README.md)
 
 ## Documentation
 
@@ -134,24 +142,33 @@ Run accuracy evaluation with Pass@1 scoring using pre-defined benchmarks:
 
 ## Contributing
 
-We welcome contributions from the community. See [CONTRIBUTING.md](CONTRIBUTING.md) for:
+We welcome contributions from the community. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for:
 
 - Development setup and prerequisites
 - Code style (ruff, mypy, conventional commits)
 - Testing requirements (>90% coverage, pytest markers)
 - Pull request process and review expectations
 
-Issues are tracked on our [project board](https://github.com/orgs/mlcommons/projects/57). Look for [`good first issue`](https://github.com/mlcommons/endpoints/labels/good%20first%20issue) or [`help wanted`](https://github.com/mlcommons/endpoints/labels/help%20wanted) to get started.
+Issues are tracked on our
+[project board](https://github.com/orgs/mlcommons/projects/57). Look for
+[`good first issue`](https://github.com/mlcommons/endpoints/labels/good%20first%20issue)
+or [`help wanted`](https://github.com/mlcommons/endpoints/labels/help%20wanted)
+to get started.
 
 ## Acknowledgements
 
 This project draws inspiration from:
 
-- [MLCommons Inference](https://github.com/mlcommons/inference) — MLPerf Inference benchmark suite
+- [MLCommons Inference](https://github.com/mlcommons/inference) — MLPerf
+  Inference benchmark suite
 - [AIPerf](https://github.com/ai-dynamo/aiperf) — AI model performance profiling
-- [SGLang GenAI-Bench](https://github.com/sgl-project/genai-bench) — Token-level performance evaluation
-- [vLLM Benchmarks](https://github.com/vllm-project/vllm/tree/main/benchmarks) — Performance benchmarking for vLLM
-- [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) - LLM inference optimization toolkit
+- [SGLang GenAI-Bench](https://github.com/sgl-project/genai-bench) — Token-level
+  performance evaluation
+- [vLLM Benchmarks](https://github.com/vllm-project/vllm/tree/main/benchmarks) —
+  Performance benchmarking for vLLM
+- [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) - LLM inference
+  optimization toolkit
 
 ## License
 

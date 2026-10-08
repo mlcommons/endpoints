@@ -1,16 +1,27 @@
 # Dataset Manager — Design Spec
 
-> Loads benchmark datasets from local files and HuggingFace sources and applies ordered transform pipelines to produce request-ready samples for the load generator.
+> Loads benchmark datasets from local files and HuggingFace sources and applies
+> ordered transform pipelines to produce request-ready samples for the load
+> generator.
 
-**Component specs:** [async_utils](../async_utils/DESIGN.md) · [commands](../commands/DESIGN.md) · [config](../config/DESIGN.md) · [core](../core/DESIGN.md) · **dataset_manager** · [endpoint_client](../endpoint_client/DESIGN.md) · [evaluation](../evaluation/DESIGN.md) · [load_generator](../load_generator/DESIGN.md) · [metrics](../metrics/DESIGN.md) · [openai](../openai/DESIGN.md) · [plugins](../plugins/DESIGN.md) · [profiling](../profiling/DESIGN.md) · [sglang](../sglang/DESIGN.md) · [testing](../testing/DESIGN.md) · [utils](../utils/DESIGN.md)
+**Component specs:** [async_utils](../async_utils/DESIGN.md) ·
+[commands](../commands/DESIGN.md) · [config](../config/DESIGN.md) ·
+[core](../core/DESIGN.md) · **dataset_manager** ·
+[endpoint_client](../endpoint_client/DESIGN.md) ·
+[evaluation](../evaluation/DESIGN.md) ·
+[load_generator](../load_generator/DESIGN.md) · [metrics](../metrics/DESIGN.md)
+· [openai](../openai/DESIGN.md) · [plugins](../plugins/DESIGN.md) ·
+[profiling](../profiling/DESIGN.md) · [sglang](../sglang/DESIGN.md) ·
+[testing](../testing/DESIGN.md) · [utils](../utils/DESIGN.md)
 
 ---
 
 ## Overview
 
-`dataset_manager/` loads benchmark datasets from various sources and applies transformation
-pipelines to produce request-ready samples. It decouples dataset format (how data is stored)
-from model and adapter requirements (how data must be shaped).
+`dataset_manager/` loads benchmark datasets from various sources and applies
+transformation pipelines to produce request-ready samples. It decouples dataset
+format (how data is stored) from model and adapter requirements (how data must
+be shaped).
 
 ## Responsibilities
 
@@ -54,8 +65,8 @@ class Dataset:
     # When repeats > 1, the dataset wraps around after num_samples()
 ```
 
-`load_sample()` typically returns a `dict`, but the return type is `Any` — dataset schemas vary
-widely and are not enforced at the base class level.
+`load_sample()` typically returns a `dict`, but the return type is `Any` —
+dataset schemas vary widely and are not enforced at the base class level.
 
 ### `DataLoaderFactory`
 
@@ -67,9 +78,9 @@ class DataLoaderFactory:
     ) -> Dataset: ...
 ```
 
-`config` is the `Dataset` Pydantic model from `config/schema.py`; it carries path, format,
-parser/remap config, and dataset name. Format is inferred from file extension when
-`config.format` is not set:
+`config` is the `Dataset` Pydantic model from `config/schema.py`; it carries
+path, format, parser/remap config, and dataset name. Format is inferred from
+file extension when `config.format` is not set:
 
 - `.jsonl` → `JSONL`
 - `.json` → `JSON`
@@ -77,9 +88,10 @@ parser/remap config, and dataset name. Format is inferred from file extension wh
 - `.parquet` → `PARQUET`
 - explicit `format=huggingface` → `HF`
 
-Presets (e.g. `"gpqa::gptoss"`) are encoded in `config.name` as a `"::"` split — `<dataset>::<preset>` —
-where the factory resolves the first segment to a predefined dataset class and the second to a named
-preset with its transform stack.
+Presets (e.g. `"gpqa::gptoss"`) are encoded in `config.name` as a `"::"` split —
+`<dataset>::<preset>` — where the factory resolves the first segment to a
+predefined dataset class and the second to a named preset with its transform
+stack.
 
 ### `Transform` (abstract base)
 
@@ -101,8 +113,9 @@ Transforms are composed in order; each receives the output of the previous.
 
 ## Predefined Datasets
 
-Registered in `dataset.py` under `Dataset.PREDEFINED`. Referenced by name in rulesets and YAML
-configs. Each predefined dataset ships with default transforms for supported model families.
+Registered in `dataset.py` under `Dataset.PREDEFINED`. Referenced by name in
+rulesets and YAML configs. Each predefined dataset ships with default transforms
+for supported model families.
 
 | Name                           | Source        | Notes                                                 |
 | ------------------------------ | ------------- | ----------------------------------------------------- |
@@ -117,35 +130,38 @@ configs. Each predefined dataset ships with default transforms for supported mod
 
 ## Preset System
 
-A preset string like `"gpqa::gptoss"` (`<dataset>::<preset>`) resolves to a predefined dataset with a
-named preset's transform stack pre-applied. This is used by rulesets to ensure consistent
-prompt formatting across submissions.
+A preset string like `"gpqa::gptoss"` (`<dataset>::<preset>`) resolves to a
+predefined dataset with a named preset's transform stack pre-applied. This is
+used by rulesets to ensure consistent prompt formatting across submissions.
 
 ## Design Decisions
 
 **Transforms are separate from datasets**
 
-The same raw dataset can be used with different models (each with different prompt templates) or
-different API adapters (OpenAI vs SGLang). Keeping transforms out of the dataset class means
-neither the dataset nor the adapter has to know about the other.
+The same raw dataset can be used with different models (each with different
+prompt templates) or different API adapters (OpenAI vs SGLang). Keeping
+transforms out of the dataset class means neither the dataset nor the adapter
+has to know about the other.
 
 **Format inference from extension**
 
-Reducing friction for CLI users is a priority. Specifying `--dataset my_data.jsonl` should just
-work. For non-standard sources such as HuggingFace datasets, callers can set the dataset
-`format` explicitly in YAML or in the repeatable `--dataset ...,format=huggingface` string.
+Reducing friction for CLI users is a priority. Specifying
+`--dataset my_data.jsonl` should just work. For non-standard sources such as
+HuggingFace datasets, callers can set the dataset `format` explicitly in YAML or
+in the repeatable `--dataset ...,format=huggingface` string.
 
 **`load_sample()` returns a dict, not a typed struct**
 
-Dataset schemas vary widely (different columns, optional fields). A dict interface avoids a
-proliferation of dataset-specific types while still being easily introspectable and debuggable.
-The adapter layer (`openai/openai_adapter.py`) is responsible for reading the expected keys.
+Dataset schemas vary widely (different columns, optional fields). A dict
+interface avoids a proliferation of dataset-specific types while still being
+easily introspectable and debuggable. The adapter layer
+(`openai/openai_adapter.py`) is responsible for reading the expected keys.
 
 **`repeats` for issuing more samples than the dataset size**
 
-When `n_samples_to_issue > num_samples()`, the dataset wraps. Index arithmetic (`index %
-num_samples()`) is handled by the Dataset base class. This avoids duplicating the logic in every
-scheduler.
+When `n_samples_to_issue > num_samples()`, the dataset wraps. Index arithmetic
+(`index % num_samples()`) is handled by the Dataset base class. This avoids
+duplicating the logic in every scheduler.
 
 ## Integration Points
 

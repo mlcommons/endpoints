@@ -1,6 +1,7 @@
 # Benchmark Comparison Example
 
-Compare `inference-endpoint` with vLLM's benchmarking tool using identical prompts.
+Compare `inference-endpoint` with vLLM's benchmarking tool using identical
+prompts.
 
 ## Prerequisites
 
@@ -11,7 +12,8 @@ cd examples/03_BenchmarkComparison
 ./setup_vllm_venv.sh
 ```
 
-This creates a `vllm_venv` directory with vLLM installed. You can specify a custom location:
+This creates a `vllm_venv` directory with vLLM installed. You can specify a
+custom location:
 
 ```bash
 ./setup_vllm_venv.sh /path/to/custom/venv
