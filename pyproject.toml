@@ -213,6 +213,9 @@ ignore = [
     "C901",  # too complex
 ]
 
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

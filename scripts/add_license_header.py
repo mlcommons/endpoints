@@ -66,10 +66,11 @@ def add_header_to_file(filepath: Path) -> bool:
                     lines[i] = (
                         f"# SPDX-FileCopyrightText: Copyright (c) {YEAR} NVIDIA CORPORATION & AFFILIATES. All rights reserved."
                     )
+                    updated = "\n".join(lines)
+                    if updated != content:
+                        filepath.write_text(updated)
+                        return True
                     break
-            content = "\n".join(lines)
-            filepath.write_text(content)
-            return True
         return False
 
     # Handle shebang
