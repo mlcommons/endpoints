@@ -62,8 +62,19 @@ def test_accuracy_nested_scores_are_owned():
     assert parsed.root["aime25"]["extras"]["source"] == "test"
 
 
-@pytest.mark.parametrize("field", ["speculative_decoding", "drafter"])
-@pytest.mark.parametrize("declaration", [{}, {"target_checksum": "declared-checksum"}])
+@pytest.mark.parametrize(
+    "field", ["speculative_decoding", "spec_decode_head", "drafter"]
+)
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        {},
+        {
+            "target_checksum": "git-sha1:" + "a" * 40,
+            "configuration": {"exit_layer": 24},
+        },
+    ],
+)
 def test_supplied_decode_head_keeps_approval_checks_selected(
     tmp_path, field, declaration
 ):
@@ -78,15 +89,15 @@ def test_supplied_decode_head_keeps_approval_checks_selected(
         {},
     )
     point = PointArtifacts.from_evidence(
-        point.path, point.evidence, frozenset({EvidenceKey.APPROVED_SPED_DECODE_HEADS})
+        point.path, point.evidence, frozenset({EvidenceKey.APPROVED_SPEC_DECODE_HEADS})
     )
     policy = load_policy(bundled_policy_path())
     checks = {
         check.rule.id: check for check in plan_checks(policy, [point.context]).checks
     }
     assert point.context.speculative_decoding is True
-    assert checks["approved-drafter"].decision is Decision.READY
-    assert checks["drafter-approval-lead-time"].decision is Decision.READY
+    assert checks["approved-spec-decode-head"].decision is Decision.READY
+    assert checks["spec-decode-head-approval-lead-time"].decision is Decision.READY
 
 
 @pytest.fixture
@@ -194,19 +205,20 @@ def test_no_decode_head_keeps_approval_checks_excluded(tmp_path, declaration):
         ).checks
     }
     assert point.context.speculative_decoding is False
-    assert checks["approved-drafter"].decision is Decision.EXCLUDED
+    assert checks["approved-spec-decode-head"].decision is Decision.EXCLUDED
 
 
-def test_incomplete_canonical_head_does_not_fall_back_to_alias(tmp_path):
+@pytest.mark.parametrize("alias", ["spec_decode_head", "drafter"])
+def test_incomplete_canonical_head_does_not_fall_back_to_alias(tmp_path, alias):
     policy = load_policy(bundled_policy_path())
-    approved = policy.catalogs["approved_sped_decode_heads"][0]
+    approved = policy.catalogs["approved_spec_decode_heads"][0]
     point = tmp_path / "results" / "system" / approved["model"] / "r16"
     point.mkdir(parents=True)
     config = {
         "concurrency": 16,
         "runtime_settings": {"runtime": {}},
-        "speculative_decoding": {"target_checksum": "declared"},
-        "drafter": {
+        "speculative_decoding": {},
+        alias: {
             "repository": approved["repository"],
             "revision": approved["revision"],
         },
@@ -214,7 +226,7 @@ def test_incomplete_canonical_head_does_not_fall_back_to_alias(tmp_path):
     (point / "point.yaml").write_text(json.dumps(config))
     report = validate_submission(tmp_path, policy=policy)
     assert any(
-        result.rule == "approved-drafter"
+        result.rule == "approved-spec-decode-head"
         and not result.passed
         and "approved identity" in result.message
         for result in report.results

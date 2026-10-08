@@ -15,14 +15,17 @@ from pydantic import ValidationError
 
 from ..artifacts import Artifacts, PointArtifacts, read_mapping
 from ..evaluator_base import Evaluator
-from ..operations import PowerOperation
+from ..operations import PowerMode, PowerOperation
 from ..planner import PlannedCheck, plan_checks
 from ..power.calculation import PowerCalculator
 from ..power.models import PowerComputation, PowerEvidence, SystemPower
 from ..results import CheckResult
+from ..schemas.requirements_v1 import (
+    PowerRequirements,
+)
 from ..types import Cooling, Decision, EvidenceKey, Scope
 from ..vocabulary import CheckKind
-from .helpers import finding, unsupported, validate_modes, warning
+from .helpers import finding, unsupported, warning
 
 
 def power_entry(artifacts: Artifacts, point: PointArtifacts) -> PowerEvidence:
@@ -64,6 +67,7 @@ def compute_descriptor(check: PlannedCheck, artifacts: Artifacts) -> None:
     """Compute only the selected system using its effective descriptor rule."""
     system_id = check.subject.id
     rule = check.rule
+    req = check.requirements(PowerRequirements)
     existing = artifacts.derived.power.get(system_id, {})
     if existing.get("requirements") == rule.requirements:
         return
@@ -77,8 +81,9 @@ def compute_descriptor(check: PlannedCheck, artifacts: Artifacts) -> None:
                 - {EvidenceKey.POWER_COMPUTATION, EvidenceKey.POINT_POWER}
             }
         )
-    constants = artifacts.resolve(rule.requirements["constants"], check)
-    path = Path(system_id) / rule.requirements["artifact"]
+    assert req.artifact is not None
+    constants = artifacts.resolve(req.constants, check)
+    path = Path(system_id) / req.artifact
     if not path.exists():
         artifacts.derived.power[system_id] = {
             "problems": [f"Power descriptor {path.name} is missing"]
@@ -125,7 +130,7 @@ def compute_descriptor(check: PlannedCheck, artifacts: Artifacts) -> None:
                     computation.sets[computation.sets.index(node_set)] = replace(
                         node_set, accelerators_per_node=count
                     )
-        if rule.requirements.get("cooling_must_match_system_description"):
+        if req.cooling_must_match_system_description:
             declared = [str(p.get_system("cooling", "")) for p in members]
             declared.extend(str(n.get("cooling", "")) for n in nodes)
             labels: set[Cooling] = set()
@@ -210,7 +215,7 @@ def prepare(artifacts: Artifacts) -> None:
             if (
                 check.decision is Decision.READY
                 and check.rule.kind is CheckKind.POWER
-                and check.rule.requirements.get("operation") == operation
+                and check.requirements(PowerRequirements).operation == operation
             ):
                 try:
                     PowerEvaluator()(check, artifacts)
@@ -237,22 +242,16 @@ def prepare(artifacts: Artifacts) -> None:
 
 class PowerEvaluator(Evaluator, kind=CheckKind.POWER):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        params = check.rule.requirements
-        invalid = validate_modes(check)
-        if invalid is not None:
-            return invalid
-        try:
-            operation = PowerOperation(cast(str, params.get("operation")))
-        except ValueError:
-            return unsupported(check)
+        params = check.requirements(PowerRequirements)
+        operation = params.operation
         if operation is PowerOperation.DESCRIPTOR:
             flags = (
-                "validate_public_sources",
-                "validate_node_sets",
-                "validate_scale_out",
-                "validate_computed_values",
+                params.validate_public_sources,
+                params.validate_node_sets,
+                params.validate_scale_out,
+                params.validate_computed_values,
             )
-            if any(params.get(field) is False for field in flags):
+            if any(flag is False for flag in flags):
                 return unsupported(
                     check,
                     "This power schema requires source, node, scale-out and computed-value validation",
@@ -318,9 +317,9 @@ class PowerEvaluator(Evaluator, kind=CheckKind.POWER):
                     }
                 )
                 if (
-                    params.get("declared_total_scaling") != "maximum_engaged_fraction"
-                    or params.get("switch_scaling") != "engaged_node_fraction"
-                    or params.get("on_undeclared_nodes") != "fully_engaged"
+                    params.declared_total_scaling != PowerMode.MAXIMUM_ENGAGED_FRACTION
+                    or params.switch_scaling != PowerMode.ENGAGED_NODE_FRACTION
+                    or params.on_undeclared_nodes != PowerMode.FULLY_ENGAGED
                 ):
                     return unsupported(
                         check, "Unsupported engaged power scaling policy"
@@ -345,7 +344,7 @@ class PowerEvaluator(Evaluator, kind=CheckKind.POWER):
                             / sum(s.nodes_provisioned for s in computation.sets)
                         )
                         kw = watts / 1000
-                    point.derived.power_kw = round(kw, params["round_kw_decimals"])
+                    point.derived.power_kw = round(kw, params.round_kw_decimals)
                     point.context = point.context.model_copy(
                         update={
                             "available": point.context.available
@@ -361,9 +360,10 @@ class PowerEvaluator(Evaluator, kind=CheckKind.POWER):
                     )
                 )
                 continue
-            factors = params.get(
-                "replica_factors",
-                ("tensor_parallel", "pipeline_parallel", "expert_parallel"),
+            factors = (
+                params.replica_factors
+                if params.replica_factors is not None
+                else ("tensor_parallel", "pipeline_parallel", "expert_parallel")
             )
             present = any(field in description for field in (*factors, "data_parallel"))
             replica = math.prod(description.get(field, 1) for field in factors)
@@ -371,7 +371,7 @@ class PowerEvaluator(Evaluator, kind=CheckKind.POWER):
             known = all(s.accelerators_per_node is not None for s in computation.sets)
             if operation is PowerOperation.NODE_DECLARATION:
                 if (
-                    params.get("require_accelerator_capacity")
+                    params.require_accelerator_capacity
                     and present
                     and known
                     and not description.get("disaggregated")
@@ -430,9 +430,9 @@ class PowerEvaluator(Evaluator, kind=CheckKind.POWER):
                 )
                 continue
             maximum = provisioned // replica
-            shortfall = artifacts.resolve(params["shortfall"], check, point)
+            shortfall = artifacts.resolve(params.shortfall, check, point)
             valid = dp <= maximum
-            if params.get("require_maximum_data_parallel") and dp < maximum:
+            if params.require_maximum_data_parallel and dp < maximum:
                 valid = (
                     isinstance(shortfall, Mapping)
                     and shortfall.get("dp_actual") == dp

@@ -33,12 +33,14 @@ names and references are validated by the versioned policy parser.
 - Dataset entries default to `is_legacy: false` and `sample_unit: sample` when those
   fields are omitted.
 - Seeds come from the bundled published cohort catalog.
+- Speculative-head approvals include their publication cohorts. Weight-based and
+  configuration-based identities are supported; the published catalog currently
+  contains only weight-based approvals.
 
 ## Unresolved policy inputs
 
 The approved_client_revisions list is empty. Published full client SHAs must be
 supplied before client revision approval can pass.
-Speculative-head approval publication cohorts are unspecified.
 The policy catalog is proposed, not an official MLCommons publication.
 
 ## Evaluator kinds
@@ -66,7 +68,7 @@ The policy catalog is proposed, not an official MLCommons publication.
   - `field_constraints`: requires fields to be absent or exactly equal to
     prescribed values, including model-specific constraints.
   - `numeric_validity`: checks numeric type, presence, finiteness, and positivity.
-  - `comparison`: compares artifact values or constants using equality,
+  - `comparison`: compares artifact values, constants, or sums using equality,
     greater-than, or greater-than-or-equal.
   - `consistency`: checks equality between two values or across a collection of
     declarations, optionally excluding specified fields.
@@ -110,8 +112,11 @@ The policy catalog is proposed, not an official MLCommons publication.
   - `artifact_binding`:
     - Matches the submitted client SHA against the approved list.
     - Matches checkpoint repository and revision against the model's approvals.
-  - `drafter_binding`:
-    - Matches a speculative decoding head by model, repository, and revision.
+  - `spec_decode_head`:
+    - Matches a speculative decoding head by model and approved weight identity
+      (repository/revision or `git-sha1:` checksum).
+    - Supports target-checksum plus exact configuration identities; none have
+      been officially approved, so the bundled catalog contains none.
     - Checks its approval lead time in cohorts.
   - `seed_binding`:
     - Checks published seed-set membership.
@@ -147,14 +152,13 @@ Rules are grouped by scope; each group lists its policy file once.
 
 Policy file: `submission_checks.yaml`.
 
-| Rule ID                   | Evaluator kind      |
-| ------------------------- | ------------------- |
-| `accuracy-present`        | `accuracy_presence` |
-| `path-exists`             | `presence`          |
-| `required-dir`            | `presence`          |
-| `src-dir`                 | `presence`          |
-| `system-name-consistency` | `consistency`       |
-| `system-results-dir`      | `presence`          |
+| Rule ID              | Evaluator kind      |
+| -------------------- | ------------------- |
+| `accuracy-present`   | `accuracy_presence` |
+| `path-exists`        | `presence`          |
+| `required-dir`       | `presence`          |
+| `src-dir`            | `presence`          |
+| `system-results-dir` | `presence`          |
 
 ### Implementation
 
@@ -174,6 +178,7 @@ Policy file: `system_checks.yaml`.
 | `power-descriptor`                 | `power`        |
 | `power-estimated`                  | `power`        |
 | `system-description-across-curves` | `consistency`  |
+| `system-name-consistency`          | `consistency`  |
 
 ### Pareto curve
 
@@ -214,62 +219,62 @@ Policy file: `curve_checks.yaml`.
 
 Policy file: `point_checks.yaml`.
 
-| Rule ID                            | Evaluator kind      |
-| ---------------------------------- | ------------------- |
-| `accuracy-valid`                   | `artifact_schema`   |
-| `agentic-metric-consistency`       | `derived_metric`    |
-| `approved-checkpoint`              | `artifact_binding`  |
-| `approved-drafter`                 | `drafter_binding`   |
-| `concurrency-in-range`             | `region_placement`  |
-| `drafter-approval-lead-time`       | `drafter_binding`   |
-| `endpoints-client-sha`             | `artifact_binding`  |
-| `load-pattern`                     | `issuance`          |
-| `maximal-engagement`               | `power`             |
-| `metric-consistency-accounting`    | `comparison`        |
-| `metric-consistency-duration`      | `comparison`        |
-| `metric-consistency-output-tokens` | `comparison`        |
-| `metric-consistency-system-tps`    | `derived_metric`    |
-| `metric-consistency-tpot-p90`      | `numeric_validity`  |
-| `metric-consistency-tps-per-kw`    | `derived_metric`    |
-| `metric-consistency-tps-per-user`  | `derived_metric`    |
-| `min-completed-samples`            | `count`             |
-| `nodes-used`                       | `power`             |
-| `offline-declared`                 | `membership`        |
-| `point-config-valid`               | `artifact_schema`   |
-| `point-dirname-concurrency`        | `consistency`       |
-| `point-disclosure-complete`        | `disclosure`        |
-| `point-duration`                   | `duration`          |
-| `point-power`                      | `power`             |
-| `point-rules-skipped`              | `report`            |
-| `region-declared`                  | `membership`        |
-| `region-placement`                 | `region_placement`  |
-| `result-file-valid`                | `artifact_schema`   |
-| `result-summary-present`           | `presence`          |
-| `seed-config-legacy`               | `seed_binding`      |
-| `seed-runtime-match`               | `seed_binding`      |
-| `seed-set-adoption`                | `seed_binding`      |
-| `seed-set-membership`              | `seed_binding`      |
-| `shared-path-resolution`           | `path_resolution`   |
-| `steady-state-basis`               | `steady_state`      |
-| `steady-state-consistency`         | `steady_state`      |
-| `steady-state-valid`               | `steady_state`      |
-| `streaming-config`                 | `report`            |
-| `submission-flags`                 | `field_constraints` |
-| `swebench-instance-count`          | `count`             |
-| `swebench-template`                | `field_constraints` |
-| `system-description-present`       | `presence`          |
-| `system-description-valid`         | `artifact_schema`   |
-| `target-cohort`                    | `cohort_identifier` |
-| `trajectories-to-issue`            | `count`             |
-| `warmup-logs-retained`             | `warmup`            |
-| `warmup-present`                   | `presence`          |
-| `warmup-salt`                      | `warmup`            |
+| Rule ID                               | Evaluator kind      |
+| ------------------------------------- | ------------------- |
+| `accuracy-valid`                      | `artifact_schema`   |
+| `agentic-metric-consistency`          | `derived_metric`    |
+| `approved-checkpoint`                 | `artifact_binding`  |
+| `approved-spec-decode-head`           | `spec_decode_head`  |
+| `concurrency-in-range`                | `region_placement`  |
+| `endpoints-client-sha`                | `artifact_binding`  |
+| `load-pattern`                        | `issuance`          |
+| `maximal-engagement`                  | `power`             |
+| `metric-consistency-accounting`       | `comparison`        |
+| `metric-consistency-duration`         | `comparison`        |
+| `metric-consistency-output-tokens`    | `comparison`        |
+| `metric-consistency-system-tps`       | `derived_metric`    |
+| `metric-consistency-tpot-p90`         | `numeric_validity`  |
+| `metric-consistency-tps-per-kw`       | `derived_metric`    |
+| `metric-consistency-tps-per-user`     | `derived_metric`    |
+| `min-completed-samples`               | `count`             |
+| `nodes-used`                          | `power`             |
+| `offline-declared`                    | `membership`        |
+| `point-config-valid`                  | `artifact_schema`   |
+| `point-dirname-concurrency`           | `consistency`       |
+| `point-disclosure-complete`           | `disclosure`        |
+| `point-duration`                      | `duration`          |
+| `point-power`                         | `power`             |
+| `point-rules-skipped`                 | `report`            |
+| `region-declared`                     | `membership`        |
+| `region-placement`                    | `region_placement`  |
+| `result-file-valid`                   | `artifact_schema`   |
+| `result-summary-present`              | `presence`          |
+| `seed-config-legacy`                  | `seed_binding`      |
+| `seed-runtime-match`                  | `seed_binding`      |
+| `seed-set-adoption`                   | `seed_binding`      |
+| `seed-set-membership`                 | `seed_binding`      |
+| `shared-path-resolution`              | `path_resolution`   |
+| `spec-decode-head-approval-lead-time` | `spec_decode_head`  |
+| `steady-state-basis`                  | `steady_state`      |
+| `steady-state-consistency`            | `steady_state`      |
+| `steady-state-valid`                  | `steady_state`      |
+| `streaming-config`                    | `report`            |
+| `submission-flags`                    | `field_constraints` |
+| `swebench-instance-count`             | `count`             |
+| `swebench-template`                   | `field_constraints` |
+| `system-description-present`          | `presence`          |
+| `system-description-valid`            | `artifact_schema`   |
+| `target-cohort`                       | `cohort_identifier` |
+| `trajectories-to-issue`               | `count`             |
+| `warmup-logs-retained`                | `warmup`            |
+| `warmup-present`                      | `presence`          |
+| `warmup-salt`                         | `warmup`            |
 
 ### Validator catalogs
 
 Policy file: `catalog.yaml`.
 
-| Rule ID                 | Evaluator kind      |
-| ----------------------- | ------------------- |
-| `drafter-list-registry` | `catalog_integrity` |
-| `seed-set-registry`     | `catalog_integrity` |
+| Rule ID                    | Evaluator kind      |
+| -------------------------- | ------------------- |
+| `spec-decode-head-catalog` | `catalog_integrity` |
+| `seed-set-registry`        | `catalog_integrity` |

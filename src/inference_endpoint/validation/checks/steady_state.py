@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
 
 from ..artifacts import Artifacts
 from ..evaluator_base import Evaluator
@@ -13,23 +12,20 @@ from ..evidence.steady_state import MetricState, SteadyStateStatus
 from ..operations import SteadyOperation
 from ..planner import PlannedCheck
 from ..results import CheckResult
+from ..schemas.requirements_v1 import (
+    SteadyStateRequirements,
+)
 from ..vocabulary import CheckKind
-from .helpers import finding, number, unsupported, validate_modes, warning
+from .helpers import finding, number, unsupported, warning
 
 
 class SteadyStateEvaluator(Evaluator, kind=CheckKind.STEADY_STATE):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        params = check.rule.requirements
-        invalid = validate_modes(check)
-        if invalid is not None:
-            return invalid
-        constants = artifacts.resolve(params["constants"], check)
+        params = check.requirements(SteadyStateRequirements)
+        constants = artifacts.resolve(params.constants, check)
         if not isinstance(constants, Mapping):
             return unsupported(check, "Steady-state catalog unavailable")
-        try:
-            operation = SteadyOperation(cast(str, params.get("operation")))
-        except ValueError:
-            return unsupported(check)
+        operation = params.operation
         output = []
         for point in artifacts.members(check):
             block = point.config.steady_state if point.config is not None else None
@@ -38,7 +34,7 @@ class SteadyStateEvaluator(Evaluator, kind=CheckKind.STEADY_STATE):
                     output.append(
                         warning(
                             check,
-                            f"Steady-state window is nonofficial; reporting basis: {params['fallback']}",
+                            f"Steady-state window is nonofficial; reporting basis: {params.fallback}",
                             point,
                         )
                     )
@@ -98,7 +94,7 @@ class SteadyStateEvaluator(Evaluator, kind=CheckKind.STEADY_STATE):
                         problems.append(
                             f"Official window spans {spans} super-passes; requires {minimum}"
                         )
-                    if params.get("official_requires_plateau") and any(
+                    if params.official_requires_plateau and any(
                         v is not MetricState.PLATEAU for v in block.state.values()
                     ):
                         problems.append("Official window contains a nonplateau metric")
@@ -116,7 +112,7 @@ class SteadyStateEvaluator(Evaluator, kind=CheckKind.STEADY_STATE):
                     else block.n_super_passes
                 )
                 if (
-                    params.get("check_reported_super_pass_count")
+                    params.check_reported_super_pass_count
                     and reported is not None
                     and spans is not None
                     and reported != spans

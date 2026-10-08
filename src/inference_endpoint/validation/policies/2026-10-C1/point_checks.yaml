@@ -221,7 +221,11 @@ checks:
   metric-consistency-accounting:
     kind: comparison
     when: { field: result_summary.n_samples_issued, greater_than: 0 }
-    left: { kind: field, field: result_summary.n_samples_completed }
+    left:
+      kind: sum
+      operands:
+        - { kind: field, field: result_summary.n_samples_completed }
+        - { kind: field, field: result_summary.n_samples_failed, default: 0 }
     operator: equal
     right: { kind: field, field: result_summary.n_samples_issued }
   metric-consistency-output-tokens:
@@ -299,23 +303,23 @@ checks:
     adoption_window_cohorts: 4
     on_legacy_registry_without_cohorts: blocked
     requires: [point_config, seed_catalog]
-  approved-drafter:
-    kind: drafter_binding
+  approved-spec-decode-head:
+    kind: spec_decode_head
     operation: membership
     applies_to: { speculative_decoding: true }
-    requires: [approved_sped_decode_heads, point_config]
-    catalog: catalogs.approved_sped_decode_heads
-    matching: model_and_repository_and_revision
-    on_missing_repository_or_revision: error
+    requires: [approved_spec_decode_heads, point_config]
+    catalog: catalogs.approved_spec_decode_heads
+    matching: model_and_identity
+    on_missing_identity: error
     on_empty_catalog: error
-  drafter-approval-lead-time:
-    kind: drafter_binding
+  spec-decode-head-approval-lead-time:
+    kind: spec_decode_head
     operation: approval_age
     applies_to: { speculative_decoding: true }
-    requires: [approved_sped_decode_heads, point_config]
-    catalog: catalogs.approved_sped_decode_heads
+    requires: [approved_spec_decode_heads, point_config]
+    catalog: catalogs.approved_spec_decode_heads
     minimum_cohorts: 2
-    on_unmatched_drafter: skip
+    on_unmatched_spec_decode_head: skip
     on_unparseable_cohort: warning
     on_missing_approval_cohort: warning
   nodes-used:

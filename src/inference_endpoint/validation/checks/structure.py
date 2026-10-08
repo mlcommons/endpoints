@@ -7,23 +7,38 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
 
 from inference_endpoint.config.schema import LoadPatternType
 
 from ..artifacts import Artifacts
 from ..evaluator_base import Evaluator
+from ..operations import (
+    ArtifactSchema as ArtifactSchemaKind,
+    PolicyAction,
+    PresenceObject,
+)
 from ..outcomes import result
 from ..planner import PlannedCheck
 from ..results import CheckResult, Severity
+from ..schemas.requirements_v1 import (
+    ArtifactSchemaRequirements,
+    CohortIdentifierRequirements,
+    ConsistencyRequirements,
+    DisclosureRequirements,
+    IssuanceRequirements,
+    MembershipRequirements,
+    PathResolutionRequirements,
+    PresenceRequirements,
+    ReportRequirements,
+)
 from ..vocabulary import CheckKind
 from .helpers import values
 
 
 class Presence(Evaluator, kind=CheckKind.PRESENCE):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
-        targets = req.get("targets") or [req.get("target")]
+        req = check.requirements(PresenceRequirements)
+        targets = req.targets or [req.target]
         findings = []
         for target in targets:
             value = (
@@ -32,21 +47,21 @@ class Presence(Evaluator, kind=CheckKind.PRESENCE):
                 else artifacts.resolve(target, check)
             )
             items = values(value)
-            if req.get("pattern"):
+            if req.pattern:
                 items = [
                     item
                     for item in items
-                    if re.fullmatch(req["pattern"], getattr(item, "name", str(item)))
+                    if re.fullmatch(req.pattern, getattr(item, "name", str(item)))
                 ]
-            object_type = req.get("object")
+            object_type = req.object
 
             def present(item: object, object_type: str | None = object_type) -> bool:
                 if isinstance(item, Path):
                     return (
                         item.is_file()
-                        if object_type == "file"
+                        if object_type == PresenceObject.FILE
                         else item.is_dir()
-                        if object_type == "directory"
+                        if object_type == PresenceObject.DIRECTORY
                         else item.exists()
                     )
                 return item is not None and item is not False
@@ -55,8 +70,8 @@ class Presence(Evaluator, kind=CheckKind.PRESENCE):
             findings.append(
                 result(
                     check,
-                    count >= req.get("minimum_count", 1),
-                    f"{target}: found {count}, required {req.get('minimum_count', 1)}",
+                    count >= req.minimum_count,
+                    f"{target}: found {count}, required {req.minimum_count}",
                 )
             )
         return findings
@@ -65,22 +80,22 @@ class Presence(Evaluator, kind=CheckKind.PRESENCE):
 class ArtifactSchema(Evaluator, kind=CheckKind.ARTIFACT_SCHEMA):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
         point = artifacts.index.points[check.subject.id]
-        req = check.rule.requirements
-        schema = req.get("schema")
-        if schema == "accuracy_result":
+        req = check.requirements(ArtifactSchemaRequirements)
+        schema = req.artifact_schema
+        if schema == ArtifactSchemaKind.ACCURACY_RESULT:
             present = point.evidence.accuracy.present
-            if req.get("when_present") and not present:
+            if req.when_present and not present:
                 return []
             obj = point.accuracy
             findings = point.evidence.accuracy.errors
-            if obj is not None and req.get("reject_empty") and not obj.root:
+            if obj is not None and req.reject_empty and not obj.root:
                 return [result(check, False, "Accuracy results must not be empty")]
         else:
             attr = {
-                "point_config": "config",
-                "system_description": "system",
-                "result_summary": "summary",
-            }.get(cast(str, schema))
+                ArtifactSchemaKind.POINT_CONFIG: "config",
+                ArtifactSchemaKind.SYSTEM_DESCRIPTION: "system",
+                ArtifactSchemaKind.RESULT_SUMMARY: "summary",
+            }.get(schema)
             if attr is None:
                 return [
                     result(
@@ -109,24 +124,24 @@ class ArtifactSchema(Evaluator, kind=CheckKind.ARTIFACT_SCHEMA):
 
 class Membership(Evaluator, kind=CheckKind.MEMBERSHIP):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
-        catalog = artifacts.resolve(req["catalog"], check)
-        items = values(artifacts.resolve(req["target"], check))
+        req = check.requirements(MembershipRequirements)
+        catalog = artifacts.resolve(req.catalog, check)
+        items = values(artifacts.resolve(req.target, check))
         findings = []
         seen = set()
         for value in items:
-            if value is None and req.get("skip_missing"):
+            if value is None and req.skip_missing:
                 continue
-            if value is None and not req.get("required"):
+            if value is None and not req.required:
                 continue
-            if req.get("deduplicate") and value in seen:
+            if req.deduplicate and value in seen:
                 continue
             seen.add(value)
             findings.append(
                 result(
                     check,
                     value in catalog if catalog is not None else False,
-                    f"{req['target']}: {value!r}; allowed {list(catalog or [])!r}",
+                    f"{req.target}: {value!r}; allowed {list(catalog or [])!r}",
                     blocked=catalog is None,
                 )
             )
@@ -135,30 +150,30 @@ class Membership(Evaluator, kind=CheckKind.MEMBERSHIP):
 
 class Consistency(Evaluator, kind=CheckKind.CONSISTENCY):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
-        if "left" in req:
-            left = artifacts.resolve(req["left"], check)
-            right = artifacts.resolve(req["right"], check)
+        req = check.requirements(ConsistencyRequirements)
+        if req.left is not None:
+            left = artifacts.resolve(req.left, check)
+            right = artifacts.resolve(req.right, check)
             if left is None or right is None:
                 finding = result(check, False, "Comparison evidence is missing")
-                if req.get("on_missing") == "warning":
+                if req.on_missing == PolicyAction.WARNING:
                     finding = finding.model_copy(update={"severity": Severity.WARNING})
                 return [finding]
             return [result(check, left == right, f"{left!r} compared with {right!r}")]
-        items = values(artifacts.resolve(req["target"], check))
-        if req.get("exclude_fields"):
+        items = values(artifacts.resolve(req.target, check))
+        if req.exclude_fields:
             items = [
-                {k: v for k, v in item.items() if k not in req["exclude_fields"]}
+                {k: v for k, v in item.items() if k not in req.exclude_fields}
                 if isinstance(item, Mapping)
                 else item
                 for item in items
             ]
         if any(item is None for item in items):
-            if req.get("on_missing") == "error":
+            if req.on_missing == PolicyAction.ERROR:
                 return [result(check, False, "Required comparison evidence is missing")]
             items = [item for item in items if item is not None]
         nonempty = (
-            not req.get("require_nonempty")
+            not req.require_nonempty
             or bool(items)
             and all(bool(item) for item in items)
         )
@@ -166,16 +181,16 @@ class Consistency(Evaluator, kind=CheckKind.CONSISTENCY):
             result(
                 check,
                 nonempty and (not items or all(item == items[0] for item in items)),
-                f"{req['target']}: {len(items)} declarations compared",
+                f"{req.target}: {len(items)} declarations compared",
             )
         ]
 
 
 class Disclosure(Evaluator, kind=CheckKind.DISCLOSURE):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
+        req = check.requirements(DisclosureRequirements)
         point = artifacts.index.points[check.subject.id]
-        fields = artifacts.resolve(req["fields"], check)
+        fields = artifacts.resolve(req.fields, check)
         missing = [name for name in fields if point.get_config(name) in (None, "")]
         return [
             result(
@@ -190,7 +205,9 @@ class Disclosure(Evaluator, kind=CheckKind.DISCLOSURE):
 
 class CohortIdentifier(Evaluator, kind=CheckKind.COHORT_IDENTIFIER):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        value = artifacts.resolve(check.rule.requirements["target"], check)
+        value = artifacts.resolve(
+            check.requirements(CohortIdentifierRequirements).target, check
+        )
         return [
             result(
                 check,
@@ -203,12 +220,12 @@ class CohortIdentifier(Evaluator, kind=CheckKind.COHORT_IDENTIFIER):
 
 class PathResolution(Evaluator, kind=CheckKind.PATH_RESOLUTION):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
-        root = Path(artifacts.resolve(req["base"], check)).resolve()
+        req = check.requirements(PathResolutionRequirements)
+        root = Path(artifacts.resolve(req.base, check)).resolve()
         findings = []
-        for address in req["targets"]:
+        for address in req.targets:
             value = artifacts.resolve(address, check)
-            if value is None and req.get("on_missing") == "skip":
+            if value is None and req.on_missing == PolicyAction.SKIP:
                 continue
             if not isinstance(value, str):
                 findings.append(result(check, False, f"{address}: missing path"))
@@ -224,17 +241,24 @@ class PathResolution(Evaluator, kind=CheckKind.PATH_RESOLUTION):
                 )
                 continue
             valid = (
-                (req.get("allow_absolute", False) or not path.is_absolute())
-                and (req.get("allow_parent_traversal", False) or ".." not in path.parts)
+                (req.allow_absolute or not path.is_absolute())
                 and (
-                    req.get("allow_escape_via_symlink", False)
+                    (
+                        req.allow_parent_traversal
+                        if req.allow_parent_traversal is not None
+                        else False
+                    )
+                    or ".." not in path.parts
+                )
+                and (
+                    (
+                        req.allow_escape_via_symlink
+                        if req.allow_escape_via_symlink is not None
+                        else False
+                    )
                     or resolved.is_relative_to(root)
                 )
-                and (
-                    resolved.is_dir()
-                    if req.get("require_directory")
-                    else resolved.exists()
-                )
+                and (resolved.is_dir() if req.require_directory else resolved.exists())
             )
             findings.append(
                 result(check, valid, f"{address}: {value!r} resolves to {resolved}")
@@ -244,19 +268,25 @@ class PathResolution(Evaluator, kind=CheckKind.PATH_RESOLUTION):
 
 class ReportValue(Evaluator, kind=CheckKind.REPORT):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        value = artifacts.resolve(check.rule.requirements["target"], check)
-        return [result(check, True, f"{check.rule.requirements['target']}: {value!r}")]
+        value = artifacts.resolve(check.requirements(ReportRequirements).target, check)
+        return [
+            result(
+                check,
+                True,
+                f"{check.requirements(ReportRequirements).target}: {value!r}",
+            )
+        ]
 
 
 class Issuance(Evaluator, kind=CheckKind.ISSUANCE):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
         point = artifacts.index.points[check.subject.id]
-        req = check.rule.requirements
+        req = check.requirements(IssuanceRequirements)
         pattern = point.get_config(
             "runtime_settings.load_pattern", LoadPatternType.CONCURRENCY
         )
-        valid = pattern in req["allowed"] and (
-            not req.get("require_positive_concurrency")
+        valid = pattern in req.allowed and (
+            not req.require_positive_concurrency
             or point.concurrency is not None
             and point.concurrency > 0
         )

@@ -11,6 +11,7 @@ from inference_endpoint.config.schema import LoadPatternType
 
 from ..types import (
     AccuracyKind,
+    ChecksumValue,
     CohortId,
     CommitId,
     Cooling,
@@ -37,10 +38,20 @@ class Checkpoint(FrozenModel):
     revision: CommitId
 
 
-class DecodeHead(Checkpoint):
+class SpecDecodeHead(Checkpoint):
     model: Identifier
     method: DecodeMethod
     bundled: bool = Field(default=False, strict=True)
+    approved_cohort: CohortId | None = None
+
+
+class ConfigurationSpecDecodeHead(FrozenModel):
+    """An approved draft pass identified by target weights and configuration."""
+
+    model: Identifier
+    method: DecodeMethod
+    target_checksum: ChecksumValue
+    configuration: dict[Identifier, JsonValue] = Field(min_length=1)
     approved_cohort: CohortId | None = None
 
 
@@ -99,7 +110,7 @@ class Catalogs(FrozenModel):
     mandatory_accuracy_bands: tuple[Identifier, ...]
     datasets: dict[Identifier, Dataset]
     models: dict[Identifier, Model]
-    approved_sped_decode_heads: tuple[DecodeHead, ...]
+    approved_spec_decode_heads: tuple[SpecDecodeHead | ConfigurationSpecDecodeHead, ...]
     approved_client_revisions: tuple[CommitId, ...]
     approved_checkpoints: dict[Identifier, tuple[Checkpoint, ...]]
     submission_flags: dict[str, JsonValue]
@@ -131,7 +142,7 @@ class Catalogs(FrozenModel):
                 raise ValueError(f"Unknown accuracy dataset for {name}")
         if not self.approved_checkpoints.keys() <= self.models.keys():
             raise ValueError("Checkpoint catalog references unknown models")
-        for head in self.approved_sped_decode_heads:
+        for head in self.approved_spec_decode_heads:
             if head.model not in self.models:
                 raise ValueError("Decode head references unknown model")
         return self

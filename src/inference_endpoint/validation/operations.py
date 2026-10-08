@@ -8,6 +8,7 @@ from enum import StrEnum
 class BindingMatch(StrEnum):
     CHECKPOINT = "model_and_repository_and_revision"
     CLIENT_ALLOWLIST = "exact_revision"
+    SPEC_DECODE_HEAD = "model_and_identity"
 
 
 class AccuracyOperation(StrEnum):
@@ -29,7 +30,7 @@ class OfflineOperation(StrEnum):
     ORDERING = "ordering"
 
 
-class DrafterOperation(StrEnum):
+class SpecDecodeHeadOperation(StrEnum):
     MEMBERSHIP = "membership"
     APPROVAL_AGE = "approval_age"
 
@@ -43,6 +44,7 @@ class ComparisonOperator(StrEnum):
 class OperandKind(StrEnum):
     FIELD = "field"
     CONSTANT = "constant"
+    SUM = "sum"
 
 
 class DerivedOperation(StrEnum):
@@ -88,3 +90,113 @@ class CountOperator(StrEnum):
     GREATER_THAN_OR_EQUAL = "greater_than_or_equal"
     EQUAL = "equal"
     POSITIVE_MULTIPLE = "positive_multiple"
+
+
+class FractionConversion(StrEnum):
+    LEGACY_VALUE_AND_THRESHOLD_HEURISTIC = "legacy_value_and_threshold_heuristic"
+
+
+class AccuracyMode(StrEnum):
+    ARITHMETIC_MEAN = "arithmetic_mean"
+    CASE_INSENSITIVE = "case_insensitive"
+    PER_REQUIRED_DATASET_OR_SUITE = "per_required_dataset_or_suite"
+    SAMPLE_WEIGHTED_MEAN = "sample_weighted_mean"
+    SAMPLES_TIMES_REPEATS = "samples_times_repeats"
+    SCORE_OR_FIRST_METRIC = "score_or_first_metric"
+    SOLE_METRIC_ONLY_WITH_WARNING = "sole_metric_only_with_warning"
+
+
+class ArtifactPrecedence(StrEnum):
+    STANDALONE_FIRST = "standalone_first"
+
+
+class ArtifactSchema(StrEnum):
+    ACCURACY_RESULT = "accuracy_result"
+    APPENDIX_E_SYSTEM_POWER = "appendix_e_system_power"
+    POINT_CONFIG = "point_config"
+    RESULT_SUMMARY = "result_summary"
+    SYSTEM_DESCRIPTION = "system_description"
+
+
+class ConsistencyMode(StrEnum):
+    EXACT = "exact"
+    WHOLE_DOCUMENT = "whole_document"
+
+
+class CurveTypePolicy(StrEnum):
+    SINGLE_TURN = "single_turn"
+
+
+class Deduplication(StrEnum):
+    DECLARED_NAME = "declared_name"
+
+
+class IdentifierFormat(StrEnum):
+    GIT_COMMIT_SHA1 = "git_commit_sha1"
+    YEAR_MONTH_C0_OR_C1 = "year_month_c0_or_c1"
+
+
+class PolicyAction(StrEnum):
+    AVERAGE_AND_WARN = "average_and_warn"
+    BLOCK_DEPENDENT_CHECKS = "block_dependent_checks"
+    BLOCKED = "blocked"
+    ERROR = "error"
+    EXCLUDE = "exclude"
+    EXEMPT = "exempt"
+    GATE_AVAILABLE_MEAN_AND_WARN = "gate_available_mean_and_warn"
+    REPORT_DERIVED = "report_derived"
+    SKIP = "skip"
+    SKIP_COUNT_COMPARISON = "skip_count_comparison"
+    WARN_RANGE_OR_SLOPE_REQUIRED = "warn_range_or_slope_required"
+    WARNING = "warning"
+
+
+class PowerMode(StrEnum):
+    ENGAGED_NODE_FRACTION = "engaged_node_fraction"
+    FULLY_ENGAGED = "fully_engaged"
+    MAXIMUM_ENGAGED_FRACTION = "maximum_engaged_fraction"
+
+
+class PowerTag(StrEnum):
+    ESTIMATED_POWER = "estimated_power"
+
+
+class PresenceObject(StrEnum):
+    DECLARATION = "declaration"
+    DIRECTORY = "directory"
+    FILE = "file"
+    PATH = "path"
+
+
+class RegionSource(StrEnum):
+    C_MAX_POINT = "c_max_point"
+    POINTS_WITH_READABLE_THROUGHPUT_AND_UTILIZATION = (
+        "points_with_readable_throughput_and_utilization"
+    )
+    SMALLEST_SUBMITTED = "smallest_submitted"
+
+
+class ReportInterpretation(StrEnum):
+    CLIENT_IPC_FORWARDING_ONLY = "client_ipc_forwarding_only"
+
+
+class ReportOperation(StrEnum):
+    BLOCKED_CONFIG_DEPENDENTS = "blocked_config_dependents"
+
+
+class ReportingBasis(StrEnum):
+    WHOLE_RUN_TOTAL = "whole_run_total"
+
+
+class ChecksumAlgorithm(StrEnum):
+    GIT_SHA1 = "git-sha1"
+
+
+class AccuracyPresenceSource(StrEnum):
+    STANDALONE_ACCURACY_RESULTS = "standalone_accuracy_results"
+    EMBEDDED_NONEMPTY_ACCURACY_SCORES = "embedded_nonempty_accuracy_scores"
+
+
+class AccuracyArtifactSource(StrEnum):
+    ACCURACY_RESULTS = "accuracy_results.json"
+    INLINE_ACCURACY_SCORES = "results.json.accuracy_scores"

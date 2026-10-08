@@ -18,8 +18,8 @@ class PercentileStats(BaseModel):
     """Summary statistics dict produced by the endpoints ``compute_summary()`` helper."""
 
     model_config = ConfigDict(extra="ignore")
-    total: float = 0.0
-    percentiles: dict[str, float] = Field(default_factory=dict)
+    total: FiniteFloat = 0.0
+    percentiles: dict[str, FiniteFloat] = Field(default_factory=dict)
 
     @field_validator("percentiles")
     @classmethod
@@ -69,12 +69,13 @@ class PointSummary(BaseModel):
     n_samples_issued: int = 0
     n_samples_completed: int
     n_samples_failed: int = 0
-    duration_ns: float
+    duration_ns: FiniteFloat
+    latency: PercentileStats = Field(default_factory=PercentileStats)
     ttft: PercentileStats = Field(default_factory=PercentileStats)
     tpot: PercentileStats = Field(default_factory=PercentileStats)
     output_sequence_lengths: PercentileStats = Field(default_factory=PercentileStats)
-    output_tokens_per_turn_total: float | None = None
-    e2e_turn_time_seconds_total: float | None = None
+    output_tokens_per_turn_total: FiniteFloat | None = None
+    e2e_turn_time_seconds_total: FiniteFloat | None = None
 
     @computed_field  # type: ignore[misc]
     @property
@@ -138,6 +139,9 @@ class PointSummary(BaseModel):
         """§4.1: ``sum(output_tokens_per_turn) / sum(e2e_turn_time_seconds)``."""
         tokens = self.output_tokens_per_turn_total
         seconds = self.e2e_turn_time_seconds_total
+        if tokens is None and seconds is None and self.n_samples_failed == 0:
+            tokens = self.output_sequence_lengths.total
+            seconds = self.latency.total / 1e9
         if tokens is None or seconds is None or seconds <= 0:
             return None
         return tokens / seconds

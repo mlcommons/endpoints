@@ -4,12 +4,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..requirements import CheckRequirements
 from ..types import Cooling
 
 _W_PER_KW = 1000.0
@@ -213,4 +213,4 @@ class PowerEvidence(TypedDict, total=False):
     computation: PowerComputation
     descriptor: SystemPower
     problems: list[str]
-    requirements: Mapping[str, object]
+    requirements: CheckRequirements

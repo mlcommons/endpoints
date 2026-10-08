@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Any, TypeVar, overload
 
 from .conditions import Conditions
+from .requirements import CheckRequirements
 from .types import EvidenceKey, PolicyFile, Release, Scope, Severity
 from .vocabulary import CheckKind, EvidenceReference
 
@@ -49,7 +50,7 @@ class Rule:
     applies_to: Conditions | None
     unless: Conditions | None
     requires: frozenset[EvidenceKey]
-    requirements: Mapping[str, Any]
+    requirements: CheckRequirements
     references: frozenset[EvidenceReference]
     source: PolicyFile
     needs_model: bool = False

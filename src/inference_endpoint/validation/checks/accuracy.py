@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any
 
 from pydantic import JsonValue
 
@@ -14,12 +14,23 @@ from inference_endpoint.config.schema import LoadPatternType
 
 from ..artifacts import Artifacts, PointArtifacts
 from ..evaluator_base import Evaluator
-from ..operations import AccuracyOperation
+from ..operations import (
+    AccuracyMode,
+    AccuracyOperation,
+    AccuracyPresenceSource,
+    FractionConversion,
+    PolicyAction,
+)
 from ..planner import PlannedCheck
 from ..results import CheckResult, Severity
+from ..schemas.requirements_v1 import (
+    AccuracyCoverageRequirements,
+    AccuracyGateRequirements,
+    AccuracyPresenceRequirements,
+)
 from ..types import AccuracyKind, OfflineMode
 from ..vocabulary import CheckKind
-from .helpers import finding, number, unsupported, validate_modes, warning
+from .helpers import finding, number, unsupported, warning
 
 
 def accuracy_entries(
@@ -63,17 +74,24 @@ def accuracy_band(artifacts: Artifacts, point: PointArtifacts) -> str | None:
 
 class AccuracyPresenceEvaluator(Evaluator, kind=CheckKind.ACCURACY_PRESENCE):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        accepted = check.rule.requirements["accept"]
+        accepted = check.requirements(AccuracyPresenceRequirements).accept
         curves = set()
         for point in artifacts.members(check):
             root, _ = accuracy_entries(point)
             standalone = (point.path / "accuracy_results.json").exists()
             if root and (
-                (standalone and "standalone_accuracy_results" in accepted)
-                or (not standalone and "embedded_nonempty_accuracy_scores" in accepted)
+                (
+                    standalone
+                    and AccuracyPresenceSource.STANDALONE_ACCURACY_RESULTS in accepted
+                )
+                or (
+                    not standalone
+                    and AccuracyPresenceSource.EMBEDDED_NONEMPTY_ACCURACY_SCORES
+                    in accepted
+                )
             ):
                 curves.add(point.curve)
-        minimum = check.rule.requirements["minimum_models"]
+        minimum = check.requirements(AccuracyPresenceRequirements).minimum_models
         return [
             finding(
                 check,
@@ -85,11 +103,8 @@ class AccuracyPresenceEvaluator(Evaluator, kind=CheckKind.ACCURACY_PRESENCE):
 
 class AccuracyCoverageEvaluator(Evaluator, kind=CheckKind.ACCURACY_COVERAGE):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        params = check.rule.requirements
-        invalid = validate_modes(check)
-        if invalid is not None:
-            return invalid
-        bands = artifacts.resolve(params["mandatory_bands"], check)
+        params = check.requirements(AccuracyCoverageRequirements)
+        bands = artifacts.resolve(params.mandatory_bands, check)
         counts: defaultdict[str | None, int] = defaultdict(int)
         offline = False
         for point in artifacts.members(check):
@@ -97,7 +112,7 @@ class AccuracyCoverageEvaluator(Evaluator, kind=CheckKind.ACCURACY_COVERAGE):
             if not root:
                 continue
             band = artifacts.region(point)
-            if band != "margin" or params.get("margin_counts"):
+            if band != "margin" or params.margin_counts:
                 counts[band] += 1
             if (
                 point.concurrency is not None
@@ -113,8 +128,8 @@ class AccuracyCoverageEvaluator(Evaluator, kind=CheckKind.ACCURACY_COVERAGE):
         output = [
             finding(
                 check,
-                counts[band] >= params["minimum_results_per_band"],
-                f"Accuracy band {band}: {counts[band]} results; requires {params['minimum_results_per_band']}",
+                counts[band] >= params.minimum_results_per_band,
+                f"Accuracy band {band}: {counts[band]} results; requires {params.minimum_results_per_band}",
             )
             for band in bands
         ]
@@ -124,7 +139,7 @@ class AccuracyCoverageEvaluator(Evaluator, kind=CheckKind.ACCURACY_COVERAGE):
             if p.get_config("offline") != OfflineMode.DEDICATED
         }
         if (
-            params.get("single_turn_requires_offline_accuracy")
+            params.single_turn_requires_offline_accuracy
             and LoadPatternType.AGENTIC_INFERENCE not in patterns
         ):
             output.append(
@@ -141,15 +156,9 @@ class AccuracyCoverageEvaluator(Evaluator, kind=CheckKind.ACCURACY_COVERAGE):
 
 class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        params = check.rule.requirements
-        invalid = validate_modes(check)
-        if invalid is not None:
-            return invalid
-        try:
-            operation = AccuracyOperation(cast(str, params.get("operation")))
-        except ValueError:
-            return unsupported(check)
-        model_catalog = artifacts.resolve(params["models"], check)
+        params = check.requirements(AccuracyGateRequirements)
+        operation = params.operation
+        model_catalog = artifacts.resolve(params.models, check)
         model = (
             model_catalog.get(check.subject.model_id, {})
             if isinstance(model_catalog, Mapping)
@@ -173,12 +182,12 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
                 )
             ]
         if operation is AccuracyOperation.PER_POINT_RANGE:
-            bounds = artifacts.resolve(params["bounds"], check)
+            bounds = artifacts.resolve(params.bounds, check)
             if not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
                 return unsupported(check, "Accuracy range catalog unavailable")
             output = []
             for point in points:
-                value = artifacts.resolve(params["source"], check, point)
+                value = artifacts.resolve(params.source, check, point)
                 if not number(value):
                     output.append(
                         warning(
@@ -190,9 +199,7 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
                     continue
                 low, high = bounds
                 passed = (
-                    low <= value <= high
-                    if params.get("inclusive")
-                    else low < value < high
+                    low <= value <= high if params.inclusive else low < value < high
                 )
                 output.append(
                     finding(
@@ -215,10 +222,13 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
         check: PlannedCheck,
         artifacts: Artifacts,
         points: list[PointArtifacts],
-        params: Mapping[str, Any],
+        params: AccuracyGateRequirements,
         operation: AccuracyOperation,
     ) -> list[CheckResult]:
-        minimum = artifacts.resolve(params["minimum"], check)
+        assert params.dataset is not None
+        assert params.input_range is not None
+        assert params.output_scale is not None
+        minimum = artifacts.resolve(params.minimum, check)
         if not number(minimum):
             return unsupported(check, "Accuracy minimum unavailable")
         output = []
@@ -228,20 +238,20 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
             selected = [
                 (name, metrics)
                 for name, metrics in scores.items()
-                if dataset_matches(name, params["dataset"])
+                if dataset_matches(name, params.dataset)
             ]
             if not selected:
                 if operation is AccuracyOperation.PER_POINT_FRACTION:
                     output.append(
                         warning(
-                            check, f"Missing {params['dataset']} accuracy result", point
+                            check, f"Missing {params.dataset} accuracy result", point
                         )
                     )
                 continue
             values = []
             for name, metrics in selected:
                 value = metrics.get("score", next(iter(metrics.values()), None))
-                lo, hi = params["input_range"]
+                lo, hi = params.input_range
                 if not number(value) or not lo <= value <= hi:
                     output.append(
                         finding(
@@ -252,7 +262,7 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
                         )
                     )
                     continue
-                values.append(value * params["output_scale"])
+                values.append(value * params.output_scale)
             if not values:
                 continue
             average = sum(values) / len(values)
@@ -268,13 +278,14 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
             else:
                 by_band[accuracy_band(artifacts, point)].append(average)
         if operation is AccuracyOperation.MEAN_OF_BAND_MEANS:
-            bands = artifacts.resolve(params["bands"], check)
+            assert params.required_band_count is not None
+            bands = artifacts.resolve(params.bands, check)
             available = [band for band in bands if by_band[band]]
-            if len(available) < params["required_band_count"]:
+            if len(available) < params.required_band_count:
                 output.append(
                     warning(
                         check,
-                        f"SWE-bench accuracy has {len(available)} populated bands; requires {params['required_band_count']}",
+                        f"SWE-bench accuracy has {len(available)} populated bands; requires {params.required_band_count}",
                     )
                 )
             for band in available:
@@ -304,18 +315,20 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
         check: PlannedCheck,
         artifacts: Artifacts,
         points: list[PointArtifacts],
-        params: Mapping[str, Any],
+        params: AccuracyGateRequirements,
         profile: Mapping[str, Any],
         operation: AccuracyOperation,
     ) -> list[CheckResult]:
-        required = artifacts.resolve(params["required_datasets"], check)
-        datasets = artifacts.resolve(params["dataset_catalog"], check)
+        if operation is AccuracyOperation.ISSUED_COUNT:
+            assert params.minimum_repeats is not None
+        required = artifacts.resolve(params.required_datasets, check)
+        datasets = artifacts.resolve(params.dataset_catalog, check)
         metrics = profile.get("metrics", {})
         if not required or not isinstance(datasets, Mapping):
             return unsupported(check, "Required accuracy datasets unavailable")
         if (
             operation is AccuracyOperation.SINGLE_TURN_METRICS
-            and params.get("aggregation") != "sample_weighted_mean"
+            and params.aggregation != AccuracyMode.SAMPLE_WEIGHTED_MEAN
         ):
             return unsupported(check, "Unsupported accuracy aggregation")
         output = []
@@ -344,8 +357,9 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
                 )
                 continue
             if operation is AccuracyOperation.ISSUED_COUNT:
+                assert params.minimum_repeats is not None
                 for ds in required:
-                    threshold = datasets.get(ds, {}).get(params["threshold"])
+                    threshold = datasets.get(ds, {}).get(params.threshold)
                     if not number(threshold):
                         output.append(
                             finding(
@@ -362,11 +376,9 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
                         if not dataset_matches(name, ds):
                             continue
                         count = entry.get("num_samples")
-                        repeats = entry.get("n_repeats", params["missing_repeats"])
+                        repeats = entry.get("n_repeats", params.missing_repeats)
                         if number(count) and number(repeats):
-                            counts.append(
-                                count * max(repeats, params["minimum_repeats"])
-                            )
+                            counts.append(count * max(repeats, params.minimum_repeats))
                     if counts:
                         total = sum(counts)
                         output.append(
@@ -384,7 +396,7 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
                 for metric, value in scores.get(name, {}).items():
                     pairs[
                         metric.lower()
-                        if params.get("metric_matching") == "case_insensitive"
+                        if params.metric_matching == AccuracyMode.CASE_INSENSITIVE
                         else metric
                     ].append((value, weight))
             aggregate = {
@@ -393,7 +405,7 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
             if (
                 set(aggregate) == {"score"}
                 and len(metrics) == 1
-                and params.get("unnamed_scalar") == "sole_metric_only_with_warning"
+                and params.unnamed_scalar == AccuracyMode.SOLE_METRIC_ONLY_WITH_WARNING
             ):
                 name = next(iter(metrics))
                 aggregate[name] = aggregate.pop("score")
@@ -407,11 +419,11 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
             for name, bounds in metrics.items():
                 score = aggregate.get(
                     name.lower()
-                    if params.get("metric_matching") == "case_insensitive"
+                    if params.metric_matching == AccuracyMode.CASE_INSENSITIVE
                     else name
                 )
                 if score is None:
-                    if params.get("on_missing_metric") != "skip":
+                    if params.on_missing_metric != PolicyAction.SKIP:
                         output.append(
                             finding(
                                 check,
@@ -447,8 +459,8 @@ class AccuracyGateEvaluator(Evaluator, kind=CheckKind.ACCURACY_GATE):
                     )
                     continue
                 if (
-                    params.get("fraction_conversion")
-                    == "legacy_score_and_threshold_heuristic"
+                    params.fraction_conversion
+                    == FractionConversion.LEGACY_VALUE_AND_THRESHOLD_HEURISTIC
                     and 0 <= score <= 1
                     and lower is not None
                     and lower > 1

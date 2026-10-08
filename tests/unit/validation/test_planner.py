@@ -51,7 +51,7 @@ def decisions(policy, context):
 def test_patterns_select_model_family_checks(policy):
     agentic = decisions(policy, point())
     assert agentic["trajectories-to-issue"].decision is Decision.READY
-    assert agentic["approved-drafter"].decision is Decision.EXCLUDED
+    assert agentic["approved-spec-decode-head"].decision is Decision.EXCLUDED
     single = decisions(
         policy, point(model_id="llama3_1-8b", load_pattern="concurrency")
     )
@@ -184,12 +184,12 @@ def test_model_override_changes_only_selected_context(tmp_path):
     policy = load_policy(directory)
     check = decisions(policy, point())["trajectories-to-issue"]
     assert check.override == "kimi-count-exception"
-    assert check.rule.requirements["operator"] == "equal"
+    assert check.rule.requirements.operator == "equal"
     other = decisions(policy, point(model_id="deepseek-v4_1-flash"))[
         "trajectories-to-issue"
     ]
     assert other.override is None
-    assert other.rule.requirements["operator"] == "positive_multiple"
+    assert other.rule.requirements.operator == "positive_multiple"
     data["enrollment"]["overrides"].append({**override, "id": "overlapping"})
     path.write_text(yaml.safe_dump(data, sort_keys=False))
     with pytest.raises(ValueError, match="Overlapping overrides"):

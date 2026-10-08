@@ -20,7 +20,7 @@ class CheckKind(StrEnum):
     COUNT = "count"
     DERIVED_METRIC = "derived_metric"
     DISCLOSURE = "disclosure"
-    DRAFTER_BINDING = "drafter_binding"
+    SPEC_DECODE_HEAD = "spec_decode_head"
     DURATION = "duration"
     FIELD_CONSTRAINTS = "field_constraints"
     ISSUANCE = "issuance"

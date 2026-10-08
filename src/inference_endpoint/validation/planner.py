@@ -4,12 +4,15 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from types import MappingProxyType
+from typing import TypeVar
 
 from .conditions import Context
 from .models import Override, Policy, Rule
 from .references import evidence_references, needs_model
+from .requirements import CheckRequirements
 from .types import Decision, EvidenceKey, Match
+
+_Requirements = TypeVar("_Requirements", bound=CheckRequirements)
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,12 @@ class PlannedCheck:
     missing: frozenset[EvidenceKey] = frozenset()
     override: str | None = None
     selected_members: tuple[str, ...] | None = None
+
+    def requirements(self, contract: type[_Requirements]) -> _Requirements:
+        parameters = self.rule.requirements
+        if not isinstance(parameters, contract):
+            raise TypeError(f"Rule {self.rule.id} requires {contract.__name__}")
+        return parameters
 
 
 @dataclass(frozen=True)
@@ -164,12 +173,14 @@ def plan_checks(policy: Policy, subjects: Iterable[Context]) -> CheckPlan:
                     if not override.enabled:
                         decision, reason = Decision.EXCLUDED, override.reason
                     else:
-                        requirements = {**rule.requirements, **override.requirements}
+                        requirements = rule.requirements.with_updates(
+                            override.requirements
+                        )
                         rule = replace(
                             rule,
-                            requirements=MappingProxyType(requirements),
-                            references=evidence_references(requirements),
-                            needs_model=needs_model(requirements),
+                            requirements=requirements,
+                            references=evidence_references(requirements.wire()),
+                            needs_model=needs_model(requirements.wire()),
                         )
                         reason = override.reason
                 if decision is Decision.READY:

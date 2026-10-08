@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
 
 from ..artifacts import Artifacts, nested
 from ..cohorts import Cohort, adoption_window
@@ -13,22 +12,19 @@ from ..evaluator_base import Evaluator
 from ..operations import SeedOperation
 from ..planner import PlannedCheck
 from ..results import CheckResult
+from ..schemas.requirements_v1 import (
+    SeedBindingRequirements,
+)
 from ..vocabulary import CheckKind
-from .helpers import finding, unsupported, validate_modes, warning
+from .helpers import finding, unsupported, warning
 
 
 class SeedBindingEvaluator(Evaluator, kind=CheckKind.SEED_BINDING):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        params = check.rule.requirements
-        invalid = validate_modes(check)
-        if invalid is not None:
-            return invalid
-        try:
-            operation = SeedOperation(cast(str, params.get("operation")))
-        except ValueError:
-            return unsupported(check)
+        params = check.requirements(SeedBindingRequirements)
+        operation = params.operation
         registry = (
-            artifacts.resolve(params.get("catalog"), check)
+            artifacts.resolve(params.catalog, check)
             if operation is not SeedOperation.LEGACY_NAMES
             else None
         )
@@ -40,14 +36,15 @@ class SeedBindingEvaluator(Evaluator, kind=CheckKind.SEED_BINDING):
         for point in artifacts.members(check):
             runtime = point.get_config("runtime_settings.runtime", {})
             if operation is SeedOperation.LEGACY_NAMES:
-                aliases = params["aliases"]
+                aliases = params.aliases
+                assert aliases is not None
                 used = [
                     key
                     for key in aliases
                     if f"runtime_settings.runtime.{key}" in point.evidence.config.fields
                 ]
                 if used and (
-                    not params.get("warn_legacy_only_when_model_seed_missing")
+                    not params.warn_legacy_only_when_model_seed_missing
                     or runtime.get("model_seed") is None
                 ):
                     output.append(
@@ -80,9 +77,10 @@ class SeedBindingEvaluator(Evaluator, kind=CheckKind.SEED_BINDING):
                 )
                 continue
             if operation is SeedOperation.RUNTIME_VALUES:
+                assert params.fields is not None
                 canonical = nested(point.config, "runtime_settings.runtime")
                 problems = []
-                for field in params["fields"]:
+                for field in params.fields:
                     expected = nested(published, field)
                     actual = (
                         nested(canonical, field)
@@ -92,7 +90,7 @@ class SeedBindingEvaluator(Evaluator, kind=CheckKind.SEED_BINDING):
                     if expected is None:
                         return unsupported(check, f"Published seed set has no {field}")
                     if actual != expected and (
-                        actual is not None or params.get("require_all")
+                        actual is not None or params.require_all
                     ):
                         problems.append(f"{field}={actual!r}, expected {expected!r}")
                 output.append(
@@ -130,9 +128,8 @@ class SeedBindingEvaluator(Evaluator, kind=CheckKind.SEED_BINDING):
                         )
                     )
                     continue
-                allowed = adoption_window(
-                    publication, params["adoption_window_cohorts"]
-                )
+                assert params.adoption_window_cohorts is not None
+                allowed = adoption_window(publication, params.adoption_window_cohorts)
                 output.append(
                     finding(
                         check,

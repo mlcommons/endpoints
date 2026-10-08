@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from inference_endpoint.validation import (
     Conditions,
@@ -14,7 +15,6 @@ from inference_endpoint.validation import (
     bundled_policy_path,
     checks,  # noqa: F401 - registers built-in evaluators
     load_policy,
-    validate_submission,
 )
 from inference_endpoint.validation.artifacts import (
     ArtifactIndex,
@@ -89,7 +89,7 @@ def artifacts():
 def check_for(artifacts, rule_id, **parameters):
     rule = next(rule for rule in artifacts.policy.checks if rule.id == rule_id)
     if parameters:
-        rule = replace(rule, requirements={**rule.requirements, **parameters})
+        rule = replace(rule, requirements=rule.requirements.with_updates(parameters))
     point = next(iter(artifacts.index.points.values()))
     subject = (
         point.context
@@ -103,6 +103,24 @@ def check_for(artifacts, rule_id, **parameters):
 
 def point(artifacts):
     return next(iter(artifacts.index.points.values()))
+
+
+@pytest.mark.parametrize(
+    "score,passed", [(0.83, True), (83, True), (0.8, False), (80, False)]
+)
+def test_accuracy_fraction_and_percentage_scores(artifacts, score, passed):
+    update_accuracy(
+        point(artifacts),
+        {
+            "mlperf_gpt_oss_accuracy": {
+                "num_samples": 4395,
+                "score": {"exact_match": score},
+            }
+        },
+    )
+    results = evaluate(check_for(artifacts, "accuracy-gate"), artifacts)
+    assert results
+    assert all(result.passed for result in results) is passed
 
 
 def test_accuracy_catalog_threshold_changes_acceptance(artifacts):
@@ -243,26 +261,23 @@ def test_power_catalog_overhead_and_component_defaults(artifacts):
     assert changed.estimated
 
 
-def test_unknown_special_operation_is_blocked(artifacts):
-    results = evaluate(
-        check_for(artifacts, "warmup-salt", operation="unsupported"), artifacts
-    )
-    assert results[0].key == "blocked"
-    assert not results[0].passed
+def test_unknown_special_operation_is_rejected(artifacts):
+    with pytest.raises(ValidationError, match="operation"):
+        check_for(artifacts, "warmup-salt", operation="unsupported")
 
 
-def test_drafter_identity_requires_repository_and_revision(artifacts):
+def test_spec_decode_head_identity_must_be_approved(artifacts):
     p = point(artifacts)
     p.context = p.context.model_copy(update={"model_id": "kimi-k3"})
     update_evidence(
-        p, "config", speculative_decoding={"weight_checksum": "same-checksum"}
+        p, "config", speculative_decoding={"weight_checksum": "git-sha1:" + "0" * 40}
     )
-    results = evaluate(check_for(artifacts, "approved-drafter"), artifacts)
+    results = evaluate(check_for(artifacts, "approved-spec-decode-head"), artifacts)
     assert any(not result.passed for result in results)
-    artifacts.catalogs.values["approved_sped_decode_heads"] = artifacts.policy.catalogs[
-        "approved_sped_decode_heads"
+    artifacts.catalogs.values["approved_spec_decode_heads"] = artifacts.policy.catalogs[
+        "approved_spec_decode_heads"
     ]
-    approved = artifacts.policy.catalogs["approved_sped_decode_heads"][0]
+    approved = artifacts.policy.catalogs["approved_spec_decode_heads"][0]
     update_evidence(
         p,
         "config",
@@ -273,7 +288,9 @@ def test_drafter_identity_requires_repository_and_revision(artifacts):
     )
     assert all(
         result.passed
-        for result in evaluate(check_for(artifacts, "approved-drafter"), artifacts)
+        for result in evaluate(
+            check_for(artifacts, "approved-spec-decode-head"), artifacts
+        )
     )
 
 
@@ -348,6 +365,7 @@ def test_power_descriptor_override_changes_only_selected_system(two_power_system
     constants["cooling_overhead"]["air"] = 1.0
     artifacts.policy = replace(
         artifacts.policy,
+        catalogs={**artifacts.policy.catalogs, "power_high_overhead": constants},
         overrides=(
             Override(
                 "air-overhead",
@@ -355,7 +373,7 @@ def test_power_descriptor_override_changes_only_selected_system(two_power_system
                 "System-specific overhead",
                 Conditions(division=["Standardized"]),
                 True,
-                {"constants": constants},
+                {"constants": "catalogs.power_high_overhead"},
             ),
         ),
     )
@@ -452,26 +470,9 @@ def test_unevaluated_descriptor_provides_no_power_facts(
     assert other.derived.power_kw == 14.7
 
 
-def test_invalid_point_power_policy_returns_blocked_report(two_power_systems):
-    artifacts = two_power_systems
-    effective_checks = tuple(
-        replace(
-            rule, requirements={**rule.requirements, "round_kw_decimals": "invalid"}
-        )
-        if rule.id == "point-power"
-        else rule
-        for rule in artifacts.policy.checks
+def test_invalid_point_power_policy_is_rejected(two_power_systems):
+    rule = next(
+        rule for rule in two_power_systems.policy.checks if rule.id == "point-power"
     )
-    policy = replace(artifacts.policy, checks=effective_checks)
-    report = validate_submission(artifacts.root, policy=policy)
-    assert any(
-        result.rule == "point-power" and result.key == "blocked"
-        for result in report.errors
-    )
-    artifacts.policy = policy
-    prepare(artifacts)
-    assert all(
-        point.derived.power_kw is None
-        and EvidenceKey.POINT_POWER not in point.context.available
-        for point in artifacts.index.points.values()
-    )
+    with pytest.raises(ValidationError, match="round_kw_decimals"):
+        rule.requirements.with_updates({"round_kw_decimals": "invalid"})

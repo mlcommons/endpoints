@@ -5,6 +5,7 @@
 import re
 from collections.abc import Mapping
 
+from .operations import BindingMatch
 from .vocabulary import EvidenceReference
 
 
@@ -52,5 +53,6 @@ def needs_model(requirements: Mapping) -> bool:
         )
         or requirements.get("models") == "catalogs.models"
         or "constraints_by_model" in requirements
-        or requirements.get("matching") == "model_and_repository_and_revision"
+        or requirements.get("matching")
+        in {BindingMatch.CHECKPOINT, BindingMatch.SPEC_DECODE_HEAD}
     )

@@ -18,14 +18,41 @@ from .point_config import PointConfig
 from .point_summary import PointSummary
 from .system import SystemDescription
 
+MAX_ARTIFACT_DEPTH = 100
+
+
+class ArtifactStructureError(ValueError):
+    """An artifact contains a cyclic or excessively nested structure."""
+
 
 def supplied_fields(value: object, prefix: str = "") -> frozenset[str]:
-    fields = set()
-    if isinstance(value, Mapping):
-        for key, child in value.items():
-            name = f"{prefix}.{key}" if prefix else str(key)
-            fields.add(name)
-            fields.update(supplied_fields(child, name))
+    fields: set[str] = set()
+    ancestors: set[int] = set()
+    stack: list[tuple[object, str, int, bool]] = [(value, prefix, 0, False)]
+    while stack:
+        current, address, depth, leaving = stack.pop()
+        if not isinstance(current, (Mapping, list, tuple)):
+            continue
+        identity = id(current)
+        if leaving:
+            ancestors.remove(identity)
+            continue
+        if identity in ancestors:
+            raise ArtifactStructureError("Artifact contains a recursive alias")
+        if depth > MAX_ARTIFACT_DEPTH:
+            raise ArtifactStructureError(
+                f"Artifact nesting exceeds {MAX_ARTIFACT_DEPTH} levels"
+            )
+        ancestors.add(identity)
+        stack.append((current, address, depth, True))
+        if isinstance(current, Mapping):
+            for key, child in current.items():
+                name = f"{address}.{key}" if address else str(key)
+                fields.add(name)
+                stack.append((child, name, depth + 1, False))
+        else:
+            for child in current:
+                stack.append((child, address, depth + 1, False))
     return frozenset(fields)
 
 
@@ -86,7 +113,13 @@ class ParsedArtifact(Generic[T]):  # noqa: UP046 - supported by the repository t
     def from_json(
         cls, data: object, model: type[T], path: Path, rule: str
     ) -> "ParsedArtifact[T]":
-        fields = supplied_fields(data)
+        try:
+            fields = supplied_fields(data)
+        except ArtifactStructureError as error:
+            finding = CheckResult(
+                rule=rule, key="artifact-structure", message=str(error), path=path
+            )
+            return cls(None, frozenset(), (finding,), True)
         try:
             return cls(model.model_validate(data), fields, (), True)
         except ValidationError as error:
@@ -110,7 +143,13 @@ def read_artifact(  # noqa: UP047 - supported by the repository type checker
             if path.suffix in {".yaml", ".yml"}
             else json.loads(text)
         )
-    except (OSError, UnicodeError, json.JSONDecodeError, yaml.YAMLError) as error:
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        yaml.YAMLError,
+        RecursionError,
+    ) as error:
         if accuracy_scores:
             # Result-file checks own failures in the inline accuracy source.
             return ParsedArtifact(None, frozenset(), (), False)

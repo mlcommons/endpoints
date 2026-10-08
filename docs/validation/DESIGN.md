@@ -89,8 +89,12 @@ Each parser declares a cohort and inclusive revision interval.
 `schemas/requirements_v1.py` defines a typed contract for each check kind,
 including strict flags, numeric bounds, nested operands, and operation-specific
 required fields. Base rules and fully merged overrides must satisfy those
-contracts before planning. `operations.py` shares operation enums between
-contracts and evaluators. Overlapping intervals
+contracts before planning. Validated requirement models remain immutable through
+planning and execution; evaluators read typed attributes. Overrides are revalidated
+against the same contract. Override patches contain only changed fields; each fully
+merged rule is validated when loading and when planning. `operations.py` shares
+operation and mode enums between
+contracts and evaluators; unknown modes are rejected while loading the bundle. Overlapping intervals
 and unsupported releases fail explicitly. Revision 1 is supported.
 
 ## Classification and planning
@@ -103,7 +107,34 @@ accept finite numbers and finite numeric strings; booleans, malformed values,
 and explicitly empty scores produce structural errors. Supplied non-null decode
 head declarations select approval checks even when identity is incomplete.
 Cooling uses the shared `Cooling` enum, including `mixed`, and requires a
-matching policy overhead.
+matching policy overhead. Artifact metrics must be finite. Calculated metrics are
+checked for finiteness even when no stored metric is available. Cyclic aliases and
+structures deeper than 100 levels produce artifact errors; shared aliases are valid.
+
+Comparisons accept typed field, constant, and sum operands. A field operand may
+specify a numeric default for an absent value. Sample accounting compares the sum
+of completed and failed samples with issued samples; omitted failed counts default
+to zero. System names must agree within each submitted system.
+
+Agentic interactivity uses explicit output-token and elapsed-turn totals when
+available. When both are absent and no samples failed, it uses the client's output
+sequence total and latency total in nanoseconds. A partially supplied explicit pair
+does not use that fallback.
+
+Speculative decoding heads are approved by model and identity. Declarations
+may use an approved repository/revision pair or a full lowercase `git-sha1:` weight
+checksum. Multiple supplied identity fields must agree. The catalog records each
+head's approval cohort; target cohorts must satisfy the configured lead time.
+Configuration-based identities require a target checksum (`git-sha1:` or `sha256:`)
+and an exact, nonempty configuration dictionary. Equality preserves scalar types
+at every nesting level: booleans, integers, and floats are distinct. Dictionary
+key order is irrelevant; list order and length must match. Non-finite numbers
+never match an approval identity. The same comparison enforces agreement between
+`spec_decode_head` and its accepted input alias. Configuration identities cannot be combined with
+weight identity fields. Catalog entries use `target_checksum` and `configuration`
+in place of `repository` and `revision`, with the same model and approval-cohort
+checks. This identity form is supported, but no configuration-based entries have
+been officially approved; the bundled catalog contains only weight-based entries.
 
 `PointArtifacts.from_evidence` constructs a complete point with parsed evidence
 and a required classification. Calculated point power lives in `PointDerived`.

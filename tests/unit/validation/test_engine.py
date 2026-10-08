@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from inference_endpoint.validation import (
     Conditions,
@@ -212,19 +213,10 @@ def test_region_basis_uses_selected_collection_members(tmp_path):
 
 
 @pytest.mark.parametrize("rule_id", ["region-placement", "offline-point-present"])
-def test_unknown_collection_operation_blocks(rule_id):
-    policy = policy_only("region-basis", rule_id)
-    rules = tuple(
-        replace(
-            rule, requirements=freeze({**rule.requirements, "operation": "unsupported"})
-        )
-        if rule.id == rule_id
-        else rule
-        for rule in policy.checks
-    )
-    report = execute_submission(FIXTURE, replace(policy, checks=rules))
-    findings = [f for f in report.results if f.rule == rule_id]
-    assert findings and all(f.key == "blocked" for f in findings)
+def test_unknown_collection_operation_is_rejected(rule_id):
+    rule = next(rule for rule in policy_only(rule_id).checks if rule.id == rule_id)
+    with pytest.raises(ValidationError, match="operation"):
+        rule.requirements.with_updates({"operation": "unsupported"})
 
 
 def test_offline_uses_effective_numeric_concurrency_floor(tmp_path):
@@ -237,8 +229,8 @@ def test_offline_uses_effective_numeric_concurrency_floor(tmp_path):
     policy = policy_only("offline-ordering")
     rule = replace(
         policy.checks[0],
-        requirements=freeze(
-            {**policy.checks[0].requirements, "concurrency_floor": 10**12}
+        requirements=policy.checks[0].requirements.with_updates(
+            {"concurrency_floor": 10**12}
         ),
     )
     report = execute_submission(submission, replace(policy, checks=(rule,)))
@@ -250,8 +242,8 @@ def test_elected_offline_uses_effective_required_concurrency():
     policy = policy_only("offline-point-present")
     rule = replace(
         policy.checks[0],
-        requirements=freeze(
-            {**policy.checks[0].requirements, "elected_must_equal": 10**12}
+        requirements=policy.checks[0].requirements.with_updates(
+            {"elected_must_equal": 10**12}
         ),
     )
     assert not execute_submission(FIXTURE, replace(policy, checks=(rule,))).passed
@@ -292,7 +284,7 @@ def test_conflicting_region_basis_partitions_block_explicitly():
 
 
 @pytest.mark.parametrize(
-    "option", ["seed_sets_path", "approved_sped_decode_heads_path"]
+    "option", ["seed_sets_path", "approved_spec_decode_heads_path"]
 )
 def test_api_rejects_catalog_overrides(option, tmp_path):
     with pytest.raises(TypeError, match="unexpected keyword argument"):
@@ -302,15 +294,15 @@ def test_api_rejects_catalog_overrides(option, tmp_path):
 def test_catalog_environment_cannot_replace_validation_approvals(tmp_path, monkeypatch):
     monkeypatch.setenv("MLPERF_ENDPOINTS_SEED_SETS", str(tmp_path / "seeds.yaml"))
     monkeypatch.setenv(
-        "MLPERF_ENDPOINTS_APPROVED_DRAFTERS", str(tmp_path / "heads.yaml")
+        "MLPERF_ENDPOINTS_APPROVED_SPEC_DECODE_HEADS", str(tmp_path / "heads.yaml")
     )
     policy = load_policy(bundled_policy_path())
     artifacts = load_artifacts(tmp_path, policy)
     assert "seed_sets" in artifacts.catalogs.values
     assert not artifacts.catalogs.errors
     assert (
-        artifacts.catalogs.values["approved_sped_decode_heads"]
-        == policy.catalogs["approved_sped_decode_heads"]
+        artifacts.catalogs.values["approved_spec_decode_heads"]
+        == policy.catalogs["approved_spec_decode_heads"]
     )
 
 

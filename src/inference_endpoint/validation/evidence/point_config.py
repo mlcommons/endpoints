@@ -5,18 +5,23 @@
 from __future__ import annotations
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
     JsonValue,
     StrictBool,
     StrictInt,
+    field_serializer,
+    field_validator,
     model_validator,
 )
 
 from inference_endpoint.config.schema import LoadPatternType
 
-from ..types import Division, OfflineMode
+from ..json_values import json_identity_equal
+from ..operations import ChecksumAlgorithm
+from ..types import ChecksumValue, CommitId, Division, OfflineMode
 from .steady_state import SteadyState
 
 
@@ -77,8 +82,85 @@ class CheckpointDeclaration(BaseModel):
     revision: str | None = None
 
 
-class DecodeHeadDeclaration(CheckpointDeclaration):
-    weight_checksum: str | None = None
+class SpecDecodeHeadChecksum(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    algorithm: ChecksumAlgorithm
+    revision: CommitId
+
+    @classmethod
+    def from_string(cls, value: str) -> SpecDecodeHeadChecksum:
+        algorithm, separator, revision = value.partition(":")
+        if not separator:
+            raise ValueError("Weight checksum requires algorithm:revision")
+        return cls.model_validate({"algorithm": algorithm, "revision": revision})
+
+    def as_string(self) -> str:
+        return f"{self.algorithm.value}:{self.revision}"
+
+
+class SpecDecodeHeadDeclaration(CheckpointDeclaration):
+    weight_checksum: SpecDecodeHeadChecksum | None = None
+    target_checksum: ChecksumValue | None = None
+    configuration: dict[str, JsonValue] | None = None
+
+    @field_validator("weight_checksum", mode="before")
+    @classmethod
+    def parse_checksum(cls, value: object) -> SpecDecodeHeadChecksum | None:
+        if value is None or isinstance(value, SpecDecodeHeadChecksum):
+            return value
+        if not isinstance(value, str):
+            raise ValueError("Weight checksum must be an algorithm:revision string")
+        return SpecDecodeHeadChecksum.from_string(value)
+
+    @field_serializer("weight_checksum")
+    def serialize_checksum(self, value: SpecDecodeHeadChecksum | None) -> str | None:
+        return value.as_string() if value is not None else None
+
+    @model_validator(mode="after")
+    def consistent_identity(self) -> SpecDecodeHeadDeclaration:
+        if self.target_checksum is not None or self.configuration is not None:
+            if self.target_checksum is None or not self.configuration:
+                raise ValueError(
+                    "Configuration identity requires target_checksum and nonempty configuration"
+                )
+            if any(
+                value is not None
+                for value in (self.weight_checksum, self.repository, self.revision)
+            ):
+                raise ValueError(
+                    "Weight and configuration identity forms cannot be combined"
+                )
+        if (
+            self.weight_checksum is not None
+            and self.revision is not None
+            and self.revision != self.weight_checksum.revision
+        ):
+            raise ValueError("Weight checksum and revision must agree")
+        return self
+
+    def matches(
+        self,
+        repository: str | None = None,
+        revision: str | None = None,
+        *,
+        target_checksum: str | None = None,
+        configuration: JsonValue = None,
+    ) -> bool:
+        if target_checksum is not None:
+            return (
+                self.target_checksum == target_checksum
+                and bool(self.configuration)
+                and json_identity_equal(self.configuration, configuration)
+            )
+        if self.target_checksum is not None:
+            return False
+        if repository is None or revision is None:
+            return False
+        if self.weight_checksum is not None:
+            return self.weight_checksum.revision == revision and (
+                self.repository is None or self.repository == repository
+            )
+        return self.repository == repository and self.revision == revision
 
 
 class AgenticSettings(BaseModel):
@@ -154,13 +236,28 @@ class PointConfig(BaseModel):
     dataset_link: str | None = None
     offline: OfflineMode | None = None
     steady_state: SteadyState | None = None
-    speculative_decoding: DecodeHeadDeclaration | None = None
-    drafter: DecodeHeadDeclaration | None = None
+    speculative_decoding: SpecDecodeHeadDeclaration | None = None
+    spec_decode_head: SpecDecodeHeadDeclaration | None = Field(
+        default=None, validation_alias=AliasChoices("spec_decode_head", "drafter")
+    )
     checkpoint: CheckpointDeclaration | None = None
     accuracy: dict[str, dict[str, JsonValue]] | None = None
     nodes_used: list[NodesUsed] | None = None
     dp_shortfall: DpShortfall | None = None
     shared_src: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_spec_decode_head_aliases(cls, value: object) -> object:
+        if (
+            isinstance(value, dict)
+            and "spec_decode_head" in value
+            and "drafter" in value
+            and not json_identity_equal(value["spec_decode_head"], value["drafter"])
+        ):
+            raise ValueError("spec_decode_head and its input alias must agree")
+        return value
+
     shared_docs: str | None = None
     seed_set: str | None = None
     target_cohort: str | None = None

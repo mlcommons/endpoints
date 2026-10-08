@@ -10,21 +10,27 @@ from .operations import BindingMatch
 from .outcomes import result
 from .planner import PlannedCheck
 from .results import CheckResult
+from .schemas.requirements_v1 import (
+    ArtifactBindingRequirements,
+    CatalogIntegrityRequirements,
+)
 from .vocabulary import CheckKind
 
 
 class ArtifactBinding(Evaluator, kind=CheckKind.ARTIFACT_BINDING):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        matching = BindingMatch(check.rule.requirements["matching"])
+        req = check.requirements(ArtifactBindingRequirements)
+        matching = req.matching
         findings = []
         for point in artifacts.members(check):
             if matching is BindingMatch.CHECKPOINT:
-                addresses = check.rule.requirements["sources"]
+                addresses = req.sources
+                assert addresses is not None
                 repository, revision = (
                     artifacts.resolve(address, check, point) for address in addresses
                 )
                 model = point.context.model_id
-                catalog = artifacts.resolve(check.rule.requirements["catalog"], check)
+                catalog = artifacts.resolve(req.catalog, check)
                 approved = catalog.get(model, ()) if catalog is not None else ()
                 if not approved:
                     findings.append(
@@ -62,9 +68,7 @@ class ArtifactBinding(Evaluator, kind=CheckKind.ARTIFACT_BINDING):
                         )
                     )
                 continue
-            revision = artifacts.resolve(
-                check.rule.requirements["source"], check, point
-            )
+            revision = artifacts.resolve(req.source, check, point)
             if not isinstance(revision, str) or not re.fullmatch(
                 r"[0-9a-f]{40}", revision
             ):
@@ -77,7 +81,7 @@ class ArtifactBinding(Evaluator, kind=CheckKind.ARTIFACT_BINDING):
                     )
                 )
                 continue
-            approved = artifacts.resolve(check.rule.requirements["catalog"], check)
+            approved = artifacts.resolve(req.catalog, check)
             if not approved:
                 findings.append(
                     result(
@@ -105,11 +109,11 @@ class ArtifactBinding(Evaluator, kind=CheckKind.ARTIFACT_BINDING):
 
 class CatalogIntegrity(Evaluator, kind=CheckKind.CATALOG_INTEGRITY):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        address = check.rule.requirements["catalog"]
+        address = check.requirements(CatalogIntegrityRequirements).catalog
         catalog_name = (
             "seed_sets"
             if address == "context.cohorts.seed_sets"
-            else "approved_sped_decode_heads"
+            else "approved_spec_decode_heads"
         )
         problem = artifacts.catalogs.errors.get(catalog_name)
         catalog = artifacts.resolve(address, check)

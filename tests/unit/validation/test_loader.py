@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from inference_endpoint.validation import bundled_policy_path, load_policy
 from inference_endpoint.validation.schemas import BundleParser, parser_for
@@ -61,8 +62,10 @@ def test_policy_is_immutable_and_preserves_source_hashes(policy_dir):
     policy = load_policy(policy_dir)
     with pytest.raises(TypeError):
         policy.catalogs["datasets"]["aime25"]["sample_count"] = 1
-    with pytest.raises(TypeError):
-        policy.checks[0].requirements["anything"] = 1
+    requirements = policy.checks[0].requirements
+    field = next(iter(type(requirements).model_fields))
+    with pytest.raises(ValidationError, match="frozen"):
+        setattr(requirements, field, getattr(requirements, field))
     for file, digest in policy.source_digests.items():
         assert (
             digest == hashlib.sha256((policy_dir / file.value).read_bytes()).hexdigest()
@@ -197,27 +200,27 @@ def test_noncanonical_identifiers_cannot_replace_existing_entries(policy_dir, se
 def test_optional_offline_and_region_declarations_are_checked_only_when_present():
     policy = load_policy(bundled_policy_path())
     rules = {rule.id: rule for rule in policy.checks}
-    assert rules["offline-declared"].requirements["required"] is False
-    assert rules["region-declared"].requirements["required"] is False
+    assert rules["offline-declared"].requirements.required is False
+    assert rules["region-declared"].requirements.required is False
 
 
 def test_decode_head_can_record_its_publication_cohort(policy_dir):
     catalog = policy_dir / PolicyFile.CATALOG.value
     modify(
         catalog,
-        lambda data: data["catalogs"]["approved_sped_decode_heads"][0].update(
+        lambda data: data["catalogs"]["approved_spec_decode_heads"][0].update(
             approved_cohort="2026-06-C0"
         ),
     )
     assert (
-        load_policy(policy_dir).catalogs["approved_sped_decode_heads"][0][
+        load_policy(policy_dir).catalogs["approved_spec_decode_heads"][0][
             "approved_cohort"
         ]
         == "2026-06-C0"
     )
     modify(
         catalog,
-        lambda data: data["catalogs"]["approved_sped_decode_heads"][0].update(
+        lambda data: data["catalogs"]["approved_spec_decode_heads"][0].update(
             approved_cohort="2026-06-C9"
         ),
     )

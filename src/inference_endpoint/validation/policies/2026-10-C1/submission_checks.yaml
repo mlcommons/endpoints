@@ -27,10 +27,3 @@ checks:
       minimum_models: 1,
       accept: [standalone_accuracy_results, embedded_nonempty_accuracy_scores],
     }
-  system-name-consistency:
-    kind: consistency
-    target: point.system_description.system_name
-    comparison: exact
-    require_nonempty: true
-    required_artifact: point.system_desc.json
-    on_missing: error

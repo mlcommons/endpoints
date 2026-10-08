@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import math
 import operator
-from collections.abc import Mapping
-from typing import Any
 
 from ..artifacts import Artifacts
 from ..evaluator_base import Evaluator
@@ -16,11 +14,21 @@ from ..operations import (
     ComparisonOperator,
     DerivedOperation,
     DurationBasis,
-    OperandKind,
+    PolicyAction,
 )
 from ..outcomes import result
 from ..planner import PlannedCheck
 from ..results import CheckResult
+from ..schemas.requirements_v1 import (
+    ComparisonRequirements,
+    ConstantOperand,
+    DerivedMetricRequirements,
+    DurationRequirements,
+    FieldOperand,
+    NumericValidityRequirements,
+    Operand,
+    SumOperand,
+)
 from ..vocabulary import CheckKind
 
 
@@ -32,71 +40,76 @@ class Comparison(Evaluator, kind=CheckKind.COMPARISON):
     }
 
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
-        when = req.get("when")
+        req = check.requirements(ComparisonRequirements)
+        when = req.when
         if when:
-            actual = artifacts.resolve(when["field"], check)
-            if actual is None or actual <= when["greater_than"]:
+            actual = artifacts.resolve(when.field, check)
+            if actual is None or actual <= when.greater_than:
                 return []
 
-        def operand(value: Mapping[str, Any]) -> Any:
-            return (
-                value["value"]
-                if OperandKind(value["kind"]) is OperandKind.CONSTANT
-                else artifacts.resolve(value["field"], check)
-            )
-
-        left = operand(req["left"])
-        right = operand(req["right"])
-        op = self.operations.get(ComparisonOperator(req["operator"]))
-        if op is None:
-            return [
-                result(
-                    check,
-                    False,
-                    f"Unsupported comparison {req['operator']}",
-                    blocked=True,
+        def operand(value: Operand) -> int | float | None:
+            if isinstance(value, ConstantOperand):
+                return value.value
+            if isinstance(value, FieldOperand):
+                resolved = artifacts.resolve(value.field, check)
+                if resolved is None:
+                    resolved = value.default
+                return (
+                    resolved
+                    if isinstance(resolved, (int, float))
+                    and not isinstance(resolved, bool)
+                    else None
                 )
-            ]
+            assert isinstance(value, SumOperand)
+            operands = [operand(child) for child in value.operands]
+            if any(child is None for child in operands):
+                return None
+            return sum(child for child in operands if child is not None)
+
+        left = operand(req.left)
+        right = operand(req.right)
+        op = self.operations[req.operator]
         valid = (
             left is not None
             and right is not None
             and not isinstance(left, bool)
             and not isinstance(right, bool)
+            and (not isinstance(left, float) or math.isfinite(left))
+            and (not isinstance(right, float) or math.isfinite(right))
             and op(left, right)
         )
-        return [result(check, valid, f"{left!r} {req['operator']} {right!r}")]
+        return [result(check, valid, f"{left!r} {req.operator} {right!r}")]
 
 
 class NumericValidity(Evaluator, kind=CheckKind.NUMERIC_VALIDITY):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
-        value = artifacts.resolve(req["source"], check)
-        if value is None and not req.get("require_present"):
+        req = check.requirements(NumericValidityRequirements)
+        value = artifacts.resolve(req.source, check)
+        if value is None and not req.require_present:
             return []
         valid = isinstance(value, (int, float)) and not isinstance(value, bool)
-        if valid and req.get("finite"):
+        if valid and req.finite:
             valid = math.isfinite(value)
-        if valid and req.get("strictly_positive"):
+        if valid and req.strictly_positive:
             valid = value > 0
-        return [result(check, valid, f"{req['source']}: {value!r}")]
+        return [result(check, valid, f"{req.source}: {value!r}")]
 
 
 class Duration(Evaluator, kind=CheckKind.DURATION):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
         point = artifacts.index.points[check.subject.id]
-        req = check.rule.requirements
+        req = check.requirements(DurationRequirements)
         band = artifacts.region(point)
-        if band is None and req.get("on_unclassifiable_concurrency") == "skip":
+        if band is None and req.on_unclassifiable_concurrency == PolicyAction.SKIP:
             return []
-        thresholds = artifacts.resolve(req["thresholds"], check)
+        thresholds = artifacts.resolve(req.thresholds, check)
         minimum = thresholds.get(band)
         duration = None
-        for basis in req["basis_precedence"]:
+        for basis in req.basis_precedence:
             if basis == DurationBasis.REPORTED_WINDOW_ISSUE_SPAN:
                 value = point.get_config("steady_state.window.duration_s")
                 if value is not None and (
-                    not req.get("window_status_required")
+                    not req.window_status_required
                     or point.get_config("steady_state.status")
                     == SteadyStateStatus.WINDOWABLE
                 ):
@@ -124,17 +137,18 @@ class Duration(Evaluator, kind=CheckKind.DURATION):
 
 class DerivedMetric(Evaluator, kind=CheckKind.DERIVED_METRIC):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
-        operation = DerivedOperation(req["operation"])
+        req = check.requirements(DerivedMetricRequirements)
+        operation = req.operation
         findings = []
         points = artifacts.members(check)
-        constants = artifacts.resolve(req.get("constants"), check) or {}
+        constants = artifacts.resolve(req.constants, check) or {}
         if operation is DerivedOperation.CURVE_PEAK_RATIO:
+            assert req.tolerance is not None
             available = [
                 p
                 for p in points
                 if p.throughput is not None
-                and isinstance(artifacts.resolve(req["stored"], check, p), (int, float))
+                and isinstance(artifacts.resolve(req.stored, check, p), (int, float))
             ]
             peak = max(
                 (p.throughput for p in available if p.throughput is not None), default=0
@@ -142,34 +156,46 @@ class DerivedMetric(Evaluator, kind=CheckKind.DERIVED_METRIC):
             if peak <= 0:
                 return []
             for point in available:
-                stored = artifacts.resolve(req["stored"], check, point)
+                stored = artifacts.resolve(req.stored, check, point)
                 assert point.throughput is not None
                 ratio = point.throughput / peak
                 findings.append(
                     result(
                         check,
                         math.isfinite(stored)
-                        and abs(stored - ratio) <= req["tolerance"]["absolute"],
+                        and abs(stored - ratio) <= req.tolerance.absolute,
                         f"Utilization {stored}; derived {ratio}",
                         point=point,
                     )
                 )
             return findings
         for point in points:
-            stored = artifacts.resolve(req.get("stored"), check, point)
+            stored = artifacts.resolve(req.stored, check, point)
             expected: float | None = None
             if operation is DerivedOperation.OUTPUT_TOKENS_PER_ELAPSED_SECOND:
                 expected = point.throughput
             elif operation is DerivedOperation.INVERSE_TPOT_P90_MS:
+                assert req.numerator is not None
                 tpot = artifacts.resolve(
                     "result_summary.tpot.percentiles.90", check, point
                 )
                 if isinstance(tpot, (int, float)) and math.isfinite(tpot) and tpot > 0:
-                    expected = req["numerator"] / (tpot / 1e6)
+                    milliseconds = tpot / 1e6
+                    if milliseconds <= 0:
+                        findings.append(
+                            result(
+                                check,
+                                False,
+                                "TPOT duration is too small to represent",
+                                point=point,
+                            )
+                        )
+                        continue
+                    expected = req.numerator / milliseconds
                 else:
                     continue
             elif operation is DerivedOperation.THROUGHPUT_PER_PROVISIONED_KW:
-                denominator = artifacts.resolve(req["denominator"], check, point)
+                denominator = artifacts.resolve(req.denominator, check, point)
                 if denominator is None or denominator <= 0:
                     continue
                 expected = (
@@ -178,14 +204,11 @@ class DerivedMetric(Evaluator, kind=CheckKind.DERIVED_METRIC):
                     else None
                 )
             elif operation is DerivedOperation.OUTPUT_TOKENS_PER_COMPLETED_TURN_SECOND:
-                tokens = point.get_summary("output_tokens_per_turn_total")
-                seconds = point.get_summary("e2e_turn_time_seconds_total")
-                if (
-                    isinstance(tokens, (int, float))
-                    and isinstance(seconds, (int, float))
-                    and seconds > 0
-                ):
-                    expected = tokens / seconds
+                expected = (
+                    point.summary.e2e_avg_interactivity
+                    if point.summary is not None
+                    else None
+                )
                 if expected is None and stored is None:
                     continue
             else:
@@ -200,6 +223,11 @@ class DerivedMetric(Evaluator, kind=CheckKind.DERIVED_METRIC):
             if expected is None:
                 findings.append(
                     result(check, False, "Metric inputs unavailable", point=point)
+                )
+                continue
+            if not math.isfinite(expected):
+                findings.append(
+                    result(check, False, "Derived metric is not finite", point=point)
                 )
                 continue
             if stored is None:

@@ -26,6 +26,7 @@ from .evidence.loaders import ParsedArtifact, read_artifact
 from .models import Policy
 from .planner import PlannedCheck, plan_checks
 from .power.models import PowerEvidence
+from .schemas.requirements_v1 import RegionBasisRequirements
 from .types import Declaration, EvidenceKey, OfflineMode, Scope
 from .vocabulary import CheckKind
 
@@ -116,7 +117,7 @@ class PointArtifacts:
             declared=declared,
             speculative_decoding=(
                 config.value.speculative_decoding is not None
-                or config.value.drafter is not None
+                or config.value.spec_decode_head is not None
             )
             if config.value is not None
             else None,
@@ -193,7 +194,8 @@ class PointArtifacts:
         tokens = self.get_summary("output_sequence_lengths.total")
         if duration is None or tokens is None or duration <= 0:
             return None
-        return tokens / (duration / 1e9)
+        seconds = duration / 1e9
+        return tokens / seconds if seconds > 0 else None
 
 
 @dataclass
@@ -246,8 +248,8 @@ class Artifacts:
     ) -> Any:
         if not isinstance(address, str):
             return address
-        if address == "catalogs.approved_sped_decode_heads":
-            return self.catalogs.values.get("approved_sped_decode_heads")
+        if address == "catalogs.approved_spec_decode_heads":
+            return self.catalogs.values.get("approved_spec_decode_heads")
         if address.startswith("catalogs."):
             return nested(self.policy.catalogs, address[9:])
         if address == "enrollment.models":
@@ -384,8 +386,8 @@ def load_artifacts(root: Path, policy: Policy) -> Artifacts:
         artifacts.catalogs.values["seed_sets"] = load_seed_sets()
     except (ValueError, OSError) as exc:
         artifacts.catalogs.errors["seed_sets"] = str(exc)
-    artifacts.catalogs.values["approved_sped_decode_heads"] = policy.catalogs.get(
-        "approved_sped_decode_heads"
+    artifacts.catalogs.values["approved_spec_decode_heads"] = policy.catalogs.get(
+        "approved_spec_decode_heads"
     )
     for system_dir in directories(root / "results"):
         system_ids = []
@@ -419,8 +421,8 @@ def load_artifacts(root: Path, policy: Policy) -> Artifacts:
                 available = set()
                 if "seed_sets" in artifacts.catalogs.values:
                     available.add(EvidenceKey.SEED_CATALOG)
-                if "approved_sped_decode_heads" in artifacts.catalogs.values:
-                    available.add(EvidenceKey.APPROVED_SPED_DECODE_HEADS)
+                if "approved_spec_decode_heads" in artifacts.catalogs.values:
+                    available.add(EvidenceKey.APPROVED_SPEC_DECODE_HEADS)
                 point = PointArtifacts.from_evidence(
                     path, evidence, frozenset(available)
                 )
@@ -493,7 +495,9 @@ def _compute_regions(artifacts: Artifacts, curve: Path, ids: list[str]) -> None:
     ]
     if not plans:
         return
-    effective_clamps = {check.rule.requirements["upper_clamp"] for check in plans}
+    effective_clamps = {
+        check.requirements(RegionBasisRequirements).upper_clamp for check in plans
+    }
     if len(effective_clamps) != 1:
         artifacts.derived.region_errors[str(curve)] = (
             "Conflicting region-basis partitions cannot share one set of boundaries"

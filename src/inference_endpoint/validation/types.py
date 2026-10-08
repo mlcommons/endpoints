@@ -19,6 +19,9 @@ Identifier = Annotated[
 ]
 CohortId = Annotated[str, StringConstraints(pattern=r"^\d{4}-(0[1-9]|1[0-2])-C[01]$")]
 CommitId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
+ChecksumValue = Annotated[
+    str, StringConstraints(pattern=r"^(git-sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$")
+]
 
 
 class FrozenModel(BaseModel):
@@ -86,7 +89,7 @@ class EvidenceKey(StrEnum):
     WARMUP = "warmup"
     STEADY_STATE = "steady_state"
     SEED_CATALOG = "seed_catalog"
-    APPROVED_SPED_DECODE_HEADS = "approved_sped_decode_heads"
+    APPROVED_SPEC_DECODE_HEADS = "approved_spec_decode_heads"
     POINT_CONFIG = "point_config"
     POWER_COMPUTATION = "power_computation"
     POINT_POWER = "point_power"
@@ -118,6 +121,7 @@ class SampleUnit(StrEnum):
 class DecodeMethod(StrEnum):
     DSPARK = "dspark"
     MTP = "mtp"
+    SELF_SPECULATIVE = "self_speculative"
 
 
 class Cooling(StrEnum):

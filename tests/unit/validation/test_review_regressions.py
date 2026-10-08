@@ -6,6 +6,7 @@ import shutil
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from inference_endpoint.validation import (
     Context,
@@ -165,14 +166,14 @@ def test_enabled_curve_overrides_keep_distinct_immutable_requirements(tmp_path):
         if check.rule.id == "offline-ordering"
     ]
     assert {
-        (check.override, check.rule.requirements["throughput_minimum_multiplier"])
+        (check.override, check.rule.requirements.throughput_minimum_multiplier)
         for check in checks
     } == {("max_throughput", 0.9), ("agentic_inference", 0.8)}
     assert all(check.decision is Decision.READY for check in checks)
-    with pytest.raises(TypeError):
-        checks[0].rule.requirements["throughput_minimum_multiplier"] = 1
+    with pytest.raises(ValidationError, match="frozen"):
+        checks[0].rule.requirements.throughput_minimum_multiplier = 1
     original = next(rule for rule in policy.checks if rule.id == "offline-ordering")
-    assert original.requirements["throughput_minimum_multiplier"] == 0.98
+    assert original.requirements.throughput_minimum_multiplier == 0.98
 
 
 def test_overlapping_overrides_are_detected_on_each_curve_member(tmp_path):

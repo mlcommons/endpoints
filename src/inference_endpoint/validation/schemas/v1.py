@@ -113,7 +113,7 @@ class ParserV1(BundleParser, version="2026-10-C1", first_revision=1, last_revisi
                     if key not in Metadata.model_fields
                 }
                 try:
-                    validate_requirements(metadata.kind, parameters)
+                    requirements = validate_requirements(metadata.kind, parameters)
                 except ValueError as error:
                     raise ValueError(f"Rule {id_}: {error}") from error
                 validate_catalog_references(
@@ -137,7 +137,7 @@ class ParserV1(BundleParser, version="2026-10-C1", first_revision=1, last_revisi
                     metadata.applies_to,
                     metadata.unless,
                     frozenset(metadata.requires),
-                    freeze(parameters),
+                    requirements,
                     references,
                     file,
                     needs_model(parameters),
@@ -151,7 +151,7 @@ class ParserV1(BundleParser, version="2026-10-C1", first_revision=1, last_revisi
             rule = rules[override.rule]
             try:
                 validate_requirements(
-                    rule.kind, {**rule.requirements, **override.requirements}
+                    rule.kind, {**rule.requirements.wire(), **override.requirements}
                 )
             except ValueError as error:
                 raise ValueError(

@@ -6,10 +6,14 @@ from __future__ import annotations
 
 from ..artifacts import Artifacts
 from ..evaluator_base import Evaluator
-from ..operations import CountOperator
+from ..operations import CountOperator, PolicyAction
 from ..outcomes import result
 from ..planner import PlannedCheck
 from ..results import CheckResult
+from ..schemas.requirements_v1 import (
+    CountRequirements,
+    FieldConstraintsRequirements,
+)
 from ..types import SampleUnit
 from ..vocabulary import CheckKind
 
@@ -18,32 +22,34 @@ class Count(Evaluator, kind=CheckKind.COUNT):
     """Compare a reported or configured count with a catalog reference count."""
 
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
+        req = check.requirements(CountRequirements)
         dataset = (
-            artifacts.resolve(req["dataset_source"], check)
-            if "dataset_source" in req
-            else req["dataset"]
+            artifacts.resolve(req.dataset_source, check)
+            if req.dataset_source is not None
+            else req.dataset
         )
-        entry = (artifacts.resolve(req["catalog"], check) or {}).get(dataset, {})
-        supported_units = req.get("supported_sample_units")
+        entry = (artifacts.resolve(req.catalog, check) or {}).get(dataset, {})
+        supported_units = req.supported_sample_units
         if (
             supported_units is not None
             and entry.get("sample_unit", SampleUnit.SAMPLE) not in supported_units
         ):
-            if req.get("on_unsupported_sample_unit") == "skip":
+            if req.on_unsupported_sample_unit == PolicyAction.SKIP:
                 return []
             return [result(check, False, "Unsupported sample unit", blocked=True)]
-        expected = entry.get(req.get("threshold", "sample_count"))
+        expected = entry.get(
+            req.threshold if req.threshold is not None else "sample_count"
+        )
         if expected is None:
-            if req.get("on_unknown_or_null_threshold") == "skip":
+            if req.on_unknown_or_null_threshold == PolicyAction.SKIP:
                 return []
             return [result(check, False, "Reference count unavailable", blocked=True)]
         if expected <= 0:
             return [
                 result(check, False, "Reference count must be positive", blocked=True)
             ]
-        operation = CountOperator(req["operator"])
-        sources = req.get("sources") or [req["source"]]
+        operation = req.operator
+        sources = req.sources or [req.source]
         findings = []
         for source in sources:
             actual = artifacts.resolve(source, check)
@@ -75,21 +81,22 @@ class Count(Evaluator, kind=CheckKind.COUNT):
 
 class FieldConstraints(Evaluator, kind=CheckKind.FIELD_CONSTRAINTS):
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
+        req = check.requirements(FieldConstraintsRequirements)
         point = artifacts.index.points[check.subject.id]
-        if "constraints_by_model" in req:
-            constraint = (
-                artifacts.resolve(req["constraints_by_model"], check) or {}
-            ).get(check.subject.model_id)
+        if req.constraints_by_model is not None:
+            assert req.target is not None
+            constraint = (artifacts.resolve(req.constraints_by_model, check) or {}).get(
+                check.subject.model_id
+            )
             if constraint is None:
                 return [
                     result(
                         check, False, "Model field constraint unavailable", blocked=True
                     )
                 ]
-            constraints = {req["target"]: constraint}
+            constraints = {req.target: constraint}
         else:
-            constraints = artifacts.resolve(req["constraints"], check)
+            constraints = artifacts.resolve(req.constraints, check)
         findings = []
         for field, constraint in constraints.items():
             value = (

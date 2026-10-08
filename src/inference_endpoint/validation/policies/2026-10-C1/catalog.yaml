@@ -129,33 +129,39 @@ catalogs:
               minimum_multiplier: 0.9,
               maximum_multiplier: 1.1,
             }
-  approved_sped_decode_heads:
+  approved_spec_decode_heads:
     - model: kimi-k3
       repository: RadixArk/Kimi-K3-DSpark
       revision: 3c5bac301d9cf392706189d82ed947feca6c2f0f
+      approved_cohort: 2026-09-C1
       method: dspark
     - model: kimi-k3
       repository: Inferact/Kimi-K3-DSpark
       revision: cf6b8244620e7ea4b0651d214f28e89eac75bed6
+      approved_cohort: 2026-09-C1
       method: dspark
     - model: deepseek-v4_1-flash
       repository: deepseek-ai/DeepSeek-V4.1-Flash
       revision: dba1be0a40aa45a94ad051997016db3960a90277
+      approved_cohort: 2026-09-C1
       method: dspark
       bundled: true
     - model: qwen3_6-35b-a3b
       repository: Qwen/Qwen3.6-35B-A3B
       revision: 995ad96eacd98c81ed38be0c5b274b04031597b0
+      approved_cohort: 2026-09-C1
       method: mtp
       bundled: true
     - model: qwen3_6-35b-a3b
       repository: Qwen/Qwen3.6-35B-A3B-FP8
       revision: 95a723d08a9490559dae23d0cff1d9466213d989
+      approved_cohort: 2026-09-C1
       method: mtp
       bundled: true
     - model: qwen3_6-35b-a3b
       repository: nvidia/Qwen3.6-35B-A3B-NVFP4
       revision: 1355db6a052410cfd62085d94b58866fd0f2c3c5
+      approved_cohort: 2026-09-C1
       method: mtp
       bundled: true
   approved_client_revisions: []
@@ -313,9 +319,9 @@ diagnostics:
         catalog: context.cohorts.seed_sets,
         on_unavailable: block_dependent_checks,
       }
-    drafter-list-registry:
+    spec-decode-head-catalog:
       {
         kind: catalog_integrity,
-        catalog: catalogs.approved_sped_decode_heads,
+        catalog: catalogs.approved_spec_decode_heads,
         on_unavailable: block_dependent_checks,
       }

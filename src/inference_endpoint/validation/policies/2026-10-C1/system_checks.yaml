@@ -44,3 +44,10 @@ checks:
         config_summary_notes,
       ]
     comparison: whole_document
+  system-name-consistency:
+    kind: consistency
+    target: point.system_description.system_name
+    comparison: exact
+    require_nonempty: true
+    required_artifact: point.system_desc.json
+    on_missing: error

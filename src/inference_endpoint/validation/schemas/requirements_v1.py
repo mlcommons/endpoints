@@ -3,29 +3,56 @@
 """Strict check requirement contracts for cohort revision 1."""
 
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, StrictBool, StrictFloat, StrictInt, model_validator
+from pydantic import (
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    field_serializer,
+    model_validator,
+)
 
 from inference_endpoint.config.schema import LoadPatternType
 
 from ..operations import (
+    AccuracyArtifactSource,
+    AccuracyMode,
     AccuracyOperation,
+    AccuracyPresenceSource,
+    ArtifactPrecedence,
+    ArtifactSchema,
     BindingMatch,
     ComparisonOperator,
+    ConsistencyMode,
     CountOperator,
+    CurveTypePolicy,
+    Deduplication,
     DerivedOperation,
-    DrafterOperation,
     DurationBasis,
+    FractionConversion,
+    IdentifierFormat,
     OfflineOperation,
     OperandKind,
+    PolicyAction,
+    PowerMode,
     PowerOperation,
+    PowerTag,
+    PresenceObject,
     RegionPlacementOperation,
+    RegionSource,
+    ReportingBasis,
+    ReportInterpretation,
+    ReportOperation,
     SeedOperation,
+    SpecDecodeHeadOperation,
     SteadyOperation,
     WarmupOperation,
 )
-from ..types import AccuracyKind, FrozenModel, Identifier, OfflineMode, SampleUnit
+from ..requirements import CheckRequirements
+from ..types import AccuracyKind, Identifier, OfflineMode, SampleUnit
 from ..vocabulary import CheckKind
 
 Number = Annotated[StrictInt | StrictFloat, Field(allow_inf_nan=False)]
@@ -35,7 +62,7 @@ NonnegativeInt = Annotated[StrictInt, Field(ge=0)]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
 
 
-class Requirements(FrozenModel):
+class Requirements(CheckRequirements):
     @model_validator(mode="before")
     @classmethod
     def reject_null_fields(cls, value: object) -> object:
@@ -95,6 +122,7 @@ class ComparisonWhen(Requirements):
 class FieldOperand(Requirements):
     kind: Literal[OperandKind.FIELD]
     field: Identifier
+    default: Number | None = None
 
 
 class ConstantOperand(Requirements):
@@ -102,7 +130,15 @@ class ConstantOperand(Requirements):
     value: Number
 
 
-Operand = Annotated[FieldOperand | ConstantOperand, Field(discriminator="kind")]
+class SumOperand(Requirements):
+    kind: Literal[OperandKind.SUM]
+    operands: tuple["Operand", ...] = Field(min_length=1)
+
+
+Operand = Annotated[
+    FieldOperand | ConstantOperand | SumOperand, Field(discriminator="kind")
+]
+SumOperand.model_rebuild()
 
 
 class CountWhen(Requirements):
@@ -117,46 +153,48 @@ class CountOverride(Requirements):
 
 class AccuracyCoverageRequirements(Requirements):
     mandatory_bands: Identifier
-    margin_counts: StrictBool | None = None
+    margin_counts: StrictBool = False
     minimum_results_per_band: NonnegativeInt
     single_turn_requires_offline_accuracy: StrictBool | None = None
 
 
 class AccuracyGateRequirements(Requirements):
-    aggregation: Identifier | None = None
+    aggregation: Literal[AccuracyMode.SAMPLE_WEIGHTED_MEAN] | None = None
     bands: Identifier | None = None
     bounds: Identifier | None = None
-    count_scope: Identifier | None = None
+    count_scope: Literal[AccuracyMode.PER_REQUIRED_DATASET_OR_SUITE] | None = None
     dataset: Identifier | None = None
     dataset_catalog: Identifier | None = None
-    fraction_conversion: Identifier | None = None
+    fraction_conversion: FractionConversion | None = None
     inclusive: StrictBool | None = None
     input_range: tuple[Number, Number] | None = None
-    metric_matching: Identifier | None = None
+    metric_matching: Literal[AccuracyMode.CASE_INSENSITIVE] | None = None
     minimum: NonnegativeNumber | Identifier | None = None
     minimum_repeats: PositiveInt | None = None
     missing_repeats: PositiveInt | None = None
     models: Identifier
-    on_missing: Identifier | None = None
-    on_missing_bands: Identifier | None = None
-    on_missing_metric: Identifier | None = None
-    on_missing_required_dataset: Identifier | None = None
-    on_missing_weights: Identifier | None = None
-    on_multiple_results_per_band: Identifier | None = None
-    on_no_results: Identifier | None = None
-    on_no_sample_counts: Identifier | None = None
-    on_unknown_model: Identifier | None = None
-    on_unknown_or_unpublished: Identifier | None = None
-    on_unrelated_dataset: Identifier | None = None
+    on_missing: (
+        Literal[PolicyAction.ERROR, PolicyAction.SKIP, PolicyAction.WARNING] | None
+    ) = None
+    on_missing_bands: Literal[PolicyAction.GATE_AVAILABLE_MEAN_AND_WARN] | None = None
+    on_missing_metric: Literal[PolicyAction.SKIP, PolicyAction.ERROR] | None = None
+    on_missing_required_dataset: Literal[PolicyAction.ERROR] | None = None
+    on_missing_weights: Literal[AccuracyMode.ARITHMETIC_MEAN] | None = None
+    on_multiple_results_per_band: Literal[PolicyAction.AVERAGE_AND_WARN] | None = None
+    on_no_results: Literal[PolicyAction.WARNING] | None = None
+    on_no_sample_counts: Literal[PolicyAction.SKIP] | None = None
+    on_unknown_model: Literal[PolicyAction.WARNING] | None = None
+    on_unknown_or_unpublished: Literal[PolicyAction.WARNING] | None = None
+    on_unrelated_dataset: Literal[PolicyAction.EXCLUDE] | None = None
     operation: AccuracyOperation
     output_scale: PositiveNumber | None = None
     required_band_count: PositiveInt | None = None
     required_datasets: Identifier | None = None
-    score: Identifier | None = None
+    score: Literal[AccuracyMode.SCORE_OR_FIRST_METRIC] | None = None
     source: Identifier | None = None
     threshold: Identifier | None = None
-    units: Identifier | None = None
-    unnamed_scalar: Identifier | None = None
+    units: Literal[AccuracyMode.SAMPLES_TIMES_REPEATS] | None = None
+    unnamed_scalar: Literal[AccuracyMode.SOLE_METRIC_ONLY_WITH_WARNING] | None = None
     windowed_fallback: StrictBool | None = None
 
     @model_validator(mode="after")
@@ -184,20 +222,22 @@ class AccuracyGateRequirements(Requirements):
 
 
 class AccuracyPresenceRequirements(Requirements):
-    accept: list[Identifier]
+    accept: tuple[AccuracyPresenceSource, ...]
     minimum_models: NonnegativeInt
 
 
 class ArtifactBindingRequirements(Requirements):
     catalog: Identifier
-    format: Identifier | None = None
-    matching: BindingMatch
-    on_empty_approval_list: Identifier | None = None
-    on_empty_model_catalog: Identifier | None = None
-    on_missing: Identifier | None = None
+    format: Literal[IdentifierFormat.GIT_COMMIT_SHA1] | None = None
+    matching: Literal[BindingMatch.CHECKPOINT, BindingMatch.CLIENT_ALLOWLIST]
+    on_empty_approval_list: Literal[PolicyAction.BLOCKED] | None = None
+    on_empty_model_catalog: Literal[PolicyAction.BLOCKED] | None = None
+    on_missing: (
+        Literal[PolicyAction.ERROR, PolicyAction.SKIP, PolicyAction.WARNING] | None
+    ) = None
     repository: Identifier | None = None
     source: Identifier | None = None
-    sources: list[Identifier] | None = None
+    sources: tuple[Identifier, ...] | None = None
 
     @model_validator(mode="after")
     def check_form(self) -> Self:
@@ -214,28 +254,35 @@ class ArtifactBindingRequirements(Requirements):
 
 
 class ArtifactSchemaRequirements(Requirements):
-    accept: list[Identifier] | None = None
+    accept: tuple[AccuracyArtifactSource, ...] | None = None
     artifact: Identifier | None = None
-    precedence: Identifier | None = None
+    precedence: Literal[ArtifactPrecedence.STANDALONE_FIRST] | None = None
     reject_empty: StrictBool | None = None
-    artifact_schema: Identifier = Field(alias="schema")
+    artifact_schema: Literal[
+        ArtifactSchema.ACCURACY_RESULT,
+        ArtifactSchema.POINT_CONFIG,
+        ArtifactSchema.RESULT_SUMMARY,
+        ArtifactSchema.SYSTEM_DESCRIPTION,
+    ] = Field(alias="schema")
     when_present: StrictBool | None = None
 
 
 class CatalogIntegrityRequirements(Requirements):
     catalog: Identifier
-    on_unavailable: Identifier | None = None
+    on_unavailable: (
+        Literal[PolicyAction.BLOCKED, PolicyAction.BLOCK_DEPENDENT_CHECKS] | None
+    ) = None
 
 
 class CohortIdentifierRequirements(Requirements):
-    format: Identifier
+    format: Literal[IdentifierFormat.YEAR_MONTH_C0_OR_C1]
     target: Identifier
 
 
 class CollectionSizeRequirements(Requirements):
     maximum: NonnegativeInt | None = None
     minimum: NonnegativeInt | None = None
-    overrides: list[CountOverride] | None = None
+    overrides: tuple[CountOverride, ...] = ()
     source: Identifier
 
     @model_validator(mode="after")
@@ -259,11 +306,15 @@ class ComparisonRequirements(Requirements):
 
 
 class ConsistencyRequirements(Requirements):
-    comparison: Identifier | None = None
-    exclude_fields: list[Identifier] | None = None
+    comparison: (
+        Literal[ConsistencyMode.EXACT, ConsistencyMode.WHOLE_DOCUMENT] | None
+    ) = None
+    exclude_fields: tuple[Identifier, ...] | None = None
     left: Identifier | None = None
-    on_disagreement_curve_type: Identifier | None = None
-    on_missing: Identifier | None = None
+    on_disagreement_curve_type: Literal[CurveTypePolicy.SINGLE_TURN] | None = None
+    on_missing: (
+        Literal[PolicyAction.ERROR, PolicyAction.SKIP, PolicyAction.WARNING] | None
+    ) = None
     require_nonempty: StrictBool | None = None
     required_artifact: Identifier | None = None
     right: Identifier | None = None
@@ -281,7 +332,7 @@ class ConsistencyRequirements(Requirements):
 
 class CoverageRequirements(Requirements):
     band: Identifier | Bounds
-    margin_counts: StrictBool | None = None
+    margin_counts: StrictBool = False
     minimum_count: NonnegativeInt
     target: Identifier
 
@@ -290,16 +341,18 @@ class CountRequirements(Requirements):
     catalog: Identifier
     dataset: Identifier | None = None
     dataset_source: Identifier | None = None
-    on_missing: Identifier | None = None
-    on_unknown_or_null_threshold: Identifier | None = None
-    on_unsupported_sample_unit: Identifier | None = None
+    on_missing: (
+        Literal[PolicyAction.ERROR, PolicyAction.SKIP, PolicyAction.WARNING] | None
+    ) = None
+    on_unknown_or_null_threshold: Literal[PolicyAction.SKIP] | None = None
+    on_unsupported_sample_unit: Literal[PolicyAction.SKIP] | None = None
     operator: CountOperator
     require_all: StrictBool | None = None
     sample_unit: SampleUnit | None = None
     source: Identifier | None = None
-    sources: list[Identifier] | None = None
-    supported_sample_units: list[SampleUnit] | None = None
-    threshold: Identifier | None = None
+    sources: tuple[Identifier, ...] | None = None
+    supported_sample_units: tuple[SampleUnit, ...] | None = None
+    threshold: Identifier = "sample_count"
 
     @model_validator(mode="after")
     def check_form(self) -> Self:
@@ -312,15 +365,17 @@ class DerivedMetricRequirements(Requirements):
     constants: Identifier | None = None
     denominator: Identifier | None = None
     numerator: PositiveNumber | None = None
-    on_invalid_tpot: Identifier | None = None
-    on_missing_or_invalid_file: Identifier | None = None
-    on_missing_or_nonpositive_power: Identifier | None = None
-    on_missing_stored: Identifier | None = None
-    on_no_inputs_and_no_stored: Identifier | None = None
-    on_nonpositive_peak: Identifier | None = None
-    on_stored_without_derivable_inputs: Identifier | None = None
+    on_invalid_tpot: Literal[PolicyAction.SKIP] | None = None
+    on_missing_or_invalid_file: Literal[PolicyAction.SKIP] | None = None
+    on_missing_or_nonpositive_power: Literal[PolicyAction.SKIP] | None = None
+    on_missing_stored: Literal[PolicyAction.REPORT_DERIVED] | None = None
+    on_no_inputs_and_no_stored: Literal[PolicyAction.SKIP] | None = None
+    on_nonpositive_peak: Literal[PolicyAction.SKIP] | None = None
+    on_stored_without_derivable_inputs: Literal[PolicyAction.ERROR] | None = None
     operation: DerivedOperation
-    peak_source: Identifier | None = None
+    peak_source: (
+        Literal[RegionSource.POINTS_WITH_READABLE_THROUGHPUT_AND_UTILIZATION] | None
+    ) = None
     source: Identifier | None = None
     stored: Identifier
     tolerance: Tolerance | None = None
@@ -340,27 +395,27 @@ class DisclosureRequirements(Requirements):
     fields: Identifier
 
 
-class DrafterBindingRequirements(Requirements):
+class SpecDecodeHeadRequirements(Requirements):
     catalog: Identifier
-    matching: BindingMatch | None = None
+    matching: Literal[BindingMatch.SPEC_DECODE_HEAD] | None = None
     minimum_cohorts: PositiveInt | None = None
-    on_empty_catalog: Identifier | None = None
-    on_missing_approval_cohort: Identifier | None = None
-    on_missing_repository_or_revision: Identifier | None = None
-    on_unmatched_drafter: Identifier | None = None
-    on_unparseable_cohort: Identifier | None = None
-    operation: DrafterOperation
+    on_empty_catalog: Literal[PolicyAction.ERROR] | None = None
+    on_missing_approval_cohort: Literal[PolicyAction.WARNING] | None = None
+    on_missing_identity: Literal[PolicyAction.ERROR] | None = None
+    on_unmatched_spec_decode_head: Literal[PolicyAction.SKIP] | None = None
+    on_unparseable_cohort: Literal[PolicyAction.WARNING] | None = None
+    operation: SpecDecodeHeadOperation
 
     @model_validator(mode="after")
     def check_form(self) -> Self:
-        if self.operation is DrafterOperation.APPROVAL_AGE:
+        if self.operation is SpecDecodeHeadOperation.APPROVAL_AGE:
             self.require_fields("minimum_cohorts")
         return self
 
 
 class DurationRequirements(Requirements):
-    basis_precedence: list[DurationBasis]
-    on_unclassifiable_concurrency: Identifier | None = None
+    basis_precedence: tuple[DurationBasis, ...]
+    on_unclassifiable_concurrency: Literal[PolicyAction.SKIP] | None = None
     thresholds: Identifier
     window_status_required: StrictBool | None = None
 
@@ -368,7 +423,9 @@ class DurationRequirements(Requirements):
 class FieldConstraintsRequirements(Requirements):
     constraints: Identifier | None = None
     constraints_by_model: Identifier | None = None
-    on_missing: Identifier | None = None
+    on_missing: (
+        Literal[PolicyAction.ERROR, PolicyAction.SKIP, PolicyAction.WARNING] | None
+    ) = None
     target: Identifier | None = None
 
     @model_validator(mode="after")
@@ -380,14 +437,14 @@ class FieldConstraintsRequirements(Requirements):
 
 
 class IssuanceRequirements(Requirements):
-    allowed: list[LoadPatternType]
+    allowed: tuple[LoadPatternType, ...]
     require_positive_concurrency: StrictBool | None = None
 
 
 class MembershipRequirements(Requirements):
     catalog: Identifier
-    deduplicate: StrictBool | Identifier | None = None
-    matching: Identifier | None = None
+    deduplicate: StrictBool | Deduplication | None = None
+    matching: Literal[ConsistencyMode.EXACT] | None = None
     required: StrictBool | None = None
     skip_missing: StrictBool | None = None
     target: Identifier
@@ -405,11 +462,11 @@ class OfflineRequirements(Requirements):
     agentic_count: NonnegativeInt | None = None
     concurrency_floor: NonnegativeNumber | Identifier | None = None
     elected_must_equal: PositiveInt | Identifier | None = None
-    on_missing_summary: Identifier | None = None
+    on_missing_summary: Literal[PolicyAction.SKIP] | None = None
     operation: OfflineOperation
     single_turn_count: NonnegativeInt | None = None
     throughput_minimum_multiplier: NonnegativeNumber | None = None
-    throughput_reference: Identifier | None = None
+    throughput_reference: Literal[RegionSource.C_MAX_POINT] | None = None
 
     @model_validator(mode="after")
     def check_form(self) -> Self:
@@ -423,40 +480,44 @@ class OfflineRequirements(Requirements):
 
 
 class PathResolutionRequirements(Requirements):
-    allow_absolute: StrictBool | None = None
-    allow_escape_via_symlink: StrictBool | None = None
-    allow_parent_traversal: StrictBool | None = None
+    allow_absolute: StrictBool = False
+    allow_escape_via_symlink: StrictBool = False
+    allow_parent_traversal: StrictBool = False
     base: Identifier
-    on_missing: Identifier | None = None
+    on_missing: (
+        Literal[PolicyAction.ERROR, PolicyAction.SKIP, PolicyAction.WARNING] | None
+    ) = None
     require_directory: StrictBool | None = None
-    targets: list[Identifier]
+    targets: tuple[Identifier, ...]
 
 
 class PowerRequirements(Requirements):
     artifact: Identifier | None = None
     constants: Identifier | None = None
     cooling_must_match_system_description: StrictBool | None = None
-    declared_total_scaling: Identifier | None = None
-    on_disaggregated: Identifier | None = None
-    on_missing_parallelism: Identifier | None = None
-    on_spare_nodes: Identifier | None = None
-    on_undeclared_nodes: Identifier | None = None
-    on_unknown_accelerator_count: Identifier | None = None
+    declared_total_scaling: Literal[PowerMode.MAXIMUM_ENGAGED_FRACTION] | None = None
+    on_disaggregated: Literal[PolicyAction.WARNING] | None = None
+    on_missing_parallelism: Literal[PolicyAction.WARNING] | None = None
+    on_spare_nodes: Literal[PolicyAction.WARNING] | None = None
+    on_undeclared_nodes: Literal[PowerMode.FULLY_ENGAGED] | None = None
+    on_unknown_accelerator_count: Literal[PolicyAction.WARNING] | None = None
     operation: PowerOperation
     parallelism: Identifier | None = None
     reject_duplicate_ensemble_ids: StrictBool | None = None
-    replica_factors: list[Identifier] | None = None
+    replica_factors: tuple[Identifier, ...] | None = None
     require_accelerator_capacity: StrictBool | None = None
     require_derivable_total: StrictBool | None = None
     require_known_ensemble_ids: StrictBool | None = None
     require_maximum_data_parallel: StrictBool | None = None
     require_nodes_within_provisioned: StrictBool | None = None
     round_kw_decimals: NonnegativeInt | None = None
-    artifact_schema: Identifier | None = Field(default=None, alias="schema")
+    artifact_schema: Literal[ArtifactSchema.APPENDIX_E_SYSTEM_POWER] | None = Field(
+        default=None, alias="schema"
+    )
     shortfall: Identifier | None = None
     source: Identifier | None = None
-    switch_scaling: Identifier | None = None
-    tag: Identifier | None = None
+    switch_scaling: Literal[PowerMode.ENGAGED_NODE_FRACTION] | None = None
+    tag: Literal[PowerTag.ESTIMATED_POWER] | None = None
     validate_computed_values: StrictBool | None = None
     validate_node_sets: StrictBool | None = None
     validate_public_sources: StrictBool | None = None
@@ -475,11 +536,19 @@ class PowerRequirements(Requirements):
 
 class PresenceRequirements(Requirements):
     case_sensitive: StrictBool | None = None
-    minimum_count: NonnegativeInt | None = None
-    object: Identifier | None = None
+    minimum_count: NonnegativeInt = 1
+    object: (
+        Literal[
+            PresenceObject.DECLARATION,
+            PresenceObject.DIRECTORY,
+            PresenceObject.FILE,
+            PresenceObject.PATH,
+        ]
+        | None
+    ) = None
     pattern: Identifier | None = None
     target: Identifier | None = None
-    targets: list[Identifier] | None = None
+    targets: tuple[Identifier, ...] | None = None
 
     @model_validator(mode="after")
     def check_form(self) -> Self:
@@ -488,9 +557,9 @@ class PresenceRequirements(Requirements):
 
 
 class RegionBasisRequirements(Requirements):
-    minimum_concurrency: Identifier | None = None
-    on_no_parsed_points: Identifier | None = None
-    on_partial_parse: Identifier | None = None
+    minimum_concurrency: Literal[RegionSource.SMALLEST_SUBMITTED] | None = None
+    on_no_parsed_points: Literal[PolicyAction.ERROR] | None = None
+    on_partial_parse: Literal[PolicyAction.WARNING] | None = None
     source: Identifier
     upper_clamp: PositiveInt
 
@@ -502,31 +571,41 @@ class RegionBoundariesRequirements(Requirements):
 
 
 class RegionPlacementRequirements(Requirements):
-    ignore_declared: list[Identifier] | None = None
+    ignore_declared: tuple[Identifier, ...] = ()
     include_margin: StrictBool | None = None
-    on_missing_or_unclassifiable: Identifier | None = None
+    on_missing_or_unclassifiable: Literal[PolicyAction.SKIP] | None = None
     operation: RegionPlacementOperation
 
 
 class ReportRequirements(Requirements):
-    interpretation: Identifier | None = None
-    operation: Identifier | None = None
+    interpretation: Literal[ReportInterpretation.CLIENT_IPC_FORWARDING_ONLY] | None = (
+        None
+    )
+    operation: Literal[ReportOperation.BLOCKED_CONFIG_DEPENDENTS] | None = None
     target: Identifier
 
 
 class SeedBindingRequirements(Requirements):
     adoption_window_cohorts: PositiveInt | None = None
-    aliases: dict[Identifier, Identifier] | None = None
+    aliases: Mapping[Identifier, Identifier] | None = None
     catalog: Identifier | None = None
-    fields: list[Identifier] | None = None
-    on_legacy_registry_without_cohorts: Identifier | None = None
-    on_unavailable: Identifier | None = None
+    fields: tuple[Identifier, ...] | None = None
+    on_legacy_registry_without_cohorts: Literal[PolicyAction.BLOCKED] | None = None
+    on_unavailable: (
+        Literal[PolicyAction.BLOCKED, PolicyAction.BLOCK_DEPENDENT_CHECKS] | None
+    ) = None
     operation: SeedOperation
     require_all: StrictBool | None = None
     warn_legacy_only_when_model_seed_missing: StrictBool | None = None
 
+    @field_serializer("aliases")
+    def serialize_aliases(self, value):
+        return dict(value) if value is not None else None
+
     @model_validator(mode="after")
     def check_form(self) -> Self:
+        if self.aliases is not None:
+            object.__setattr__(self, "aliases", MappingProxyType(dict(self.aliases)))
         if self.operation is SeedOperation.LEGACY_NAMES:
             self.require_fields("aliases")
         else:
@@ -541,19 +620,21 @@ class SeedBindingRequirements(Requirements):
 class SteadyStateRequirements(Requirements):
     check_reported_super_pass_count: StrictBool | None = None
     constants: Identifier
-    fallback: Identifier | None = None
+    fallback: Literal[ReportingBasis.WHOLE_RUN_TOTAL] | None = None
     official_requires_plateau: StrictBool | None = None
-    on_drift: Identifier | None = None
-    on_missing_or_nonofficial: Identifier | None = None
-    on_missing_window_extent: Identifier | None = None
+    on_drift: Literal[PolicyAction.WARN_RANGE_OR_SLOPE_REQUIRED] | None = None
+    on_missing_or_nonofficial: Literal[PolicyAction.WARNING] | None = None
+    on_missing_window_extent: Literal[PolicyAction.SKIP_COUNT_COMPARISON] | None = None
     operation: SteadyOperation
 
 
 class WarmupRequirements(Requirements):
-    disabled_warmup: Identifier | None = None
-    on_missing: Identifier | None = None
+    disabled_warmup: Literal[PolicyAction.EXEMPT] | None = None
+    on_missing: (
+        Literal[PolicyAction.ERROR, PolicyAction.SKIP, PolicyAction.WARNING] | None
+    ) = None
     operation: WarmupOperation
-    require_declared_retained: StrictBool | None = None
+    require_declared_retained: StrictBool = True
     source: Identifier | None = None
     verify_archive_contents: StrictBool | None = None
 
@@ -579,7 +660,7 @@ REQUIREMENT_MODELS: dict[CheckKind, type[Requirements]] = {
     CheckKind.COUNT: CountRequirements,
     CheckKind.DERIVED_METRIC: DerivedMetricRequirements,
     CheckKind.DISCLOSURE: DisclosureRequirements,
-    CheckKind.DRAFTER_BINDING: DrafterBindingRequirements,
+    CheckKind.SPEC_DECODE_HEAD: SpecDecodeHeadRequirements,
     CheckKind.DURATION: DurationRequirements,
     CheckKind.FIELD_CONSTRAINTS: FieldConstraintsRequirements,
     CheckKind.ISSUANCE: IssuanceRequirements,
