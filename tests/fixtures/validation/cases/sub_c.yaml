@@ -1,0 +1,357 @@
+defaults:
+  accuracy_results.json:
+    humaneval:
+      dataset_name: humaneval
+      num_samples: 500
+      score: 0.45
+      extractor: ExactMatchExtractor
+      n_repeats: 1
+  config.yaml: {}
+  point.yaml:
+    dataset: mlperf-perf-dataset-v1
+    dataset_link: https://example.com/dataset
+    dataset_name: CNN/DailyMail
+    dataset_type: Performance
+    division: Standardized
+    link_to_model: https://example.com/model
+    link_to_model_transformation: https://example.com/quantization
+    max_supported_concurrency: 512
+    model_name: qwen3-coder-480b
+    model_notes: ""
+    model_precision: FP16
+    runtime_settings:
+      load_pattern: concurrency
+      runtime:
+        model_seed: 9315206023656308754
+        sample_index_rng_seed: 586478644936801402
+        scheduler_rng_seed: 10487924139932647040
+      stream_all_chunks: true
+    seed_set: A
+    shared_docs: docs
+    shared_src: src
+    steady_state:
+      state:
+        tpot_p50: Plateau
+        tpot_p90: Plateau
+        ttft_p50: Plateau
+        ttft_p90: Plateau
+      status: windowable
+      verdict: STEADY STATE
+      window:
+        n_samples: 4000
+        super_pass_end: 4
+        super_pass_size: 1000
+        super_pass_start: 1
+    target_cohort: 2026-10-C1
+    warmup:
+      data_source: mlperf-perf-dataset-v1 validation split
+      duration_s: 60.0
+      initialization_steps:
+        - model loaded
+        - kv-cache warmed
+      link_logs: https://example.com/warmup-logs
+      logs_retained: true
+  result_summary.json:
+    n_samples_issued: 24576
+    n_samples_completed: 24576
+    n_samples_failed: 0
+    output_sequence_lengths:
+      percentiles: {}
+    tpot:
+      total: 99508224000.00002
+      percentiles:
+        "50": 4000000.0
+        "90": 5500000.0
+        "95": 6000000.0
+        "99": 6500000.0
+    tps_per_user: 181.8182
+  system_desc.json:
+    submitter_org_names: Submitter-C
+    submitter_contact: contact@example.com
+    system_name: system_c
+    system_category: datacenter
+    max_supported_concurrency: 512
+    serving_framework: vLLM (TPU)
+    node_types:
+      - system_node_ensemble_id: 0
+        number_of_nodes: 1
+        host_processor_model_name: Custom TPU Host CPU
+        host_processors_per_node: 1
+        host_processor_core_count: 24
+        host_memory_capacity: 192 GB
+        host_networking: Ethernet 100Gb
+        host_storage_capacity: 10 TB
+        host_storage_type: NVMe SSD
+        operating_system: Debian 11
+        host_memory_configuration: 8x 64GB DDR5
+        host_network_card_count: 1x NIC
+        driver: "1.0"
+        filesystem: ext4
+        accelerator_info:
+          - accelerator_model_name: Google TPU v5p
+            accelerators_per_node: 4
+            accelerator_memory_capacity: 96 GB HBM2e
+            accelerator_memory_type: HBM3e
+    division: Standardized
+    model_precision: FP16
+    link_to_model: https://example.com/model
+    dataset_id: cnn_dailymail
+    dataset_name: CNN/DailyMail
+    input_token_average: 870.0
+    output_token_average: 128.0
+    dataset_type: performance
+    dataset_link: https://example.com/dataset
+    measured_accuracy_score: "38.7"
+    system_size: 1 node
+    model_id: qwen3-coder-480b
+    system_node_ensemble_count: 1
+    system_node_ensemble_total: 1
+    publication_status: Available
+    node_config: 8x H100 test node
+    config_summary:
+      disaggregated: null
+      expert_parallel: 1
+      tensor_parallel: 4
+      pipeline_parallel: 1
+      data_parallel: 1
+      batch: null
+    cooling: Liquid-cooled
+files:
+  docs/.gitkeep: ""
+  results/system_c/system_power.json:
+    system_desc_id: system_c
+    cooling: liquid
+    node_sets:
+      - node_set_id: 0
+        system_node_ensemble_id: 0
+        nodes_provisioned: 1
+        power_method: component_sum
+        components:
+          cpu:
+            model: Custom TPU Host CPU
+            count_per_node: 1
+            tdp_per_unit:
+              value_w: 350
+              source_type: vendor_spec
+              source: https://example.com/cpu-spec
+          accelerator:
+            model: Google TPU v5p
+            count_per_node: 4
+            tdp_per_unit:
+              value_w: 700
+              source_type: vendor_spec
+              source: https://example.com/accelerator-spec
+          scale_up_network:
+            method: declared_tdp
+            switch_count: 1
+            tdp_per_switch:
+              value_w: 3500
+              source_type: vendor_spec
+              source: https://example.com/switch-spec
+    scale_out:
+      present: false
+  src/vllm/README.md: "# vllm
+
+
+    Anonymised fixture implementation directory. Real submissions document how to build the SUT and reproduce
+    a point here.
+
+    "
+points:
+  results/system_c/qwen3-coder-480b/r128:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 128
+    point.yaml:
+      concurrency: 128
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 128
+        requests_completed: 1280
+        requests_issued: 1280
+    result_summary.json:
+      duration_ns: 3704248419955.0
+      ttft:
+        total: 5674433556480.0
+        percentiles:
+          "50": 230893292.5
+          "95": 330418109.5
+          "90": 310513146.1
+      output_sequence_lengths:
+        total: 7189576.0
+      system_tps: 1940.9001
+    system_desc.json:
+      tps_utilization: 0.686722
+  results/system_c/qwen3-coder-480b/r16:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 16
+    point.yaml:
+      concurrency: 16
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 16
+        requests_completed: 160
+        requests_issued: 160
+    result_summary.json:
+      duration_ns: 9681657879146.0
+      ttft:
+        total: 2364827467776.0
+        percentiles:
+          "50": 96225076.0
+          "95": 164579607.0
+          "90": 150908700.8
+      output_sequence_lengths:
+        total: 7193577.0
+      system_tps: 743.0109
+    system_desc.json:
+      tps_utilization: 0.262889
+  results/system_c/qwen3-coder-480b/r256:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 256
+    point.yaml:
+      concurrency: 256
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 256
+        requests_completed: 2560
+        requests_issued: 2560
+    result_summary.json:
+      duration_ns: 3055408461497.0005
+      ttft:
+        total: 8782727024640.0
+        percentiles:
+          "50": 357370077.5
+          "95": 457645674.25
+          "90": 437590554.9
+      output_sequence_lengths:
+        total: 7178996.0
+      system_tps: 2349.6027
+    system_desc.json:
+      tps_utilization: 0.831327
+  results/system_c/qwen3-coder-480b/r32:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 32
+    point.yaml:
+      concurrency: 32
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 32
+        requests_completed: 320
+        requests_issued: 320
+    result_summary.json:
+      duration_ns: 7215663280145.0
+      ttft:
+        total: 3557367164928.0
+        percentiles:
+          "50": 144749640.5
+          "95": 211749072.25
+          "90": 198349185.9
+      output_sequence_lengths:
+        total: 7193551.0
+      system_tps: 996.9355
+    system_desc.json:
+      tps_utilization: 0.352732
+  results/system_c/qwen3-coder-480b/r512:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 512
+    point.yaml:
+      concurrency: 512
+      offline: elected
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 512
+        requests_completed: 5120
+        requests_issued: 5120
+    result_summary.json:
+      duration_ns: 2550450936890.0
+      ttft:
+        total: 13680033595392.0
+        percentiles:
+          "50": 556641992.0
+          "95": 841800473.5
+          "90": 784768777.2
+      output_sequence_lengths:
+        total: 7208408.0
+      system_tps: 2826.3269
+    system_desc.json:
+      tps_utilization: 1.0
+  results/system_c/qwen3-coder-480b/r64:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 64
+    point.yaml:
+      concurrency: 64
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 64
+        requests_completed: 640
+        requests_issued: 640
+    result_summary.json:
+      duration_ns: 4947046368648.0
+      ttft:
+        total: 3985956200448.0
+        percentiles:
+          "50": 162188973.0
+          "95": 255115666.5
+          "90": 236530327.8
+      output_sequence_lengths:
+        total: 7194216.0
+      system_tps: 1454.2447
+    system_desc.json:
+      tps_utilization: 0.514535
+  results/system_c/qwen3-coder-480b/r8:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 8
+    point.yaml:
+      concurrency: 8
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 8
+        requests_completed: 80
+        requests_issued: 80
+    result_summary.json:
+      duration_ns: 17117165266230.002
+      ttft:
+        total: 2276072361984.0
+        percentiles:
+          "50": 92613621.5
+          "95": 157459882.0
+          "90": 144490629.9
+      output_sequence_lengths:
+        total: 7185824.0
+      system_tps: 419.8022
+    system_desc.json:
+      tps_utilization: 0.148533

@@ -5,7 +5,6 @@
 import json
 import shutil
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 import yaml
@@ -29,10 +28,6 @@ from inference_endpoint.validation.schemas.requirements_v1 import (
 )
 
 pytestmark = pytest.mark.unit
-FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "fixtures/validation/submissions/valid_standardized"
-)
 
 
 def selected_policy(*ids):
@@ -51,8 +46,10 @@ def write_summary(root, summary):
     return point
 
 
-def test_system_names_are_compared_within_each_system(tmp_path):
-    shutil.copytree(FIXTURE, tmp_path / "submission")
+def test_system_names_are_compared_within_each_system(
+    standardized_submission, tmp_path
+):
+    shutil.copytree(standardized_submission, tmp_path / "submission")
     root = tmp_path / "submission"
     systems = root / "results"
     original = next(systems.iterdir())

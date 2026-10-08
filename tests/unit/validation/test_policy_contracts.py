@@ -4,7 +4,6 @@
 
 import json
 import shutil
-from pathlib import Path
 
 import pytest
 import yaml
@@ -296,12 +295,11 @@ def test_malformed_nested_and_operation_contracts_are_rejected(
     ],
 )
 def test_power_cooling_must_match_description(
-    tmp_path, description, descriptor_cooling, accepted
+    standardized_submission, tmp_path, description, descriptor_cooling, accepted
 ):
     policy = load_policy(bundled_policy_path())
     source = (
-        Path(__file__).resolve().parents[3]
-        / "tests/fixtures/validation/submissions/valid_standardized/results/system_k/llama3_1-8b/r16/system_desc.json"
+        standardized_submission / "results/system_k/llama3_1-8b/r16/system_desc.json"
     )
     system = tmp_path / "results" / "system"
     point = system / "gpt-oss-120b" / "r16"

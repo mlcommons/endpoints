@@ -1,9 +1,0 @@
-{
-  "humaneval": {
-    "dataset_name": "humaneval",
-    "num_samples": 500,
-    "score": 0.45,
-    "extractor": "ExactMatchExtractor",
-    "n_repeats": 1
-  }
-}

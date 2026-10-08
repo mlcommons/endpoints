@@ -1,25 +1,31 @@
 # Validation fixtures
 
-The submission trees are synthetic test cases, not historical submissions or
+The submission cases are synthetic test inputs, not historical submissions or
 measured results. Their accuracy scores, performance summaries, steady-state
-windows, system configurations, and power disclosures are constructed to exercise
-validation behavior. They must not be used to compare hardware or serving software.
+windows, system configurations, and power disclosures exercise validation behavior.
+They must not be used to compare hardware or serving software.
 
-Each invented system has a neutral identifier (`system_a` through `system_l`).
-Real model, dataset, accelerator, and processor names remain where they exercise
-published policy keys and hardware power lookups; these names do not establish
-that the configurations were run on those products.
+`cases/` contains one readable YAML file per submission. Each file has:
 
-`valid_standardized` supplies a complete standardized submission layout.
-`invalid_submission` exercises invalid declarations and missing requirements.
-`sub_a` through `sub_j` exercise different curve, model, configuration, and power
-paths. These are checker inputs: the directory names do not guarantee that every
-case passes all rules in the current cohort.
+- `defaults`: common artifact fields shared by its measurement points.
+- `files`: submission-level artifacts and small source/documentation files.
+- `points`: point paths and artifact fields that differ from the defaults.
 
-The corpus was adapted from the submission checker test corpus. Its fixture
-regeneration tool explicitly describes the data as synthetic and constructs
-accuracy values, steady-state windows, and power disclosures. The copies here
-are maintained as native validation fixtures and require no external checker.
+The pytest fixtures in `tests/unit/validation/conftest.py` write complete JSON and
+YAML artifacts into a temporary directory. Nested dictionaries merge recursively;
+scalar values and lists replace their defaults. An empty override uses all defaults.
+An omitted artifact is absent; `null` is a value, not a deletion instruction.
+Missing fields must be omitted from defaults and supplied only by points that need
+them. Tests can copy and mutate generated trees without changing the case files.
+
+`valid_standardized` supplies a complete standardized layout. `invalid_submission`
+exercises invalid declarations and missing requirements. `sub_a` through `sub_j`
+exercise different curves, models, configurations, and power paths. Their names do
+not guarantee that every case passes all rules in the current cohort.
+
+Invented systems use neutral identifiers (`system_a` through `system_l`). Real
+model, dataset, accelerator, and processor names exercise published policy keys
+and hardware power lookups; they do not establish that those configurations ran.
 
 `policy-fingerprints.json` pins the catalog and rule definitions independently of
-these submission trees, so policy edits require an explicit expected-value update.
+these cases, so policy edits require an explicit expected-value update.

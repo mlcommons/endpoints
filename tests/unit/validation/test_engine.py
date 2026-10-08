@@ -5,7 +5,6 @@
 import json
 import shutil
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 import yaml
@@ -25,10 +24,6 @@ from inference_endpoint.validation.types import EvidenceKey, Severity
 from inference_endpoint.validation.vocabulary import CheckKind
 
 pytestmark = pytest.mark.unit
-FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "fixtures/validation/submissions/valid_standardized"
-)
 
 
 def policy_only(*ids):
@@ -38,22 +33,24 @@ def policy_only(*ids):
     )
 
 
-def test_min_completed_samples_uses_catalog_sample_count():
+def test_min_completed_samples_uses_catalog_sample_count(standardized_submission):
     policy = policy_only("min-completed-samples")
-    original = execute_submission(FIXTURE, policy)
+    original = execute_submission(standardized_submission, policy)
     catalog = {
         **policy.catalogs,
         "datasets": {"llm-perf-dataset-v1": {"sample_count": 10**12}},
     }
-    stricter = execute_submission(FIXTURE, replace(policy, catalogs=freeze(catalog)))
+    stricter = execute_submission(
+        standardized_submission, replace(policy, catalogs=freeze(catalog))
+    )
     assert original.passed
     assert not stricter.passed
     assert all(f.rule == "min-completed-samples" for f in stricter.results)
 
 
-def test_duration_catalog_edit_changes_runtime_gate():
+def test_duration_catalog_edit_changes_runtime_gate(standardized_submission):
     policy = policy_only("region-basis", "point-duration")
-    original = execute_submission(FIXTURE, policy)
+    original = execute_submission(standardized_submission, policy)
     catalog = {
         **policy.catalogs,
         "steady_state": {
@@ -62,12 +59,16 @@ def test_duration_catalog_edit_changes_runtime_gate():
             )
         },
     }
-    stricter = execute_submission(FIXTURE, replace(policy, catalogs=freeze(catalog)))
+    stricter = execute_submission(
+        standardized_submission, replace(policy, catalogs=freeze(catalog))
+    )
     assert original.passed
     assert not stricter.passed
 
 
-def test_new_yaml_rule_and_selection_override_execute(tmp_path):
+def test_new_yaml_rule_and_selection_override_execute(
+    standardized_submission, tmp_path
+):
     policy_dir = tmp_path / "2026-10-C1"
     shutil.copytree(bundled_policy_path(), policy_dir)
     point_yaml = policy_dir / "point_checks.yaml"
@@ -83,19 +84,28 @@ def test_new_yaml_rule_and_selection_override_execute(tmp_path):
     point_yaml.write_text(yaml.safe_dump(document))
     policy = load_policy(policy_dir)
     rule = next(r for r in policy.checks if r.id == "new-completed-floor")
-    assert not execute_submission(FIXTURE, replace(policy, checks=(rule,))).passed
+    assert not execute_submission(
+        standardized_submission, replace(policy, checks=(rule,))
+    ).passed
     document["checks"]["new-completed-floor"]["applies_to"] = {
         "load_pattern": ["agentic_inference"]
     }
     point_yaml.write_text(yaml.safe_dump(document))
     policy = load_policy(policy_dir)
     rule = next(r for r in policy.checks if r.id == "new-completed-floor")
-    assert execute_submission(FIXTURE, replace(policy, checks=(rule,))).results == []
+    assert (
+        execute_submission(
+            standardized_submission, replace(policy, checks=(rule,))
+        ).results
+        == []
+    )
 
 
-def test_untrusted_nan_region_basis_blocks_without_crashing(tmp_path):
+def test_untrusted_nan_region_basis_blocks_without_crashing(
+    standardized_submission, tmp_path
+):
     submission = tmp_path / "submission"
-    shutil.copytree(FIXTURE, submission)
+    shutil.copytree(standardized_submission, submission)
     for path in submission.glob("results/*/*/r*/system_desc.json"):
         data = json.loads(path.read_text())
         data["max_supported_concurrency"] = float("nan")
@@ -114,7 +124,7 @@ def test_registry_rejects_duplicate_kinds():
                 return []
 
 
-def test_model_accuracy_catalog_changes_public_results():
+def test_model_accuracy_catalog_changes_public_results(standardized_submission):
     policy = policy_only("accuracy-gate")
     profile = {
         "accuracy": {
@@ -125,13 +135,13 @@ def test_model_accuracy_catalog_changes_public_results():
     }
     catalogs = {**policy.catalogs, "models": {"llama3_1-8b": profile}}
     policy = replace(policy, catalogs=freeze(catalogs))
-    assert validate_submission(FIXTURE, policy=policy).passed
+    assert validate_submission(standardized_submission, policy=policy).passed
     profile["accuracy"]["metrics"]["rouge1"]["reference"] = 10**12
     stricter = replace(policy, catalogs=freeze(catalogs))
-    assert not validate_submission(FIXTURE, policy=stricter).passed
+    assert not validate_submission(standardized_submission, policy=stricter).passed
 
 
-def test_disabled_cohort_override_prevents_execution(tmp_path):
+def test_disabled_cohort_override_prevents_execution(standardized_submission, tmp_path):
     policy_dir = tmp_path / "2026-10-C1"
     shutil.copytree(bundled_policy_path(), policy_dir)
     catalog_file = policy_dir / "catalog.yaml"
@@ -153,17 +163,19 @@ def test_disabled_cohort_override_prevents_execution(tmp_path):
             rule for rule in policy.checks if rule.id == "min-completed-samples"
         ),
     )
-    assert validate_submission(FIXTURE, policy=policy).results == []
+    assert validate_submission(standardized_submission, policy=policy).results == []
 
 
-def test_unregistered_evaluator_blocks(monkeypatch):
+def test_unregistered_evaluator_blocks(standardized_submission, monkeypatch):
     monkeypatch.delitem(Evaluator.registry, CheckKind.COMPARISON)
-    report = execute_submission(FIXTURE, policy_only("metric-consistency-duration"))
+    report = execute_submission(
+        standardized_submission, policy_only("metric-consistency-duration")
+    )
     assert report.errors
     assert all(f.key == "blocked" for f in report.errors)
 
 
-def test_effective_override_changes_evaluator_threshold():
+def test_effective_override_changes_evaluator_threshold(standardized_submission):
     policy = policy_only("point-cap")
     override = Override(
         id="smaller-cohort-cap",
@@ -173,15 +185,15 @@ def test_effective_override_changes_evaluator_threshold():
         enabled=True,
         requirements=freeze({"maximum": 1}),
     )
-    assert validate_submission(FIXTURE, policy=policy).passed
+    assert validate_submission(standardized_submission, policy=policy).passed
     overridden = validate_submission(
-        FIXTURE, policy=replace(policy, overrides=(override,))
+        standardized_submission, policy=replace(policy, overrides=(override,))
     )
     assert not overridden.passed
     assert all("allowed [0, 1]" in finding.message for finding in overridden.results)
 
 
-def test_disabled_region_basis_does_not_publish_dependencies():
+def test_disabled_region_basis_does_not_publish_dependencies(standardized_submission):
     policy = policy_only("region-basis")
     exemption = Override(
         id="disabled-basis",
@@ -191,7 +203,9 @@ def test_disabled_region_basis_does_not_publish_dependencies():
         enabled=False,
         requirements=freeze({}),
     )
-    artifacts = load_artifacts(FIXTURE, replace(policy, overrides=(exemption,)))
+    artifacts = load_artifacts(
+        standardized_submission, replace(policy, overrides=(exemption,))
+    )
     assert not artifacts.derived.regions
     assert all(
         EvidenceKey.COMPUTED_REGIONS not in point.context.available
@@ -199,9 +213,11 @@ def test_disabled_region_basis_does_not_publish_dependencies():
     )
 
 
-def test_region_basis_uses_selected_collection_members(tmp_path):
+def test_region_basis_uses_selected_collection_members(
+    standardized_submission, tmp_path
+):
     submission = tmp_path / "submission"
-    shutil.copytree(FIXTURE, submission)
+    shutil.copytree(standardized_submission, submission)
     path = next(submission.glob("results/*/*/r16/point.yaml"))
     data = yaml.safe_load(path.read_text())
     data["offline"] = "dedicated"
@@ -219,9 +235,11 @@ def test_unknown_collection_operation_is_rejected(rule_id):
         rule.requirements.with_updates({"operation": "unsupported"})
 
 
-def test_offline_uses_effective_numeric_concurrency_floor(tmp_path):
+def test_offline_uses_effective_numeric_concurrency_floor(
+    standardized_submission, tmp_path
+):
     submission = tmp_path / "submission"
-    shutil.copytree(FIXTURE, submission)
+    shutil.copytree(standardized_submission, submission)
     path = next(submission.glob("results/*/*/r1000/point.yaml"))
     data = yaml.safe_load(path.read_text())
     data["offline"] = "dedicated"
@@ -238,7 +256,7 @@ def test_offline_uses_effective_numeric_concurrency_floor(tmp_path):
     assert "1000000000000" in report.results[0].message
 
 
-def test_elected_offline_uses_effective_required_concurrency():
+def test_elected_offline_uses_effective_required_concurrency(standardized_submission):
     policy = policy_only("offline-point-present")
     rule = replace(
         policy.checks[0],
@@ -246,12 +264,16 @@ def test_elected_offline_uses_effective_required_concurrency():
             {"elected_must_equal": 10**12}
         ),
     )
-    assert not execute_submission(FIXTURE, replace(policy, checks=(rule,))).passed
+    assert not execute_submission(
+        standardized_submission, replace(policy, checks=(rule,))
+    ).passed
 
 
-def test_schema_errors_use_effective_warning_severity(tmp_path):
+def test_schema_errors_use_effective_warning_severity(
+    standardized_submission, tmp_path
+):
     submission = tmp_path / "submission"
-    shutil.copytree(FIXTURE, submission)
+    shutil.copytree(standardized_submission, submission)
     path = next(submission.glob("results/*/*/r16/point.yaml"))
     data = yaml.safe_load(path.read_text())
     data["concurrency"] = "invalid"
@@ -263,7 +285,7 @@ def test_schema_errors_use_effective_warning_severity(tmp_path):
     assert all(f.severity.value == "warning" for f in report.results if f.path == path)
 
 
-def test_conflicting_region_basis_partitions_block_explicitly():
+def test_conflicting_region_basis_partitions_block_explicitly(standardized_submission):
     policy = policy_only("region-basis", "point-duration")
     partition = Override(
         id="different-clamp",
@@ -273,7 +295,9 @@ def test_conflicting_region_basis_partitions_block_explicitly():
         enabled=True,
         requirements=freeze({"upper_clamp": 4}),
     )
-    report = execute_submission(FIXTURE, replace(policy, overrides=(partition,)))
+    report = execute_submission(
+        standardized_submission, replace(policy, overrides=(partition,))
+    )
     assert any(
         f.rule == "region-basis" and f.key == "blocked" and "Conflicting" in f.message
         for f in report.results
@@ -286,9 +310,9 @@ def test_conflicting_region_basis_partitions_block_explicitly():
 @pytest.mark.parametrize(
     "option", ["seed_sets_path", "approved_spec_decode_heads_path"]
 )
-def test_api_rejects_catalog_overrides(option, tmp_path):
+def test_api_rejects_catalog_overrides(standardized_submission, option, tmp_path):
     with pytest.raises(TypeError, match="unexpected keyword argument"):
-        validate_submission(FIXTURE, **{option: tmp_path})
+        validate_submission(standardized_submission, **{option: tmp_path})
 
 
 def test_catalog_environment_cannot_replace_validation_approvals(tmp_path, monkeypatch):
@@ -306,11 +330,8 @@ def test_catalog_environment_cannot_replace_validation_approvals(tmp_path, monke
     )
 
 
-@pytest.mark.parametrize(
-    "submission", sorted(FIXTURE.parent.iterdir()), ids=lambda path: path.name
-)
-def test_native_submission_corpus_has_no_internal_evaluation_errors(submission):
-    report = validate_submission(submission)
+def test_native_submission_corpus_has_no_internal_evaluation_errors(submission_case):
+    report = validate_submission(submission_case)
     assert report.results
     assert not any(
         "Evaluation could not complete" in finding.message for finding in report.results

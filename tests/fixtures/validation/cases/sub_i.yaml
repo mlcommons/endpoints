@@ -1,0 +1,481 @@
+defaults:
+  accuracy_results.json:
+    math500:
+      dataset_name: math500
+      num_samples: 4388
+      score:
+        exact_match: 81.3582
+      extractor: BoxedAnswerExtractor
+      n_repeats: 1
+  config.yaml: {}
+  point.yaml:
+    dataset: mlperf-perf-dataset-v1
+    dataset_link: https://example.com/dataset
+    dataset_name: CNN/DailyMail
+    dataset_type: Performance
+    division: Standardized
+    link_to_model: https://example.com/model
+    link_to_model_transformation: https://example.com/quantization
+    max_supported_concurrency: 512
+    model_name: deepseek-r1
+    model_notes: ""
+    model_precision: FP16
+    runtime_settings:
+      load_pattern: concurrency
+      runtime:
+        model_seed: 9315206023656308754
+        sample_index_rng_seed: 586478644936801402
+        scheduler_rng_seed: 10487924139932647040
+      stream_all_chunks: true
+    seed_set: A
+    shared_docs: docs
+    shared_src: src
+    steady_state:
+      state:
+        tpot_p50: Plateau
+        tpot_p90: Plateau
+        ttft_p50: Plateau
+        ttft_p90: Plateau
+      status: windowable
+      verdict: STEADY STATE
+      window:
+        n_samples: 4000
+        super_pass_end: 4
+        super_pass_size: 1000
+        super_pass_start: 1
+    target_cohort: 2026-10-C1
+    warmup:
+      data_source: mlperf-perf-dataset-v1 validation split
+      duration_s: 60.0
+      initialization_steps:
+        - model loaded
+        - kv-cache warmed
+      link_logs: https://example.com/warmup-logs
+      logs_retained: true
+  result_summary.json:
+    n_samples_failed: 0
+    output_sequence_lengths:
+      percentiles: {}
+    tpot:
+      percentiles:
+        "50": 4000000.0
+        "90": 5500000.0
+        "95": 6000000.0
+        "99": 6500000.0
+    tps_per_user: 181.8182
+  system_desc.json:
+    submitter_org_names: Submitter-I
+    submitter_contact: contact@example.com
+    system_name: system_i
+    system_category: datacenter
+    max_supported_concurrency: 512
+    serving_framework: TensorRT-LLM
+    node_types:
+      - system_node_ensemble_id: 0
+        number_of_nodes: 1
+        host_processor_model_name: Intel Xeon Platinum 8562Y+
+        host_processors_per_node: 2
+        host_processor_core_count: 32
+        host_memory_capacity: 2 TiB
+        host_networking: InfiniBand NDR
+        host_storage_capacity: 15 TB
+        host_storage_type: NVMe SSD
+        operating_system: Ubuntu 22.04
+        host_memory_configuration: 8x 64GB DDR5
+        host_network_card_count: 1x NIC
+        driver: "1.0"
+        filesystem: ext4
+        accelerator_info:
+          - accelerator_model_name: NVIDIA H200-SXM-141GB
+            accelerators_per_node: 8
+            accelerator_memory_capacity: 141 GB HBM3e
+            accelerator_memory_type: HBM3e
+            accelerator_interconnect: 18x NVLink 4th Gen 900 GB/s
+            accelerator_host_interconnect: PCIe Gen5
+    division: Standardized
+    model_precision: FP16
+    link_to_model: https://example.com/model
+    dataset_id: cnn_dailymail
+    dataset_name: CNN/DailyMail
+    input_token_average: 870.0
+    output_token_average: 128.0
+    dataset_type: performance
+    dataset_link: https://example.com/dataset
+    measured_accuracy_score: "38.7"
+    system_size: 1 node
+    model_id: deepseek-r1
+    system_node_ensemble_count: 1
+    system_node_ensemble_total: 1
+    publication_status: Available
+    node_config: 8x H100 test node
+    config_summary:
+      disaggregated: null
+      expert_parallel: 1
+      tensor_parallel: 8
+      pipeline_parallel: 1
+      data_parallel: 1
+      batch: null
+    cooling: Air-cooled
+files:
+  docs/.gitkeep: ""
+  results/system_i/system_power.json:
+    system_desc_id: system_i
+    cooling: air
+    node_sets:
+      - node_set_id: 0
+        system_node_ensemble_id: 0
+        nodes_provisioned: 1
+        power_method: component_sum
+        components:
+          cpu:
+            model: Intel Xeon Platinum 8562Y+
+            count_per_node: 2
+            tdp_per_unit:
+              value_w: 350
+              source_type: vendor_spec
+              source: https://example.com/cpu-spec
+          accelerator:
+            model: NVIDIA H200-SXM-141GB
+            count_per_node: 8
+            tdp_per_unit:
+              value_w: 700
+              source_type: vendor_spec
+              source: https://example.com/accelerator-spec
+          scale_up_network:
+            method: declared_tdp
+            switch_count: 1
+            tdp_per_switch:
+              value_w: 3500
+              source_type: vendor_spec
+              source: https://example.com/switch-spec
+    scale_out:
+      present: false
+  src/tensorrt-llm/README.md: "# tensorrt-llm
+
+
+    Anonymised fixture implementation directory. Real submissions document how to build the SUT and reproduce
+    a point here.
+
+    "
+points:
+  results/system_i/deepseek-r1/r1:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 1
+    point.yaml:
+      concurrency: 1
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 1
+        requests_completed: 10
+        requests_issued: 10
+    result_summary.json:
+      n_samples_issued: 29
+      n_samples_completed: 29
+      duration_ns: 1810326781531.0
+      ttft:
+        total: 3239905752.0
+        percentiles:
+          "50": 111720888.0
+          "95": 121428535.79999998
+          "90": 119487006.23999998
+      output_sequence_lengths:
+        total: 168384.0
+      tpot:
+        total: 117421000.00000001
+      system_tps: 93.013
+    system_desc.json:
+      tps_utilization: 0.01422
+  results/system_i/deepseek-r1/r128:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 128
+    point.yaml:
+      concurrency: 128
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 128
+        requests_completed: 1280
+        requests_issued: 1280
+    result_summary.json:
+      n_samples_issued: 1675
+      n_samples_completed: 1675
+      duration_ns: 2363311856036.0
+      ttft:
+        total: 268304677475.0
+        percentiles:
+          "50": 160181897.0
+          "95": 456279775.1
+          "90": 397060199.48
+      output_sequence_lengths:
+        total: 6215384.0
+      tpot:
+        total: 6782075000.000001
+      system_tps: 2629.9466
+    system_desc.json:
+      tps_utilization: 0.402063
+  results/system_i/deepseek-r1/r16:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 16
+    point.yaml:
+      concurrency: 16
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 16
+        requests_completed: 160
+        requests_issued: 160
+    result_summary.json:
+      n_samples_issued: 339
+      n_samples_completed: 339
+      duration_ns: 2003156043150.0
+      ttft:
+        total: 45912856545.0
+        percentiles:
+          "50": 135436155.0
+          "95": 241107175.0999999
+          "90": 219972971.07999992
+      output_sequence_lengths:
+        total: 1378214.0
+      tpot:
+        total: 1372611000.0000002
+      system_tps: 688.0213
+    system_desc.json:
+      tps_utilization: 0.105184
+  results/system_i/deepseek-r1/r2:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 2
+    point.yaml:
+      concurrency: 2
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 2
+        requests_completed: 20
+        requests_issued: 20
+    result_summary.json:
+      n_samples_issued: 68
+      n_samples_completed: 68
+      duration_ns: 1944103059102.0002
+      ttft:
+        total: 8684697316.0
+        percentiles:
+          "50": 127716137.0
+          "95": 137065360.35
+          "90": 135195515.68
+      output_sequence_lengths:
+        total: 315398.0
+      tpot:
+        total: 275332000.00000006
+      system_tps: 162.2332
+    system_desc.json:
+      tps_utilization: 0.024802
+  results/system_i/deepseek-r1/r256:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 256
+    point.yaml:
+      concurrency: 256
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 256
+        requests_completed: 2560
+        requests_issued: 2560
+    result_summary.json:
+      n_samples_issued: 2759
+      n_samples_completed: 2759
+      duration_ns: 2418594571195.9995
+      ttft:
+        total: 512378878272.0
+        percentiles:
+          "50": 185711808.0
+          "95": 842228387.0
+          "90": 710925071.2
+      output_sequence_lengths:
+        total: 10495599.0
+      tpot:
+        total: 11171191000.000002
+      system_tps: 4339.5446
+    system_desc.json:
+      tps_utilization: 0.663424
+  results/system_i/deepseek-r1/r32:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 32
+    point.yaml:
+      concurrency: 32
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 32
+        requests_completed: 320
+        requests_issued: 320
+    result_summary.json:
+      n_samples_issued: 516
+      n_samples_completed: 516
+      duration_ns: 2102160301502.9998
+      ttft:
+        total: 72592828674.0
+        percentiles:
+          "50": 140683776.5
+          "95": 237608990.0
+          "90": 218223947.3
+      output_sequence_lengths:
+        total: 1986475.0
+      tpot:
+        total: 2089284000.0000002
+      system_tps: 944.9684
+    system_desc.json:
+      tps_utilization: 0.144466
+  results/system_i/deepseek-r1/r4:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 4
+    point.yaml:
+      concurrency: 4
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 4
+        requests_completed: 40
+        requests_issued: 40
+    result_summary.json:
+      n_samples_issued: 117
+      n_samples_completed: 117
+      duration_ns: 1962849595746.0
+      ttft:
+        total: 14924097162.0
+        percentiles:
+          "50": 127556386.0
+          "95": 135825117.4
+          "90": 134171371.12
+      output_sequence_lengths:
+        total: 539431.0
+      tpot:
+        total: 473733000.00000006
+      system_tps: 274.8203
+    system_desc.json:
+      tps_utilization: 0.042014
+  results/system_i/deepseek-r1/r512:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 512
+    point.yaml:
+      concurrency: 512
+      offline: elected
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 512
+        requests_completed: 5120
+        requests_issued: 5120
+    result_summary.json:
+      n_samples_issued: 4388
+      n_samples_completed: 4388
+      duration_ns: 2594198991881.0
+      ttft:
+        total: 1184049108896.0
+        percentiles:
+          "50": 269837992.0
+          "95": 2367829187.25
+          "90": 1948230948.2
+      output_sequence_lengths:
+        total: 16968991.0
+      tpot:
+        total: 17767012000.000004
+      system_tps: 6541.1293
+    system_desc.json:
+      tps_utilization: 1.0
+  results/system_i/deepseek-r1/r64:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 64
+    point.yaml:
+      concurrency: 64
+      runtime_settings:
+        min_duration_ms: 1200000
+      steady_state:
+        window:
+          duration_s: 1200.0
+      warmup:
+        concurrency: 64
+        requests_completed: 640
+        requests_issued: 640
+    result_summary.json:
+      n_samples_issued: 906
+      n_samples_completed: 906
+      duration_ns: 2209290005442.0
+      ttft:
+        total: 134375863380.0
+        percentiles:
+          "50": 148317730.0
+          "95": 300972722.5
+          "90": 270441724.0
+      output_sequence_lengths:
+        total: 3400893.0
+      tpot:
+        total: 3668394000.0000005
+      system_tps: 1539.3602
+    system_desc.json:
+      tps_utilization: 0.235336
+  results/system_i/deepseek-r1/r8:
+    accuracy_results.json: {}
+    config.yaml:
+      concurrency: 8
+    point.yaml:
+      concurrency: 8
+      runtime_settings:
+        min_duration_ms: 600000
+      steady_state:
+        window:
+          duration_s: 600.0
+      warmup:
+        concurrency: 8
+        requests_completed: 80
+        requests_issued: 80
+    result_summary.json:
+      n_samples_issued: 220
+      n_samples_completed: 220
+      duration_ns: 1919705564758.0
+      ttft:
+        total: 28929776150.000004
+        percentiles:
+          "50": 131498982.50000001
+          "95": 139797791.85
+          "90": 138138029.98
+      output_sequence_lengths:
+        total: 867074.0
+      tpot:
+        total: 890780000.0000001
+      system_tps: 451.6703
+    system_desc.json:
+      tps_utilization: 0.069051
