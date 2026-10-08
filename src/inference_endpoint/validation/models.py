@@ -18,11 +18,13 @@ _Key = TypeVar("_Key")
 @overload
 def freeze(  # noqa: UP047 - supported by the repository type checker
     value: Mapping[_Key, Any],
-) -> Mapping[_Key, Any]: ...
+) -> Mapping[_Key, Any]:
+    pass
 
 
 @overload
-def freeze(value: object) -> Any: ...
+def freeze(value: object) -> Any:
+    pass
 
 
 def freeze(value: object) -> Any:
