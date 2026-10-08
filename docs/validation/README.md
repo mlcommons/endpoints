@@ -42,47 +42,97 @@ The policy catalog is proposed, not an official MLCommons publication.
 
 ## Evaluator kinds
 
-- A rule's YAML `kind` selects its callable evaluator class.
-- The rule supplies the evidence addresses, catalogs, thresholds, and other
-  requirements used by that evaluator. Some kinds also use an `operation` to
-  select a specific behavior.
+- A rule's YAML `kind` selects a callable evaluator class; its other fields supply
+  evidence addresses, catalogs, thresholds, and requirements.
+- Each kind below has its own registry entry. The groups organize related checks;
+  they do not represent class inheritance.
+- Nested operations under a kind share its evaluator class. For example, client
+  SHA and checkpoint approval both use `artifact_binding`.
 - The planner selects applicable checks and verifies prerequisites before
-  evaluators run. Evaluators return findings for the validation report.
+  evaluators return findings for the report.
 
-| Evaluator kind      | How it works                                                                                                                                                        |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `accuracy_coverage` | Checks that accuracy results cover the required concurrency bands and offline points.                                                                               |
-| `accuracy_gate`     | Compares model accuracy scores, issued accuracy sample counts, or output-length statistics with policy thresholds; supports per-point and aggregated results.       |
-| `accuracy_presence` | Checks that enough model curves contain standalone or embedded accuracy results.                                                                                    |
-| `artifact_binding`  | Matches a submitted client SHA or checkpoint repository and revision against approved catalog entries.                                                              |
-| `artifact_schema`   | Checks that an artifact parsed successfully into its typed model and, when required, is nonempty.                                                                   |
-| `catalog_integrity` | Checks that a required seed or speculative-head catalog loaded successfully and is available.                                                                       |
-| `cohort_identifier` | Checks the target cohort string has the expected year, month, and C0/C1 format.                                                                                     |
-| `collection_size`   | Checks that the number of points or other collection members falls within the configured limits.                                                                    |
-| `comparison`        | Compares two artifact values or constants using equality, greater-than, or greater-than-or-equal.                                                                   |
-| `consistency`       | Checks equality between two values or across declarations in a collection, optionally excluding specified fields.                                                   |
-| `coverage`          | Counts performance points in a concurrency band and checks the required minimum.                                                                                    |
-| `dataset_count`     | Checks that a declared count equals the dataset sample count or is a positive multiple of it.                                                                       |
-| `dataset_minimum`   | Checks that completed samples meet the threshold for the point's dataset.                                                                                           |
-| `derived_metric`    | Recalculates throughput, interactivity, utilization, or throughput per kW and compares it with the reported value using a tolerance.                                |
-| `disclosure`        | Checks that required configuration disclosure fields are present and nonempty.                                                                                      |
-| `drafter_binding`   | Checks speculative decoding head approval by model, repository, and revision, or checks approval lead time.                                                         |
-| `duration`          | Checks runtime against the threshold for the concurrency band, using the configured precedence for window and whole-run durations.                                  |
-| `field_constraints` | Checks that configured fields are absent or exactly equal to prescribed values, including model-specific constraints.                                               |
-| `issuance`          | Checks that the load pattern is allowed and, when required, concurrency is positive.                                                                                |
-| `membership`        | Checks that a value belongs to a configured catalog of allowed values.                                                                                              |
-| `numeric_validity`  | Checks numeric type and configured requirements for presence, finiteness, and positivity.                                                                           |
-| `offline`           | Checks required offline points, elected-offline concurrency, or throughput ordering relative to other points.                                                       |
-| `path_resolution`   | Resolves shared source and documentation paths and checks existence, directory type, and allowed traversal or symlink behavior.                                     |
-| `power`             | Checks system power descriptors and sources, reports estimated power, calculates per-point power from engaged nodes, or checks accelerator capacity and engagement. |
-| `presence`          | Checks that required files, directories, declarations, or collection members exist.                                                                                 |
-| `region_basis`      | Reports the minimum concurrency used to derive regions and checks that readable concurrency values are available.                                                   |
-| `region_boundaries` | Checks the minimum and maximum concurrency requirements and that region boundaries were computed.                                                                   |
-| `region_placement`  | Checks that a point lies in an allowed computed region or that its declared region matches.                                                                         |
-| `report`            | Includes a resolved artifact value in the report without applying a pass/fail constraint.                                                                           |
-| `seed_binding`      | Checks published seed-set membership, runtime seed values, adoption windows, or legacy seed field usage.                                                            |
-| `steady_state`      | Checks status and verdict vocabulary, window consistency, or reporting basis; reports drift and unavailable official windows.                                       |
-| `warmup`            | Checks that warmup salt is disabled or log retention is declared, with configured exemptions for disabled warmup.                                                   |
+- **Artifact structure and required evidence**
+  - `presence`: requires files, directories, declarations, or collection members.
+  - `artifact_schema`: requires successful typed parsing and, when configured,
+    nonempty contents.
+  - `disclosure`: requires nonempty configuration fields.
+  - `path_resolution`: resolves shared source and documentation paths and checks
+    existence, directory type, and allowed traversal or symlink behavior.
+  - `catalog_integrity`: requires a successfully loaded seed or speculative-head
+    catalog.
+- **Values and collections**
+  - `membership`: checks a value against an allowed catalog.
+  - `field_constraints`: requires fields to be absent or exactly equal to
+    prescribed values, including model-specific constraints.
+  - `numeric_validity`: checks numeric type, presence, finiteness, and positivity.
+  - `comparison`: compares artifact values or constants using equality,
+    greater-than, or greater-than-or-equal.
+  - `consistency`: checks equality between two values or across a collection of
+    declarations, optionally excluding specified fields.
+  - `collection_size`: checks the number of members against configured limits.
+  - `report`: includes a resolved value in the report without a pass/fail
+    constraint.
+- **Run classification and Pareto curves**
+  - `cohort_identifier`: checks the cohort string's year, month, and C0/C1 format.
+  - `issuance`: checks allowed load patterns and, when required, positive
+    concurrency.
+  - `region_basis`: reports the minimum concurrency used to derive regions and
+    requires readable concurrency values.
+  - `region_boundaries`: checks minimum and maximum concurrency requirements and
+    that region boundaries were computed.
+  - `region_placement`:
+    - Checks that a point lies within an allowed computed region.
+    - Checks that the declared region matches the computed region.
+  - `coverage`: counts performance points in a concurrency band and checks the
+    required minimum.
+  - `offline`:
+    - Checks required offline points and elected-offline concurrency.
+    - Checks offline throughput ordering relative to other points.
+- **Datasets and accuracy**
+  - `dataset_minimum`: compares completed samples with the dataset's threshold.
+  - `dataset_count`: requires the dataset's exact sample count or a positive
+    multiple of it.
+  - `accuracy_presence`: requires accuracy results in enough model curves.
+  - `accuracy_coverage`: requires accuracy results across concurrency bands and
+    offline points.
+  - `accuracy_gate`:
+    - Checks that an agentic accuracy profile is available.
+    - Compares single-turn scores and issued accuracy sample counts with model
+      requirements.
+    - Compares agentic scores per point or as a mean of concurrency-band means.
+    - Checks output-length statistics against a model-specific range.
+- **Approved artifacts and seeds**
+  - `artifact_binding`:
+    - Matches the submitted client SHA against the approved list.
+    - Matches checkpoint repository and revision against the model's approvals.
+  - `drafter_binding`:
+    - Matches a speculative decoding head by model, repository, and revision.
+    - Checks its approval lead time in cohorts.
+  - `seed_binding`:
+    - Checks published seed-set membership.
+    - Compares runtime seed values with the published set.
+    - Checks the seed set's adoption window.
+    - Reports legacy seed field usage.
+- **Measurements and runtime**
+  - `duration`: compares runtime with the concurrency band's threshold, using the
+    configured precedence for window and whole-run durations.
+  - `derived_metric`: recalculates a metric and compares it with the reported
+    value using a tolerance. Operations cover throughput, interactivity,
+    utilization, and throughput per kW.
+  - `steady_state`:
+    - Checks status and verdict vocabulary.
+    - Checks window and reported super-pass consistency.
+    - Checks reporting basis and reports drift or unavailable official windows.
+  - `warmup`:
+    - Requires disabled warmup salt.
+    - Checks declared log retention, with configured exemptions for disabled
+      warmup.
+- **Power**
+  - `power`:
+    - Checks system power descriptors and sources.
+    - Reports estimated power that uses component defaults.
+    - Calculates per-point power from engaged nodes.
+    - Checks declared accelerator capacity and maximal engagement.
 
 ## Definitions
 
