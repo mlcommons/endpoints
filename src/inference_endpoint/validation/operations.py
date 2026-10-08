@@ -84,6 +84,7 @@ class DurationBasis(StrEnum):
     WHOLE_RUN_DURATION = "whole_run_duration"
 
 
-class DatasetCountOperator(StrEnum):
+class CountOperator(StrEnum):
+    GREATER_THAN_OR_EQUAL = "greater_than_or_equal"
     EQUAL = "equal"
     POSITIVE_MULTIPLE = "positive_multiple"

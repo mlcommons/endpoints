@@ -13,7 +13,7 @@ from ..operations import (
     AccuracyOperation,
     BindingMatch,
     ComparisonOperator,
-    DatasetCountOperator,
+    CountOperator,
     DerivedOperation,
     DrafterOperation,
     DurationBasis,
@@ -25,7 +25,7 @@ from ..operations import (
     SteadyOperation,
     WarmupOperation,
 )
-from ..types import AccuracyKind, FrozenModel, Identifier, OfflineMode
+from ..types import AccuracyKind, FrozenModel, Identifier, OfflineMode, SampleUnit
 from ..vocabulary import CheckKind
 
 Number = Annotated[StrictInt | StrictFloat, Field(allow_inf_nan=False)]
@@ -286,29 +286,26 @@ class CoverageRequirements(Requirements):
     target: Identifier
 
 
-class DatasetCountRequirements(Requirements):
+class CountRequirements(Requirements):
     catalog: Identifier
-    dataset: Identifier
+    dataset: Identifier | None = None
+    dataset_source: Identifier | None = None
     on_missing: Identifier | None = None
-    operator: DatasetCountOperator
+    on_unknown_or_null_threshold: Identifier | None = None
+    on_unsupported_sample_unit: Identifier | None = None
+    operator: CountOperator
     require_all: StrictBool | None = None
-    sample_unit: Identifier | None = None
+    sample_unit: SampleUnit | None = None
     source: Identifier | None = None
     sources: list[Identifier] | None = None
+    supported_sample_units: list[SampleUnit] | None = None
+    threshold: Identifier | None = None
 
     @model_validator(mode="after")
     def check_form(self) -> Self:
         self.require_exactly_one("source", "sources")
+        self.require_exactly_one("dataset", "dataset_source")
         return self
-
-
-class DatasetMinimumRequirements(Requirements):
-    catalog: Identifier
-    on_unknown_or_null_threshold: Identifier | None = None
-    on_unsupported_sample_unit: Identifier | None = None
-    source: Identifier
-    supported_sample_units: list[Identifier] | None = None
-    threshold: Identifier
 
 
 class DerivedMetricRequirements(Requirements):
@@ -579,8 +576,7 @@ REQUIREMENT_MODELS: dict[CheckKind, type[Requirements]] = {
     CheckKind.COMPARISON: ComparisonRequirements,
     CheckKind.CONSISTENCY: ConsistencyRequirements,
     CheckKind.COVERAGE: CoverageRequirements,
-    CheckKind.DATASET_COUNT: DatasetCountRequirements,
-    CheckKind.DATASET_MINIMUM: DatasetMinimumRequirements,
+    CheckKind.COUNT: CountRequirements,
     CheckKind.DERIVED_METRIC: DerivedMetricRequirements,
     CheckKind.DISCLOSURE: DisclosureRequirements,
     CheckKind.DRAFTER_BINDING: DrafterBindingRequirements,

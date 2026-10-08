@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from ..artifacts import Artifacts
 from ..evaluator_base import Evaluator
-from ..operations import DatasetCountOperator
+from ..operations import CountOperator
 from ..outcomes import result
 from ..planner import PlannedCheck
 from ..results import CheckResult
@@ -14,61 +14,60 @@ from ..types import SampleUnit
 from ..vocabulary import CheckKind
 
 
-class DatasetMinimum(Evaluator, kind=CheckKind.DATASET_MINIMUM):
+class Count(Evaluator, kind=CheckKind.COUNT):
+    """Compare a reported or configured count with a catalog reference count."""
+
     def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
         req = check.rule.requirements
-        point = artifacts.index.points[check.subject.id]
-        dataset = point.get_config("dataset")
-        catalog = artifacts.resolve(req["catalog"], check) or {}
-        entry = catalog.get(dataset, {})
-        if entry.get("sample_unit", SampleUnit.SAMPLE) not in req.get(
-            "supported_sample_units", [SampleUnit.SAMPLE]
+        dataset = (
+            artifacts.resolve(req["dataset_source"], check)
+            if "dataset_source" in req
+            else req["dataset"]
+        )
+        entry = (artifacts.resolve(req["catalog"], check) or {}).get(dataset, {})
+        supported_units = req.get("supported_sample_units")
+        if (
+            supported_units is not None
+            and entry.get("sample_unit", SampleUnit.SAMPLE) not in supported_units
         ):
             if req.get("on_unsupported_sample_unit") == "skip":
                 return []
             return [result(check, False, "Unsupported sample unit", blocked=True)]
-        minimum = entry.get(req["threshold"])
-        if minimum is None:
+        expected = entry.get(req.get("threshold", "sample_count"))
+        if expected is None:
             if req.get("on_unknown_or_null_threshold") == "skip":
                 return []
-            return [result(check, False, "Dataset threshold unavailable", blocked=True)]
-        actual = artifacts.resolve(req["source"], check)
-        return [
-            result(
-                check,
-                isinstance(actual, (int, float))
-                and not isinstance(actual, bool)
-                and actual >= minimum,
-                f"Completed {actual!r}; {dataset} requires {minimum}",
-            )
-        ]
-
-
-class DatasetCount(Evaluator, kind=CheckKind.DATASET_COUNT):
-    def __call__(self, check: PlannedCheck, artifacts: Artifacts) -> list[CheckResult]:
-        req = check.rule.requirements
-        entry = (artifacts.resolve(req["catalog"], check) or {}).get(req["dataset"], {})
-        expected = entry.get("sample_count")
+            return [result(check, False, "Reference count unavailable", blocked=True)]
+        if expected <= 0:
+            return [
+                result(check, False, "Reference count must be positive", blocked=True)
+            ]
+        operation = CountOperator(req["operator"])
         sources = req.get("sources") or [req["source"]]
         findings = []
-        if expected is None or expected <= 0:
-            return [result(check, False, "Dataset count unavailable", blocked=True)]
         for source in sources:
             actual = artifacts.resolve(source, check)
-            valid = (
-                isinstance(actual, int)
-                and not isinstance(actual, bool)
-                and (
-                    actual == expected
-                    if req["operator"] == DatasetCountOperator.EQUAL
-                    else actual > 0 and actual % expected == 0
+            if operation is CountOperator.GREATER_THAN_OR_EQUAL:
+                valid = (
+                    isinstance(actual, (int, float))
+                    and not isinstance(actual, bool)
+                    and actual >= expected
                 )
-            )
+            else:
+                valid = (
+                    isinstance(actual, int)
+                    and not isinstance(actual, bool)
+                    and (
+                        actual == expected
+                        if operation is CountOperator.EQUAL
+                        else actual > 0 and actual % expected == 0
+                    )
+                )
             findings.append(
                 result(
                     check,
                     valid,
-                    f"{source}: {actual!r}; expected {req['operator']} {expected}",
+                    f"{source}: {actual!r}; expected {operation.value} {expected} for {dataset}",
                 )
             )
         return findings

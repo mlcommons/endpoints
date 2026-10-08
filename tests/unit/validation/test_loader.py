@@ -126,9 +126,7 @@ def test_extra_files_wrong_scope_and_mixed_revisions_are_rejected(policy_dir):
 )
 def test_unknown_dispatch_and_reference_values_are_rejected(policy_dir, change):
     point = policy_dir / PolicyFile.POINT.value
-    modify(
-        point, lambda data: data["checks"]["agentic-trajectory-count"].update(change)
-    )
+    modify(point, lambda data: data["checks"]["trajectories-to-issue"].update(change))
     with pytest.raises(ValueError):
         load_policy(policy_dir)
 
@@ -154,7 +152,7 @@ def test_duplicate_ids_and_broken_catalog_bindings_are_rejected(policy_dir):
 
 def test_evidence_addresses_are_enum_backed():
     policy = load_policy(bundled_policy_path())
-    rule = next(rule for rule in policy.checks if rule.id == "agentic-trajectory-count")
+    rule = next(rule for rule in policy.checks if rule.id == "trajectories-to-issue")
     assert rule.scope is Scope.POINT
     assert (
         EvidenceReference.POINT_RUNTIME_SETTINGS_AGENTIC_INFERENCE_NUM_TRAJECTORIES_TO_ISSUE

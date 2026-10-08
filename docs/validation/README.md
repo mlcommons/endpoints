@@ -24,8 +24,9 @@ names and references are validated by the versioned policy parser.
   A matching exclusion prevents the check from running.
 - Missing classification information blocks checks that need it. An empty set
   means the information is known and none of the listed facts are present.
-- Exceptions for points within a Pareto curve create separate plans for the
-  affected points. Overlapping exceptions for the same point cause an error.
+- Exceptions can change or disable a check for specific points within a Pareto
+  curve. Other points are checked using the original requirements. Overlapping
+  exceptions for the same point cause an error.
 - Each point retains its own classification information, including unknown values.
 - An invalid artifact blocks checks that depend on it; independent checks can
   still run.
@@ -89,9 +90,13 @@ The policy catalog is proposed, not an official MLCommons publication.
     - Checks required offline points and elected-offline concurrency.
     - Checks offline throughput ordering relative to other points.
 - **Datasets and accuracy**
-  - `dataset_minimum`: compares completed samples with the dataset's threshold.
-  - `dataset_count`: requires the dataset's exact sample count or a positive
-    multiple of it.
+  - `count`: compares a reported or configured count with a catalog reference.
+    - `min-completed-samples`: completed samples must meet or exceed the count for
+      the point's configured dataset.
+    - `trajectories-to-issue`: the configured issuance target must be a positive
+      multiple of the trajectory count.
+    - `swebench-instance-count`: declared and evaluated instance counts must each
+      equal the catalog count.
   - `accuracy_presence`: requires accuracy results in enough model curves.
   - `accuracy_coverage`: requires accuracy results across concurrency bands and
     offline points.
@@ -213,7 +218,6 @@ Policy file: `point_checks.yaml`.
 | ---------------------------------- | ------------------- |
 | `accuracy-valid`                   | `artifact_schema`   |
 | `agentic-metric-consistency`       | `derived_metric`    |
-| `agentic-trajectory-count`         | `dataset_count`     |
 | `approved-checkpoint`              | `artifact_binding`  |
 | `approved-drafter`                 | `drafter_binding`   |
 | `concurrency-in-range`             | `region_placement`  |
@@ -228,7 +232,7 @@ Policy file: `point_checks.yaml`.
 | `metric-consistency-tpot-p90`      | `numeric_validity`  |
 | `metric-consistency-tps-per-kw`    | `derived_metric`    |
 | `metric-consistency-tps-per-user`  | `derived_metric`    |
-| `min-query-count`                  | `dataset_minimum`   |
+| `min-completed-samples`            | `count`             |
 | `nodes-used`                       | `power`             |
 | `offline-declared`                 | `membership`        |
 | `point-config-valid`               | `artifact_schema`   |
@@ -251,11 +255,12 @@ Policy file: `point_checks.yaml`.
 | `steady-state-valid`               | `steady_state`      |
 | `streaming-config`                 | `report`            |
 | `submission-flags`                 | `field_constraints` |
-| `swebench-instance-count`          | `dataset_count`     |
+| `swebench-instance-count`          | `count`             |
 | `swebench-template`                | `field_constraints` |
 | `system-description-present`       | `presence`          |
 | `system-description-valid`         | `artifact_schema`   |
 | `target-cohort`                    | `cohort_identifier` |
+| `trajectories-to-issue`            | `count`             |
 | `warmup-logs-retained`             | `warmup`            |
 | `warmup-present`                   | `presence`          |
 | `warmup-salt`                      | `warmup`            |

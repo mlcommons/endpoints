@@ -37,8 +37,8 @@ def policy_only(*ids):
     )
 
 
-def test_dataset_catalog_edit_changes_count_gate():
-    policy = policy_only("min-query-count")
+def test_min_completed_samples_uses_catalog_sample_count():
+    policy = policy_only("min-completed-samples")
     original = execute_submission(FIXTURE, policy)
     catalog = {
         **policy.catalogs,
@@ -47,7 +47,7 @@ def test_dataset_catalog_edit_changes_count_gate():
     stricter = execute_submission(FIXTURE, replace(policy, catalogs=freeze(catalog)))
     assert original.passed
     assert not stricter.passed
-    assert all(f.rule == "min-query-count" for f in stricter.results)
+    assert all(f.rule == "min-completed-samples" for f in stricter.results)
 
 
 def test_duration_catalog_edit_changes_runtime_gate():
@@ -138,7 +138,7 @@ def test_disabled_cohort_override_prevents_execution(tmp_path):
     catalog["enrollment"]["overrides"] = [
         {
             "id": "count-disabled",
-            "rule": "min-query-count",
+            "rule": "min-completed-samples",
             "reason": "Cohort count exemption",
             "applies_to": {"models": ["llama3_1-8b"]},
             "enabled": False,
@@ -148,7 +148,9 @@ def test_disabled_cohort_override_prevents_execution(tmp_path):
     policy = load_policy(policy_dir)
     policy = replace(
         policy,
-        checks=tuple(rule for rule in policy.checks if rule.id == "min-query-count"),
+        checks=tuple(
+            rule for rule in policy.checks if rule.id == "min-completed-samples"
+        ),
     )
     assert validate_submission(FIXTURE, policy=policy).results == []
 

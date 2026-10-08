@@ -16,8 +16,8 @@ checks:
     target: accuracy.swe_bench.extras.swebench_template
     constraints_by_model: catalogs.submission_flags.swebench_templates
     requires: [point_config]
-  agentic-trajectory-count:
-    kind: dataset_count
+  trajectories-to-issue:
+    kind: count
     applies_to: { load_pattern: [agentic_inference] }
     dataset: agentic_combined
     source: point.runtime_settings.agentic_inference.num_trajectories_to_issue
@@ -27,7 +27,7 @@ checks:
     on_missing: error
     requires: [point_config]
   swebench-instance-count:
-    kind: dataset_count
+    kind: count
     applies_to: { load_pattern: [agentic_inference] }
     dataset: swe_bench
     sources:
@@ -203,8 +203,10 @@ checks:
     basis_precedence: [reported_window_issue_span, whole_run_duration]
     window_status_required: false
     on_unclassifiable_concurrency: skip
-  min-query-count:
-    kind: dataset_minimum
+  min-completed-samples:
+    kind: count
+    dataset_source: point.dataset
+    operator: greater_than_or_equal
     source: result_summary.n_samples_completed
     catalog: catalogs.datasets
     threshold: sample_count

@@ -50,12 +50,12 @@ def decisions(policy, context):
 
 def test_patterns_select_model_family_checks(policy):
     agentic = decisions(policy, point())
-    assert agentic["agentic-trajectory-count"].decision is Decision.READY
+    assert agentic["trajectories-to-issue"].decision is Decision.READY
     assert agentic["approved-drafter"].decision is Decision.EXCLUDED
     single = decisions(
         policy, point(model_id="llama3_1-8b", load_pattern="concurrency")
     )
-    assert single["agentic-trajectory-count"].decision is Decision.EXCLUDED
+    assert single["trajectories-to-issue"].decision is Decision.EXCLUDED
     assert single["point-config-valid"].decision is Decision.READY
     curve = Context.model_validate(
         {
@@ -79,12 +79,12 @@ def test_exclusion_precedes_missing_dependencies(policy):
     )
     assert checks["concurrency-in-range"].decision is Decision.EXCLUDED
     assert checks["load-pattern"].decision is Decision.EXCLUDED
-    assert checks["agentic-trajectory-count"].decision is Decision.EXCLUDED
+    assert checks["trajectories-to-issue"].decision is Decision.EXCLUDED
 
 
 def test_unknown_classification_blocks_without_hiding_unconditional_checks(policy):
     checks = decisions(policy, point(load_pattern=None, offline=None))
-    assert checks["agentic-trajectory-count"].decision is Decision.BLOCKED
+    assert checks["trajectories-to-issue"].decision is Decision.BLOCKED
     assert checks["concurrency-in-range"].decision is Decision.BLOCKED
     assert checks["result-file-valid"].decision is Decision.READY
 
@@ -101,8 +101,8 @@ def test_invalid_config_does_not_hide_summary_schema_checks(policy):
     )
     assert checks["result-file-valid"].decision is Decision.READY
     assert checks["point-rules-skipped"].decision is Decision.READY
-    assert checks["agentic-trajectory-count"].decision is Decision.BLOCKED
-    assert checks["agentic-trajectory-count"].missing == {EvidenceKey.POINT_CONFIG}
+    assert checks["trajectories-to-issue"].decision is Decision.BLOCKED
+    assert checks["trajectories-to-issue"].missing == {EvidenceKey.POINT_CONFIG}
 
 
 def test_missing_seed_catalog_blocks_instead_of_deselecting(policy):
@@ -174,7 +174,7 @@ def test_model_override_changes_only_selected_context(tmp_path):
     data = yaml.safe_load(path.read_text())
     override = {
         "id": "kimi-count-exception",
-        "rule": "agentic-trajectory-count",
+        "rule": "trajectories-to-issue",
         "reason": "Fixture exception",
         "applies_to": {"models": ["kimi-k3"]},
         "requirements": {"operator": "equal"},
@@ -182,11 +182,11 @@ def test_model_override_changes_only_selected_context(tmp_path):
     data["enrollment"]["overrides"] = [override]
     path.write_text(yaml.safe_dump(data, sort_keys=False))
     policy = load_policy(directory)
-    check = decisions(policy, point())["agentic-trajectory-count"]
+    check = decisions(policy, point())["trajectories-to-issue"]
     assert check.override == "kimi-count-exception"
     assert check.rule.requirements["operator"] == "equal"
     other = decisions(policy, point(model_id="deepseek-v4_1-flash"))[
-        "agentic-trajectory-count"
+        "trajectories-to-issue"
     ]
     assert other.override is None
     assert other.rule.requirements["operator"] == "positive_multiple"
