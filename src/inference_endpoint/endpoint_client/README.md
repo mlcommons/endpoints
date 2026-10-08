@@ -1,6 +1,7 @@
 # HTTP Endpoint Client
 
-HTTP client for LLM inference with multiprocessing workers and ZMQ communication.
+HTTP client for LLM inference with multiprocessing workers and ZMQ
+communication.
 
 ## Architecture
 
@@ -57,9 +58,9 @@ if response:
 
 ## CPU Affinity
 
-For optimal performance, compute an `AffinityPlan` and pass it to `HTTPClientConfig`.
-The plan partitions physical cores between the main process (LoadGen) and workers,
-assigning all hyperthreads of each core together.
+For optimal performance, compute an `AffinityPlan` and pass it to
+`HTTPClientConfig`. The plan partitions physical cores between the main process
+(LoadGen) and workers, assigning all hyperthreads of each core together.
 
 ```python
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -81,7 +82,8 @@ client = HTTPEndpointClient(
 
 ## Shutdown
 
-Shutdown is optional. Workers and event loop thread are daemons - they terminate automatically with the main process.
+Shutdown is optional. Workers and event loop thread are daemons - they terminate
+automatically with the main process.
 
 ```python
 # Optional: graceful shutdown for early exit

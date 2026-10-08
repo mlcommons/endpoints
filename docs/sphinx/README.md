@@ -1,6 +1,7 @@
 # Sphinx Documentation
 
-This directory contains the Sphinx documentation setup for generating and hosting API documentation with GitHub Pages.
+This directory contains the Sphinx documentation setup for generating and
+hosting API documentation with GitHub Pages.
 
 ## 📋 TODO: Documentation Setup
 

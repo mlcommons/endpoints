@@ -1,10 +1,12 @@
 # AGENTS.md
 
-Guidelines for AI coding agents working in the MLPerf Inference Endpoint Benchmarking System repository.
+Guidelines for AI coding agents working in the MLPerf Inference Endpoint
+Benchmarking System repository.
 
 ## Project Overview
 
-High-performance benchmarking tool for LLM inference endpoints targeting 50k+ QPS. Python 3.12+, Apache 2.0 licensed.
+High-performance benchmarking tool for LLM inference endpoints targeting 50k+
+QPS. Python 3.12+, Apache 2.0 licensed.
 
 ## Common Commands
 
@@ -114,63 +116,163 @@ Multi-process, event-loop design optimized for throughput:
 
 ### Metrics Aggregator subprocess (pub/sub)
 
-The aggregator is a separate process (`python -m inference_endpoint.async_utils.services.metrics_aggregator`) that subscribes to events and publishes `MetricsSnapshot` messages. Key facts for working in this layer:
+The aggregator is a separate process
+(`python -m inference_endpoint.async_utils.services.metrics_aggregator`) that
+subscribes to events and publishes `MetricsSnapshot` messages. Key facts for
+working in this layer:
 
-- **Series storage**: each `SeriesSampler` keeps three parallel views: O(1) cheap rollups (count/total/min/max/sum_sq, exact), an HDR Histogram (cheap live percentiles), and an in-memory `array.array` of raw values (for exact percentiles in the `COMPLETE` snapshot). Hot path is `registry.record(name, value)` — no allocation, no I/O.
-- **Counter API**: `registry.increment(name, delta=1)` for sample-event counters. `registry.set_counter(name, value)` only for the three derived-duration counters (`total_duration_ns` max-of-elapsed, `tracked_duration_ns` sum-of-blocks, `legacy_loadgen_window_duration_ns` first-issue→last-issued-completion span for LoadGen-parity QPS/TPS).
-- **Lifecycle**: `INITIALIZE` (constructed, awaiting first `STARTED`) → `LIVE` (run in progress, ticking every `--publish-interval` seconds) → `DRAINING` (set on `ENDED`; tick continues; bounded by the `--drain-timeout` budget / `settings.timeouts.metrics_drain_timeout_s`: None or omitted flag = unlimited) → terminal: `COMPLETE` (clean end via `publish_final`, exact stats) **or** `INTERRUPTED` (best-effort partial stats; entered via the session's INTERRUPTED marker event before ENDED, or via metrics-service SIGTERM during abnormal pipeline teardown). The aggregator **ignores SIGINT**: a terminal ^C reaches the whole foreground group, and the parent's ENDED path is authoritative. Drain timeout is detected by consumers as `state == COMPLETE and n_pending_tasks > 0` — `run_benchmark` fails the run on it (artifacts written with `complete: false`, then non-zero exit); interrupted runs are detected as `state == INTERRUPTED` directly.
-- **Final delivery is dual-path with separated concerns**: `publish_final` atomically writes `final_snapshot.json` (`tmp + fsync(file) + rename + fsync(parent_dir)`) — this is the **primary** Report build source — AND emits the terminal-state snapshot over pub/sub as a TUI shutdown signal. Each path is wrapped in its own try/except so one failure cannot suppress the other. Main process consumer reads `final_snapshot.json` (via `json.loads` to dict, no Struct decode); falls back to the subscriber's `latest` live snapshot only if the file is missing (e.g. SIGKILL / OOM before the signal handler ran). The dict form is the canonical consumer contract (see `snapshot_to_dict`). **Run-outcome precedence**: `final_snapshot.json` records what the aggregator itself observed and can legitimately read `state: complete` when an abort lands after the session's terminal ENDED (the metrics-drain window); `finalize_benchmark` rewrites the Report on any abort, so `performance/result_summary.json` + the process exit code are the run-level truth.
-- **Early stopping (on by default)**: series registered with `register_series(..., tail_latency=True)` (today ttft/tpot/latency) get MLPerf early-stopping percentile estimates on the COMPLETE (exact) snapshot — a compact `early_stopping_percentiles` map in `result_summary.json` whose keys mirror the `percentiles` grid (≥ p50) with estimate-or-`null` values; rich detail is INFO-logged. On by default (cold-path only; the exact path shares one in-place sort between the percentile grid and the estimates); `settings.early_stopping.enabled: false` / `--no-early-stopping` opts out. Confidence/tolerance are LoadGen constants. Pure math in `metrics/early_stopping.py`; post-hoc recomputation from any run's `events.jsonl` via `scripts/early_stopping_estimate_from_events.py`. See docs/early_stopping.md.
-- **Steady-state detection (opt-in, off by default)**: Enable with `settings.steady_state.enabled` / `--steady-state`. The parent resolves a workload profile (`commands/benchmark/pipeline.py:steady_state_profile`) and passes `--steady-state-profile <name>` to the aggregator. The flag's presence is the whole opt-in.
+- **Series storage**: each `SeriesSampler` keeps three parallel views: O(1)
+  cheap rollups (count/total/min/max/sum_sq, exact), an HDR Histogram (cheap
+  live percentiles), and an in-memory `array.array` of raw values (for exact
+  percentiles in the `COMPLETE` snapshot). Hot path is
+  `registry.record(name, value)` — no allocation, no I/O.
+- **Counter API**: `registry.increment(name, delta=1)` for sample-event
+  counters. `registry.set_counter(name, value)` only for the three
+  derived-duration counters (`total_duration_ns` max-of-elapsed,
+  `tracked_duration_ns` sum-of-blocks, `legacy_loadgen_window_duration_ns`
+  first-issue→last-issued-completion span for LoadGen-parity QPS/TPS).
+- **Lifecycle**: `INITIALIZE` (constructed, awaiting first `STARTED`) → `LIVE`
+  (run in progress, ticking every `--publish-interval` seconds) → `DRAINING`
+  (set on `ENDED`; tick continues; bounded by the `--drain-timeout` budget /
+  `settings.timeouts.metrics_drain_timeout_s`: None or omitted flag = unlimited)
+  → terminal: `COMPLETE` (clean end via `publish_final`, exact stats) **or**
+  `INTERRUPTED` (best-effort partial stats; entered via the session's
+  INTERRUPTED marker event before ENDED, or via metrics-service SIGTERM during
+  abnormal pipeline teardown). The aggregator **ignores SIGINT**: a terminal ^C
+  reaches the whole foreground group, and the parent's ENDED path is
+  authoritative. Drain timeout is detected by consumers as
+  `state == COMPLETE and n_pending_tasks > 0` — `run_benchmark` fails the run on
+  it (artifacts written with `complete: false`, then non-zero exit); interrupted
+  runs are detected as `state == INTERRUPTED` directly.
+- **Final delivery is dual-path with separated concerns**: `publish_final`
+  atomically writes `final_snapshot.json`
+  (`tmp + fsync(file) + rename + fsync(parent_dir)`) — this is the **primary**
+  Report build source — AND emits the terminal-state snapshot over pub/sub as a
+  TUI shutdown signal. Each path is wrapped in its own try/except so one failure
+  cannot suppress the other. Main process consumer reads `final_snapshot.json`
+  (via `json.loads` to dict, no Struct decode); falls back to the subscriber's
+  `latest` live snapshot only if the file is missing (e.g. SIGKILL / OOM before
+  the signal handler ran). The dict form is the canonical consumer contract (see
+  `snapshot_to_dict`). **Run-outcome precedence**: `final_snapshot.json` records
+  what the aggregator itself observed and can legitimately read
+  `state: complete` when an abort lands after the session's terminal ENDED (the
+  metrics-drain window); `finalize_benchmark` rewrites the Report on any abort,
+  so `performance/result_summary.json` + the process exit code are the run-level
+  truth.
+- **Early stopping (on by default)**: series registered with
+  `register_series(..., tail_latency=True)` (today ttft/tpot/latency) get MLPerf
+  early-stopping percentile estimates on the COMPLETE (exact) snapshot — a
+  compact `early_stopping_percentiles` map in `result_summary.json` whose keys
+  mirror the `percentiles` grid (≥ p50) with estimate-or-`null` values; rich
+  detail is INFO-logged. On by default (cold-path only; the exact path shares
+  one in-place sort between the percentile grid and the estimates);
+  `settings.early_stopping.enabled: false` / `--no-early-stopping` opts out.
+  Confidence/tolerance are LoadGen constants. Pure math in
+  `metrics/early_stopping.py`; post-hoc recomputation from any run's
+  `events.jsonl` via `scripts/early_stopping_estimate_from_events.py`. See
+  docs/early_stopping.md.
+- **Steady-state detection (opt-in, off by default)**: Enable with
+  `settings.steady_state.enabled` / `--steady-state`. The parent resolves a
+  workload profile (`commands/benchmark/pipeline.py:steady_state_profile`) and
+  passes `--steady-state-profile <name>` to the aggregator. The flag's presence
+  is the whole opt-in.
 
-  The aggregator feeds a `SuperPassCollector` (`metrics/steady_state_diagnostics.py`) from the sample events it already routes. It reuses `TpotTrigger`'s token counts, so nothing is tokenized twice. Per-sample series are `array("d")`, ~34 bytes/sample. Bucket size arrives on `PHASE_START` (`PhaseData.num_turns`) and is latched while the series is empty.
+  The aggregator feeds a `SuperPassCollector`
+  (`metrics/steady_state_diagnostics.py`) from the sample events it already
+  routes. It reuses `TpotTrigger`'s token counts, so nothing is tokenized twice.
+  Per-sample series are `array("d")`, ~34 bytes/sample. Bucket size arrives on
+  `PHASE_START` (`PhaseData.num_turns`) and is latched while the series is
+  empty.
 
-  The collector holds no per-sample state. The super-pass index lives on `SampleRow.sp_index`; the standalone parse keeps its own `_PendingRow` because it has no table. This avoids holding the same in-flight sample in two uuid maps.
+  The collector holds no per-sample state. The super-pass index lives on
+  `SampleRow.sp_index`; the standalone parse keeps its own `_PendingRow` because
+  it has no table. This avoids holding the same in-flight sample in two uuid
+  maps.
 
-  Two ordering rules preserve the index. First, the router reads the row **before** `table.set_field`, because COMPLETE drops it from the table and RECV_FIRST overwrites `recv_first_ns`. That overwrite is how a retry's second first-chunk is told apart. Second, `TpotTrigger` reads `row.sp_index` **at fire time** and carries the int in the recorder closure. The count arrives at the drain flush, long after the row is gone.
+  Two ordering rules preserve the index. First, the router reads the row
+  **before** `table.set_field`, because COMPLETE drops it from the table and
+  RECV_FIRST overwrites `recv_first_ns`. That overwrite is how a retry's second
+  first-chunk is told apart. Second, `TpotTrigger` reads `row.sp_index` **at
+  fire time** and carries the int in the recorder closure. The count arrives at
+  the drain flush, long after the row is gone.
 
-  `ISSUED` is also gated on `table.is_tracking`, because `set_field` returns early outside the window without dropping the row. The verdict is computed after token drain. It rides `MetricsSnapshot.steady_state` into the single `final_snapshot.json` write, then onto `Report.steady_state`.
+  `ISSUED` is also gated on `table.is_tracking`, because `set_field` returns
+  early outside the window without dropping the row. The verdict is computed
+  after token drain. It rides `MetricsSnapshot.steady_state` into the single
+  `final_snapshot.json` write, then onto `Report.steady_state`.
 
-  The series describes only a run with terminal state `COMPLETE` and `n_pending_tasks == 0`. This path is best-effort: no failure in steady-state detection can fail a run.
+  The series describes only a run with terminal state `COMPLETE` and
+  `n_pending_tasks == 0`. This path is best-effort: no failure in steady-state
+  detection can fail a run.
 
-  Eligibility is read from `Profile.supported`; offline and agentic are `False`, and an unclassified load pattern resolves to no profile. This keeps the parent's gate and the child's profile selection in sync. The gate also requires streaming, because without `TpotTrigger` every verdict would be `found: false`; a resolved tokenizer; and a non-accuracy-only run.
+  Eligibility is read from `Profile.supported`; offline and agentic are `False`,
+  and an unclassified load pattern resolves to no profile. This keeps the
+  parent's gate and the child's profile selection in sync. The gate also
+  requires streaming, because without `TpotTrigger` every verdict would be
+  `found: false`; a resolved tokenizer; and a non-accuracy-only run.
 
-  Agentic is refused twice: by load-pattern name in the parent gate and by `Profile.supported` in the aggregator. Agentic runs do not get a steady-state verdict. Audit phases disable it too (`commands/audit.py`), because TEST04 issues one repeated sample. See docs/steady_state_diagnostics.md.
+  Agentic is refused twice: by load-pattern name in the parent gate and by
+  `Profile.supported` in the aggregator. Agentic runs do not get a steady-state
+  verdict. Audit phases disable it too (`commands/audit.py`), because TEST04
+  issues one repeated sample. See docs/steady_state_diagnostics.md.
 
-- **Post-run service wait**: `drain_and_build_report` waits for service subprocesses **unbounded** (`wait_for_exit(None)`). `wait_for_exit` SIGKILLs on expiry, and the aggregator writes `final_snapshot.json` — the Report's primary source — as the last thing it does, so a parent-side deadline here trades a wedged-service hang for a lost snapshot. The abort path keeps its own ceiling (`interrupted_teardown_grace_s`, 30s), and the whole-run watchdog stays armed throughout.
-- **Histogram bucket edges are dynamic per snapshot**: log-spaced over the observed `[min, max]`. Bucket count is fixed at construction; consumers MUST re-render from the snapshot's `(lo, hi, count)` triples each frame and MUST NOT track bucket-by-index across snapshots.
+- **Post-run service wait**: `drain_and_build_report` waits for service
+  subprocesses **unbounded** (`wait_for_exit(None)`). `wait_for_exit` SIGKILLs
+  on expiry, and the aggregator writes `final_snapshot.json` — the Report's
+  primary source — as the last thing it does, so a parent-side deadline here
+  trades a wedged-service hang for a lost snapshot. The abort path keeps its own
+  ceiling (`interrupted_teardown_grace_s`, 30s), and the whole-run watchdog
+  stays armed throughout.
+- **Histogram bucket edges are dynamic per snapshot**: log-spaced over the
+  observed `[min, max]`. Bucket count is fixed at construction; consumers MUST
+  re-render from the snapshot's `(lo, hi, count)` triples each frame and MUST
+  NOT track bucket-by-index across snapshots.
 
 ### SWE-bench Pyxis command transport
 
 `evaluation/swebench_service/swebench_service/pyxis_persistent.py` owns one
 long-lived Slurm step per agent environment. The container runs the packaged
 `pyxis_command_worker.sh`, staged in a private control mount separate from tool
-`/tmp`. Worker startup retries only confirmed prelaunch Slurm failures before any
-request is published. A lock serializes callers through one atomically published
-request directory and completion marker.
-Commands run in fresh PID namespaces; accepted requests are never replayed after an
-uncertain failure. `pyxis_environment.py` owns container creation, command result
-mapping, and worker-before-container cleanup. All tool commands use the persistent
-worker. Evaluation remains in `pyxis_worker.py`.
+`/tmp`. Worker startup retries only confirmed prelaunch Slurm failures before
+any request is published. A lock serializes callers through one atomically
+published request directory and completion marker. Commands run in fresh PID
+namespaces; accepted requests are never replayed after an uncertain failure.
+`pyxis_environment.py` owns container creation, command result mapping, and
+worker-before-container cleanup. All tool commands use the persistent worker.
+Evaluation remains in `pyxis_worker.py`.
 
 ### CLI Modes
 
-CLI is auto-generated from `config/schema.py` Pydantic models via cyclopts. Fields annotated with `cyclopts.Parameter(alias="--flag")` get flat shorthands; all other fields get auto-generated dotted flags (kebab-case).
+CLI is auto-generated from `config/schema.py` Pydantic models via cyclopts.
+Fields annotated with `cyclopts.Parameter(alias="--flag")` get flat shorthands;
+all other fields get auto-generated dotted flags (kebab-case).
 
-- **CLI mode** (`offline`/`online`): cyclopts constructs `OfflineBenchmarkConfig`/`OnlineBenchmarkConfig` (subclasses in `config/schema.py`) directly from CLI args. Type locked via `Literal`. `--dataset` is repeatable with TOML-style format `[perf|acc:]<path>[,key=value...]` (e.g. `--dataset data.csv,samples=500,parser.prompt=article`). Full accuracy support via `accuracy_config.eval_method=pass_at_1` etc.
-- **YAML mode** (`from-config`): `BenchmarkConfig.from_yaml_file()` loads YAML, resolves env vars, and auto-selects the right subclass via Pydantic discriminated union. Optional `--timeout` override maps to `settings.timeouts.run_timeout_s` via `config.with_updates()`; `--mode` selects the `TestMode` passed to the runner.
+- **CLI mode** (`offline`/`online`): cyclopts constructs
+  `OfflineBenchmarkConfig`/`OnlineBenchmarkConfig` (subclasses in
+  `config/schema.py`) directly from CLI args. Type locked via `Literal`.
+  `--dataset` is repeatable with TOML-style format
+  `[perf|acc:]<path>[,key=value...]` (e.g.
+  `--dataset data.csv,samples=500,parser.prompt=article`). Full accuracy support
+  via `accuracy_config.eval_method=pass_at_1` etc.
+- **YAML mode** (`from-config`): `BenchmarkConfig.from_yaml_file()` loads YAML,
+  resolves env vars, and auto-selects the right subclass via Pydantic
+  discriminated union. Optional `--timeout` override maps to
+  `settings.timeouts.run_timeout_s` via `config.with_updates()`; `--mode`
+  selects the `TestMode` passed to the runner.
 - **eval**: Not yet implemented (raises `CLIError` with a tracking issue link)
 
 ### Config Construction & Validation
 
-Both CLI and YAML produce the same subclass via Pydantic discriminated union on `type`:
+Both CLI and YAML produce the same subclass via Pydantic discriminated union on
+`type`:
 
 ```
 CLI offline/online:  cyclopts → OfflineBenchmarkConfig/OnlineBenchmarkConfig → with_updates(datasets) → run_benchmark
 YAML from-config:    from_yaml_file(path) → discriminated union → same subclass → run_benchmark
 ```
 
-`OfflineBenchmarkConfig` and `OnlineBenchmarkConfig` (in `config/schema.py`) inherit `BenchmarkConfig`:
+`OfflineBenchmarkConfig` and `OnlineBenchmarkConfig` (in `config/schema.py`)
+inherit `BenchmarkConfig`:
 
 - `type`: locked via `Literal[TestType.OFFLINE]` / `Literal[TestType.ONLINE]`
 - `settings`: `OfflineSettings` (hides load pattern) / `OnlineSettings`
@@ -178,9 +280,12 @@ YAML from-config:    from_yaml_file(path) → discriminated union → same subcl
 
 Validation is layered:
 
-1. **Field-level** (Pydantic): `Field(gt=0)` on durations/deadlines, `Field(ge=-1)` on workers, `Literal` on `benchmark_mode`
+1. **Field-level** (Pydantic): `Field(gt=0)` on durations/deadlines,
+   `Field(ge=-1)` on workers, `Literal` on `benchmark_mode`
 2. **Field validators**: `workers != 0` check
-3. **Model validator** (`_resolve_and_validate`): streaming AUTO resolution, model name from `submission_ref`, load pattern vs test type, duplicate datasets
+3. **Model validator** (`_resolve_and_validate`): streaming AUTO resolution,
+   model name from `submission_ref`, load pattern vs test type, duplicate
+   datasets
 
 ### Load Patterns
 
@@ -190,13 +295,38 @@ Validation is layered:
 
 ### Compliance Audits
 
-Orthogonal to the main run: a YAML-only `audit:` block (`show=False`, no CLI flag) on `BenchmarkConfig` selects an `AuditTest`. If `audit:` is set, `cli._run` freezes a shared `report_dir`, runs the main benchmark, then calls `commands/audit.py:run_audit` — the upstream MLPerf order (perf run, then TEST04). Unlike upstream there is no SUT reset between stages; see docs/compliance_audit_plan.md ("Run ordering"). `run_audit`:
+Orthogonal to the main run: a YAML-only `audit:` block (`show=False`, no CLI
+flag) on `BenchmarkConfig` selects an `AuditTest`. If `audit:` is set,
+`cli._run` freezes a shared `report_dir`, runs the main benchmark, then calls
+`commands/audit.py:run_audit` — the upstream MLPerf order (perf run, then
+TEST04). Unlike upstream there is no SUT reset between stages; see
+docs/compliance_audit_plan.md ("Run ordering"). `run_audit`:
 
-1. Builds a per-phase config that is performance-only by default (drops accuracy datasets so no phase re-issues or re-scores them), overridable per-`AuditRunSpec` via `test_mode` (`ACC`/`BOTH` keeps accuracy datasets — supported but currently unused; every registered audit runs perf-only), and, after the first phase's dataset loads, calls `AuditTest.validate(cfg, dataset_size, load_pattern)` to bounds-check the test's sample counts/indices and load pattern before any phase issues load (reuses the loaded dataset — no extra load).
-2. Runs each `AuditRunSpec` phase (from `AuditTest.plan_runs`) back-to-back under its own `<report_dir>/<label>/` subdir via `setup_benchmark`/`run_benchmark_async`. A phase whose `Report.complete` is `False` (drain timeout / interrupt) aborts with `ExecutionError` — no result on partial data.
-3. Calls `AuditTest.verify(...)` and atomically writes `audit_result.json` (durable record) then `verify_<TEST>.txt` (validator marker).
+1. Builds a per-phase config that is performance-only by default (drops accuracy
+   datasets so no phase re-issues or re-scores them), overridable
+   per-`AuditRunSpec` via `test_mode` (`ACC`/`BOTH` keeps accuracy datasets —
+   supported but currently unused; every registered audit runs perf-only), and,
+   after the first phase's dataset loads, calls
+   `AuditTest.validate(cfg, dataset_size, load_pattern)` to bounds-check the
+   test's sample counts/indices and load pattern before any phase issues load
+   (reuses the loaded dataset — no extra load).
+2. Runs each `AuditRunSpec` phase (from `AuditTest.plan_runs`) back-to-back
+   under its own `<report_dir>/<label>/` subdir via
+   `setup_benchmark`/`run_benchmark_async`. A phase whose `Report.complete` is
+   `False` (drain timeout / interrupt) aborts with `ExecutionError` — no result
+   on partial data.
+3. Calls `AuditTest.verify(...)` and atomically writes `audit_result.json`
+   (durable record) then `verify_<TEST>.txt` (validator marker).
 
-`run_audit` returns an `AuditResult`; `cli._run` maps `passed` to the process exit code (0 PASS / 1 FAIL; setup/IO errors → non-zero via the standard error path). A crashed or interrupted main run skips the audit entirely (as upstream: TEST04 only runs once a perf result exists); a FAIL doesn't cost the submission its perf report — `cli._run` raises only after both stages have run. The output-caching audit (MLPerf TEST04) is the only registered audit today (`AuditTestId.OUTPUT_CACHING_TEST`); add new audits by implementing the `AuditTest` protocol (including `validate`) and adding the instance to the `AUDIT_TESTS` map in `compliance/__init__.py`.
+`run_audit` returns an `AuditResult`; `cli._run` maps `passed` to the process
+exit code (0 PASS / 1 FAIL; setup/IO errors → non-zero via the standard error
+path). A crashed or interrupted main run skips the audit entirely (as upstream:
+TEST04 only runs once a perf result exists); a FAIL doesn't cost the submission
+its perf report — `cli._run` raises only after both stages have run. The
+output-caching audit (MLPerf TEST04) is the only registered audit today
+(`AuditTestId.OUTPUT_CACHING_TEST`); add new audits by implementing the
+`AuditTest` protocol (including `validate`) and adding the instance to the
+`AUDIT_TESTS` map in `compliance/__init__.py`.
 
 ## Code Organization
 
@@ -330,30 +460,43 @@ tests/
 - **Formatter/Linter**: `ruff` (line-length 88, target Python 3.12)
 - **Type checking**: `mypy` (via pre-commit)
 - **Formatting**: `ruff-format` (double quotes, space indent)
-- **License headers**: Required on all Python files (enforced by pre-commit hook `scripts/add_license_header.py`)
+- **Markdown**: Prettier wraps prose at 80 columns (`.prettierrc.yaml`),
+  enforced by pre-commit and CI
+- **License headers**: Required on all Python files (enforced by pre-commit hook
+  `scripts/add_license_header.py`)
 - **Conventional commits**: `feat:`, `fix:`, `docs:`, `test:`, `chore:`
 
 ### Pre-commit Hooks
 
 All of these run automatically on commit:
 
-- trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict, debug-statements
+- trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict,
+  debug-statements
 - `ruff` (lint + autofix) and `ruff-format`
 - `mypy` type checking
 - `prettier` for YAML/JSON/Markdown
 - License header enforcement
-- `regenerate-templates`: auto-regenerates YAML config templates from schema defaults when any `config/*.py` module, `endpoint_client/config.py`, or `regenerate_templates.py` changes
+- `regenerate-templates`: auto-regenerates YAML config templates from schema
+  defaults when any `config/*.py` module, `endpoint_client/config.py`, or
+  `regenerate_templates.py` changes
 
-**IMPORTANT: Always run `pre-commit run --all-files` before every commit.** Hooks may modify files (prettier, ruff-format, license headers). If files are modified, stage the changes and commit once. Never commit without running pre-commit first.
+**IMPORTANT: Always run `pre-commit run --all-files` before every commit.**
+Hooks may modify files (prettier, ruff-format, license headers). If files are
+modified, stage the changes and commit once. Never commit without running
+pre-commit first.
 
-See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details.
+See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow
+details.
 
 ### Data Types & Serialization
 
-- **Core types** (`Query`, `QueryResult`, `StreamChunk`): `msgspec.Struct` with `frozen=True`, `array_like=True`, `gc=False`, `omit_defaults=True`
+- **Core types** (`Query`, `QueryResult`, `StreamChunk`): `msgspec.Struct` with
+  `frozen=True`, `array_like=True`, `gc=False`, `omit_defaults=True`
 - **Config types**: `pydantic.BaseModel` for validation
-- **Enums**: `str, Enum` pattern for serializable enums (e.g., `LoadPatternType`, `APIType`)
-- **Serialization**: `msgspec.json` for hot-path (ZMQ transport), `pydantic` for config
+- **Enums**: `str, Enum` pattern for serializable enums (e.g.,
+  `LoadPatternType`, `APIType`)
+- **Serialization**: `msgspec.json` for hot-path (ZMQ transport), `pydantic` for
+  config
 
 ### Testing
 
@@ -369,7 +512,9 @@ See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details
 @pytest.mark.run_explicitly # Only run when explicitly selected
 ```
 
-**Async tests**: Use `@pytest.mark.asyncio` — strict mode is configured globally in `pyproject.toml` (`asyncio_mode = "strict"`). Do NOT pass `mode="strict"` to the marker — it's not a valid argument.
+**Async tests**: Use `@pytest.mark.asyncio` — strict mode is configured globally
+in `pyproject.toml` (`asyncio_mode = "strict"`). Do NOT pass `mode="strict"` to
+the marker — it's not a valid argument.
 
 **Key fixtures** (defined in `tests/conftest.py`):
 
@@ -377,22 +522,34 @@ See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details
 - `mock_http_oracle_server` — dataset-driven response server
 - `dummy_dataset` — in-memory test dataset
 - `hf_squad_dataset` — HuggingFace squad dataset
-- `max_throughput_runtime_settings`, `poisson_runtime_settings`, `concurrency_runtime_settings` — preset configs
+- `max_throughput_runtime_settings`, `poisson_runtime_settings`,
+  `concurrency_runtime_settings` — preset configs
 
-**Test data**: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples), `tests/assets/datasets/squad_pruned/`, `tests/assets/tokenizers/char` + `char_chat` (hermetic char-level tokenizers; `char_chat` adds a minimal chat template for the structured tokenization paths)
+**Test data**: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples),
+`tests/assets/datasets/squad_pruned/`, `tests/assets/tokenizers/char` +
+`char_chat` (hermetic char-level tokenizers; `char_chat` adds a minimal chat
+template for the structured tokenization paths)
 
-**Performance suites** (`tests/performance/`, CI-skipped, run on demand): CLI roofline + low-QPS correctness against the built-in stub servers, and a metrics-tokenizer throughput matrix with regression floors. Cases record rows via the shared `record_result` fixture (`tests/performance/conftest.py`) into one end-of-session summary table; knobs are `--roofline-*` pytest options. See docs/CLIENT_PERFORMANCE_TUNING.md ("Performance Test Suite").
+**Performance suites** (`tests/performance/`, CI-skipped, run on demand): CLI
+roofline + low-QPS correctness against the built-in stub servers, and a
+metrics-tokenizer throughput matrix with regression floors. Cases record rows
+via the shared `record_result` fixture (`tests/performance/conftest.py`) into
+one end-of-session summary table; knobs are `--roofline-*` pytest options. See
+docs/CLIENT_PERFORMANCE_TUNING.md ("Performance Test Suite").
 
 ### Performance Guidelines
 
-These apply especially to code in the hot path (load generator, endpoint client, transport):
+These apply especially to code in the hot path (load generator, endpoint client,
+transport):
 
 - **No `match` statements in hot paths** — use dict dispatch instead
-- **Use `dataclass(slots=True)`** for frequently instantiated classes (or `msgspec.Struct`)
+- **Use `dataclass(slots=True)`** for frequently instantiated classes (or
+  `msgspec.Struct`)
 - **Prefer generators** over list comprehensions for large datasets
 - **Minimize async suspends** in hot path code
 - **Use `msgspec`** over `json`/`pydantic` for serialization in the data path
-- **Connection pooling**: The HTTP client uses custom `ConnectionPool` with `httptools` parser — not `aiohttp`/`requests`
+- **Connection pooling**: The HTTP client uses custom `ConnectionPool` with
+  `httptools` parser — not `aiohttp`/`requests`
 - **Event loop**: `uvloop` with `eager_task_factory` via `LoopManager`
 - **IPC**: ZMQ-based transport between main process and worker processes
 
@@ -412,34 +569,59 @@ These apply especially to code in the hot path (load generator, endpoint client,
 
 ### Files to NOT Modify
 
-- `src/inference_endpoint/openai/openai_types_gen.py` — auto-generated, excluded from ruff/pre-commit
-- `src/inference_endpoint/openai/openapi.yaml` — OpenAI API spec, excluded from pre-commit
+- `src/inference_endpoint/openai/openai_types_gen.py` — auto-generated, excluded
+  from ruff/pre-commit
+- `src/inference_endpoint/openai/openapi.yaml` — OpenAI API spec, excluded from
+  pre-commit
 
 ### Documentation references — no local-only artifacts
 
-**Code, comments, docstrings, tests, and committed Markdown MUST NOT reference paths that aren't in the repository.** This includes anything under `.gitignore`d directories (e.g. `.cursor_artifacts/`, design scratch dirs, untracked working notes), absolute paths to a contributor's workstation, build outputs, or unmerged branch artifacts. A reviewer fetching the PR should be able to follow every reference cited in the diff.
+**Code, comments, docstrings, tests, and committed Markdown MUST NOT reference
+paths that aren't in the repository.** This includes anything under
+`.gitignore`d directories (e.g. `.cursor_artifacts/`, design scratch dirs,
+untracked working notes), absolute paths to a contributor's workstation, build
+outputs, or unmerged branch artifacts. A reviewer fetching the PR should be able
+to follow every reference cited in the diff.
 
-**Why:** stale references compound — `See foo.md §3` is meaningless once `foo.md` is gone, renamed, or never existed in the merged tree, and rotting cross-references are how docs stop being trusted. AI agents reading the codebase later treat dangling pointers as ground truth and propagate confusion.
+**Why:** stale references compound — `See foo.md §3` is meaningless once
+`foo.md` is gone, renamed, or never existed in the merged tree, and rotting
+cross-references are how docs stop being trusted. AI agents reading the codebase
+later treat dangling pointers as ground truth and propagate confusion.
 
 **Allowed:**
 
-- Paths to files committed to the repo (`docs/...`, `src/...`, `tests/...`, `README.md`, etc.).
+- Paths to files committed to the repo (`docs/...`, `src/...`, `tests/...`,
+  `README.md`, etc.).
 - External URLs (issue trackers, PRs, RFCs, vendor docs).
-- Generic references to environment/setup that the reader is expected to create themselves (e.g. `source .venv/bin/activate` in a setup README, where `.venv` is the user's local venv).
+- Generic references to environment/setup that the reader is expected to create
+  themselves (e.g. `source .venv/bin/activate` in a setup README, where `.venv`
+  is the user's local venv).
 
 **Disallowed examples:**
 
 - `See .cursor_artifacts/foo_design.md §2` — `.cursor_artifacts/` is gitignored.
 - `See ~/work/notes/architecture.txt` — contributor-local.
-- `Tracked in metrics_pubsub_design_v5.md test impact section` — same gitignored doc.
+- `Tracked in metrics_pubsub_design_v5.md test impact section` — same gitignored
+  doc.
 
-If a design doc is worth referencing from the source tree, commit it to `docs/` or inline the relevant content into the code comment / docstring. For one-off rationale that won't survive the conversation, prefer a self-contained explanation in the comment itself rather than a pointer to ephemera.
+If a design doc is worth referencing from the source tree, commit it to `docs/`
+or inline the relevant content into the code comment / docstring. For one-off
+rationale that won't survive the conversation, prefer a self-contained
+explanation in the comment itself rather than a pointer to ephemera.
 
 ### Comments and docstrings — describe current state, not development history
 
-**Don't write comments or docstrings that narrate iteration on the codebase.** Pointers to abandoned approaches, prior implementations, or design pivots belong in the PR description and `git log`, not in the source tree. They rot quickly: the prior implementation is gone, the reader has no way to evaluate the comparison, and the scaffolding accumulates with every iteration. Future readers — humans and AI agents alike — treat the comment as if it describes load-bearing context when it's actually historical clutter.
+**Don't write comments or docstrings that narrate iteration on the codebase.**
+Pointers to abandoned approaches, prior implementations, or design pivots belong
+in the PR description and `git log`, not in the source tree. They rot quickly:
+the prior implementation is gone, the reader has no way to evaluate the
+comparison, and the scaffolding accumulates with every iteration. Future readers
+— humans and AI agents alike — treat the comment as if it describes load-bearing
+context when it's actually historical clutter.
 
-This applies especially to AI-assisted development, where it's tempting to leave a paper trail of "we tried X first, then switched to Y" inside the source. That paper trail belongs in the PR description.
+This applies especially to AI-assisted development, where it's tempting to leave
+a paper trail of "we tried X first, then switched to Y" inside the source. That
+paper trail belongs in the PR description.
 
 **Disallowed patterns:**
 
@@ -447,20 +629,34 @@ This applies especially to AI-assisted development, where it's tempting to leave
 - `# An earlier implementation did X — this version does Y`
 - `# Removed the foo parameter` / `# Replaced bar with baz`
 - `# Note: this used to be sync but is now async`
-- `# Regression: an earlier shape did X` — even in regression-test docstrings, drop the narrative framing.
-- `# An alternative design considered ... but was rejected because ...` (unless the rejected alternative is a _common_ path a future contributor might re-attempt — in that case, frame it as "**don't** do X because Y", not as developer history).
+- `# Regression: an earlier shape did X` — even in regression-test docstrings,
+  drop the narrative framing.
+- `# An alternative design considered ... but was rejected because ...` (unless
+  the rejected alternative is a _common_ path a future contributor might
+  re-attempt — in that case, frame it as "**don't** do X because Y", not as
+  developer history).
 
 **Allowed:**
 
-- **Current rationale**: `# Uses dict dispatch — hot path measured at sub-ms` (describes why the current design exists; no history).
-- **Regression context that doesn't narrate the prior bug's discovery**: `# Without this check, value > hdr_high silently corrupts the histogram total` (describes the bug being prevented, framed as a current invariant — not "we used to have a bug here").
-- **Inline TODO/FIXME** pointing at a tracking issue (URL or issue number, not "we plan to do X eventually").
+- **Current rationale**: `# Uses dict dispatch — hot path measured at sub-ms`
+  (describes why the current design exists; no history).
+- **Regression context that doesn't narrate the prior bug's discovery**:
+  `# Without this check, value > hdr_high silently corrupts the histogram total`
+  (describes the bug being prevented, framed as a current invariant — not "we
+  used to have a bug here").
+- **Inline TODO/FIXME** pointing at a tracking issue (URL or issue number, not
+  "we plan to do X eventually").
 
-**Rule of thumb:** if removing the comment would leave the code's intent unchanged for someone seeing it for the first time, the comment is fine. If the comment only makes sense to someone who saw the prior version, delete it.
+**Rule of thumb:** if removing the comment would leave the code's intent
+unchanged for someone seeing it for the first time, the comment is fine. If the
+comment only makes sense to someone who saw the prior version, delete it.
 
 ### Comments and docstrings — no line-of-code estimates
 
-**Don't reference line counts in comments or docstrings.** Phrasing like "one ~20-line block", "this 50-LOC walker", "(~30 LOC)" rots the moment the code is refactored, conveys no actionable meaning, and adds maintenance burden — every edit nearby risks invalidating the count, and there is no warning when it does.
+**Don't reference line counts in comments or docstrings.** Phrasing like "one
+~20-line block", "this 50-LOC walker", "(~30 LOC)" rots the moment the code is
+refactored, conveys no actionable meaning, and adds maintenance burden — every
+edit nearby risks invalidating the count, and there is no warning when it does.
 
 **Disallowed patterns:**
 
@@ -471,32 +667,50 @@ This applies especially to AI-assisted development, where it's tempting to leave
 **Allowed:**
 
 - Describe _what_ the code does and _why_, not how big it is.
-- If size is genuinely the point (e.g. a perf comment about an inlined hot path), name the property that matters: "kept inlined to avoid the call overhead measured at X µs", not "this is 12 lines".
+- If size is genuinely the point (e.g. a perf comment about an inlined hot
+  path), name the property that matters: "kept inlined to avoid the call
+  overhead measured at X µs", not "this is 12 lines".
 
-**Why:** the value of a comment is the invariant it pins. A line count isn't an invariant — it's an accident of formatting and current scope. Future readers will trust the number; it will be wrong; you've now created a misleading comment instead of an absent one.
+**Why:** the value of a comment is the invariant it pins. A line count isn't an
+invariant — it's an accident of formatting and current scope. Future readers
+will trust the number; it will be wrong; you've now created a misleading comment
+instead of an absent one.
 
 ## Keeping AGENTS.md Up to Date
 
-**This file is the source of truth for AI agents working in this repo.** If it is stale or wrong, every AI-assisted session starts from a broken foundation.
+**This file is the source of truth for AI agents working in this repo.** If it
+is stale or wrong, every AI-assisted session starts from a broken foundation.
 
 ### When to Update
 
-Update AGENTS.md as part of any PR that includes a **significant refactor**, meaning:
+Update AGENTS.md as part of any PR that includes a **significant refactor**,
+meaning:
 
-- **Moved, renamed, or deleted modules/packages** — update the Code Organization tree and Key Components table
-- **Changed architectural boundaries** (e.g., new IPC transport, replaced pydantic with msgspec for config) — update Architecture and Data Types sections
-- **Added or removed CLI commands/subcommands** — update CLI Modes and Common Commands
-- **Changed test infrastructure** (new fixtures, changed markers, new test directories) — update Testing section
+- **Moved, renamed, or deleted modules/packages** — update the Code Organization
+  tree and Key Components table
+- **Changed architectural boundaries** (e.g., new IPC transport, replaced
+  pydantic with msgspec for config) — update Architecture and Data Types
+  sections
+- **Added or removed CLI commands/subcommands** — update CLI Modes and Common
+  Commands
+- **Changed test infrastructure** (new fixtures, changed markers, new test
+  directories) — update Testing section
 - **Added or removed key dependencies** — update Key Dependencies table
-- **Changed build/tooling** (new pre-commit hooks, changed ruff config, new CI steps) — update [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
-- **Changed hot-path patterns** (new transport, changed serialization, new performance constraints) — update Performance Guidelines
+- **Changed build/tooling** (new pre-commit hooks, changed ruff config, new CI
+  steps) — update [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+- **Changed hot-path patterns** (new transport, changed serialization, new
+  performance constraints) — update Performance Guidelines
 
 ### How to Update
 
-1. Treat AGENTS.md changes as part of the refactor itself — include them in the same PR, not as a follow-up
-2. Keep descriptions factual and concise — what exists and where, not aspirational design docs
-3. If you add a new top-level module under `src/inference_endpoint/`, add it to both the Key Components table and the Code Organization tree
-4. If you remove something, remove it from AGENTS.md — stale entries are worse than missing ones
+1. Treat AGENTS.md changes as part of the refactor itself — include them in the
+   same PR, not as a follow-up
+2. Keep descriptions factual and concise — what exists and where, not
+   aspirational design docs
+3. If you add a new top-level module under `src/inference_endpoint/`, add it to
+   both the Key Components table and the Code Organization tree
+4. If you remove something, remove it from AGENTS.md — stale entries are worse
+   than missing ones
 
 ### Reviewer Checklist
 
@@ -508,43 +722,111 @@ When reviewing PRs with significant structural changes, verify:
 
 ## Common AI Coding Pitfalls
 
-Known failure modes when AI tools generate code for this project. Reference these during code review of AI-assisted PRs.
+Known failure modes when AI tools generate code for this project. Reference
+these during code review of AI-assisted PRs.
 
 ### Architecture & Design
 
-- **Inventing abstractions that don't exist**: AI may introduce new base classes, registries, or factory patterns that don't match the existing architecture. This project uses concrete types and explicit wiring — check that new code follows existing patterns rather than imposing unfamiliar frameworks.
-- **Misunderstanding the multi-process boundary**: The endpoint client uses separate worker _processes_ (not threads) communicating over ZMQ. AI-generated code often assumes shared memory, passes unpicklable objects across processes, or adds synchronization primitives (locks, semaphores) that don't work cross-process.
-- **Confusing hot-path vs. cold-path**: AI tends to treat all code uniformly. Code in `load_generator/`, `endpoint_client/worker.py`, and `async_utils/transport/` is latency-critical. Pydantic validation, excessive logging, or try/except blocks in these paths will degrade throughput.
+- **Inventing abstractions that don't exist**: AI may introduce new base
+  classes, registries, or factory patterns that don't match the existing
+  architecture. This project uses concrete types and explicit wiring — check
+  that new code follows existing patterns rather than imposing unfamiliar
+  frameworks.
+- **Misunderstanding the multi-process boundary**: The endpoint client uses
+  separate worker _processes_ (not threads) communicating over ZMQ. AI-generated
+  code often assumes shared memory, passes unpicklable objects across processes,
+  or adds synchronization primitives (locks, semaphores) that don't work
+  cross-process.
+- **Confusing hot-path vs. cold-path**: AI tends to treat all code uniformly.
+  Code in `load_generator/`, `endpoint_client/worker.py`, and
+  `async_utils/transport/` is latency-critical. Pydantic validation, excessive
+  logging, or try/except blocks in these paths will degrade throughput.
 
 ### Serialization & Types
 
-- **Using the wrong serialization library**: This project uses `msgspec` for hot-path data and `pydantic` for config. AI frequently defaults to `json.dumps`/`json.loads`, `dataclasses`, or applies pydantic where msgspec is required. If the type is a `msgspec.Struct`, encode/decode with `msgspec.json`, not stdlib json.
-- **Breaking msgspec Struct constraints**: Core types (`Query`, `QueryResult`, `StreamChunk`) are `frozen=True` with `array_like=True`. AI may try to mutate fields directly (must use `force_setattr`), add mutable default fields, or assume dict-like serialization when the wire format is array-based.
-- **Adding `dataclass` where `msgspec.Struct` is expected**: If neighboring types use msgspec, new types in the same module should too. AI defaults to `@dataclass` out of habit.
+- **Using the wrong serialization library**: This project uses `msgspec` for
+  hot-path data and `pydantic` for config. AI frequently defaults to
+  `json.dumps`/`json.loads`, `dataclasses`, or applies pydantic where msgspec is
+  required. If the type is a `msgspec.Struct`, encode/decode with
+  `msgspec.json`, not stdlib json.
+- **Breaking msgspec Struct constraints**: Core types (`Query`, `QueryResult`,
+  `StreamChunk`) are `frozen=True` with `array_like=True`. AI may try to mutate
+  fields directly (must use `force_setattr`), add mutable default fields, or
+  assume dict-like serialization when the wire format is array-based.
+- **Adding `dataclass` where `msgspec.Struct` is expected**: If neighboring
+  types use msgspec, new types in the same module should too. AI defaults to
+  `@dataclass` out of habit.
 
 ### Async & Concurrency
 
-- **Mixing sync and async incorrectly**: AI may `await` in a sync context, call blocking I/O inside an `async def`, or use `asyncio.run()` when a loop is already running (this project manages its own loops via `LoopManager`).
-- **Creating new event loops**: Workers and the main process already have managed event loops. AI may call `asyncio.new_event_loop()` or `asyncio.run()` which conflicts with the existing `LoopManager`/`uvloop` setup.
-- **Ignoring `eager_task_factory`**: The project uses Python 3.12's `eager_task_factory` for performance. AI-generated code that creates coroutines expecting lazy scheduling will behave differently than expected.
+- **Mixing sync and async incorrectly**: AI may `await` in a sync context, call
+  blocking I/O inside an `async def`, or use `asyncio.run()` when a loop is
+  already running (this project manages its own loops via `LoopManager`).
+- **Creating new event loops**: Workers and the main process already have
+  managed event loops. AI may call `asyncio.new_event_loop()` or `asyncio.run()`
+  which conflicts with the existing `LoopManager`/`uvloop` setup.
+- **Ignoring `eager_task_factory`**: The project uses Python 3.12's
+  `eager_task_factory` for performance. AI-generated code that creates
+  coroutines expecting lazy scheduling will behave differently than expected.
 
 ### Testing
 
-- **Generating mock-heavy tests for integration scenarios**: This project has real echo/oracle server fixtures. AI tends to mock HTTP calls even when `mock_http_echo_server` or `mock_http_oracle_server` fixtures exist and should be used.
-- **Missing test markers**: Every test function needs `@pytest.mark.unit`, `@pytest.mark.integration`, or another marker. AI-generated tests almost always omit markers, which breaks CI filtering.
-- **Wrong asyncio marker**: Tests must use bare `@pytest.mark.asyncio` — strict mode is configured globally in `pyproject.toml`. Do NOT pass `mode="strict"` to the marker (it's not a valid argument and will cause errors). AI sometimes hallucinates this parameter.
-- **Fabricating fixture names**: AI may invent fixtures that don't exist in `conftest.py`. Always check that referenced fixtures actually exist before using them.
+- **Generating mock-heavy tests for integration scenarios**: This project has
+  real echo/oracle server fixtures. AI tends to mock HTTP calls even when
+  `mock_http_echo_server` or `mock_http_oracle_server` fixtures exist and should
+  be used.
+- **Missing test markers**: Every test function needs `@pytest.mark.unit`,
+  `@pytest.mark.integration`, or another marker. AI-generated tests almost
+  always omit markers, which breaks CI filtering.
+- **Wrong asyncio marker**: Tests must use bare `@pytest.mark.asyncio` — strict
+  mode is configured globally in `pyproject.toml`. Do NOT pass `mode="strict"`
+  to the marker (it's not a valid argument and will cause errors). AI sometimes
+  hallucinates this parameter.
+- **Fabricating fixture names**: AI may invent fixtures that don't exist in
+  `conftest.py`. Always check that referenced fixtures actually exist before
+  using them.
 
 ### Code Style & Repo Conventions
 
-- **Missing license headers**: Every Python file needs the Apache 2.0 SPDX header. AI never generates these — the pre-commit hook will add them, but be aware of this when reviewing diffs.
-- **Importing removed or renamed modules**: After refactors, AI (working from stale context) may import old module paths. Always verify imports resolve to actual files.
-- **Over-documenting**: AI generates verbose docstrings, inline comments explaining obvious code, and type annotations on trivial variables. This project prefers minimal comments — only where the _why_ isn't obvious from the code.
-- **Adding backwards-compatibility shims**: If something was renamed or removed, AI may add re-exports, aliases, or deprecation wrappers. In this project, just delete the old thing and update all call sites.
-- **Empty except blocks**: Every `except` block must contain either a comment explaining why the exception is ignored, or a logging statement. Bare `except: pass` without explanation is disallowed. AI often generates empty handlers — always add the reason.
-- **No lazy imports**: All imports must be at the top of the file. Imports inside functions, methods, or conditional blocks (other than `TYPE_CHECKING`) are disallowed. The only exceptions are: (1) circular import avoidance with a documenting comment, (2) optional dependencies with a top-level try/except that sets the import to `None`, (3) security sandboxing code that intentionally restricts imports.
+- **Missing license headers**: Every Python file needs the Apache 2.0 SPDX
+  header. AI never generates these — the pre-commit hook will add them, but be
+  aware of this when reviewing diffs.
+- **Importing removed or renamed modules**: After refactors, AI (working from
+  stale context) may import old module paths. Always verify imports resolve to
+  actual files.
+- **Over-documenting**: AI generates verbose docstrings, inline comments
+  explaining obvious code, and type annotations on trivial variables. This
+  project prefers minimal comments — only where the _why_ isn't obvious from the
+  code.
+- **Adding backwards-compatibility shims**: If something was renamed or removed,
+  AI may add re-exports, aliases, or deprecation wrappers. In this project, just
+  delete the old thing and update all call sites.
+- **Empty except blocks**: Every `except` block must contain either a comment
+  explaining why the exception is ignored, or a logging statement. Bare
+  `except: pass` without explanation is disallowed. AI often generates empty
+  handlers — always add the reason.
+- **No lazy imports**: All imports must be at the top of the file. Imports
+  inside functions, methods, or conditional blocks (other than `TYPE_CHECKING`)
+  are disallowed. The only exceptions are: (1) circular import avoidance with a
+  documenting comment, (2) optional dependencies with a top-level try/except
+  that sets the import to `None`, (3) security sandboxing code that
+  intentionally restricts imports.
 
 ### Dependency & Environment
 
-- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new runtime, dev, or test dependency must be justified, added to the correct optional group, and pinned to an exact version (`==`). After adding a dependency, run `pip-audit` (included in `dev` extras) to verify it has no known vulnerabilities. When adding dependencies, use `uv add <package>==<version>` to update both `pyproject.toml` and `uv.lock` atomically, then run `uv run pip-audit --ignore-vuln PYSEC-2026-3740` to check for vulnerabilities (the ignored `nltk` advisory has no fixed release and its affected APIs are unused; tracked in https://github.com/mlcommons/endpoints/issues/520). Note: `[build-system] requires` is also pinned to exact versions for reproducibility.
-- **Using `requests`/`aiohttp` for HTTP**: This project has its own HTTP client (`endpoint_client/http.py`) using `httptools`. AI defaults to `requests` or `aiohttp` — these should not appear in production code (test dependencies are fine).
+- **Adding new dependencies without justification**: AI may `pip install` or add
+  imports for packages not in `pyproject.toml`. Any new runtime, dev, or test
+  dependency must be justified, added to the correct optional group, and pinned
+  to an exact version (`==`). After adding a dependency, run `pip-audit`
+  (included in `dev` extras) to verify it has no known vulnerabilities. When
+  adding dependencies, use `uv add <package>==<version>` to update both
+  `pyproject.toml` and `uv.lock` atomically, then run
+  `uv run pip-audit --ignore-vuln PYSEC-2026-3740` to check for vulnerabilities
+  (the ignored `nltk` advisory has no fixed release and its affected APIs are
+  unused; tracked in https://github.com/mlcommons/endpoints/issues/520). Note:
+  `[build-system] requires` is also pinned to exact versions for
+  reproducibility.
+- **Using `requests`/`aiohttp` for HTTP**: This project has its own HTTP client
+  (`endpoint_client/http.py`) using `httptools`. AI defaults to `requests` or
+  `aiohttp` — these should not appear in production code (test dependencies are
+  fine).

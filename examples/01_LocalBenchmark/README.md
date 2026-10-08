@@ -1,6 +1,7 @@
 # Local Benchmark Example
 
-Demonstrates benchmarking a locally-hosted HuggingFace model using custom components.
+Demonstrates benchmarking a locally-hosted HuggingFace model using custom
+components.
 
 ## Overview
 
@@ -41,6 +42,8 @@ Results are saved to `tinyllm_benchmark_report/` directory containing:
 
 ## Notes
 
-- Uses TinyLlama-1.1B-Chat model (~1.1GB) - popular small model with 4M+ downloads/month
+- Uses TinyLlama-1.1B-Chat model (~1.1GB) - popular small model with 4M+
+  downloads/month
 - Demonstrates framework components, not production benchmarking
-- For remote endpoints, use the CLI commands instead (see [CLI_QUICK_REFERENCE.md](../../docs/CLI_QUICK_REFERENCE.md))
+- For remote endpoints, use the CLI commands instead (see
+  [CLI_QUICK_REFERENCE.md](../../docs/CLI_QUICK_REFERENCE.md))

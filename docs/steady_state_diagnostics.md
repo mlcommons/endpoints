@@ -2,17 +2,18 @@
 
 Use this CLI to inspect steady-state and drift for a benchmark run's
 `events.jsonl`. The implementation is
-`src/inference_endpoint/metrics/steady_state_diagnostics.py`. The full methodology
-lives in [`steady-state-detection.md`](steady-state-detection.md); this page is the
-operator's quick reference.
+`src/inference_endpoint/metrics/steady_state_diagnostics.py`. The full
+methodology lives in [`steady-state-detection.md`](steady-state-detection.md);
+this page is the operator's quick reference.
 
-**The rules live elsewhere.** MLCommons
-[§4.4 Reporting Basis (Steady-State Window)][rules] defines the official result:
-when a steady-state window supersedes the whole-run `total`, how coverage
-`status` is classified, and which load patterns are in scope. This document
-describes the tool and its defaults. Where the two disagree, the rules win.
+**The rules live elsewhere.** MLCommons [§4.4 Reporting Basis (Steady-State
+Window)][rules] defines the official result: when a steady-state window
+supersedes the whole-run `total`, how coverage `status` is classified, and which
+load patterns are in scope. This document describes the tool and its defaults.
+Where the two disagree, the rules win.
 
-[rules]: https://github.com/mlcommons/endpoints_policies/blob/main/endpoints_rules.md#44-reporting-basis-steady-state-window
+[rules]:
+  https://github.com/mlcommons/endpoints_policies/blob/main/endpoints_rules.md#44-reporting-basis-steady-state-window
 
 ## Two ways to get a verdict
 
@@ -45,30 +46,30 @@ If any requirement is missing, collection stays off.
 Detection is best-effort. It runs inside the aggregator's finalize path. If it
 fails, the performance report is still written.
 
-**After a run** (this CLI): replays `events.jsonl` through the same collector and
-the same `compute_steady_state_metrics`. The CLI is the debug and audit path. It
-is also the only path that prints the drift tables.
+**After a run** (this CLI): replays `events.jsonl` through the same collector
+and the same `compute_steady_state_metrics`. The CLI is the debug and audit
+path. It is also the only path that prints the drift tables.
 
 ## What it does
 
 1. Buckets performance-tracked samples into **super-passes** by issue order
    (`--superpass-size` samples each, default `--dataset-size`).
 2. Reconstructs per-sample **TTFT** (`recv_first − issued`) and **TPOT**
-   (`(complete − recv_first) / tokens(output-after-first-chunk)`). TPOT needs the
-   `--tokenizer`, so the tokenizer is required.
+   (`(complete − recv_first) / tokens(output-after-first-chunk)`). TPOT needs
+   the `--tokenizer`, so the tokenizer is required.
 3. Finds the **first steady plateau**. The window grows from the start while the
-   gated metric, **TPOT** p50 and p90, stays trend-steady
-   (Mann–Kendall + Hamed–Rao) and within a CoV bound.
-4. Treats **TTFT** as a diagnostic and drift warning, not as a hard gate. At high
-   concurrency, TTFT tail variance comes from prefill time, tracking dataset ISL
-   skew, and queueing. It is not decode unsteadiness. See §5.5.
-5. Splits staircase jumps into separate plateaus. The reported steady state is the
-   first plateau that clears the min-duration gate. Earlier plateaus that are too
-   brief to certify are skipped. Later plateaus are usually degradation.
+   gated metric, **TPOT** p50 and p90, stays trend-steady (Mann–Kendall +
+   Hamed–Rao) and within a CoV bound.
+4. Treats **TTFT** as a diagnostic and drift warning, not as a hard gate. At
+   high concurrency, TTFT tail variance comes from prefill time, tracking
+   dataset ISL skew, and queueing. It is not decode unsteadiness. See §5.5.
+5. Splits staircase jumps into separate plateaus. The reported steady state is
+   the first plateau that clears the min-duration gate. Earlier plateaus that
+   are too brief to certify are skipped. Later plateaus are usually degradation.
 6. Selects by estimator precision, following MSER. It does not select by
    throughput.
-7. Summarizes the selected window with TTFT/TPOT histograms and percentiles, plus
-   **per-user and system TPS** with batch-means confidence intervals.
+7. Summarizes the selected window with TTFT/TPOT histograms and percentiles,
+   plus **per-user and system TPS** with batch-means confidence intervals.
 8. Flags a level shift toward the end of the run as an `anomaly` when a
    multi-plateau run has a Pettitt change-point.
 
@@ -79,16 +80,17 @@ is also the only path that prints the drift tables.
 
 ## Run
 
-**Zero-config**: point it at a run directory. It auto-detects everything from the
-sidecar `config.yaml`: model to tokenizer, and load pattern to profile.
+**Zero-config**: point it at a run directory. It auto-detects everything from
+the sidecar `config.yaml`: model to tokenizer, and load pattern to profile.
 
 ```bash
 uv run python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>/
 ```
 
-> **Runs without the `session.phase_start` event** do not announce the super-pass
-> size, so auto-detection cannot find one. Pass `--superpass-size <N>` as one full
-> dataset pass. Everything else still resolves from `config.yaml`.
+> **Runs without the `session.phase_start` event** do not announce the
+> super-pass size, so auto-detection cannot find one. Pass
+> `--superpass-size <N>` as one full dataset pass. Everything else still
+> resolves from `config.yaml`.
 
 **One flag**: for a bare `events.jsonl` with no sidecar, `--model` drives the
 built-in model-to-tokenizer registry and the workload profile:
@@ -144,13 +146,15 @@ These optional overrides are still available:
   TPOT p50 3.29ms   p90 3.44ms    p99 3.56ms    mean 3.31ms
 ```
 
-- **window** — the steady plateau, as **post-warmup** super-pass indices `lo..hi`, plus
-  the pooled sample count it was measured over.
+- **window** — the steady plateau, as **post-warmup** super-pass indices
+  `lo..hi`, plus the pooled sample count it was measured over.
 - **TPS per-user** = `1 / mean(TPOT)` — output tokens/s for a single stream
-  (interactivity). **TPS system** = total output tokens ÷ window wall-clock (aggregate
-  throughput). Each `CI` is a 95% batch-means interval (super-passes as batches), so it
-  reflects per-super-pass variability, not a naïve iid interval.
-- **TTFT / TPOT** — percentiles and mean over the pooled raw samples of the window.
+  (interactivity). **TPS system** = total output tokens ÷ window wall-clock
+  (aggregate throughput). Each `CI` is a 95% batch-means interval (super-passes
+  as batches), so it reflects per-super-pass variability, not a naïve iid
+  interval.
+- **TTFT / TPOT** — percentiles and mean over the pooled raw samples of the
+  window.
 
 If no window qualifies:
 
@@ -158,12 +162,13 @@ If no window qualifies:
   not found: no admissible steady plateau
 ```
 
-means no contiguous run of super-passes was steady enough. The run is drifting or
-too short. The per-window diagnostics below show which metric failed CoV or trend.
+means no contiguous run of super-passes was steady enough. The run is drifting
+or too short. The per-window diagnostics below show which metric failed CoV or
+trend.
 
 A second "not found" form comes from the **min-duration gate**. See
-docs/steady-state-detection.md §5.5. In this case, each admissible plateau is real
-but too brief in wall time to certify.
+docs/steady-state-detection.md §5.5. In this case, each admissible plateau is
+real but too brief in wall time to certify.
 
 ```
   not found: all 6 admissible plateau(s) too short: longest 15s < 600s required (floor-dominated); pass --no-min-duration to override
@@ -203,10 +208,11 @@ The full breakdown is in `--json`: `steady_state.short_window`,
   ANOMALY: level shift at super-pass 6, TPOT +100.0% toward end of run (likely degradation)
 ```
 
-A second, materially different plateau was detected after the first and confirmed
-by a Pettitt change-point. The headline steady result remains the **first**
-plateau. This line says the run degraded later, for example from KV-cache
-eviction or an unhealthy worker. `delta_pct` is signed (+ = TPOT rose = worse).
+A second, materially different plateau was detected after the first and
+confirmed by a Pettitt change-point. The headline steady result remains the
+**first** plateau. This line says the run degraded later, for example from
+KV-cache eviction or an unhealthy worker. `delta_pct` is signed (+ = TPOT rose =
+worse).
 
 ### `WARNING` line
 
@@ -229,19 +235,19 @@ distinct from `anomaly`, which is a discrete step.
 
 ### Diagnostics (below the headline)
 
-Per `--window-size`, the CLI prints a **CoV steadiness** table and a
-**whole-run trend** summary. The CoV table covers each gated and diagnostic
-metric against each CoV bound over the trailing window. The trend summary covers
-each metric across the algorithms.
+Per `--window-size`, the CLI prints a **CoV steadiness** table and a **whole-run
+trend** summary. The CoV table covers each gated and diagnostic metric against
+each CoV bound over the trailing window. The trend summary covers each metric
+across the algorithms.
 
 The full rolling drift scan, including every window position, is only in
 `--json`.
 
 ### `--json`
 
-Full structured result: `steady_state` (window, `ttft`/`tpot` summaries + histograms,
-`tps`, `anomaly` with every plateau), plus `trajectories`, `cov`, and `drift` (the
-rolling scan) for deeper analysis.
+Full structured result: `steady_state` (window, `ttft`/`tpot` summaries +
+histograms, `tps`, `anomaly` with every plateau), plus `trajectories`, `cov`,
+and `drift` (the rolling scan) for deeper analysis.
 
 ## Caveats
 

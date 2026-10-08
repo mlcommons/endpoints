@@ -1,8 +1,18 @@
 # Commands — Design Spec
 
-> Thin execution layer that maps Cyclopts CLI inputs to concrete command handlers and benchmark execution code. It owns dispatch and user-facing command boundaries, not core benchmarking logic.
+> Thin execution layer that maps Cyclopts CLI inputs to concrete command
+> handlers and benchmark execution code. It owns dispatch and user-facing
+> command boundaries, not core benchmarking logic.
 
-**Component specs:** [async_utils](../async_utils/DESIGN.md) · **commands** · [config](../config/DESIGN.md) · [core](../core/DESIGN.md) · [dataset_manager](../dataset_manager/DESIGN.md) · [endpoint_client](../endpoint_client/DESIGN.md) · [evaluation](../evaluation/DESIGN.md) · [load_generator](../load_generator/DESIGN.md) · [metrics](../metrics/DESIGN.md) · [openai](../openai/DESIGN.md) · [plugins](../plugins/DESIGN.md) · [profiling](../profiling/DESIGN.md) · [sglang](../sglang/DESIGN.md) · [testing](../testing/DESIGN.md) · [utils](../utils/DESIGN.md)
+**Component specs:** [async_utils](../async_utils/DESIGN.md) · **commands** ·
+[config](../config/DESIGN.md) · [core](../core/DESIGN.md) ·
+[dataset_manager](../dataset_manager/DESIGN.md) ·
+[endpoint_client](../endpoint_client/DESIGN.md) ·
+[evaluation](../evaluation/DESIGN.md) ·
+[load_generator](../load_generator/DESIGN.md) · [metrics](../metrics/DESIGN.md)
+· [openai](../openai/DESIGN.md) · [plugins](../plugins/DESIGN.md) ·
+[profiling](../profiling/DESIGN.md) · [sglang](../sglang/DESIGN.md) ·
+[testing](../testing/DESIGN.md) · [utils](../utils/DESIGN.md)
 
 ---
 
@@ -10,13 +20,17 @@
 
 The command layer is split across:
 
-- `main.py` for top-level app setup, global flags, simple commands, and error-to-exit-code handling
-- `commands/benchmark/cli.py` for the `benchmark` subcommands (`offline`, `online`, `from-config`)
-- `commands/benchmark/execute.py` for benchmark setup, execution, and finalization
+- `main.py` for top-level app setup, global flags, simple commands, and
+  error-to-exit-code handling
+- `commands/benchmark/cli.py` for the `benchmark` subcommands (`offline`,
+  `online`, `from-config`)
+- `commands/benchmark/execute.py` for benchmark setup, execution, and
+  finalization
 - One module per simple command: `probe.py`, `info.py`, `validate.py`, `init.py`
 
-Cyclopts constructs typed config objects directly from CLI arguments, so command functions receive
-already-parsed models rather than raw `argparse.Namespace` objects.
+Cyclopts constructs typed config objects directly from CLI arguments, so command
+functions receive already-parsed models rather than raw `argparse.Namespace`
+objects.
 
 ## Responsibilities
 
@@ -60,8 +74,8 @@ inference-endpoint
   +-- eval
 ```
 
-`benchmark` is registered lazily from `commands/benchmark/cli.py`, keeping startup light for
-simple commands like `info` and `validate-yaml`.
+`benchmark` is registered lazily from `commands/benchmark/cli.py`, keeping
+startup light for simple commands like `info` and `validate-yaml`.
 
 ## `benchmark` Command Flow
 
@@ -98,10 +112,11 @@ commands/benchmark/execute.py::run_benchmark()
 
 ## `probe` Command
 
-`probe` is a lightweight connectivity check built on the same endpoint/client stack as the main
-benchmark path. It issues a small number of synthetic prompts, then reports success rate, latency,
-and sample responses. Its purpose is to validate endpoint reachability and request formatting
-before launching a full benchmark.
+`probe` is a lightweight connectivity check built on the same endpoint/client
+stack as the main benchmark path. It issues a small number of synthetic prompts,
+then reports success rate, latency, and sample responses. Its purpose is to
+validate endpoint reachability and request formatting before launching a full
+benchmark.
 
 ## Utility Commands
 
@@ -115,29 +130,31 @@ before launching a full benchmark.
 
 **Cyclopts models are the CLI boundary**
 
-The command layer does not parse raw strings manually unless a flag is intentionally free-form,
-such as repeatable `--dataset` values. Most arguments are parsed straight into Pydantic models
-defined in `config/schema.py`, which keeps command handlers small and pushes field validation to
-the schema layer.
+The command layer does not parse raw strings manually unless a flag is
+intentionally free-form, such as repeatable `--dataset` values. Most arguments
+are parsed straight into Pydantic models defined in `config/schema.py`, which
+keeps command handlers small and pushes field validation to the schema layer.
 
 **Benchmark declaration and execution are split**
 
-`commands/benchmark/cli.py` owns subcommand shape and input normalization. `commands/benchmark/execute.py`
-owns the multi-phase benchmark lifecycle. This keeps the CLI definition readable while allowing the
-execution path to grow without turning the CLI module into orchestration code.
+`commands/benchmark/cli.py` owns subcommand shape and input normalization.
+`commands/benchmark/execute.py` owns the multi-phase benchmark lifecycle. This
+keeps the CLI definition readable while allowing the execution path to grow
+without turning the CLI module into orchestration code.
 
 **Simple commands stay in `main.py` when they are thin**
 
-Top-level commands with small signatures (`info`, `init`, `validate-yaml`, `probe`) are registered
-directly in `main.py` and delegate immediately to their implementation modules. That keeps the app
-topology visible in one place without introducing extra wrapper files.
+Top-level commands with small signatures (`info`, `init`, `validate-yaml`,
+`probe`) are registered directly in `main.py` and delegate immediately to their
+implementation modules. That keeps the app topology visible in one place without
+introducing extra wrapper files.
 
 **`eval` is intentionally reserved**
 
-The `eval` command is exposed in help output but still raises `CLIError` with a tracking issue
-link. The benchmark
-path already supports dataset-specific accuracy evaluation, but the standalone `eval` command has
-not been implemented yet.
+The `eval` command is exposed in help output but still raises `CLIError` with a
+tracking issue link. The benchmark path already supports dataset-specific
+accuracy evaluation, but the standalone `eval` command has not been implemented
+yet.
 
 ## Integration Points
 

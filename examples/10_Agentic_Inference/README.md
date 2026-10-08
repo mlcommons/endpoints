@@ -1,10 +1,14 @@
 # Multi-Turn Agentic Benchmark
 
-This example runs agentic inference conversations through an OpenAI-compatible endpoint. The client preserves conversation order, sends one in-flight turn per active conversation, and adds `X-Session-ID: <conversation_id>` on every request so a router can keep a conversation on the same backend.
+This example runs agentic inference conversations through an OpenAI-compatible
+endpoint. The client preserves conversation order, sends one in-flight turn per
+active conversation, and adds `X-Session-ID: <conversation_id>` on every request
+so a router can keep a conversation on the same backend.
 
 ## Dataset
 
-Use flat JSONL with one row per message. Rows for each `conversation_id` must be contiguous and ordered by increasing `turn`.
+Use flat JSONL with one row per message. Rows for each `conversation_id` must be
+contiguous and ordered by increasing `turn`.
 
 ```jsonl
 {"conversation_id":"c1","turn":1,"role":"user","system":"...","content":"...","tools":[...],"delay_seconds":0.4}
@@ -13,15 +17,24 @@ Use flat JSONL with one row per message. Rows for each `conversation_id` must be
 {"conversation_id":"c1","turn":4,"role":"assistant","content":"..."}
 ```
 
-Required fields are `conversation_id`, `turn`, and `role`. User rows normally include `content`; agentic rows can also include `system`, `tools`, `tool_calls`, `tool_results`, `reasoning_content`, and `delay_seconds`.
+Required fields are `conversation_id`, `turn`, and `role`. User rows normally
+include `content`; agentic rows can also include `system`, `tools`,
+`tool_calls`, `tool_results`, `reasoning_content`, and `delay_seconds`.
 
-The official MLPerf dataset is available from [MLCommons storage](https://endpoints.mlcommons-storage.org/index.html#mlperf-agentic-inference). The dataset SHA-256 is `1beb24c882122df96571cf11b390acbea388944038bc55c78b891475459014ae`. Submitters must use this dataset unchanged for official submissions.
+The official MLPerf dataset is available from
+[MLCommons storage](https://endpoints.mlcommons-storage.org/index.html#mlperf-agentic-inference).
+The dataset SHA-256 is
+`1beb24c882122df96571cf11b390acbea388944038bc55c78b891475459014ae`. Submitters
+must use this dataset unchanged for official submissions.
 
-Place the dataset under `examples/10_Agentic_Inference/datasets/` or point the YAML at another accessible JSONL path.
+Place the dataset under `examples/10_Agentic_Inference/datasets/` or point the
+YAML at another accessible JSONL path.
 
 ## Supported Models
 
-The Agentic Inference benchmark can support any model. The current iteration of the MLPerf Inference benchmark accepts official submissions for the following three models:
+The Agentic Inference benchmark can support any model. The current iteration of
+the MLPerf Inference benchmark accepts official submissions for the following
+three models:
 
 | Model               | Architecture                    | Parameters                                    | Context          |
 | ------------------- | ------------------------------- | --------------------------------------------- | ---------------- |
@@ -29,17 +42,24 @@ The Agentic Inference benchmark can support any model. The current iteration of 
 | Qwen3.6-35B-A3B     | MoE + Gated DeltaNet/Attention  | 35B total / 3B active                         | 262,144 tokens   |
 | DeepSeek-V4.1-Flash | Multimodal MoE + CED/CSA2 + mHC | 552B backbone / 8B prefill, 16B decode active | 1,048,576 tokens |
 
-Reference implementations and runnable examples for all three models are provided below.
+Reference implementations and runnable examples for all three models are
+provided below.
 
 ## Start A Server
 
-To run the benchmark, expose one of the supported models through an OpenAI-compatible API endpoint. The serving framework is not prescribed: submitters may use vLLM, SGLang, TensorRT-LLM, or another serving framework as long as it provides an OpenAI-compatible endpoint.
+To run the benchmark, expose one of the supported models through an
+OpenAI-compatible API endpoint. The serving framework is not prescribed:
+submitters may use vLLM, SGLang, TensorRT-LLM, or another serving framework as
+long as it provides an OpenAI-compatible endpoint.
 
-The following commands are reference examples. Adjust model paths, parallelism, ports, and memory settings for your hardware.
+The following commands are reference examples. Adjust model paths, parallelism,
+ports, and memory settings for your hardware.
 
 ### Kimi K3
 
-See the [SGLang Kimi-K3 recipe](https://docs.sglang.io/cookbook/autoregressive/Moonshotai/Kimi-K3) for model-specific deployment guidance.
+See the
+[SGLang Kimi-K3 recipe](https://docs.sglang.io/cookbook/autoregressive/Moonshotai/Kimi-K3)
+for model-specific deployment guidance.
 
 ```bash
 sglang serve \
@@ -55,7 +75,9 @@ sglang serve \
 
 ### Qwen3.6-35B-A3B
 
-See the [SGLang Qwen3.6 recipe](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.6) for model-specific deployment guidance.
+See the
+[SGLang Qwen3.6 recipe](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.6)
+for model-specific deployment guidance.
 
 ```bash
 sglang serve \
@@ -71,7 +93,9 @@ sglang serve \
 
 ### DeepSeek-V4.1-Flash
 
-See the [vLLM DeepSeek-V4.1-Flash recipe](https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4.1-Flash?hardware=b200&features=tool_calling%2Creasoning%2Cspec_decoding%2Ctext_only) for hardware-specific deployment guidance.
+See the
+[vLLM DeepSeek-V4.1-Flash recipe](https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4.1-Flash?hardware=b200&features=tool_calling%2Creasoning%2Cspec_decoding%2Ctext_only)
+for hardware-specific deployment guidance.
 
 ```bash
 docker run --gpus all \
@@ -93,19 +117,28 @@ docker run --gpus all \
   --language-model-only
 ```
 
-The positional model argument is both the checkpoint loaded by vLLM and the OpenAI model name exposed to clients. Set `model_params.name` in the YAML to the same value.
+The positional model argument is both the checkpoint loaded by vLLM and the
+OpenAI model name exposed to clients. Set `model_params.name` in the YAML to the
+same value.
 
 ## Client YAML
 
-Runnable example configs are provided for [Kimi K3](kimi_agentic_benchmark.yaml), [Qwen3.6-35B-A3B](qwen_agentic_benchmark.yaml), and [DeepSeek-V4.1-Flash](dsv4_agentic_benchmark.yaml).
+Runnable example configs are provided for
+[Kimi K3](kimi_agentic_benchmark.yaml),
+[Qwen3.6-35B-A3B](qwen_agentic_benchmark.yaml), and
+[DeepSeek-V4.1-Flash](dsv4_agentic_benchmark.yaml).
 
-Some key client features specific to the Agentic Inference benchmark are described below.
+Some key client features specific to the Agentic Inference benchmark are
+described below.
 
 ### Salting Mechanism
 
 `agentic_inference.enable_salt` must be set to `true` for official submissions.
 
-When `agentic_inference.enable_salt: true`, the strategy adds a short deterministic `[salt: ...]` marker before the system prompt for the trajectory repeat and another after the system prompt for the conversation. Each salt is four hex characters. This restricts kv-cache reuse to:
+When `agentic_inference.enable_salt: true`, the strategy adds a short
+deterministic `[salt: ...]` marker before the system prompt for the trajectory
+repeat and another after the system prompt for the conversation. Each salt is
+four hex characters. This restricts kv-cache reuse to:
 
 1. Fully allowed within a trajectory.
 2. System prompt allowed within same iteration of the dataset.
@@ -113,31 +146,86 @@ When `agentic_inference.enable_salt: true`, the strategy adds a short determinis
 
 ### Inline Accuracy
 
-Submitters must enable inline accuracy for official submissions by setting `accuracy_config.eval_method: agentic_inference_inline` on the performance dataset. The benchmark then scores the generated `events.jsonl` during finalization and writes `scores.json` under `report_dir`. The scorer uses the loaded agentic inference dataset as ground truth, matches completed assistant responses back to their conversation/turn ids, and compares them with the expected assistant turns embedded in the dataset. It does not issue a separate accuracy phase.
+Submitters must enable inline accuracy for official submissions by setting
+`accuracy_config.eval_method: agentic_inference_inline` on the performance
+dataset. The benchmark then scores the generated `events.jsonl` during
+finalization and writes `scores.json` under `report_dir`. The scorer uses the
+loaded agentic inference dataset as ground truth, matches completed assistant
+responses back to their conversation/turn ids, and compares them with the
+expected assistant turns embedded in the dataset. It does not issue a separate
+accuracy phase.
 
 ### Tail Management
 
-Agentic inference benchmarks can have a long tail because different users receive trajectories with very different turn counts, delays, and generated lengths. In large runs this tail can last up to an hour after steady-state work has already ended, so the benchmark separates the performance window from the remaining accuracy/logging drain.
+Agentic inference benchmarks can have a long tail because different users
+receive trajectories with very different turn counts, delays, and generated
+lengths. In large runs this tail can last up to an hour after steady-state work
+has already ended, so the benchmark separates the performance window from the
+remaining accuracy/logging drain.
 
-The benchmark stops performance tracking when the first active user finishes its final assigned trajectory. It emits `STOP_PERFORMANCE_TRACKING` at that point to avoid measuring the tail. Turns issued before this event remain in the performance window even if they finish later; turns issued after it are excluded from performance metrics.
+The benchmark stops performance tracking when the first active user finishes its
+final assigned trajectory. It emits `STOP_PERFORMANCE_TRACKING` at that point to
+avoid measuring the tail. Turns issued before this event remain in the
+performance window even if they finish later; turns issued after it are excluded
+from performance metrics.
 
-For official submissions, submitters must set `agentic_inference.stop_issuing_on_first_user_complete` to `false` so the client finishes already-started trajectories for accuracy. During optimization, set it to `true` to stop issuing future turns at the performance boundary and shorten the tail.
+For official submissions, submitters must set
+`agentic_inference.stop_issuing_on_first_user_complete` to `false` so the client
+finishes already-started trajectories for accuracy. During optimization, set it
+to `true` to stop issuing future turns at the performance boundary and shorten
+the tail.
 
-> **OSL for the accuracy gate.** Because tail turns are excluded from performance metrics, the windowed `output_sequence_lengths.avg` in `performance/result_summary.json` is concurrency-dependent and must **not** be used for the OSL accuracy requirement. Use `output_sequence_lengths_full_run.output_sequence_lengths.avg` — the per-turn mean over **all** turns (tail and dataset repeats included), computed with the same token-counting rule as the window, which is invariant to concurrency. A run is not valid for the OSL accuracy check when `output_sequence_lengths_full_run` is `null`, **or** its `n_turns_counted` is `0` (turns were scanned but none were countable), **or** its `partial` flag is `true` (some turns were errored, undecodable, or missing a COMPLETE record — so the mean is over a subset), **or** the report is not `complete`. `report.txt` prints it as `OSL per-turn mean (accuracy, all turns)` and marks a partial block `PARTIAL — NOT valid for the OSL accuracy gate`.
+> **OSL for the accuracy gate.** Because tail turns are excluded from
+> performance metrics, the windowed `output_sequence_lengths.avg` in
+> `performance/result_summary.json` is concurrency-dependent and must **not** be
+> used for the OSL accuracy requirement. Use
+> `output_sequence_lengths_full_run.output_sequence_lengths.avg` — the per-turn
+> mean over **all** turns (tail and dataset repeats included), computed with the
+> same token-counting rule as the window, which is invariant to concurrency. A
+> run is not valid for the OSL accuracy check when
+> `output_sequence_lengths_full_run` is `null`, **or** its `n_turns_counted` is
+> `0` (turns were scanned but none were countable), **or** its `partial` flag is
+> `true` (some turns were errored, undecodable, or missing a COMPLETE record —
+> so the mean is over a subset), **or** the report is not `complete`.
+> `report.txt` prints it as `OSL per-turn mean (accuracy, all turns)` and marks
+> a partial block `PARTIAL — NOT valid for the OSL accuracy gate`.
 
 ### SWE-bench Accuracy
 
-Submitters must enable SWE-bench accuracy for official submissions. The Kimi K3, Qwen3.6-35B-A3B, and DeepSeek-V4.1-Flash example YAML files include the required SWE-bench accuracy dataset. The benchmark framework skips its built-in endpoint phase for the SWE-bench dataset. Instead, `SWEBenchScorer` submits the run to a native SWE-bench service. The service host owns Docker, `mini-swe-agent`, and the `swebench` evaluation harness, and it drives requests to the configured endpoint.
+Submitters must enable SWE-bench accuracy for official submissions. The Kimi K3,
+Qwen3.6-35B-A3B, and DeepSeek-V4.1-Flash example YAML files include the required
+SWE-bench accuracy dataset. The benchmark framework skips its built-in endpoint
+phase for the SWE-bench dataset. Instead, `SWEBenchScorer` submits the run to a
+native SWE-bench service. The service host owns Docker, `mini-swe-agent`, and
+the `swebench` evaluation harness, and it drives requests to the configured
+endpoint.
 
-Keep `accuracy_config.num_repeats: 1`: the scorer performs one external evaluation run per benchmark. Optional `accuracy_config.extras.subset` and `split` are used consistently for dataset loading, preflight, and scoring.
+Keep `accuracy_config.num_repeats: 1`: the scorer performs one external
+evaluation run per benchmark. Optional `accuracy_config.extras.subset` and
+`split` are used consistently for dataset loading, preflight, and scoring.
 
-`accuracy_config.extras.swebench_service_url` points the benchmark client to the service. Service mode follows the LiveCodeBench-style external-service convention for heavyweight evaluation work and supports exactly one endpoint URL in `endpoint_config.endpoints`; that URL must be reachable from the service host. Treat the service host as trusted infrastructure: it receives the endpoint URL and optional endpoint API key needed to run mini-swe-agent. Start the service with `--auth-token` and set `accuracy_config.extras.swebench_service_auth_token`. Only isolated local development should use the explicit `--allow-unauthenticated` override.
+`accuracy_config.extras.swebench_service_url` points the benchmark client to the
+service. Service mode follows the LiveCodeBench-style external-service
+convention for heavyweight evaluation work and supports exactly one endpoint URL
+in `endpoint_config.endpoints`; that URL must be reachable from the service
+host. Treat the service host as trusted infrastructure: it receives the endpoint
+URL and optional endpoint API key needed to run mini-swe-agent. Start the
+service with `--auth-token` and set
+`accuracy_config.extras.swebench_service_auth_token`. Only isolated local
+development should use the explicit `--allow-unauthenticated` override.
 
-`accuracy_config.extras.workers` sets the agent run's parallelism (`--workers`). If unset, it defaults to the load pattern's `target_concurrency` (for `concurrency`/`agentic_inference` patterns), else 10. `max_eval_workers` (default 10, `--max_workers`) sets the eval harness's parallelism.
+`accuracy_config.extras.workers` sets the agent run's parallelism (`--workers`).
+If unset, it defaults to the load pattern's `target_concurrency` (for
+`concurrency`/`agentic_inference` patterns), else 10. `max_eval_workers`
+(default 10, `--max_workers`) sets the eval harness's parallelism.
 
-Qwen tool-call runs should set `accuracy_config.extras.swebench_template: qwen_tools`. The selected packaged template also activates the service's `QwenToolsModel` through mini-swe-agent's `model_class` hook.
+Qwen tool-call runs should set
+`accuracy_config.extras.swebench_template: qwen_tools`. The selected packaged
+template also activates the service's `QwenToolsModel` through mini-swe-agent's
+`model_class` hook.
 
-If SWE-bench evaluation is needed, start the service with the following command on a host that has Docker:
+If SWE-bench evaluation is needed, start the service with the following command
+on a host that has Docker:
 
 ```bash
 uv run --project src/inference_endpoint/evaluation/swebench_service \
@@ -147,9 +235,13 @@ uv run --project src/inference_endpoint/evaluation/swebench_service \
 
 #### Build ARM64 SWE-bench Images
 
-`[build_and_push.py](build_and_push.py)` builds and pushes the native ARM64 images for the first 200 pinned SWE-bench Verified tasks. The script validates the task list, applies the required ARM compatibility fixes, and skips images that already exist in the destination registry.
+`[build_and_push.py](build_and_push.py)` builds and pushes the native ARM64
+images for the first 200 pinned SWE-bench Verified tasks. The script validates
+the task list, applies the required ARM compatibility fixes, and skips images
+that already exist in the destination registry.
 
-Run it on a native ARM64 machine with Docker after logging in to a registry where you have push access:
+Run it on a native ARM64 machine with Docker after logging in to a registry
+where you have push access:
 
 ```bash
 python3 -m venv /tmp/swebench-arm64-venv
@@ -161,24 +253,44 @@ REGISTRY=registry.example.com/group/project \
   examples/10_Agentic_Inference/build_and_push.py
 ```
 
-Set `WORKERS` to change the default build and push concurrency of `16`. Images are tagged `v4.1.0-arm64`, and interrupted runs can be resumed with the same command.
+Set `WORKERS` to change the default build and push concurrency of `16`. Images
+are tagged `v4.1.0-arm64`, and interrupted runs can be resumed with the same
+command.
 
 ##### ARM64 Compatibility and x86 Comparability
 
-The builder keeps the benchmark workload fixed by pinning the SWE-bench Verified dataset revision and validating the ordered first 200 instance IDs. It does not change the dataset rows, repository or test patches, evaluation commands, or set of tests. The generated images are nevertheless architecture-specific compatibility builds: `arm_compat` adjusts only the environment and repository setup commands needed to build and run the same instances on ARM64.
+The builder keeps the benchmark workload fixed by pinning the SWE-bench Verified
+dataset revision and validating the ordered first 200 instance IDs. It does not
+change the dataset rows, repository or test patches, evaluation commands, or set
+of tests. The generated images are nevertheless architecture-specific
+compatibility builds: `arm_compat` adjusts only the environment and repository
+setup commands needed to build and run the same instances on ARM64.
 
 The compatibility adjustments are:
 
-- Replace legacy Python 3.5 environment requests with Python 3.6, and install `setuptools==38.2.4` with pip after activating the environment when that exact legacy setup command is present.
-- Preinstall `jinja2==3.1.6` and `cython==0.29.36`, then disable build isolation for the matching editable test-dependency installation.
+- Replace legacy Python 3.5 environment requests with Python 3.6, and install
+  `setuptools==38.2.4` with pip after activating the environment when that exact
+  legacy setup command is present.
+- Preinstall `jinja2==3.1.6` and `cython==0.29.36`, then disable build isolation
+  for the matching editable test-dependency installation.
 - Pin `django__django-15103` to Python 3.9.20.
-- For `django__django-10097`, replay the recorded x86 `/testbed/tests` directory enumeration order. The old Django runner consumes unsorted directory entries and leaks test state through `generic_inline_admin`; ARM64 exposes a different filesystem order. Tests absent from the recorded order are appended, so this changes only discovery order, not the test set.
+- For `django__django-10097`, replay the recorded x86 `/testbed/tests` directory
+  enumeration order. The old Django runner consumes unsorted directory entries
+  and leaks test state through `generic_inline_admin`; ARM64 exposes a different
+  filesystem order. Tests absent from the recorded order are appended, so this
+  changes only discovery order, not the test set.
 
-These substitutions intentionally preserve the benchmark instances and evaluation logic, but the resulting software environment is not byte-for-byte identical to the x86 image. The script rebuilds the two instance-specific compatibility images on every run and verifies that every image is ARM64 before pushing it.
+These substitutions intentionally preserve the benchmark instances and
+evaluation logic, but the resulting software environment is not byte-for-byte
+identical to the x86 image. The script rebuilds the two instance-specific
+compatibility images on every run and verifies that every image is ARM64 before
+pushing it.
 
 ## Run The Client
 
-Update the first `datasets` entry (`name` and `path`), `model_params.name`, and `endpoint_config.endpoints` as needed. Then select the matching model config and run it from the repo root:
+Update the first `datasets` entry (`name` and `path`), `model_params.name`, and
+`endpoint_config.endpoints` as needed. Then select the matching model config and
+run it from the repo root:
 
 ```bash
 CONFIG=examples/10_Agentic_Inference/qwen_agentic_benchmark.yaml
@@ -195,17 +307,25 @@ uv run inference-endpoint benchmark from-config --config "$CONFIG" --mode both
 uv run inference-endpoint benchmark from-config --config "$CONFIG" --mode acc
 ```
 
-The default `PERF` mode does not load, preflight, or submit external evaluation scorers. Use `--mode both` or `--mode acc` whenever SWE-bench should run.
+The default `PERF` mode does not load, preflight, or submit external evaluation
+scorers. Use `--mode both` or `--mode acc` whenever SWE-bench should run.
 
-See `accuracy/RUNBOOK.md` for preconditions, sanity checks, and common failure modes.
+See `accuracy/RUNBOOK.md` for preconditions, sanity checks, and common failure
+modes.
 
 ## Official Submission Rules
 
-The YAML configuration gives submitters flexibility to configure the benchmark for their systems, but official submissions must follow the requirements below. All MLPerf Endpoint Benchmark rules apply in full. Where a requirement below is more specific to the Agentic Inference benchmark, the more specific requirement takes precedence for this benchmark.
+The YAML configuration gives submitters flexibility to configure the benchmark
+for their systems, but official submissions must follow the requirements below.
+All MLPerf Endpoint Benchmark rules apply in full. Where a requirement below is
+more specific to the Agentic Inference benchmark, the more specific requirement
+takes precedence for this benchmark.
 
 ### Sampling Parameters and Thinking Flags
 
-Submitters must not modify the sampling parameters or thinking flags. The model-specific values in the example YAML files are authoritative and are repeated below for completeness:
+Submitters must not modify the sampling parameters or thinking flags. The
+model-specific values in the example YAML files are authoritative and are
+repeated below for completeness:
 
 For Kimi K3:
 
@@ -233,28 +353,59 @@ For DeepSeek-V4.1-Flash:
 - `chat_template_kwargs.thinking: true`
 - `chat_template_kwargs.reasoning_effort: max`
 
-Any sampling parameter or thinking flag not listed above for the selected model must be omitted. Submitters must not introduce additional sampling parameters or thinking flags.
+Any sampling parameter or thinking flag not listed above for the selected model
+must be omitted. Submitters must not introduce additional sampling parameters or
+thinking flags.
 
-For models that use `preserve_thinking`, the flag ensures that reasoning tokens from previous turns are not stripped by the chat template before the input is sent to the inference engine. Because chat-template processing is a server-side property, the client can only request this behavior by sending the flag. Popular serving frameworks, including SGLang, vLLM, and TensorRT-LLM, honor this flag; however, each submitter is responsible for verifying that their server is compliant. The chat template must not omit reasoning tokens from any previous turn.
+For models that use `preserve_thinking`, the flag ensures that reasoning tokens
+from previous turns are not stripped by the chat template before the input is
+sent to the inference engine. Because chat-template processing is a server-side
+property, the client can only request this behavior by sending the flag. Popular
+serving frameworks, including SGLang, vLLM, and TensorRT-LLM, honor this flag;
+however, each submitter is responsible for verifying that their server is
+compliant. The chat template must not omit reasoning tokens from any previous
+turn.
 
 ### Dataset Size
 
-For official submissions, `agentic_inference.num_trajectories_to_issue` must be a positive integer multiple of the total dataset size. The official dataset contains 613 trajectories, so valid values are `613`, `1226`, `1839`, and so on.
+For official submissions, `agentic_inference.num_trajectories_to_issue` must be
+a positive integer multiple of the total dataset size. The official dataset
+contains 613 trajectories, so valid values are `613`, `1226`, `1839`, and so on.
 
 Submitters must also enable salting and inter-turn delays by setting:
 
 - `agentic_inference.enable_salt: true`
 - `agentic_inference.inject_tool_delay: true`
 
-For official submissions, `agentic_inference.stop_issuing_on_first_user_complete` must be set to `false` so the client finishes already-started trajectories for accuracy after the performance window ends. Setting it to `true` stops issuing future turns at the performance boundary and may be used only for faster optimization or debugging runs. Runs with this setting enabled are not valid official submissions.
+For official submissions,
+`agentic_inference.stop_issuing_on_first_user_complete` must be set to `false`
+so the client finishes already-started trajectories for accuracy after the
+performance window ends. Setting it to `true` stops issuing future turns at the
+performance boundary and may be used only for faster optimization or debugging
+runs. Runs with this setting enabled are not valid official submissions.
 
 ### Accuracy
 
-Official submissions must enable both inline accuracy and SWE-bench accuracy. Configure the performance dataset with `accuracy_config.eval_method: agentic_inference_inline`, and configure the SWE-bench accuracy dataset with `accuracy_config.eval_method: swe_bench_scorer`. For SWE-bench, `accuracy_config.extras.num_instances` must be set to `200`. When using the example `online` configs, run with `--mode both` so performance, inline accuracy, and SWE-bench accuracy are all executed.
+Official submissions must enable both inline accuracy and SWE-bench accuracy.
+Configure the performance dataset with
+`accuracy_config.eval_method: agentic_inference_inline`, and configure the
+SWE-bench accuracy dataset with `accuracy_config.eval_method: swe_bench_scorer`.
+For SWE-bench, `accuracy_config.extras.num_instances` must be set to `200`. When
+using the example `online` configs, run with `--mode both` so performance,
+inline accuracy, and SWE-bench accuracy are all executed.
 
-Qwen3.6-35B-A3B submissions must set `accuracy_config.extras.swebench_template: qwen_tools`. Kimi K3 and DeepSeek-V4.1-Flash submissions must omit `accuracy_config.extras.swebench_template`.
+Qwen3.6-35B-A3B submissions must set
+`accuracy_config.extras.swebench_template: qwen_tools`. Kimi K3 and
+DeepSeek-V4.1-Flash submissions must omit
+`accuracy_config.extras.swebench_template`.
 
-Every Kimi K3, Qwen3.6-35B-A3B, and DeepSeek-V4.1-Flash submitted Pareto point must satisfy all of the model-specific accuracy thresholds below. For these models, SWE-bench accuracy is evaluated using mean-of-N: average one SWE-bench accuracy result from each of the [four mandatory regions](https://github.com/mlcommons/endpoints_policies/blob/main/endpoints_rules.md#54-regions-of-interest) (`N = 4`), then compare that mean with the model-specific SWE-bench threshold below.
+Every Kimi K3, Qwen3.6-35B-A3B, and DeepSeek-V4.1-Flash submitted Pareto point
+must satisfy all of the model-specific accuracy thresholds below. For these
+models, SWE-bench accuracy is evaluated using mean-of-N: average one SWE-bench
+accuracy result from each of the
+[four mandatory regions](https://github.com/mlcommons/endpoints_policies/blob/main/endpoints_rules.md#54-regions-of-interest)
+(`N = 4`), then compare that mean with the model-specific SWE-bench threshold
+below.
 
 Reference mean values are shown in parentheses.
 
@@ -264,29 +415,39 @@ Reference mean values are shown in parentheses.
 | OSL per-turn mean¹ | `425-520` tokens (`472`) | `344-422` tokens (`383`) | `793-970` tokens (`882`) |
 | SWE-bench accuracy | `>= 93.5%` (`94.83%`)    | `>= 69%` (`71.7%`)       | `>= 96.4%` (`97.5%`)     |
 
-¹ Read from `output_sequence_lengths_full_run.output_sequence_lengths.avg` (the full-run, all-turns mean), **not** the windowed `output_sequence_lengths.avg`. See [Tail Management](#tail-management).
+¹ Read from `output_sequence_lengths_full_run.output_sequence_lengths.avg` (the
+full-run, all-turns mean), **not** the windowed `output_sequence_lengths.avg`.
+See [Tail Management](#tail-management).
 
 ### Approved Checkpoints and Speculative-Decoding Heads
 
-Under the MLPerf Endpoint Benchmark rules, submitters must use only the approved model checkpoints and speculative-decoding heads listed below in their submissions. New artifacts may be added to this list only after approval from the Agentic Inference taskforce.
+Under the MLPerf Endpoint Benchmark rules, submitters must use only the approved
+model checkpoints and speculative-decoding heads listed below in their
+submissions. New artifacts may be added to this list only after approval from
+the Agentic Inference taskforce.
 
 #### Kimi K3
 
 Approved model checkpoints:
 
-- [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3/tree/f831ab66814297da540d832a5235f8e904f29d06) (`f831ab66814297da540d832a5235f8e904f29d06`)
-- [nvidia/Kimi-K3-NVFP4](https://huggingface.co/nvidia/Kimi-K3-NVFP4/tree/b2428a0b83a8b712ff2e1a8448a103d4175341f1) (`b2428a0b83a8b712ff2e1a8448a103d4175341f1`)
+- [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3/tree/f831ab66814297da540d832a5235f8e904f29d06)
+  (`f831ab66814297da540d832a5235f8e904f29d06`)
+- [nvidia/Kimi-K3-NVFP4](https://huggingface.co/nvidia/Kimi-K3-NVFP4/tree/b2428a0b83a8b712ff2e1a8448a103d4175341f1)
+  (`b2428a0b83a8b712ff2e1a8448a103d4175341f1`)
 
 Approved speculative-decoding heads:
 
-- [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark/tree/3c5bac301d9cf392706189d82ed947feca6c2f0f) (`3c5bac301d9cf392706189d82ed947feca6c2f0f`)
-- [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark/tree/cf6b8244620e7ea4b0651d214f28e89eac75bed6) (`cf6b8244620e7ea4b0651d214f28e89eac75bed6`)
+- [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark/tree/3c5bac301d9cf392706189d82ed947feca6c2f0f)
+  (`3c5bac301d9cf392706189d82ed947feca6c2f0f`)
+- [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark/tree/cf6b8244620e7ea4b0651d214f28e89eac75bed6)
+  (`cf6b8244620e7ea4b0651d214f28e89eac75bed6`)
 
 #### DeepSeek-V4.1-Flash
 
 Approved model checkpoint:
 
-- [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) (`dba1be0a40aa45a94ad051997016db3960a90277`)
+- [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
+  (`dba1be0a40aa45a94ad051997016db3960a90277`)
 
 The checkpoint includes its native DSpark speculative-decoding head.
 
@@ -294,8 +455,13 @@ The checkpoint includes its native DSpark speculative-decoding head.
 
 Approved model checkpoints:
 
-- [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/tree/995ad96eacd98c81ed38be0c5b274b04031597b0) (`995ad96eacd98c81ed38be0c5b274b04031597b0`)
-- [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8/tree/95a723d08a9490559dae23d0cff1d9466213d989) (`95a723d08a9490559dae23d0cff1d9466213d989`)
-- [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4/tree/1355db6a052410cfd62085d94b58866fd0f2c3c5) (`1355db6a052410cfd62085d94b58866fd0f2c3c5`; contains both W4A16 and W4A4 scales)
+- [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/tree/995ad96eacd98c81ed38be0c5b274b04031597b0)
+  (`995ad96eacd98c81ed38be0c5b274b04031597b0`)
+- [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8/tree/95a723d08a9490559dae23d0cff1d9466213d989)
+  (`95a723d08a9490559dae23d0cff1d9466213d989`)
+- [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4/tree/1355db6a052410cfd62085d94b58866fd0f2c3c5)
+  (`1355db6a052410cfd62085d94b58866fd0f2c3c5`; contains both W4A16 and W4A4
+  scales)
 
-The approved Qwen checkpoints include their native MTP speculative-decoding heads.
+The approved Qwen checkpoints include their native MTP speculative-decoding
+heads.

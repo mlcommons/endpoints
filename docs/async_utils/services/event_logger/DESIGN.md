@@ -1,11 +1,14 @@
 # Event Logger Service — Design Document
 
-> ZMQ subscriber service that consumes `EventRecord` messages from the pub/sub bus and persists them to JSONL or SQLite storage backends; runs as an independent subprocess.
+> ZMQ subscriber service that consumes `EventRecord` messages from the pub/sub
+> bus and persists them to JSONL or SQLite storage backends; runs as an
+> independent subprocess.
 
 ## Overview
 
-The event logger is a ZMQ subscriber service that consumes `EventRecord` messages
-from the pub/sub event bus and persists them to one or more storage backends.
+The event logger is a ZMQ subscriber service that consumes `EventRecord`
+messages from the pub/sub event bus and persists them to one or more storage
+backends.
 
 It runs as an independent subprocess with its own event loop, connected to the
 same ZMQ PUB socket as other subscriber services (e.g. metrics aggregator).
@@ -32,8 +35,8 @@ event_logger/
 ## Subscribed Events
 
 The event logger subscribes to **all topics** (`topics=None`) so that every
-published `EventRecord` is persisted. It does not interpret event semantics —
-it writes records verbatim to all configured writers.
+published `EventRecord` is persisted. It does not interpret event semantics — it
+writes records verbatim to all configured writers.
 
 The only event type with special handling is `SessionEventType.ENDED`, which
 triggers shutdown (see [Lifecycle](#lifecycle)).
@@ -65,14 +68,14 @@ The CLI maps writer names to classes via `_WRITER_REGISTRY`:
 | `jsonl` | `JSONLWriter` | `events.jsonl` |
 | `sql`   | `SQLWriter`   | `events.db`    |
 
-Multiple writers can be active simultaneously (e.g. `--writers jsonl sql`).
-Each record is written to every configured writer.
+Multiple writers can be active simultaneously (e.g. `--writers jsonl sql`). Each
+record is written to every configured writer.
 
 ## JSONL Writer
 
-`JSONLWriter` writes one JSON line per `EventRecord` using `msgspec.json.Encoder`
-with a custom `enc_hook` that serializes `EventType` enum members as their topic
-strings (e.g. `"session.ended"`, `"sample.complete"`).
+`JSONLWriter` writes one JSON line per `EventRecord` using
+`msgspec.json.Encoder` with a custom `enc_hook` that serializes `EventType` enum
+members as their topic strings (e.g. `"session.ended"`, `"sample.complete"`).
 
 Output path: `{log_dir}/events.jsonl`
 
@@ -118,16 +121,20 @@ uv run python -m inference_endpoint.async_utils.services.event_logger \
 ```
 
 1. Parse CLI arguments.
-2. Create writer instances (one per `--writers` entry), writing to `{log_dir}/events.*`.
-3. Create `ManagedZMQContext.scoped(socket_dir=args.socket_dir)` with the publisher's socket directory.
-4. Create `EventLoggerService` (extends `ZmqEventRecordSubscriber`), which connects
-   to the publisher via `ctx.connect(socket, socket_name)`.
-5. Call `logger.start()` which registers `add_reader` on the subscriber's event loop.
+2. Create writer instances (one per `--writers` entry), writing to
+   `{log_dir}/events.*`.
+3. Create `ManagedZMQContext.scoped(socket_dir=args.socket_dir)` with the
+   publisher's socket directory.
+4. Create `EventLoggerService` (extends `ZmqEventRecordSubscriber`), which
+   connects to the publisher via `ctx.connect(socket, socket_name)`.
+5. Call `logger.start()` which registers `add_reader` on the subscriber's event
+   loop.
 6. `await shutdown_event.wait()` blocks until shutdown is signalled.
 
 ### Processing
 
-Each batch of records decoded from the ZMQ socket is passed to `process(records)`:
+Each batch of records decoded from the ZMQ socket is passed to
+`process(records)`:
 
 ```
 for record in records:
@@ -140,8 +147,9 @@ if saw ENDED:
     flush + close writers, request stop
 ```
 
-All records up to and including `SessionEventType.ENDED` are written. All records
-after ENDED (in the same or subsequent batches) are dropped regardless of type.
+All records up to and including `SessionEventType.ENDED` are written. All
+records after ENDED (in the same or subsequent batches) are dropped regardless
+of type.
 
 ### Shutdown
 
@@ -214,7 +222,8 @@ usage: uv run python -m inference_endpoint.async_utils.services.event_logger
 
 ## Wiring
 
-`publish(EventRecord(...))` calls are connected in the load generator (`BenchmarkSession`
-publishes STARTED / ISSUED / COMPLETE / ERROR events via its `EventPublisher`; the prompt rides on
-the `ISSUED` event's `PromptData` payload rather than a separate event), so the event
-logger receives and persists all session/sample/error events published during a benchmark run.
+`publish(EventRecord(...))` calls are connected in the load generator
+(`BenchmarkSession` publishes STARTED / ISSUED / COMPLETE / ERROR events via its
+`EventPublisher`; the prompt rides on the `ISSUED` event's `PromptData` payload
+rather than a separate event), so the event logger receives and persists all
+session/sample/error events published during a benchmark run.

@@ -1,14 +1,19 @@
 # Benchmarking a HF model via vLLM or SgLang
 
-This document describes how we can benchmark an inference server using the inference endpoints.
+This document describes how we can benchmark an inference server using the
+inference endpoints.
 
 ## Model
 
-We are going to use [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) from Huggingface to demonstrate how to benchmark vLLM and SgLang via inference endpoints.
+We are going to use
+[meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)
+from Huggingface to demonstrate how to benchmark vLLM and SgLang via inference
+endpoints.
 
 ## Launch the server
 
-The following environment variables are used by the commands below to make the scripts easier to run
+The following environment variables are used by the commands below to make the
+scripts easier to run
 
 ```
 export HF_TOKEN=<your Hugging Face token>
@@ -16,7 +21,10 @@ export HF_HOME=<Path to your hf_home, e.g. ~/.cache/huggingface>
 export MODEL_NAME=<model to run, for instance meta-llama/Llama-3.1-8B-Instruct>
 ```
 
-It is convenient to download the model prior to launch so that the container can reuse the model instead of having to download it post-launch. This can be done via `hf download $MODEL_NAME`. The models downloaded can be verified via `hf cache scan`
+It is convenient to download the model prior to launch so that the container can
+reuse the model instead of having to download it post-launch. This can be done
+via `hf download $MODEL_NAME`. The models downloaded can be verified via
+`hf cache scan`
 
 ### [vLLM](https://github.com/vllm-project/vllm)
 
@@ -37,7 +45,9 @@ docker run --gpus all --shm-size 32g --net host -v ${HF_HOME}:/root/.cache/huggi
 
 ### [Enroot](https://github.com/NVIDIA/enroot):
 
-On some platforms, docker is replaced by enroot to provide virtualization. The following steps describe how to launch vLLM using enroot - SgLang instructions are similar:
+On some platforms, docker is replaced by enroot to provide virtualization. The
+following steps describe how to launch vLLM using enroot - SgLang instructions
+are similar:
 
 ```
 enroot import docker://vllm/vllm-openai:latest
@@ -46,7 +56,8 @@ enroot start -e HF_TOKEN=$HF_TOKEN -m $HF_HOME:/root/.cache/huggingface vllm+vll
 
 ## Launching the client
 
-Once the server is up and running, we can send requests to the endpoint by passing in the endpoint address and model name:
+Once the server is up and running, we can send requests to the endpoint by
+passing in the endpoint address and model name:
 
 ```
 uv run inference-endpoint benchmark offline --endpoints http://localhost:8000 --dataset tests/assets/datasets/dummy_1k.jsonl --model ${MODEL_NAME}
@@ -54,7 +65,8 @@ uv run inference-endpoint benchmark offline --endpoints http://localhost:8000 --
 
 # Using a config file
 
-To run [llama2-70b](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf) on a single Nvidia-H200 GPU, we first prepare the environment:
+To run [llama2-70b](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf) on a
+single Nvidia-H200 GPU, we first prepare the environment:
 
 ```
 export MODEL_NAME=meta-llama/Llama-2-70b-chat-hf
@@ -70,7 +82,10 @@ docker run --runtime nvidia --gpus all     -v ${HF_HOME}:/root/.cache/huggingfac
 
 ```
 
-And launch the benchmark using the config file `online_llama2_70b_cnn.yaml`. Note that you will need to export the [cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset via
+And launch the benchmark using the config file `online_llama2_70b_cnn.yaml`.
+Note that you will need to export the
+[cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset
+via
 
 ```
 from datasets import load_dataset

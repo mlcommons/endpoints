@@ -1,10 +1,17 @@
 # Running Endpoints with Qwen3-VL-235B-A22B on Shopify Product Catalogue
 
-This document describes how to perform MLPerf Q3VL benchmarking using the inference endpoints with [Qwen3-VL-235B-A22B-instruct](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct) model and [Shopify's Product Catalogue dataset](https://huggingface.co/datasets/Shopify/product-catalogue) for multimodal product taxonomy classification.
+This document describes how to perform MLPerf Q3VL benchmarking using the
+inference endpoints with
+[Qwen3-VL-235B-A22B-instruct](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct)
+model and
+[Shopify's Product Catalogue dataset](https://huggingface.co/datasets/Shopify/product-catalogue)
+for multimodal product taxonomy classification.
 
 ## Get Dataset
 
-The Shopify Product Catalogue dataset is loaded from HuggingFace and will be generated automatically on first run. Images are converted to base64 for storage.
+The Shopify Product Catalogue dataset is loaded from HuggingFace and will be
+generated automatically on first run. Images are converted to base64 for
+storage.
 
 ```
 # Dataset is auto-downloaded from https://huggingface.co/datasets/Shopify/product-catalogue
@@ -21,11 +28,18 @@ export HF_TOKEN=<your Hugging Face token>  # Optional for public model; may help
 hf download $MODEL_NAME
 ```
 
-The model is available at [Qwen3-VL-235B-A22B-instruct](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct) — no access request required.
+The model is available at
+[Qwen3-VL-235B-A22B-instruct](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct)
+— no access request required.
 
-**Note:** The Shopify Product Catalogue includes `ground_truth_category`, `ground_truth_brand`, and `ground_truth_is_secondhand` from the HuggingFace dataset. For accuracy evaluation, use the `shopify_category_f1` scorer which computes hierarchical F1 for category taxonomy (matches [MLCommons Q3VL evaluation](https://github.com/mlcommons/inference/blob/master/multimodal/qwen3-vl/src/mlperf_inf_mm_q3vl/evaluation.py)).
+**Note:** The Shopify Product Catalogue includes `ground_truth_category`,
+`ground_truth_brand`, and `ground_truth_is_secondhand` from the HuggingFace
+dataset. For accuracy evaluation, use the `shopify_category_f1` scorer which
+computes hierarchical F1 for category taxonomy (matches
+[MLCommons Q3VL evaluation](https://github.com/mlcommons/inference/blob/master/multimodal/qwen3-vl/src/mlperf_inf_mm_q3vl/evaluation.py)).
 
-To add accuracy evaluation, include an accuracy dataset alongside the performance dataset:
+To add accuracy evaluation, include an accuracy dataset alongside the
+performance dataset:
 
 ```yaml
 datasets:
@@ -68,7 +82,9 @@ docker run --runtime nvidia --gpus all \
   --limit-mm-per-prompt.video 0
 ```
 
-Two benchmark scenarios are provided as examples: **offline** (maximum throughput, all queries issued at once) and **online** (sustained QPS load with latency tracking, targeting the MLPerf server scenario).
+Two benchmark scenarios are provided as examples: **offline** (maximum
+throughput, all queries issued at once) and **online** (sustained QPS load with
+latency tracking, targeting the MLPerf server scenario).
 
 Run the **offline** benchmark:
 

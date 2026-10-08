@@ -2,7 +2,8 @@ This directory contains datasets used primarily for testing.
 
 ## `ds_samples.jsonl`
 
-Extracted from the deep-seek preprocessed dataset by taking a sample from each of the sources `{math500, aime1983, livecodebench, gpqa, mmlu_pro}`.
+Extracted from the deep-seek preprocessed dataset by taking a sample from each
+of the sources `{math500, aime1983, livecodebench, gpqa, mmlu_pro}`.
 
 The dataset has the following columns:
 
@@ -15,10 +16,13 @@ The dataset has the following columns:
 
 ## `squad_pruned`
 
-A pruned version of the [SQuAD v1.1](https://github.com/rajpurkar/SQuAD-explorer/raw/master/dataset/dev-v1.1.json) dataset.
-The Huggingface squad dataset (used here) has the following columns : `'id', 'title', 'context', 'question', 'answers'`
-Note that the HF version is a flattened version of the original squad dataset - each question/answer is a flattened version of `(data['data'][0]['paragraphs'][0])['qas'][0].keys()`
-The pruned version holds 50 samples from each slice (training and validation)
+A pruned version of the
+[SQuAD v1.1](https://github.com/rajpurkar/SQuAD-explorer/raw/master/dataset/dev-v1.1.json)
+dataset. The Huggingface squad dataset (used here) has the following columns :
+`'id', 'title', 'context', 'question', 'answers'` Note that the HF version is a
+flattened version of the original squad dataset - each question/answer is a
+flattened version of `(data['data'][0]['paragraphs'][0])['qas'][0].keys()` The
+pruned version holds 50 samples from each slice (training and validation)
 
 ## `dummy_1k.jsonl`
 
@@ -26,7 +30,8 @@ The pruned version holds 50 samples from each slice (training and validation)
 
 **Samples:** 1000
 
-**Format:** JSONL (one JSON object per line with columns: `text_input`, `ref_output`)
+**Format:** JSONL (one JSON object per line with columns: `text_input`,
+`ref_output`)
 
 **Content:**
 

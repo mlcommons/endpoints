@@ -1,6 +1,7 @@
 # Profiling Guide
 
-Line-by-line profiling for the HTTP client and worker processes using `line_profiler`.
+Line-by-line profiling for the HTTP client and worker processes using
+`line_profiler`.
 
 ## Quick Start
 
@@ -24,7 +25,8 @@ Profiling statistics are automatically displayed after tests complete.
 ### Environment Variables
 
 - **`ENABLE_LINE_PROFILER`**: Set to `1` to enable profiling (default: disabled)
-- **`LINE_PROFILER_LOGFILE`**: Custom path for worker profile files (default: `/tmp/mlperf_client_profiles/profile`)
+- **`LINE_PROFILER_LOGFILE`**: Custom path for worker profile files (default:
+  `/tmp/mlperf_client_profiles/profile`)
 
 ### Examples
 
@@ -71,7 +73,8 @@ def my_sync_function(data):
 **Important**:
 
 - The decorator is a no-op when profiling is disabled (zero overhead).
-- May need to explicitly call shutdown() if stats are not printing to stdout by default
+- May need to explicitly call shutdown() if stats are not printing to stdout by
+  default
 
 ```python
 from inference_endpoint.profiling import is_enabled, shutdown
@@ -89,7 +92,8 @@ def cleanup():
 
 Shows execution for the coordinating process:
 
-- `HTTPEndpointClient.issue` - Query submission (fire-and-forget to worker via ZMQ)
+- `HTTPEndpointClient.issue` - Query submission (fire-and-forget to worker via
+  ZMQ)
 - `HTTPEndpointClient.poll` / `recv` / `drain` - Response retrieval
 
 ### Worker Process Profiles
@@ -111,7 +115,9 @@ Shows execution for worker processes making HTTP requests:
 AttributeError: 'NoneType' object has no attribute 'monitoring'
 ```
 
-This appears during Python interpreter shutdown when pytest tears down `sys.monitoring` before `line_profiler`'s C extension cleanup runs. It does **not** affect profiling accuracy or test results.
+This appears during Python interpreter shutdown when pytest tears down
+`sys.monitoring` before `line_profiler`'s C extension cleanup runs. It does
+**not** affect profiling accuracy or test results.
 
-**Warning**:
-line-profiler has limitations in profiling async-code (eg: it cannot tell how much time an await actually spent sleeping)
+**Warning**: line-profiler has limitations in profiling async-code (eg: it
+cannot tell how much time an await actually spent sleeping)

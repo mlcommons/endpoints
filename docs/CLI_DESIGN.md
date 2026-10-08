@@ -1,8 +1,10 @@
 # CLI Design: Config Loading, Validation, and Execution
 
-How `BenchmarkConfig` gets built, validated, and used — from user input to benchmark execution.
+How `BenchmarkConfig` gets built, validated, and used — from user input to
+benchmark execution.
 
-For usage examples and flag reference, see [CLI_QUICK_REFERENCE.md](CLI_QUICK_REFERENCE.md).
+For usage examples and flag reference, see
+[CLI_QUICK_REFERENCE.md](CLI_QUICK_REFERENCE.md).
 
 ## Command Structure
 
@@ -26,7 +28,8 @@ Usage: inference-endpoint COMMAND
 | `benchmark online`      | Sustained QPS with load pattern     | CLI flags → Pydantic |
 | `benchmark from-config` | Run from YAML file                  | YAML → Pydantic      |
 
-Global options: `--version`, `-v` (INFO), `-vv` (DEBUG). Verbosity is handled by the meta-app, not `BenchmarkConfig`.
+Global options: `--version`, `-v` (INFO), `-vv` (DEBUG). Verbosity is handled by
+the meta-app, not `BenchmarkConfig`.
 
 ## Config Construction
 
@@ -51,29 +54,46 @@ Global options: `--version`, `-v` (INFO), `-vv` (DEBUG). Verbosity is handled by
                   setup → execute → finalize
 ```
 
-Both paths produce the **same subclass with the same defaults**. A YAML file with `type: offline` gets `OfflineBenchmarkConfig` — identical to what `benchmark offline` constructs.
+Both paths produce the **same subclass with the same defaults**. A YAML file
+with `type: offline` gets `OfflineBenchmarkConfig` — identical to what
+`benchmark offline` constructs.
 
 ### CLI path
 
-1. **cyclopts constructs the subclass directly.** `OfflineBenchmarkConfig` / `OnlineBenchmarkConfig` are Pydantic models in `config/schema.py` with `@cyclopts.Parameter(name="*")`. cyclopts generates flags from their fields.
+1. **cyclopts constructs the subclass directly.** `OfflineBenchmarkConfig` /
+   `OnlineBenchmarkConfig` are Pydantic models in `config/schema.py` with
+   `@cyclopts.Parameter(name="*")`. cyclopts generates flags from their fields.
 
-2. **Type locked at class level.** `OfflineBenchmarkConfig.type` is `Literal[TestType.OFFLINE]` — determined by subcommand, not user input.
+2. **Type locked at class level.** `OfflineBenchmarkConfig.type` is
+   `Literal[TestType.OFFLINE]` — determined by subcommand, not user input.
 
-3. **Datasets injected after construction.** `--dataset` strings are parsed by a `BeforeValidator` on the `datasets` field, then merged via `config.with_updates(datasets=...)`.
+3. **Datasets injected after construction.** `--dataset` strings are parsed by a
+   `BeforeValidator` on the `datasets` field, then merged via
+   `config.with_updates(datasets=...)`.
 
-Fields get their dotted path automatically; those needing a shorter operational spelling also declare a `cyclopts.Parameter(alias=...)`. For example `settings.timeouts.endpoint_response_idle_timeout_s` accepts either `--timeouts.endpoint-response-idle-timeout-s` or the alias `--endpoint-response-idle-timeout`; it defaults to off and, when enabled, we recommend `>=300` seconds.
+Fields get their dotted path automatically; those needing a shorter operational
+spelling also declare a `cyclopts.Parameter(alias=...)`. For example
+`settings.timeouts.endpoint_response_idle_timeout_s` accepts either
+`--timeouts.endpoint-response-idle-timeout-s` or the alias
+`--endpoint-response-idle-timeout`; it defaults to off and, when enabled, we
+recommend `>=300` seconds.
 
 ### YAML path
 
-1. **`from_yaml_file(path)`** loads YAML, resolves `${VAR}` env vars on parsed values, then passes the dict to a Pydantic `TypeAdapter` with `Discriminator`.
+1. **`from_yaml_file(path)`** loads YAML, resolves `${VAR}` env vars on parsed
+   values, then passes the dict to a Pydantic `TypeAdapter` with
+   `Discriminator`.
 
-2. **Auto-selects subclass.** `type: "offline"` → `OfflineBenchmarkConfig`, `type: "online"` → `OnlineBenchmarkConfig`, others → base `BenchmarkConfig`.
+2. **Auto-selects subclass.** `type: "offline"` → `OfflineBenchmarkConfig`,
+   `type: "online"` → `OnlineBenchmarkConfig`, others → base `BenchmarkConfig`.
 
-3. **Optional CLI overrides.** `--timeout` and `--mode` applied via `config.with_updates(...)` which re-runs validators.
+3. **Optional CLI overrides.** `--timeout` and `--mode` applied via
+   `config.with_updates(...)` which re-runs validators.
 
 ### Why subclasses?
 
-`OfflineBenchmarkConfig` and `OnlineBenchmarkConfig` exist in the schema (not just CLI) so both paths share them:
+`OfflineBenchmarkConfig` and `OnlineBenchmarkConfig` exist in the schema (not
+just CLI) so both paths share them:
 
 ```
 BenchmarkConfig (base — submission/eval fallback)
@@ -100,7 +120,9 @@ They provide:
 --dataset [perf|acc:]<path>[,key=value...]
 ```
 
-The first segment is the file path, optionally prefixed with `perf:` or `acc:` to set the dataset type (defaults to performance). Additional comma-separated `key=value` pairs set Dataset fields using dotted paths for nesting.
+The first segment is the file path, optionally prefixed with `perf:` or `acc:`
+to set the dataset type (defaults to performance). Additional comma-separated
+`key=value` pairs set Dataset fields using dotted paths for nesting.
 
 ```bash
 # Simple
@@ -119,11 +141,17 @@ The first segment is the file path, optionally prefixed with `perf:` or `acc:` t
 --dataset perf:train.jsonl --dataset acc:eval.jsonl,accuracy_config.eval_method=pass_at_1 --mode both
 ```
 
-Parser remaps use `parser.TARGET=SOURCE` — "rename my dataset's SOURCE column to TARGET". Valid targets are derived from `MakeAdapterCompatible` (`prompt`, `system`). Invalid targets are rejected at parse time. Invalid source columns are rejected at dataset load time.
+Parser remaps use `parser.TARGET=SOURCE` — "rename my dataset's SOURCE column to
+TARGET". Valid targets are derived from `MakeAdapterCompatible` (`prompt`,
+`system`). Invalid targets are rejected at parse time. Invalid source columns
+are rejected at dataset load time.
 
-Pydantic validates all fields: `extra="forbid"` on `Dataset` and `AccuracyConfig` catches typos like `--dataset data.jsonl,samles=500`. Format is auto-detected from file extension.
+Pydantic validates all fields: `extra="forbid"` on `Dataset` and
+`AccuracyConfig` catches typos like `--dataset data.jsonl,samles=500`. Format is
+auto-detected from file extension.
 
-The only YAML-only features are `submission_ref` and `benchmark_mode` (for official submissions).
+The only YAML-only features are `submission_ref` and `benchmark_mode` (for
+official submissions).
 
 ## Validation
 
@@ -144,11 +172,13 @@ Validation is layered, executing in order:
  5. Runtime (execute.py) → files exist, endpoints reachable
 ```
 
-Sub-models self-validate their own constraints. `BenchmarkConfig` only handles cross-model checks.
+Sub-models self-validate their own constraints. `BenchmarkConfig` only handles
+cross-model checks.
 
 ### Error formatting
 
-Errors from cyclopts (missing args, unknown flags, Pydantic validation) go through `cli_error_formatter` in `config/utils.py`:
+Errors from cyclopts (missing args, unknown flags, Pydantic validation) go
+through `cli_error_formatter` in `config/utils.py`:
 
 ```
 $ uv run inference-endpoint benchmark offline
@@ -163,7 +193,8 @@ $ uv run inference-endpoint benchmark offline --endpoints x --model M --dataset 
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-The formatter resolves aliases (shows `--dataset` not `--endpoint-config.endpoints`) and strips Pydantic boilerplate.
+The formatter resolves aliases (shows `--dataset` not
+`--endpoint-config.endpoints`) and strips Pydantic boilerplate.
 
 ## Error Handling
 
@@ -176,8 +207,8 @@ ExecutionError          4           Benchmark failed after setup
 CLIError                1           Generic CLI error (base class)
 ```
 
-The reserved `eval` command currently raises `CLIError` with a tracking issue link rather than a
-dedicated exception type.
+The reserved `eval` command currently raises `CLIError` with a tracking issue
+link rather than a dedicated exception type.
 
 ## Development Guide
 
@@ -203,7 +234,8 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 
 ### Config modification
 
-`BenchmarkConfig` is frozen. Use `with_updates()` to produce new instances with re-validation:
+`BenchmarkConfig` is frozen. Use `with_updates()` to produce new instances with
+re-validation:
 
 ```python
 config = config.with_updates(timeout=300, datasets=["new_data.jsonl"])

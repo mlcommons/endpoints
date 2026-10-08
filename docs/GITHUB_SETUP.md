@@ -1,8 +1,10 @@
 # GitHub Setup Guide
 
-> **Note**: This is a living document that will be refined as the project evolves.
+> **Note**: This is a living document that will be refined as the project
+> evolves.
 
-Quick reference for setting up GitHub workflows and branch protection for the MLPerf Inference Endpoint project.
+Quick reference for setting up GitHub workflows and branch protection for the
+MLPerf Inference Endpoint project.
 
 ## 📋 Available GitHub Workflows
 

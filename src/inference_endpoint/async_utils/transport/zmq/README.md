@@ -2,7 +2,8 @@
 
 ## Overview
 
-IPC between main process and worker processes using ZeroMQ PUSH/PULL sockets over Unix domain sockets, integrated with Python's asyncio event loop.
+IPC between main process and worker processes using ZeroMQ PUSH/PULL sockets
+over Unix domain sockets, integrated with Python's asyncio event loop.
 
 ## Architecture
 
@@ -38,9 +39,11 @@ IPC between main process and worker processes using ZeroMQ PUSH/PULL sockets ove
 
 ### Data Flow
 
-1. **Request**: Main selects specific worker PUSH socket -> IPC -> Worker PULL socket.
+1. **Request**: Main selects specific worker PUSH socket -> IPC -> Worker PULL
+   socket.
 2. **Processing**: Worker executes HTTP request.
-3. **Response**: Worker sends to PUSH socket -> IPC -> Main PULL socket (multiplexed).
+3. **Response**: Worker sends to PUSH socket -> IPC -> Main PULL socket
+   (multiplexed).
 
 ### Lifecycle
 
