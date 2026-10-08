@@ -1,0 +1,46 @@
+# Cohort policy; all five files must pin the same version and revision.
+version: 2026-10-C1
+revision: 1
+scope: system
+severity: error
+checks:
+  benchmark-model-dir:
+    { kind: presence, target: system.model_directories, minimum_count: 1 }
+  power-descriptor:
+    kind: power
+    operation: descriptor
+    artifact: system_power.json
+    schema: appendix_e_system_power
+    constants: catalogs.power
+    unless: { division: [RDI, Serviced], not_declared: [power_descriptor] }
+    require_derivable_total: true
+    validate_public_sources: true
+    validate_node_sets: true
+    validate_scale_out: true
+    validate_computed_values: true
+    cooling_must_match_system_description: true
+  power-estimated:
+    {
+      kind: power,
+      operation: appendix_d_defaults,
+      constants: catalogs.power,
+      severity: warning,
+      tag: estimated_power,
+    }
+  system-description-across-curves:
+    kind: consistency
+    target: point.system_description
+    scope: system
+    exclude_fields:
+      [
+        tps_utilization,
+        tensor_parallel,
+        pipeline_parallel,
+        expert_parallel,
+        data_parallel,
+        disaggregated,
+        batch,
+        config_summary,
+        config_summary_notes,
+      ]
+    comparison: whole_document

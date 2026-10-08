@@ -1,0 +1,346 @@
+# Cohort policy; all five files must pin the same version and revision.
+version: 2026-10-C1
+revision: 1
+scope: point
+severity: error
+checks:
+  submission-flags:
+    kind: field_constraints
+    applies_to: { load_pattern: [agentic_inference] }
+    constraints: catalogs.submission_flags.agentic
+    on_missing: error
+    requires: [point_config]
+  swebench-template:
+    kind: field_constraints
+    applies_to: { load_pattern: [agentic_inference] }
+    target: accuracy.swe_bench.extras.swebench_template
+    constraints_by_model: catalogs.submission_flags.swebench_templates
+    requires: [point_config]
+  agentic-trajectory-count:
+    kind: dataset_count
+    applies_to: { load_pattern: [agentic_inference] }
+    dataset: agentic_combined
+    source: point.runtime_settings.agentic_inference.num_trajectories_to_issue
+    sample_unit: trajectory
+    operator: positive_multiple
+    catalog: catalogs.datasets
+    on_missing: error
+    requires: [point_config]
+  swebench-instance-count:
+    kind: dataset_count
+    applies_to: { load_pattern: [agentic_inference] }
+    dataset: swe_bench
+    sources:
+      [
+        accuracy.swe_bench.extras.num_instances,
+        accuracy.swe_bench.evaluated_instance_count,
+      ]
+    sample_unit: instance
+    operator: equal
+    catalog: catalogs.datasets
+    require_all: true
+    requires: [point_config]
+  endpoints-client-sha:
+    kind: artifact_binding
+    source: result_summary.git_sha
+    format: git_commit_sha1
+    catalog: catalogs.approved_client_revisions
+    on_missing: error
+    on_empty_approval_list: blocked
+    matching: exact_revision
+    repository: https://github.com/mlcommons/endpoints
+  approved-checkpoint:
+    kind: artifact_binding
+    sources: [point.checkpoint.repository, point.checkpoint.revision]
+    catalog: catalogs.approved_checkpoints
+    matching: model_and_repository_and_revision
+    on_missing: error
+    on_empty_model_catalog: blocked
+  point-power:
+    kind: power
+    operation: engaged_nodes
+    requires: [power_computation, point_config]
+    source: point.nodes_used
+    on_undeclared_nodes: fully_engaged
+    declared_total_scaling: maximum_engaged_fraction
+    switch_scaling: engaged_node_fraction
+    round_kw_decimals: 2
+  point-config-valid:
+    { kind: artifact_schema, artifact: point.yaml, schema: point_config }
+  point-dirname-concurrency:
+    kind: consistency
+    left: point.directory_concurrency
+    right: point.concurrency
+    comparison: exact
+    requires: [point_config]
+  system-description-present:
+    { kind: presence, target: point.system_desc.json, object: file }
+  system-description-valid:
+    {
+      kind: artifact_schema,
+      artifact: system_desc.json,
+      schema: system_description,
+    }
+  result-summary-present:
+    { kind: presence, target: point.result_summary.json, object: file }
+  result-file-valid:
+    {
+      kind: artifact_schema,
+      artifact: result_summary.json,
+      schema: result_summary,
+    }
+  accuracy-valid:
+    kind: artifact_schema
+    accept: [accuracy_results.json, results.json.accuracy_scores]
+    schema: accuracy_result
+    when_present: true
+    precedence: standalone_first
+    reject_empty: true
+  point-disclosure-complete:
+    { kind: disclosure, fields: catalogs.disclosure.required_fields }
+  target-cohort:
+    {
+      kind: cohort_identifier,
+      target: point.target_cohort,
+      format: year_month_c0_or_c1,
+      requires: [point_config],
+    }
+  shared-path-resolution:
+    kind: path_resolution
+    targets: [point.shared_src, point.shared_docs]
+    base: submission.root
+    require_directory: true
+    allow_absolute: false
+    allow_parent_traversal: false
+    allow_escape_via_symlink: false
+    on_missing: skip
+  offline-declared:
+    {
+      kind: membership,
+      target: point.offline,
+      catalog: catalogs.offline_modes,
+      required: false,
+      requires: [point_config],
+    }
+  region-declared:
+    {
+      kind: membership,
+      target: point.region,
+      catalog: catalogs.declared_regions,
+      required: false,
+      requires: [point_config],
+    }
+  concurrency-in-range:
+    kind: region_placement
+    operation: in_range
+    requires: [computed_regions, point_config]
+    include_margin: true
+    unless: { offline: [dedicated] }
+  region-placement:
+    kind: region_placement
+    operation: declared_matches_computed
+    requires: [computed_regions]
+    severity: warning
+    ignore_declared: [submitters_choice]
+    on_missing_or_unclassifiable: skip
+  load-pattern:
+    kind: issuance
+    allowed: [concurrency, agentic_inference]
+    require_positive_concurrency: true
+    unless: { offline: [dedicated] }
+    requires: [point_config]
+  streaming-config:
+    {
+      kind: report,
+      target: point.runtime_settings.stream_all_chunks,
+      severity: info,
+      interpretation: client_ipc_forwarding_only,
+    }
+  warmup-present: { kind: presence, target: point.warmup, object: declaration }
+  warmup-logs-retained:
+    kind: warmup
+    operation: log_retention
+    applies_to: { declared: [warmup] }
+    requires: [warmup, point_config]
+    severity: warning
+    disabled_warmup: exempt
+    require_declared_retained: true
+    verify_archive_contents: false
+  warmup-salt:
+    kind: warmup
+    operation: salt_disabled
+    source: point.runtime_settings.warmup.salt
+    severity: warning
+    on_missing: skip
+    requires: [point_config]
+  steady-state-valid:
+    kind: steady_state
+    operation: vocabulary
+    applies_to: { declared: [steady_state] }
+    requires: [steady_state, point_config]
+    constants: catalogs.steady_state
+  steady-state-consistency:
+    kind: steady_state
+    operation: status_window_agreement
+    applies_to: { declared: [steady_state] }
+    requires: [steady_state, point_config]
+    constants: catalogs.steady_state
+    official_requires_plateau: true
+    check_reported_super_pass_count: true
+    on_missing_window_extent: skip_count_comparison
+  steady-state-basis:
+    kind: steady_state
+    operation: reporting_basis
+    constants: catalogs.steady_state
+    on_missing_or_nonofficial: warning
+    fallback: whole_run_total
+    on_drift: warn_range_or_slope_required
+  point-duration:
+    kind: duration
+    requires: [computed_regions]
+    severity: error
+    thresholds: catalogs.steady_state.minimum_duration_ms
+    basis_precedence: [reported_window_issue_span, whole_run_duration]
+    window_status_required: false
+    on_unclassifiable_concurrency: skip
+  min-query-count:
+    kind: dataset_minimum
+    source: result_summary.n_samples_completed
+    catalog: catalogs.datasets
+    threshold: sample_count
+    supported_sample_units: [sample]
+    on_unsupported_sample_unit: skip
+    on_unknown_or_null_threshold: skip
+  metric-consistency-duration:
+    kind: comparison
+    left: { kind: field, field: result_summary.duration_ns }
+    operator: greater_than
+    right: { kind: constant, value: 0 }
+  metric-consistency-accounting:
+    kind: comparison
+    when: { field: result_summary.n_samples_issued, greater_than: 0 }
+    left: { kind: field, field: result_summary.n_samples_completed }
+    operator: equal
+    right: { kind: field, field: result_summary.n_samples_issued }
+  metric-consistency-output-tokens:
+    kind: comparison
+    left: { kind: field, field: result_summary.output_sequence_lengths.total }
+    operator: greater_than_or_equal
+    right: { kind: constant, value: 0 }
+  metric-consistency-system-tps:
+    kind: derived_metric
+    operation: output_tokens_per_elapsed_second
+    stored: result_summary.system_tps
+    constants: catalogs.metrics
+    on_missing_stored: report_derived
+  metric-consistency-tpot-p90:
+    kind: numeric_validity
+    source: result_summary.tpot.percentiles.90
+    require_present: true
+    finite: true
+    strictly_positive: true
+    verify_underlying_distribution: false
+  metric-consistency-tps-per-user:
+    kind: derived_metric
+    operation: inverse_tpot_p90_ms
+    numerator: 1000
+    stored: result_summary.tps_per_user
+    constants: catalogs.metrics
+    on_invalid_tpot: skip
+    on_missing_stored: report_derived
+  metric-consistency-tps-per-kw:
+    kind: derived_metric
+    operation: throughput_per_provisioned_kw
+    denominator: point.power_kw
+    stored: result_summary.system_tps_per_kw
+    constants: catalogs.metrics
+    on_missing_or_nonpositive_power: skip
+    on_missing_stored: report_derived
+    requires: [point_power, point_config]
+  agentic-metric-consistency:
+    kind: derived_metric
+    operation: output_tokens_per_completed_turn_second
+    stored: result_summary.e2e_avg_interactivity
+    constants: catalogs.metrics
+    on_stored_without_derivable_inputs: error
+    on_no_inputs_and_no_stored: skip
+    on_missing_stored: report_derived
+  seed-config-legacy:
+    kind: seed_binding
+    operation: legacy_names
+    aliases:
+      {
+        scheduler_random_seed: scheduler_rng_seed,
+        dataloader_random_seed: sample_index_rng_seed,
+      }
+    severity: warning
+    warn_legacy_only_when_model_seed_missing: true
+  seed-set-membership:
+    kind: seed_binding
+    operation: membership
+    catalog: context.cohorts.seed_sets
+    on_unavailable: blocked
+    requires: [point_config, seed_catalog]
+  seed-runtime-match:
+    kind: seed_binding
+    operation: runtime_values
+    catalog: context.cohorts.seed_sets
+    on_unavailable: blocked
+    fields: [scheduler_rng_seed, sample_index_rng_seed, model_seed]
+    require_all: true
+    requires: [point_config, seed_catalog]
+  seed-set-adoption:
+    kind: seed_binding
+    operation: adoption_window
+    catalog: context.cohorts.seed_sets
+    on_unavailable: blocked
+    adoption_window_cohorts: 4
+    on_legacy_registry_without_cohorts: blocked
+    requires: [point_config, seed_catalog]
+  approved-drafter:
+    kind: drafter_binding
+    operation: membership
+    applies_to: { speculative_decoding: true }
+    requires: [approved_sped_decode_heads, point_config]
+    catalog: catalogs.approved_sped_decode_heads
+    matching: model_and_repository_and_revision
+    on_missing_repository_or_revision: error
+    on_empty_catalog: error
+  drafter-approval-lead-time:
+    kind: drafter_binding
+    operation: approval_age
+    applies_to: { speculative_decoding: true }
+    requires: [approved_sped_decode_heads, point_config]
+    catalog: catalogs.approved_sped_decode_heads
+    minimum_cohorts: 2
+    on_unmatched_drafter: skip
+    on_unparseable_cohort: warning
+    on_missing_approval_cohort: warning
+  nodes-used:
+    kind: power
+    operation: node_declaration
+    requires: [point_config, power_computation]
+    source: point.nodes_used
+    reject_duplicate_ensemble_ids: true
+    require_known_ensemble_ids: true
+    require_nodes_within_provisioned: true
+    require_accelerator_capacity: true
+    on_spare_nodes: warning
+    on_undeclared_nodes: fully_engaged
+  maximal-engagement:
+    kind: power
+    operation: maximal_engagement
+    requires: [point_config, power_computation]
+    parallelism: point.system_description
+    replica_factors: [tensor_parallel, pipeline_parallel, expert_parallel]
+    require_maximum_data_parallel: true
+    shortfall: point.dp_shortfall
+    on_missing_parallelism: warning
+    on_disaggregated: warning
+    on_unknown_accelerator_count: warning
+  point-rules-skipped:
+    kind: report
+    severity: warning
+    applies_to: { invalid: [point_config] }
+    target: point.directory
+    operation: blocked_config_dependents

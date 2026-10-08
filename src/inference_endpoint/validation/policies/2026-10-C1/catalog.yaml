@@ -1,0 +1,321 @@
+# Cohort policy; all five files must pin the same version and revision.
+version: 2026-10-C1
+revision: 1
+catalogs:
+  load_pattern: [concurrency, agentic_inference, max_throughput]
+  divisions: [Standardized, Serviced, RDI]
+  offline_modes: [none, dedicated, elected]
+  region_names:
+    [low_latency, low_concurrency, med_concurrency, high_concurrency, margin]
+  declared_regions:
+    [
+      low_latency,
+      low_concurrency,
+      med_concurrency,
+      high_concurrency,
+      margin,
+      submitters_choice,
+    ]
+  mandatory_accuracy_bands:
+    [ultra_low_concurrency, low_concurrency, med_concurrency, high_concurrency]
+  datasets:
+    open_orca: { sample_count: 24576, is_legacy: true }
+    cnn_dailymail: { sample_count: 13368 }
+    aime25: { sample_count: 30 }
+    gpqa: { sample_count: 198 }
+    livecodebench: { sample_count: 880 }
+    shopify_product_catalogue: { sample_count: 48289 }
+    shopify_product_catalogue_8k: { sample_count: 8000 }
+    mlperf_gpt_oss_performance: { sample_count: 6396 }
+    mlperf_gpt_oss_accuracy: { sample_count: 4395 }
+    math500: { sample_count: 500 }
+    legacy_mlperf_deepseek_r1: { sample_count: 4388, is_legacy: true }
+    legacy_llama3_1_405b_accuracy: { sample_count: 8313, is_legacy: true }
+    legacy_mixtral_accuracy: { sample_count: 15000, is_legacy: true }
+    agentic_combined: { sample_count: 613, sample_unit: trajectory }
+    swe_bench: { sample_count: 200, sample_unit: instance }
+  models:
+    llama3_1-8b:
+      accuracy:
+        kind: single_turn
+        datasets: [cnn_dailymail]
+        metrics:
+          rouge1: { reference: 38.7792, minimum_multiplier: 0.99 }
+          rouge2: { reference: 15.9075, minimum_multiplier: 0.99 }
+          rougel: { reference: 24.4957, minimum_multiplier: 0.99 }
+          rougelsum: { reference: 35.793, minimum_multiplier: 0.99 }
+          gen_len:
+            {
+              reference: 8167644,
+              minimum_multiplier: 0.9,
+              maximum_multiplier: 1.1,
+            }
+    gpt-oss-120b:
+      accuracy:
+        {
+          kind: single_turn,
+          datasets: [mlperf_gpt_oss_accuracy],
+          metrics:
+            { exact_match: { reference: 83.13, minimum_multiplier: 0.99 } },
+        }
+    deepseek-r1:
+      accuracy:
+        {
+          kind: single_turn,
+          datasets: [legacy_mlperf_deepseek_r1],
+          metrics:
+            { exact_match: { reference: 81.3582, minimum_multiplier: 0.99 } },
+        }
+    kimi-k3:
+      accuracy:
+        kind: agentic
+        datasets: [agentic_combined, swe_bench]
+        inline_minimum_percent: 58.32
+        swebench_mean_minimum_percent: 93.5
+        full_run_osl_range: [425, 520]
+    qwen3_6-35b-a3b:
+      accuracy:
+        kind: agentic
+        datasets: [agentic_combined, swe_bench]
+        inline_minimum_percent: 55.86
+        swebench_mean_minimum_percent: 69.0
+        full_run_osl_range: [344, 422]
+    deepseek-v4_1-flash:
+      accuracy:
+        kind: agentic
+        datasets: [agentic_combined, swe_bench]
+        inline_minimum_percent: 52.36
+        swebench_mean_minimum_percent: 96.4
+        full_run_osl_range: [793, 970]
+    llama3_1-405b:
+      accuracy:
+        kind: single_turn
+        datasets: [legacy_llama3_1_405b_accuracy]
+        metrics:
+          rougel: { reference: 21.6666, minimum_multiplier: 0.99 }
+          exact_match: { reference: 90.1335, minimum_multiplier: 0.99 }
+          tokens_per_sample:
+            {
+              reference: 684.68,
+              minimum_multiplier: 0.9,
+              maximum_multiplier: 1.1,
+            }
+    llama2-70b:
+      accuracy:
+        kind: single_turn
+        datasets: [open_orca]
+        metrics:
+          rouge1: { reference: 44.4312, minimum_multiplier: 0.99 }
+          rouge2: { reference: 22.0352, minimum_multiplier: 0.99 }
+          rougel: { reference: 28.6162, minimum_multiplier: 0.99 }
+          tokens_per_sample:
+            {
+              reference: 294.45,
+              minimum_multiplier: 0.9,
+              maximum_multiplier: 1.1,
+            }
+    mixtral-8x7b:
+      accuracy:
+        kind: single_turn
+        datasets: [legacy_mixtral_accuracy]
+        metrics:
+          rouge1: { reference: 45.5989, minimum_multiplier: 0.99 }
+          rouge2: { reference: 23.3526, minimum_multiplier: 0.99 }
+          rougel: { reference: 30.4608, minimum_multiplier: 0.99 }
+          tokens_per_sample:
+            {
+              minimum_reference: 144.84,
+              maximum_reference: 145.9,
+              minimum_multiplier: 0.9,
+              maximum_multiplier: 1.1,
+            }
+  approved_sped_decode_heads:
+    - model: kimi-k3
+      repository: RadixArk/Kimi-K3-DSpark
+      revision: 3c5bac301d9cf392706189d82ed947feca6c2f0f
+      method: dspark
+    - model: kimi-k3
+      repository: Inferact/Kimi-K3-DSpark
+      revision: cf6b8244620e7ea4b0651d214f28e89eac75bed6
+      method: dspark
+    - model: deepseek-v4_1-flash
+      repository: deepseek-ai/DeepSeek-V4.1-Flash
+      revision: dba1be0a40aa45a94ad051997016db3960a90277
+      method: dspark
+      bundled: true
+    - model: qwen3_6-35b-a3b
+      repository: Qwen/Qwen3.6-35B-A3B
+      revision: 995ad96eacd98c81ed38be0c5b274b04031597b0
+      method: mtp
+      bundled: true
+    - model: qwen3_6-35b-a3b
+      repository: Qwen/Qwen3.6-35B-A3B-FP8
+      revision: 95a723d08a9490559dae23d0cff1d9466213d989
+      method: mtp
+      bundled: true
+    - model: qwen3_6-35b-a3b
+      repository: nvidia/Qwen3.6-35B-A3B-NVFP4
+      revision: 1355db6a052410cfd62085d94b58866fd0f2c3c5
+      method: mtp
+      bundled: true
+  approved_client_revisions: []
+  approved_checkpoints:
+    llama3_1-8b:
+      - repository: meta-llama/Llama-3.1-8B-Instruct
+        revision: 0e9e39f249a16976918f6564b8830bc894c89659
+    gpt-oss-120b:
+      - repository: openai/gpt-oss-120b
+        revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
+      - repository: openai/gpt-oss-120b
+        revision: 8b193b0ef83bd41b40eb71fee8f1432315e02a3e
+    deepseek-r1:
+      - repository: deepseek-ai/DeepSeek-R1
+        revision: 56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad
+      - repository: deepseek-ai/DeepSeek-R1
+        revision: a157fa3d494497a54586a333a23df6c2143e7697
+    kimi-k3:
+      - repository: moonshotai/Kimi-K3
+        revision: f831ab66814297da540d832a5235f8e904f29d06
+      - repository: moonshotai/Kimi-K3
+        revision: a590ce090cb049c93a33dfe8c208ec652aa20503
+      - repository: nvidia/Kimi-K3-NVFP4
+        revision: b2428a0b83a8b712ff2e1a8448a103d4175341f1
+      - repository: nvidia/Kimi-K3-NVFP4
+        revision: f8c5234a0a880bcc6cbf779a315e7ee2f405b812
+    deepseek-v4_1-flash:
+      - repository: deepseek-ai/DeepSeek-V4.1-Flash
+        revision: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
+      - repository: deepseek-ai/DeepSeek-V4.1-Flash
+        revision: dba1be0a40aa45a94ad051997016db3960a90277
+    qwen3_6-35b-a3b:
+      - repository: Qwen/Qwen3.6-35B-A3B
+        revision: 995ad96eacd98c81ed38be0c5b274b04031597b0
+      - repository: Qwen/Qwen3.6-35B-A3B
+        revision: 53c43178507d69762986fbfa314f6e8d4d859409
+      - repository: Qwen/Qwen3.6-35B-A3B-FP8
+        revision: 95a723d08a9490559dae23d0cff1d9466213d989
+      - repository: Qwen/Qwen3.6-35B-A3B-FP8
+        revision: b2c1da757f2269109e990d56aeb3f2460260db3b
+      - repository: nvidia/Qwen3.6-35B-A3B-NVFP4
+        revision: 1355db6a052410cfd62085d94b58866fd0f2c3c5
+      - repository: nvidia/Qwen3.6-35B-A3B-NVFP4
+        revision: 491c2f1ea524c639598bf8fa787a93fed5a6fbce
+  submission_flags:
+    agentic:
+      runtime_settings.agentic_inference.enable_salt: { equals: true }
+      runtime_settings.agentic_inference.inject_tool_delay: { equals: true }
+      runtime_settings.agentic_inference.stop_issuing_on_first_user_complete:
+        { equals: false }
+      accuracy.inline.eval_method: { equals: agentic_inference_inline }
+      accuracy.swe_bench.eval_method: { equals: swe_bench_scorer }
+      accuracy.swe_bench.num_repeats: { equals: 1 }
+    swebench_templates:
+      {
+        qwen3_6-35b-a3b: { equals: qwen_tools },
+        kimi-k3: { absent: true },
+        deepseek-v4_1-flash: { absent: true },
+      }
+  disclosure:
+    required_fields:
+      [
+        division,
+        max_supported_concurrency,
+        model_name,
+        model_precision,
+        link_to_model,
+        dataset_name,
+        dataset_type,
+        dataset_link,
+        shared_src,
+        shared_docs,
+        seed_set,
+        target_cohort,
+      ]
+  steady_state:
+    statuses:
+      [windowable, insufficient_duration, insufficient_passes, partial_dataset]
+    verdicts: [steady_state, drifting_up, drifting_down, anomaly, not_found]
+    metric_states: [plateau, drifting_up, drifting_down]
+    minimum_super_passes: 4
+    minimum_duration_ms:
+      {
+        low_latency: 600000,
+        low_concurrency: 1200000,
+        med_concurrency: 1200000,
+        high_concurrency: 1200000,
+        margin: 1200000,
+      }
+  regions:
+    ultra_low_maximum: 32
+    logarithmic_partitions: 3
+    rounding: half_even
+    margin_multiplier: 1.1
+    margin_rounding: ceiling
+    margin_satisfies_high_coverage: false
+  power:
+    cooling_overhead: { liquid: 0.3, air: 0.5, mixed: 0.5 }
+    computed_tolerance_w: 0.5
+    computed_tolerance_kw: 0.005
+    defaults:
+      cpu:
+        - architecture: x86
+          maximum_cores: 64
+          watts: 350
+        - architecture: x86
+          minimum_cores: 65
+          watts: 500
+        - architecture: arm
+          maximum_cores: 128
+          watts: 300
+      accelerators:
+        {
+          gb300: 1400,
+          gb200: 1200,
+          b300: 1100,
+          b200: 1000,
+          mi455x: 2500,
+          mi355x: 1400,
+          mi350x: 1000,
+          tpuv7: 1000,
+          tn3: 700,
+        }
+      switches:
+        sn6810ld: { passive: 1960, active_optical: 1960 }
+        sn5610: { passive: 900, active_optical: 2080 }
+        sn5400: { passive: 670 }
+        sn4700: { passive: 630 }
+      nic_watts: 75
+  metrics:
+    {
+      relative_tolerance: 0.01,
+      relative_denominator_floor: 1.0e-09,
+      utilization_absolute_tolerance: 0.1,
+    }
+enrollment:
+  models:
+    [
+      llama3_1-8b,
+      gpt-oss-120b,
+      deepseek-r1,
+      kimi-k3,
+      qwen3_6-35b-a3b,
+      deepseek-v4_1-flash,
+    ]
+  check_groups: [submission, system, curve, point, diagnostics]
+  overrides: []
+diagnostics:
+  scope: validator
+  severity: warning
+  checks:
+    seed-set-registry:
+      {
+        kind: catalog_integrity,
+        catalog: context.cohorts.seed_sets,
+        on_unavailable: block_dependent_checks,
+      }
+    drafter-list-registry:
+      {
+        kind: catalog_integrity,
+        catalog: catalogs.approved_sped_decode_heads,
+        on_unavailable: block_dependent_checks,
+      }
