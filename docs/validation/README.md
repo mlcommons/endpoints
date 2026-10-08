@@ -18,14 +18,20 @@ names and references are validated by the versioned policy parser.
 
 ## Conditions and evidence
 
-Each check declares inline inclusion/exclusion predicates and dependencies.
-Different fields are ANDed; enum lists are alternatives. Exclusion wins.
-Unknown classification blocks selection. Empty fact sets represent known absence.
-Curve member exceptions produce distinct plans with selected member IDs.
-Overlapping exceptions on one member fail explicitly. Point-specific unknown
-facts remain unknown. Independent checks stay planned when another artifact fails.
-Datasets normalize is_legacy to false and sample_unit to sample when omitted.
-Seeds come from the bundled published cohort catalog.
+- Each check declares when it applies, when it is excluded, and which evidence it
+  requires.
+- All condition fields must match. Within an enum list, any listed value can match.
+  A matching exclusion prevents the check from running.
+- Missing classification information blocks checks that need it. An empty set
+  means the information is known and none of the listed facts are present.
+- Exceptions for points within a Pareto curve create separate plans for the
+  affected points. Overlapping exceptions for the same point cause an error.
+- Each point retains its own classification information, including unknown values.
+- An invalid artifact blocks checks that depend on it; independent checks can
+  still run.
+- Dataset entries default to `is_legacy: false` and `sample_unit: sample` when those
+  fields are omitted.
+- Seeds come from the bundled published cohort catalog.
 
 ## Unresolved policy inputs
 
