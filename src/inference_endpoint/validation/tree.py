@@ -34,17 +34,7 @@ from typing import Any, ClassVar
 
 import yaml
 
-
-class _Missing:
-    """The `MISSING` sentinel's type: tested with `is`, never equal to a value."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "MISSING"
-
-
-MISSING = _Missing()  # a fact's absence; `value is MISSING` is the test
+from inference_endpoint.validation.sentinels import MISSING
 
 _MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 _POINT_DIR_PATTERN = re.compile(r"r(\d+)")
