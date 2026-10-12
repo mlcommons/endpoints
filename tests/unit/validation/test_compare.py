@@ -1,0 +1,247 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""W1 layer tests: construction, resolution, and each row's own verdict.
+
+Each case asserts the values its subject computes: `Ref.from_string` decides
+ref-vs-literal, `Ref.resolve` reports (found, value), `Verdict.evaluate` carries
+`Compare`'s `ok` and `why`. Per-op arithmetic is tabled so the boilerplate is
+one shape. Nothing here tests pydantic itself.
+"""
+
+import pytest
+
+from inference_endpoint.validation.compare import Compare, Ref, Verdict
+
+# One `point` scope: present values, one stored null, one absent key.
+SCOPES = {
+    "point": {
+        "result_summary": {
+            "n_samples_issued": 100,
+            "n_samples_completed": 100,
+            "n_samples_failed": None,
+            "tps": 12.5,
+        },
+        "accuracy": {"aime": {"score": 0.5}, "gpqa": {"score": None}},
+    }
+}
+
+
+def _compare(**kwargs) -> Compare:
+    return Compare.model_validate(kwargs)
+
+
+class TestFromString:
+    """`Ref.from_string`: scoped dotted strings become refs, the rest are literals."""
+
+    @pytest.mark.parametrize(
+        ("value", "parts"),
+        [
+            ("point.result_summary.tps", ("point", "result_summary", "tps")),
+            ("cohort.metric_tolerance", ("cohort", "metric_tolerance")),
+        ],
+    )
+    def test_scoped_strings_are_refs(self, value, parts):
+        assert Ref.from_string(value) == Ref(parts)
+
+    @pytest.mark.parametrize(
+        "value", ["result_summary.tps", "pointish.thing", "", "literal", "point."]
+    )
+    def test_other_strings_are_literals(self, value):
+        assert Ref.from_string(value) is None
+
+
+class TestResolve:
+    """`Ref.resolve`: absent and null are different states."""
+
+    def test_found_value(self):
+        assert Ref(("point", "result_summary", "tps")).resolve(SCOPES) == (True, 12.5)
+
+    def test_absent_is_not_found(self):
+        assert Ref(("point", "result_summary", "nope")).resolve(SCOPES) == (False, None)
+
+    def test_stored_null_is_found(self):
+        found, value = Ref(("point", "result_summary", "n_samples_failed")).resolve(
+            SCOPES
+        )
+        assert (found, value) == (True, None)
+
+    def test_object_facts_read_like_mappings(self):
+        scopes = {"point": type("P", (), {"tps": 1})()}
+        assert Ref(("point", "tps")).resolve(scopes) == (True, 1)
+
+
+class TestCompareShape:
+    """Arity per op is enforced at decode, by field presence."""
+
+    @pytest.mark.parametrize(
+        ("kwargs", "left_is_ref"),
+        [
+            ({"op": "exists", "left": "point.x"}, True),
+            ({"op": "eq", "left": 1, "right": 1}, False),
+            (
+                {
+                    "op": "between",
+                    "left": "point.result_summary.tps",
+                    "lo": 0,
+                    "hi": 1,
+                },
+                True,
+            ),
+        ],
+    )
+    def test_valid_rows_decode(self, kwargs, left_is_ref):
+        row = _compare(**kwargs)
+        assert row.op == kwargs["op"]
+        assert isinstance(row.left, Ref) is left_is_ref
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"op": "exists", "left": "point.x", "right": 1},
+            {"op": "eq", "left": "point.x"},
+            {"op": "between", "left": "point.x", "lo": 0},
+        ],
+    )
+    def test_wrong_arity_is_rejected(self, kwargs):
+        with pytest.raises(ValueError):
+            _compare(**kwargs)
+
+
+class TestCompareVerdict:
+    """`Verdict.evaluate` over `Compare`: each op's ok flag and the row-owned why."""
+
+    @pytest.mark.parametrize(
+        ("kwargs", "ok"),
+        [
+            (
+                {
+                    "op": "eq",
+                    "left": "point.result_summary.n_samples_completed",
+                    "right": "point.result_summary.n_samples_issued",
+                },
+                True,
+            ),
+            (
+                {
+                    "op": "eq",
+                    "left": "point.result_summary.n_samples_completed",
+                    "right": 101,
+                },
+                False,
+            ),
+            ({"op": "ge", "left": "point.result_summary.tps", "right": 10.0}, True),
+            ({"op": "lt", "left": "point.result_summary.tps", "right": 10.0}, False),
+            ({"op": "in", "left": "a", "right": ["a", "b"]}, True),
+            ({"op": "in", "left": "k", "right": {"k": 1}}, True),
+            (
+                {
+                    "op": "between",
+                    "left": "point.result_summary.tps",
+                    "lo": 0,
+                    "hi": 100,
+                },
+                True,
+            ),
+            (
+                {
+                    "op": "between",
+                    "left": "point.result_summary.tps",
+                    "lo": "point.result_summary.n_samples_failed",
+                    "hi": 20,
+                },
+                False,
+            ),
+            (
+                {
+                    "op": "gt",
+                    "left": "point.result_summary.tps",
+                    "right": "point.result_summary.n_samples_failed",
+                },
+                False,
+            ),
+            ({"op": "matches", "left": "r16", "right": "r[0-9]+"}, True),
+            ({"op": "matches", "left": 5, "right": "r[0-9]+"}, False),
+            (
+                {
+                    "op": "eq",
+                    "left": "point.result_summary.tps",
+                    "right": 12.5000001,
+                    "abs_tol": 1e-3,
+                },
+                True,
+            ),
+            (
+                {
+                    "op": "eq",
+                    "left": "point.result_summary.n_samples_failed",
+                    "right": None,
+                },
+                True,
+            ),
+        ],
+    )
+    def test_ok_flag(self, kwargs, ok):
+        assert Verdict.evaluate(_compare(**kwargs), SCOPES).ok is ok
+
+    def test_why_names_the_got_values(self):
+        verdict = Verdict.evaluate(
+            _compare(op="eq", left="point.result_summary.tps", right=10.0), SCOPES
+        )
+        assert verdict.ok is False
+        assert "eq" in verdict.why and "12.5" in verdict.why and "10.0" in verdict.why
+
+    @pytest.mark.parametrize(
+        ("op", "ok"),
+        [("exists", False), ("absent", True), ("not_null", False)],
+    )
+    def test_missing_state_grid_for_presence_ops(self, op, ok):
+        """A missing reference: exists false, absent true, not_null false."""
+        assert (
+            Verdict.evaluate(
+                _compare(op=op, left="point.result_summary.nope"), SCOPES
+            ).ok
+            is ok
+        )
+
+    @pytest.mark.parametrize(
+        ("op", "ok"),
+        [("exists", True), ("absent", False), ("not_null", False)],
+    )
+    def test_null_state_grid_for_presence_ops(self, op, ok):
+        assert (
+            Verdict.evaluate(
+                _compare(op=op, left="point.result_summary.n_samples_failed"), SCOPES
+            ).ok
+            is ok
+        )
+
+    def test_missing_reference_fails_a_comparison_and_names_it(self):
+        verdict = Verdict.evaluate(
+            _compare(op="ge", left="point.result_summary.nope", right=0), SCOPES
+        )
+        assert verdict.ok is False
+        assert "missing" in verdict.why and "nope" in verdict.why
+
+
+class TestEvaluateAll:
+    """`Verdict.evaluate_all` keeps row order."""
+
+    def test_rows_in_order(self):
+        rows = [
+            _compare(op="eq", left=1, right=1),
+            _compare(op="eq", left=1, right=2),
+        ]
+        assert [v.ok for v in Verdict.evaluate_all(rows, SCOPES)] == [True, False]
