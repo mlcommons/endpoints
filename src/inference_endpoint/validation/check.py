@@ -15,15 +15,15 @@
 
 """Check blocks: a cohort's checks, decoded from YAML and validated in isolation.
 
-One YAML file describes one check (`id`, prose `description`/`rule`/`fix`, a
-`severity`, the node kind it applies to and its `when`/`assert` rows):
+One YAML file describes one check (`id`, prose `description`/`rule`, optional
+`fix`, a `severity`, the node kind it applies to and its `when`/`assert` rows):
 
     id: concur_dur_round
     description: Concurrency asked for must be the per-system maximum.
     rule: "Upload Rules > Concurrency"
     fix: Ask for max_sync concurrency in exec_scenario.
     severity: fail
-    root: point
+    scope: point
     when:
       - over: sys.config.max_sync
         measure: count
@@ -94,9 +94,11 @@ class Check(BaseModel):
     id: str
     description: str
     rule: str
-    fix: str
     severity: Severity
-    root: RuleScopes
+    scope: RuleScopes
+    fix: str | None = None
+    needs: tuple[str, ...] = ()
+    optional_needs: tuple[str, ...] = ()
     when: list[Row] = Field(default_factory=list)
     # `assert` is a Python keyword: YAML uses it, the model field cannot.
     assert_: list[Row] = Field(default_factory=list, alias="assert")

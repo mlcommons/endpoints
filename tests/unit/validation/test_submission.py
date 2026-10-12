@@ -18,7 +18,6 @@
 from pathlib import Path
 
 import pytest
-
 from inference_endpoint.validation.regions import Regions
 from inference_endpoint.validation.submission import Point, Submission
 from inference_endpoint.validation.tree import SubmissionNode
@@ -123,6 +122,33 @@ class TestPointCap:
     def test_point_33_fails(self, tmp_path):
         points = [_point(tmp_path, i + 1) for i in range(33)]
         assert Submission({}, points).point_cap() is False
+
+
+class TestOutOfRangePoints:
+    """`Submission.out_of_range_points`: the flagged Points per Section 5.4's row."""
+
+    def test_points_above_the_margin_flag(self, tmp_path):
+        regions = Regions.for_bounds(8192, 32)
+        submission = Submission(
+            {"max_supported_concurrency": 8192},
+            [_point(tmp_path, 512), _point(tmp_path, 9013)],
+        )
+        assert submission.out_of_range_points(regions) == (submission.points[1],)
+
+    def test_in_band_points_flag_nothing(self, tmp_path):
+        regions = Regions.for_bounds(8192, 32)
+        submission = Submission(
+            {"max_supported_concurrency": 8192},
+            [_point(tmp_path, 32), _point(tmp_path, 52)],
+        )
+        assert submission.out_of_range_points(regions) == ()
+
+    def test_points_below_1_flag_too(self, tmp_path):
+        regions = Regions.for_bounds(8192, 32)
+        submission = Submission(
+            {"max_supported_concurrency": 8192}, [_point(tmp_path, 0)]
+        )
+        assert submission.out_of_range_points(regions) == (submission.points[0],)
 
 
 class TestSubmissionCarry:

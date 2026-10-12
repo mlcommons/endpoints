@@ -35,6 +35,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from inference_endpoint.validation.regions import Regions
 from inference_endpoint.validation.tree import PointNode
 
 
@@ -73,6 +74,22 @@ class Submission:
         33 points -> False (`33 > 32`).
         """
         return len(self.points) <= 32
+
+    def out_of_range_points(self, regions: Regions) -> tuple[Point, ...]:
+        """Points whose `concurrency` falls outside `regions.coverage` (Section 5.4's row).
+
+        Endpoints Policy Section 5.4's compliance-checklist row `Concurrency in
+        range` says "each point's concurrency falls within a valid region
+        (including the 10% High Concurrency margin) ... Flag out-of-range
+        points":
+        https://github.com/mlcommons/endpoints_policies/blob/d062b470abd2/endpoints_rules.md#54-regions-of-interest
+
+        `Submission([...p512, p9013]).out_of_range_points(regions_ex_a)` ->
+        `(p9013,)`: Example A's coverage is `Interval(1, 9012)`, so 9013 (above
+        the 10% margin) is the flagged point. Takes `Regions` rather than
+        recomputing so one derivation source stays.
+        """
+        return tuple(p for p in self.points if p.concurrency not in regions.coverage())
 
     def offline_ordering(self) -> bool | None:
         """Whether the dedicated Offline point meets Endpoints Policy Section 5.7.2:
