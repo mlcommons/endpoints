@@ -24,9 +24,10 @@ its mapping.
 import json
 
 import pytest
-
 from inference_endpoint.validation.compare import Ref
 from inference_endpoint.validation.operations import Absent, Predicate
+from inference_endpoint.validation.ranges import Interval
+from inference_endpoint.validation.regions import Regions
 from inference_endpoint.validation.sentinels import MISSING
 from inference_endpoint.validation.tree import (
     CurveNode,
@@ -191,3 +192,27 @@ class TestScopes:
             False,
             None,
         )
+
+
+class TestRegionsRoot:
+    """`Node.scopes` folds `Regions` into the `regions` root of `Ref`."""
+
+    def test_regions_root_answers_coverage_lookups(self, tmp_path):
+        root = tmp_path / "acme"
+        (root / "results").mkdir(parents=True)
+        scopes = SubmissionNode.from_directory(
+            root, regions=Regions.for_bounds(8192, 32)
+        ).scopes()
+        assert Ref(("regions", "coverage")).resolve(scopes) == (
+            True,
+            Interval(1, 9012),
+        )
+        assert Ref(("regions", "by_kind", "margin", "lo")).resolve(scopes) == (
+            True,
+            8193,
+        )
+
+    def test_without_regions_the_root_stays_away(self, tmp_path):
+        root = tmp_path / "acme"
+        (root / "results").mkdir(parents=True)
+        assert "regions" not in SubmissionNode.from_directory(root).scopes()

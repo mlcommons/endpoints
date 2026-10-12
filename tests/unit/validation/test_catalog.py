@@ -23,7 +23,6 @@ subject computes: `Catalog.from_directory` its parsed mappings and
 from pathlib import Path
 
 import pytest
-
 from inference_endpoint.validation.catalog import Catalog
 from inference_endpoint.validation.compare import Ref
 from inference_endpoint.validation.tree import SubmissionNode

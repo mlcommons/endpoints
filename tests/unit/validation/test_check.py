@@ -23,7 +23,6 @@ row-type selection, `Cohort.from_directory` its loaded set.
 from pathlib import Path
 
 import pytest
-
 from inference_endpoint.validation.check import Check, Cohort, Severity, _decode_row
 from inference_endpoint.validation.compare import Aggregate, Compare
 from inference_endpoint.validation.tree import RuleScopes

@@ -16,7 +16,6 @@
 """W5 slice tests: the unified `Interval` grid across every shape it absorbs."""
 
 import pytest
-
 from inference_endpoint.validation.ranges import Interval
 
 
