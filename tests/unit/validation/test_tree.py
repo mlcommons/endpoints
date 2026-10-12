@@ -25,8 +25,9 @@ import json
 
 import pytest
 from inference_endpoint.validation.compare import Ref
+from inference_endpoint.validation.operations import Absent, Predicate
+from inference_endpoint.validation.sentinels import MISSING
 from inference_endpoint.validation.tree import (
-    MISSING,
     CurveNode,
     Node,
     PointNode,
@@ -118,6 +119,12 @@ class TestRead:
         value, error = point.read("result_summary.json")
         assert value is MISSING
         assert error is None
+
+    def test_missing_sentinel_is_the_shared_one_for_presence_ops(self, tmp_path):
+        point = self._point(tmp_path)
+        value, _ = point.read("result_summary.json")
+        assert Absent().holds(Predicate(value, None), None, None) is True
+        assert Absent().holds(Predicate(None, None), None, None) is False
 
     def test_present_null_is_none_not_missing(self, tmp_path):
         point = self._point(tmp_path, {"result_summary.json": None})
