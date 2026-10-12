@@ -1,0 +1,16 @@
+# Stub check: per-point Concurrency-in-range (Endpoints Policy Section 5.4).
+#
+# Representative stub per PR-1's "machinery + stubs" directive. Rows read
+# exactly the `regions.root` fields `Node.scopes` folds; the point's
+# `concurrency` sits on the `point` scope as `request.concurrency` (to be
+# pinned from the §8.3 tables before PR-2).
+id: concurrency_in_range
+description: Each measurement point's concurrency lands in a valid region (incl. 10% margin).
+rule: "Endpoints Policy Section 5.4, Concurrency Regions and its compliance-checklist row 'Concurrency in range'."
+fix: Adjust the point's target concurrency to fall within one of the five regions computed from your declared C_max and the Low Latency point.
+severity: warn
+scope: point
+assert:
+  - left: point.request.concurrency
+    op: in
+    right: regions.coverage

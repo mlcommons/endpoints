@@ -33,7 +33,7 @@ description: Concurrency asked for must be the per-system maximum.
 rule: "Upload Rules > Concurrency"
 fix: Ask for max_sync concurrency in exec_scenario.
 severity: fail
-root: point
+scope: point
 when:
   - over: sys.config.max_sync
     measure: count
@@ -51,7 +51,7 @@ description: A different rule entirely.
 rule: "Upload Rules > Other"
 fix: Fix the other thing.
 severity: warn
-root: system
+scope: system
 assert:
   - left: sys.config.is_public
     op: eq
@@ -95,7 +95,7 @@ class TestCheckShape:
             "rule": "Where in the Rules this comes from.",
             "fix": "How to resolve it.",
             "severity": "fail",
-            "root": "point",
+            "scope": "point",
             "assert": [{"left": 1, "op": "eq", "right": 1}],
         }
 
@@ -103,7 +103,7 @@ class TestCheckShape:
         check = Check.model_validate(self._yaml_dict())
         assert check.id == "check_id"
         assert check.severity is Severity.FAIL
-        assert check.root is RuleScopes.POINT
+        assert check.scope is RuleScopes.POINT
         assert [type(row) for row in check.assert_] == [Compare]
 
     def test_when_rows_decode_too(self):
@@ -112,6 +112,14 @@ class TestCheckShape:
             | {"when": [{"over": [], "measure": "count", "op": "eq", "value": 0}]}
         )
         assert isinstance(check.when[0], Aggregate)
+
+    def test_fix_is_optional_with_absent_grid(self):
+        present = Check.model_validate(self._yaml_dict())
+        assert present.fix == "How to resolve it."
+        absent = Check.model_validate(
+            {key: value for key, value in self._yaml_dict().items() if key != "fix"}
+        )
+        assert absent.fix is None
 
     def test_unknown_field_is_rejected(self):
         with pytest.raises(ValueError):
@@ -129,6 +137,18 @@ class TestCheckShape:
                     "root": "system",
                 }
             )
+
+
+class TestStubCohort:
+    """The 2 PR-1 stub checks decode through `Cohort.from_directory` against real rows."""
+
+    def test_stub_cohort_loads_in_full(self):
+        cohort = Cohort.from_directory(Path("tests/assets/cohorts/stub"))
+        assert [check.id for check in cohort.checks] == [
+            "concurrency_in_range",
+            "offline_ordering",
+        ]
+        assert [check.severity for check in cohort.checks] == [Severity.WARN] * 2
 
 
 class TestCohortFromDirectory:

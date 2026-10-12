@@ -42,9 +42,23 @@ messages, sandbox type-by-convention). v2 instead:
 | W3  | collection rows: `Aggregate` (count/sum/mean/min/max/any/all over a list or mapping values) + `same_multiset` compare op; `Op` family in `operations.py` (`__new__` dispatch, self-registering subclasses); blank-vs-null grid pinned  | W1         | **this wave: done pending review**                                                                                                                                                                          |
 | W4  | check block model + cohort directory loader (metadata: id/description/rule/fix/severity, `when`/`assert` rows, per-node iteration)                                                                                                     | W1         |                                                                                                                                                                                                             |
 | W5  | derivations: regions, accuracy slots/scores, shared paths (named functions) + the catalog view (models/datasets dict lookups — no pseudo-enums, sizes/values as plain data)                                                            | W2         |                                                                                                                                                                                                             |
-| W6  | check runner (needs/when cascade, findings) + report model                                                                                                                                                                             | W2,W4,W5   |                                                                                                                                                                                                             |
 | W7  | ported check families from the oracle (one family per change, e.g. metric-consistency, load-pattern, accuracy gates) + power module                                                                                                    | W3,W6      |                                                                                                                                                                                                             |
 | W8  | CLI + report printing + golden/parity fixture harness (templated generation — standing rule 5)                                                                                                                                         | W7         |                                                                                                                                                                                                             |
+
+Design notes for W6 (kept off the wave table's rows so the grid stays
+parseable):
+
+- **`Finding`** keeps no `fix` field: `Check.fix: str | None` is the optional
+  YAML hint (the oracle's `Message.fix` where-declared semantics
+  `endpoints-submission-cli@32060e6`'s `submission_checker/messages.py`), joined
+  at render time where the catalog supplies one. `Finding` emits one record per
+  _evaluated_ `assert` row (holds and failures alike) — the audit trail's
+  document-format, matching `CheckResult`'s all-messages design and
+  `messages.yaml`'s carrying both `pass:` and `fail:` texts. The report side
+  filters `not verdict.ok` for failure-only summaries.
+- **`region`-fold single source**: `Node.scopes` owns folding the `regions` root
+  (fed by `SubmissionNode.from_directory(root, regions=...)`); the runner reads
+  `node.scopes()` directly and does not re-fold.
 
 Per-item FILTERS are deliberately NOT in the row language (kept out to avoid a
 generator mini-language): filters over collections (e.g. "entries whose name is
