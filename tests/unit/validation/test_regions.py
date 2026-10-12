@@ -32,7 +32,7 @@ formula's; both printed slips are noted in `Regions.for_bounds`.
 import pytest
 
 from inference_endpoint.validation.ranges import Interval
-from inference_endpoint.validation.regions import Regions
+from inference_endpoint.validation.regions import RegionKind, Regions
 
 
 class TestWorkedExamples:
@@ -103,3 +103,28 @@ class TestBounds:
 
     def test_c_max_of_33_is_admitted(self):
         assert Regions.for_bounds(33, 1).high_concurrency == Interval(12, 33)
+
+
+class TestCovers:
+    """`Regions.covers`: which `RegionKind` covers a concurrency, or `None`."""
+
+    @pytest.mark.parametrize(
+        ("value", "kind"),
+        [
+            (32, RegionKind.LOW_LATENCY),
+            (52, RegionKind.LOW_CONCURRENCY),
+            (53, RegionKind.MED_CONCURRENCY),
+            (437, RegionKind.MED_CONCURRENCY),
+            (438, RegionKind.HIGH_CONCURRENCY),
+            (8192, RegionKind.HIGH_CONCURRENCY),
+            (8193, RegionKind.MARGIN),
+            (9012, RegionKind.MARGIN),
+        ],
+    )
+    def test_kind_of_each_example_a_boundary(self, value, kind):
+        assert Regions.for_bounds(8192, 32).covers(value) is kind
+
+    def test_outside_gives_none(self):
+        regions = Regions.for_bounds(8192, 32)
+        assert regions.covers(0) is None
+        assert regions.covers(9013) is None

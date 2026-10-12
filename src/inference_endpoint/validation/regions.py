@@ -27,8 +27,22 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import Enum
 
 from inference_endpoint.validation.ranges import Interval
+
+
+class RegionKind(str, Enum):  # noqa: UP042 - repository wire-enum convention
+    """Which region of Endpoints Policy Section 5.5 a concurrency value lands in.
+
+    `values` are the five keys of that Section's `compute_regions`.
+    """
+
+    LOW_LATENCY = "low_latency"
+    LOW_CONCURRENCY = "low_concurrency"
+    MED_CONCURRENCY = "med_concurrency"
+    HIGH_CONCURRENCY = "high_concurrency"
+    MARGIN = "margin"
 
 
 @dataclass(frozen=True)
@@ -72,3 +86,26 @@ class Regions:
             high_concurrency=Interval(med_conc_end + 1, c_max),
             margin=Interval(c_max + 1, math.ceil(1.10 * c_max)),
         )
+
+    def covers(self, concurrency: int) -> RegionKind | None:
+        """The `RegionKind` a concurrency value lands in; `None` outside every region.
+
+        Endpoints Policy Section 5.4 requires each point's concurrency to fall
+        in a valid region (including the 10% High Concurrency margin):
+        https://github.com/mlcommons/endpoints_policies/blob/d062b470abd2/endpoints_rules.md#54-regions-of-interest
+
+        `Regions.for_bounds(8192, 32).covers(32)` -> `RegionKind.LOW_LATENCY`;
+        `covers(9012)` -> `RegionKind.MARGIN`; `covers(0)` and `covers(9013)`
+        -> None. Its truthiness is the predicate: `if regions.covers(x)`.
+        """
+        pairs = (
+            (RegionKind.LOW_LATENCY, self.low_latency),
+            (RegionKind.LOW_CONCURRENCY, self.low_concurrency),
+            (RegionKind.MED_CONCURRENCY, self.med_concurrency),
+            (RegionKind.HIGH_CONCURRENCY, self.high_concurrency),
+            (RegionKind.MARGIN, self.margin),
+        )
+        for kind, interval in pairs:
+            if concurrency in interval:
+                return kind
+        return None
