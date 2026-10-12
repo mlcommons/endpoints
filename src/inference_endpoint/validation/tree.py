@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import yaml
 
+from inference_endpoint.validation.regions import RegionKind, Regions
 from inference_endpoint.validation.sentinels import MISSING
 
 if (
@@ -124,6 +125,7 @@ class Node:
         default_factory=dict, repr=False
     )
     ruleset: Catalog | None = field(default=None, repr=False)
+    regions: Regions | None = field(default=None, repr=False)
 
     def __init_subclass__(cls, kind: RuleScopes, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -172,6 +174,17 @@ class Node:
             root = root.parent
         if root.ruleset is not None:
             scopes["ruleset"] = root.ruleset.scopes()
+        if root.regions is not None:
+            scopes["regions"] = {
+                "coverage": root.regions.coverage(),
+                "by_kind": {
+                    RegionKind.LOW_LATENCY: root.regions.low_latency,
+                    RegionKind.LOW_CONCURRENCY: root.regions.low_concurrency,
+                    RegionKind.MED_CONCURRENCY: root.regions.med_concurrency,
+                    RegionKind.HIGH_CONCURRENCY: root.regions.high_concurrency,
+                    RegionKind.MARGIN: root.regions.margin,
+                },
+            }
         return scopes
 
 
@@ -179,16 +192,24 @@ class SubmissionNode(Node, kind=RuleScopes.SUBMISSION):
     """The upload root; entry point via `from_directory`."""
 
     @classmethod
-    def from_directory(cls, root: Path, ruleset: Catalog | None = None) -> Node:
+    def from_directory(
+        cls,
+        root: Path,
+        ruleset: Catalog | None = None,
+        regions: Regions | None = None,
+    ) -> Node:
         """The `submission` node for `root`, with `results/<system>/<model>/r<N>` below.
 
         `submission/acme` -> that submission's tree. A path that is not a
         directory raises NotADirectoryError (a load problem, not a report).
-        `ruleset` (a `Catalog`) becomes the `ruleset` root of `Ref.resolve`.
+        `ruleset` (a `Catalog`) becomes the `ruleset` root of `Ref.resolve`
+        and `regions` (a `Regions`) its `regions` root.
         """
         if not root.is_dir():
             raise NotADirectoryError(root)
-        submission = cls(RuleScopes.SUBMISSION, root, None, ruleset=ruleset)
+        submission = cls(
+            RuleScopes.SUBMISSION, root, None, ruleset=ruleset, regions=regions
+        )
         submission.children = _walk(submission, RuleScopes.SYSTEM, root / "results")
         return submission
 

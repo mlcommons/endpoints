@@ -26,8 +26,10 @@ extension to `ceil(1.10 * C_max)`.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from inference_endpoint.validation.ranges import Interval
 
@@ -54,6 +56,35 @@ class Regions:
     med_concurrency: Interval
     high_concurrency: Interval
     margin: Interval
+
+    @classmethod
+    def for_submission(
+        cls, system_desc: Mapping[str, Any], concurrencies: Sequence[int]
+    ) -> Regions:
+        """Regions from a submission's declared facts (`C_max`, `C_min` derivation).
+
+        `system_desc["max_supported_concurrency"]` is Endpoints Policy's declared
+        Maximum Supported Concurrency `M` (`system_desc.json` field name verbatim):
+        https://github.com/mlcommons/endpoints_policies/blob/d062b470abd2/endpoints_rules.md#56-maximum-point-cap
+
+        `C_min` is the Low Latency point's concurrency (`concurrencies` entry in
+        [1, 32]; at most one, per 5.4's Ultra Low Concurrency coverage). A
+        missing/non-int `max_supported_concurrency`, zero or multiple [1, 32]
+        entries in `concurrencies`, raises ValueError: the check list rejects
+        such a submission before regions matter.
+
+        `Regions.for_submission({"max_supported_concurrency": 8192}, [32, 40])`
+        -> the worked Example A of Section 5.4.
+        """
+        c_max = system_desc.get("max_supported_concurrency")
+        if not isinstance(c_max, int):
+            raise ValueError("system_desc needs an integer max_supported_concurrency")
+        low_latency_points = [x for x in concurrencies if 1 <= x <= 32]
+        if len(low_latency_points) != 1:
+            raise ValueError(
+                "need exactly one point in [1, 32] (the Low Latency point)"
+            )
+        return cls.for_bounds(c_max, low_latency_points[0])
 
     @classmethod
     def for_bounds(cls, c_max: int, c_min: int) -> Regions:
@@ -109,3 +140,13 @@ class Regions:
             if concurrency in interval:
                 return kind
         return None
+
+    def coverage(self) -> Interval:
+        """`Interval(1, margin.hi)`: every concurrency a region covers, one interval.
+
+        The five regions tile `[1, margin_end]` contiguously (a rounding
+        collision gives a zero-width region, never a gap), so per-point
+        Concurrency-in-range of the compliance checklist reduces to
+        `concurrency in regions.coverage()`.
+        """
+        return Interval(1, self.margin.hi)

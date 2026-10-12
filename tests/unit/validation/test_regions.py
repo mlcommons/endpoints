@@ -30,7 +30,6 @@ formula's; both printed slips are noted in `Regions.for_bounds`.
 """
 
 import pytest
-
 from inference_endpoint.validation.ranges import Interval
 from inference_endpoint.validation.regions import RegionKind, Regions
 
@@ -103,6 +102,27 @@ class TestBounds:
 
     def test_c_max_of_33_is_admitted(self):
         assert Regions.for_bounds(33, 1).high_concurrency == Interval(12, 33)
+
+
+class TestForSubmission:
+    """`Regions.for_submission`: `C_max` from `system_desc`, `C_min` from the lone point."""
+
+    def test_derives_from_the_verified_fact_names(self):
+        regions = Regions.for_submission({"max_supported_concurrency": 8192}, [32, 40])
+        assert regions == Regions.for_bounds(8192, 32)
+
+    @pytest.mark.parametrize(
+        ("system_desc", "concurrencies"),
+        [
+            ({}, [32, 40]),
+            ({"max_supported_concurrency": "8192"}, [32, 40]),
+            ({"max_supported_concurrency": 8192}, [40, 80]),
+            ({"max_supported_concurrency": 8192}, [32, 20, 40]),
+        ],
+    )
+    def test_missing_or_ambiguous_facts_raise(self, system_desc, concurrencies):
+        with pytest.raises(ValueError):
+            Regions.for_submission(system_desc, concurrencies)
 
 
 class TestCovers:

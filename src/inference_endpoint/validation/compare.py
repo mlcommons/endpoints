@@ -42,7 +42,15 @@ class Ref:
     """A dotted reference into the scoped facts, e.g. `point.result_summary.tps`."""
 
     # The scope roots that open a reference; a class constant, not a field.
-    ROOTS = ("submission", "system", "curve", "point", "ruleset", "cohort")
+    ROOTS = (
+        "submission",
+        "system",
+        "curve",
+        "point",
+        "ruleset",
+        "regions",
+        "cohort",
+    )
 
     parts: tuple[str, ...]
 
