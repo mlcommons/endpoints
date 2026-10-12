@@ -24,6 +24,7 @@ its mapping.
 import json
 
 import pytest
+
 from inference_endpoint.validation.compare import Ref
 from inference_endpoint.validation.operations import Absent, Predicate
 from inference_endpoint.validation.sentinels import MISSING

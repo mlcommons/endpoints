@@ -22,6 +22,7 @@ shape. Nothing here tests pydantic itself.
 """
 
 import pytest
+
 from inference_endpoint.validation.compare import (
     Aggregate,
     Compare,
