@@ -1,0 +1,141 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""W5f tests: `Point`/`Submission` hold the carry-set facts without drift."""
+
+from pathlib import Path
+
+import pytest
+
+from inference_endpoint.validation.regions import Regions
+from inference_endpoint.validation.submission import Point, Submission
+from inference_endpoint.validation.tree import SubmissionNode
+
+
+def _point(tmp_path: Path, concurrency: int, offline=None, system_tps: float = 1.0):
+    root = tmp_path / "acme"
+    (root / "results").mkdir(parents=True, exist_ok=True)
+    point_node = SubmissionNode.from_directory(root)
+    return Point(
+        offline=offline,
+        concurrency=concurrency,
+        system_tps=system_tps,
+        node=point_node,
+    )
+
+
+class TestOfflineOrdering:
+    """`Submission.offline_ordering`: 5.7.2's pair of clauses, or None when n/a."""
+
+    def _submission(self, tmp_path, offline_off=None, offline_tps=5292.0):
+        system_desc = {"max_supported_concurrency": 8192}
+        c_max_point = _point(tmp_path, 8192, system_tps=5400.0)
+        points = [c_max_point]
+        if offline_off is not None:
+            points.append(
+                _point(tmp_path, 8192, offline=offline_off, system_tps=offline_tps)
+            )
+        return Submission(system_desc, points)
+
+    def test_dedicated_at_the_ratio_boundary_passes(self, tmp_path):
+        assert (
+            self._submission(tmp_path, offline_off="dedicated").offline_ordering()
+            is True
+        )
+
+    def test_dedicated_below_the_ratio_fails(self, tmp_path):
+        assert (
+            self._submission(
+                tmp_path, offline_off="dedicated", offline_tps=5291.0
+            ).offline_ordering()
+            is False
+        )
+
+    def test_dedicated_below_c_max_concurrency_fails(self, tmp_path):
+        system_desc = {"max_supported_concurrency": 8192}
+        submission = Submission(
+            system_desc,
+            [
+                _point(tmp_path, 8192, system_tps=5400.0),
+                _point(tmp_path, 512, offline="dedicated", system_tps=5292.0),
+            ],
+        )
+        assert submission.offline_ordering() is False
+
+    def test_elected_offline_is_not_applicable(self, tmp_path):
+        assert (
+            self._submission(tmp_path, offline_off="elected").offline_ordering() is None
+        )
+
+    def test_no_offline_declaration_is_not_applicable(self, tmp_path):
+        assert self._submission(tmp_path).offline_ordering() is None
+
+    def test_mixed_declarations_raise(self, tmp_path):
+        system_desc = {"max_supported_concurrency": 8192}
+        submission = Submission(
+            system_desc,
+            [
+                _point(tmp_path, 8192, offline="elected", system_tps=5400.0),
+                _point(tmp_path, 512, offline="dedicated", system_tps=5292.0),
+            ],
+        )
+        with pytest.raises(ValueError, match="offline"):
+            submission.offline_ordering()
+
+    def test_missing_c_max_point_raises(self, tmp_path):
+        system_desc = {"max_supported_concurrency": 8192}
+        submission = Submission(
+            system_desc,
+            [_point(tmp_path, 512, offline="dedicated", system_tps=5292.0)],
+        )
+        with pytest.raises(ValueError, match="C_max"):
+            submission.offline_ordering()
+
+
+class TestPointCarry:
+    """`Point` keeps the three Section 8.3 facts and its node link as declared."""
+
+    def test_offline_declaration_three_states(self, tmp_path):
+        assert _point(tmp_path, 32).offline is None
+        assert _point(tmp_path, 32, offline="dedicated").offline == "dedicated"
+        assert _point(tmp_path, 32, offline="elected").offline == "elected"
+
+
+class TestPointCap:
+    """`Submission.point_cap`: Section 5.6's "<=32 total points" cap, Offline counted."""
+
+    def test_cap_boundary_32_passes(self, tmp_path):
+        points = [_point(tmp_path, i + 1) for i in range(32)]
+        assert Submission({}, points).point_cap() is True
+
+    def test_point_33_fails(self, tmp_path):
+        points = [_point(tmp_path, i + 1) for i in range(33)]
+        assert Submission({}, points).point_cap() is False
+
+
+class TestSubmissionCarry:
+    """`Submission` pairs system fields with the declared points."""
+
+    def test_regions_agree_with_the_trio_fields(self, tmp_path):
+        system_desc = {"max_supported_concurrency": 8192}
+        submission = Submission(
+            system_desc, [_point(tmp_path, 32), _point(tmp_path, 40, system_tps=2.0)]
+        )
+        regions = Regions.for_submission(
+            submission.system_desc,
+            [p.concurrency for p in submission.points],
+        )
+        assert regions == Regions.for_bounds(8192, 32)
+        assert submission.points[1].system_tps == 2.0

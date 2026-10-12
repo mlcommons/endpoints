@@ -59,7 +59,7 @@ class RuleScopes(str, Enum):  # noqa: UP042 - repository wire-enum convention
 
 
 FILE_TO_KEY_MAP = {
-    # YAML file name -> fact name the scopes mapping exposes.
+    # YAML file name -> field name the scopes mapping exposes.
     "point.yaml": "config",
     "config.yaml": "client_config",
     "result_summary.json": "result_summary",
@@ -152,11 +152,11 @@ class Node:
         return self.artifacts.get(name, (MISSING, None))
 
     def scopes(self) -> dict[str, dict[str, Any]]:
-        """Per-node fact mappings; what `Ref.resolve` in `compare.py` reads.
+        """Per-node field mappings; what `Ref.resolve` in `compare.py` reads.
 
         For a `point` holding only `result_summary.json` -> `{"point":
         {"result_summary": {"n": 1}}, "curve": {}, "system": {}, "submission":
-        {}}`; its ancestors contribute their own facts, an artifactless node
+        {}}`; its ancestors contribute their own fields, an artifactless node
         just `{}`. The `ruleset` root holds `Catalog.scopes()` when the
         submission was built with one.
         """
