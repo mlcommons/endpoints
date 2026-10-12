@@ -32,7 +32,8 @@ from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, model_validator
 
-from inference_endpoint.validation.operations import Interval, Op, Predicate
+from inference_endpoint.validation.operations import Op, Predicate
+from inference_endpoint.validation.ranges import Interval
 from inference_endpoint.validation.sentinels import MISSING
 
 

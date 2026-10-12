@@ -32,29 +32,6 @@ from inference_endpoint.validation.sentinels import MISSING
 
 
 @dataclass(frozen=True)
-class Interval:
-    """A `[lo, hi]` number interval; `value in interval` is the membership test.
-
-    `lo_inclusive` flips the low bound open, `hi_inclusive` the high one:
-    `5 in Interval(0, 10)` -> True; `10 in Interval(0, 10, hi_inclusive=False)`
-    -> False. A value that cannot order against the bounds falls outside.
-    """
-
-    lo: float
-    hi: float
-    lo_inclusive: bool = True
-    hi_inclusive: bool = True
-
-    def __contains__(self, value: Any) -> bool:
-        try:
-            low_ok = value >= self.lo if self.lo_inclusive else value > self.lo
-            high_ok = value <= self.hi if self.hi_inclusive else value < self.hi
-        except TypeError:
-            return False  # e.g. a number bound vs a string value: outside, not an error
-        return bool(low_ok and high_ok)
-
-
-@dataclass(frozen=True)
 class Predicate:
     """One comparison's resolved operands: the subject tested against its target.
 

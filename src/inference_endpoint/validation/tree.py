@@ -30,11 +30,16 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import yaml
 
 from inference_endpoint.validation.sentinels import MISSING
+
+if (
+    TYPE_CHECKING
+):  # circular-avoidance: `_StrictLoader` lives here, `catalog` borrows it
+    from inference_endpoint.validation.catalog import Catalog
 
 _MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 _POINT_DIR_PATTERN = re.compile(r"r(\d+)")
@@ -118,6 +123,7 @@ class Node:
     artifacts: dict[str, tuple[Any, str | None]] = field(
         default_factory=dict, repr=False
     )
+    ruleset: Catalog | None = field(default=None, repr=False)
 
     def __init_subclass__(cls, kind: RuleScopes, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -149,7 +155,8 @@ class Node:
         For a `point` holding only `result_summary.json` -> `{"point":
         {"result_summary": {"n": 1}}, "curve": {}, "system": {}, "submission":
         {}}`; its ancestors contribute their own facts, an artifactless node
-        just `{}`.
+        just `{}`. The `ruleset` root holds `Catalog.scopes()` when the
+        submission was built with one.
         """
         scopes: dict[str, dict[str, Any]] = {}
         node: Node | None = self
@@ -160,6 +167,11 @@ class Node:
                 if name in node.artifacts
             }
             node = node.parent
+        root: Node = self
+        while root.parent is not None:
+            root = root.parent
+        if root.ruleset is not None:
+            scopes["ruleset"] = root.ruleset.scopes()
         return scopes
 
 
@@ -167,15 +179,16 @@ class SubmissionNode(Node, kind=RuleScopes.SUBMISSION):
     """The upload root; entry point via `from_directory`."""
 
     @classmethod
-    def from_directory(cls, root: Path) -> Node:
+    def from_directory(cls, root: Path, ruleset: Catalog | None = None) -> Node:
         """The `submission` node for `root`, with `results/<system>/<model>/r<N>` below.
 
         `submission/acme` -> that submission's tree. A path that is not a
         directory raises NotADirectoryError (a load problem, not a report).
+        `ruleset` (a `Catalog`) becomes the `ruleset` root of `Ref.resolve`.
         """
         if not root.is_dir():
             raise NotADirectoryError(root)
-        submission = cls(RuleScopes.SUBMISSION, root, None)
+        submission = cls(RuleScopes.SUBMISSION, root, None, ruleset=ruleset)
         submission.children = _walk(submission, RuleScopes.SYSTEM, root / "results")
         return submission
 
