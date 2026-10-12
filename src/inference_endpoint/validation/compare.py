@@ -15,7 +15,7 @@
 
 """Condition rows: every check condition is a `Compare` or an `Aggregate`.
 
-A row decodes from YAML and evaluates against the scoped facts of one node (a
+A row decodes from YAML and evaluates against the scoped fields of one node (a
 mapping per scope root, e.g. `{"point": ...}`). Operands are literals or `Ref`
 dotted references (decode hooks below). Which op does what lives in
 `operations.py` (`Op` subclasses); which aggregation `measure` does what is the
@@ -39,7 +39,7 @@ from inference_endpoint.validation.sentinels import MISSING
 
 @dataclass(frozen=True)
 class Ref:
-    """A dotted reference into the scoped facts, e.g. `point.result_summary.tps`."""
+    """A dotted reference into the scoped fields, e.g. `point.result_summary.tps`."""
 
     # The scope roots that open a reference; a class constant, not a field.
     ROOTS = (
@@ -59,7 +59,7 @@ class Ref:
         """A `Ref` from a scope-rooted dotted string, else None for a literal.
 
         `point.result_summary.tps` -> `Ref(("point", "result_summary", "tps"))`,
-        which locates that fact under the `point` scope.
+        which locates that field under the `point` scope.
         `result_summary.tps` -> None: not rooted in a valid scope object root,
         so YAML keeps it as the literal string. `point.` and `point` -> None too.
         """
@@ -72,10 +72,10 @@ class Ref:
         """(found, value) of this reference: a missing key is absent, a stored null is a value.
 
         Against `{"point": {"tps": 1, "bad": None}}`:
-        `point.tps` -> (True, 1); `point.nope` -> (False, None): no such fact;
-        `point.bad` -> (True, None): the fact exists and is null.
-        Scope roots read mappings or fact objects alike, so rows test against
-        plain dicts here and typed nodes at run time.
+        `point.tps` -> (True, 1); `point.nope` -> (False, None): no such field;
+        `point.bad` -> (True, None): the field exists and is null.
+        Scope roots read nested mappings or node objects alike, so rows test
+        against plain dicts here and typed nodes at run time.
         """
         obj: Any = scopes
         for part in self.parts:
@@ -359,7 +359,7 @@ class Verdict:
 
     @classmethod
     def evaluate(cls, row: Compare | Aggregate, scopes: Mapping[str, Any]) -> Verdict:
-        """Evaluate one condition row against a node's scoped facts."""
+        """Evaluate one condition row against a node's scoped fields."""
         held, why = row._outcome(scopes)
         return cls(held, why)
 
