@@ -18,7 +18,6 @@
 from pathlib import Path
 
 import pytest
-
 from inference_endpoint.validation.regions import Regions
 from inference_endpoint.validation.submission import Point, Submission
 from inference_endpoint.validation.tree import SubmissionNode
@@ -150,6 +149,24 @@ class TestOutOfRangePoints:
             {"max_supported_concurrency": 8192}, [_point(tmp_path, 0)]
         )
         assert submission.out_of_range_points(regions) == (submission.points[0],)
+
+
+class TestPointPowerKw:
+    """`Point.point_power_kw`: the Section 4.5.3 per-point denominator golden rows."""
+
+    def _point(self, concurrency: int = 32):
+        return Point(
+            offline=None,
+            concurrency=concurrency,
+            system_tps=6000.0,
+            node=None,
+        )
+
+    def test_golden_row_partial_engagement(self):
+        assert self._point().point_power_kw(152.10, 16, 18) == 135.2
+
+    def test_golden_row_full_engagement_reduces_to_provisioned(self):
+        assert self._point().point_power_kw(152.10, 18, 18) == 152.1
 
 
 class TestThresholdsPerShape:
