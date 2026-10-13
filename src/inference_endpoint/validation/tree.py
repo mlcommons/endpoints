@@ -26,6 +26,7 @@ what `Ref.resolve` reads.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -270,18 +271,27 @@ def _read_artifact(directory: Path, name: str) -> tuple[Any, str | None]:
     if not _inside(directory, path):
         return None, f"{name} resolves outside the submission"
     try:
-        text = path.read_text(encoding="utf-8")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as exc:
         return None, f"{name} parse error: {exc.strerror}"
-    if len(text) > _MAX_ARTIFACT_BYTES:
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(_MAX_ARTIFACT_BYTES + 1)
+    except OSError as exc:
+        return None, f"{name} parse error: {exc.strerror}"
+    if len(data) > _MAX_ARTIFACT_BYTES:
         return None, f"{name} parse error: too large"
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return None, f"{name} parse error: {exc}"
     try:
         value = (
             json.loads(text)
             if name.endswith(".json")
             else yaml.load(text, Loader=_StrictLoader)
         )
-    except (OSError, ValueError, RecursionError, yaml.YAMLError) as exc:
+    except (ValueError, RecursionError, yaml.YAMLError) as exc:
         return None, f"{name} parse error: {exc}"
     return value, None
 

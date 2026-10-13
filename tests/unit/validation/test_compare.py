@@ -207,14 +207,29 @@ class TestCompareVerdict:
         assert verdict.ok is False
         assert "eq" in verdict.why and "12.5" in verdict.why and "10.0" in verdict.why
 
-    def test_incommensurable_ordering_pair_raises(self):
-        with pytest.raises(TypeError):
-            Verdict.evaluate(_compare(op="gt", left=5, right=None), SCOPES)
+    def test_incommensurable_ordering_pair_fails_with_why(self):
+        verdict = Verdict.evaluate(_compare(op="gt", left=5, right=None), SCOPES)
+        assert verdict.ok is False
+        assert "incommensurable pair" in verdict.why
+        assert "5" in verdict.why and "None" in verdict.why
+        assert "TypeError" in verdict.why
 
     def test_null_right_failure_names_none_not_the_interval_form(self):
         verdict = Verdict.evaluate(_compare(op="eq", left=5, right=None), SCOPES)
         assert verdict.ok is False
         assert "5" in verdict.why and "None" in verdict.why and ".." not in verdict.why
+
+    def test_big_distinct_ints_never_pass_at_zero_tolerance(self):
+        huge_left = 2**53 + 1
+        huge_right = 2**53 + 2
+        verdict = Verdict.evaluate(
+            _compare(op="eq", left=huge_left, right=huge_right), SCOPES
+        )
+        assert verdict.ok is False
+
+    def test_nonzero_tolerance_on_unsupported_op_is_rejected(self):
+        with pytest.raises(ValueError, match="tolerance semantics"):
+            _compare(op="ge", left=1, right=1, rel_tol=0.02)
 
     @pytest.mark.parametrize(
         ("op", "ok"),

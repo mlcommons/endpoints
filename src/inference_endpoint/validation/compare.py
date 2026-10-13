@@ -142,10 +142,15 @@ class Compare(BaseModel):
     def _check_shape(self) -> Compare:
         # Presence, not truthiness: `right: null` is a real operand (eq against
         # a literal null is legal), so arity is decided by field presence.
-        want = set(Op(self.op).slots)
+        op = Op(self.op)
+        want = set(op.slots)
         used = {name for name in ("right", "lo", "hi") if name in self.model_fields_set}
         if used != want:
             raise ValueError(f"`{self.op}` takes `left` plus {sorted(want) or 'none'}")
+        if not op.tolerant and (self.abs_tol or self.rel_tol):
+            raise ValueError(
+                f"`{self.op}` has no tolerance semantics (use `eq`/`ne` for abs_tol/rel_tol)"
+            )
         return self
 
     def _outcome(self, scopes: Mapping[str, Any]) -> tuple[bool, str]:
@@ -359,8 +364,23 @@ class Verdict:
 
     @classmethod
     def evaluate(cls, row: Compare | Aggregate, scopes: Mapping[str, Any]) -> Verdict:
-        """Evaluate one condition row against a node's scoped fields."""
-        held, why = row._outcome(scopes)
+        """Evaluate one condition row against a node's scoped fields.
+
+        An incommensurable pair from an untrusted artifact (a `TypeError`,
+        `ValueError` or `OverflowError` escaping `op.holds`) becomes a failing
+        verdict naming both sides and the exception class -- the fail-not-abort
+        policy the semantics grid calls for and the same return-fail shape
+        `Interval.__contains__` keeps. No artifact value ever aborts the run
+        mid-verdict.
+        """
+        try:
+            held, why = row._outcome(scopes)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return cls(
+                False,
+                f"incommensurable pair: {_show(row.left)} {row.op} {row.right}: "
+                f"{type(exc).__name__}: {exc}",
+            )
         return cls(held, why)
 
     @classmethod
