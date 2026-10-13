@@ -53,6 +53,29 @@ class Point:
     system_tps: float
     node: PointNode
 
+    def point_power_kw(
+        self,
+        provisioned_power_kw: float,
+        engaged_nodes: int,
+        provisioned_nodes: int,
+    ) -> float:
+        """The Endpoints Policy Section 4.5.3 point denominator `provisioned_power_kw x Y/N`.
+
+        Section 4.5.2/4.5.3's normalization denominator per measurement point:
+        provisioned power scaled by the node fraction `Y_s / N_s` engaged at
+        this point (whole nodes rounded up from accelerators). Rounded to two
+        decimal places, once at the final figure (`:897`'s Units and rounding
+        rule). `engaged_nodes` (Y) and `provisioned_nodes` (N) are supplied by
+        the caller until the fuller `nodes_used` carry lands on `Point` itself.
+
+        `Point(offline=None, concurrency=32, system_tps=6000.0, node=None).point_power_kw(152.10, 16, 18)`
+        -> `135.2` (the `:1906` golden row's `152.10 x 16/18`; verified
+        `round(152.10 * 16 / 18, 2) == 135.2`). With `engaged_nodes ==
+        provisioned_nodes` this reduces to `round(provisioned_power_kw, 2)`
+        (the `:1907` row's `152.10 x 18/18 == 152.1`).
+        """
+        return round(provisioned_power_kw * engaged_nodes / provisioned_nodes, 2)
+
 
 @dataclass(frozen=True)
 class Submission:
