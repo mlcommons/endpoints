@@ -47,6 +47,7 @@ class Ref:
         "system",
         "curve",
         "point",
+        "derived",
         "ruleset",
         "regions",
         "cohort",
