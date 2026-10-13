@@ -127,3 +127,24 @@ class Submission:
             offline_point.system_tps >= 0.98 * c_max_point.system_tps
             and offline_point.concurrency >= c_max
         )
+
+    def point_count_min(self) -> int:
+        """The Endpoints Policy Section 5.3 minimum point count this shape needs.
+
+        8 where a dedicated `offline` run is declared ("including a dedicated
+        Offline run (non-agentic)"); 7 where the `C_max` point is elected as
+        the Offline result, or for agentic benchmarks (which declare no
+        `offline`, see Section 5.7): a submission then contains one fewer
+        distinct run (`endpoints_rules.md` on §5.3's minimum).
+        """
+        return 8 if any(p.offline == "dedicated" for p in self.points) else 7
+
+    def accuracy_run_count_requirement(self) -> int:
+        """The Endpoints Policy Section 4.3 accuracy result count `N` this shape needs.
+
+        `:1662`'s "Exactly `N` accuracy results are present -- 5 for
+        non-agentic, 4 for agentic ([Section 4.3](#43-accuracy-metric)) --
+        one per mandatory point, and none at a submitter's-choice point":
+        5 where any `offline` run is declared (non-agentic), 4 otherwise.
+        """
+        return 5 if any(p.offline is not None for p in self.points) else 4
