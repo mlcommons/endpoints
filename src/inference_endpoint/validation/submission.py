@@ -31,9 +31,9 @@ against.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from inference_endpoint.validation.regions import Regions
 from inference_endpoint.validation.tree import PointNode
@@ -81,7 +81,7 @@ class Point:
 class Submission:
     """A system's `system_desc` fields over its ordered measurement points."""
 
-    system_desc: Mapping[str, object]
+    system_desc: Mapping[str, Any]
     points: Sequence[Point]
 
     def __post_init__(self) -> None:
@@ -171,3 +171,60 @@ class Submission:
         5 where any `offline` run is declared (non-agentic), 4 otherwise.
         """
         return 5 if any(p.offline is not None for p in self.points) else 4
+
+    def derived(self) -> Mapping[str, Any]:
+        """Named derivations for `derived.<name>` row refs, as a lazy mapping.
+
+        The charter's boundary rule item 1 ("named derivations on their
+        subject, exposed as fields `Ref` reads"): keys are `offline_ordering`,
+        `point_cap`, `point_count_min` and `accuracy_run_count_requirement`,
+        each resolved via its own named method at first access and memoized
+        (`DerivedFields`). `Submission({...}, points).derived()["point_cap"]`
+        -> the cap verdict; an unlisted name -> `KeyError`.
+        """
+        return DerivedFields(self)
+
+
+class DerivedFields(Mapping[str, Any]):
+    """Lazy `derived.<name>` mapping: a derivation runs only when a row names it.
+
+    `Ref.resolve` walks this like any scope root. `view["point_cap"]` ->
+    `Submission.point_cap()`'s value, memoized; `view["nope"]` -> `KeyError`,
+    so `Ref.resolve` reports the field absent. Membership asks the known-names
+    table only and never runs a derivation, so one derivation's fail-loud
+    `ValueError` (e.g. `derived.offline_ordering` with no unique `C_max`
+    point) reaches exactly the row that named it.
+    """
+
+    __slots__ = ("_submission", "_cache")
+
+    def __init__(self, submission: Submission) -> None:
+        self._submission = submission
+        self._cache: dict[str, Any] = {}
+
+    def __getitem__(self, name: str) -> Any:
+        """Value of `derived.<name>`: runs `Submission.<name>()` once, memoized."""
+        if name not in _DERIVATION_METHODS:
+            raise KeyError(name)
+        if name not in self._cache:
+            self._cache[name] = _DERIVATION_METHODS[name](self._submission)
+        return self._cache[name]
+
+    def __contains__(self, name: object) -> bool:
+        """Whether `name` is a known derivation name; never runs one."""
+        return name in _DERIVATION_METHODS
+
+    def __iter__(self) -> Iterator[str]:
+        """Every known derivation name (the `derived_fields` key set)."""
+        return iter(_DERIVATION_METHODS)
+
+    def __len__(self) -> int:
+        return len(_DERIVATION_METHODS)
+
+
+_DERIVATION_METHODS: dict[str, Callable[[Submission], Any]] = {
+    "offline_ordering": Submission.offline_ordering,
+    "point_cap": Submission.point_cap,
+    "point_count_min": Submission.point_count_min,
+    "accuracy_run_count_requirement": Submission.accuracy_run_count_requirement,
+}

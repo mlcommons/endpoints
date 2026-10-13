@@ -24,9 +24,7 @@ gating suppresses only that check's rows.
 from pathlib import Path
 
 import pytest
-
 from inference_endpoint.validation.check import Check, Cohort
-from inference_endpoint.validation.regions import Regions
 from inference_endpoint.validation.runner import Finding
 from inference_endpoint.validation.submission import Point, Submission
 from inference_endpoint.validation.tree import SubmissionNode
@@ -53,10 +51,6 @@ def _submission(tmp_path: Path, concurrencies: list[int]) -> Submission:
     return Submission({"max_supported_concurrency": 8192}, points)
 
 
-def _regions() -> Regions:
-    return Regions.for_bounds(8192, 32)
-
-
 def _check(id: str, **kwargs) -> Check:
     base = {
         "id": id,
@@ -73,9 +67,7 @@ class TestFindingsPerEvaluatedRow:
 
     def test_one_finding_per_assert_row_per_point(self, tmp_path):
         check = _check("cap", assert_=[{"left": 1, "op": "eq", "right": 1}])
-        findings = Finding.collect(
-            Cohort((check,)), _submission(tmp_path, [512, 8192]), _regions()
-        )
+        findings = Finding.collect(Cohort((check,)), _submission(tmp_path, [512, 8192]))
         assert len(findings) == 2
         assert all(isinstance(f, Finding) for f in findings)
         assert [f.check_id for f in findings] == ["cap", "cap"]
@@ -83,9 +75,7 @@ class TestFindingsPerEvaluatedRow:
 
     def test_failing_verdict_records_why(self, tmp_path):
         check = _check("failing", assert_=[{"left": 0, "op": "eq", "right": 1}])
-        findings = Finding.collect(
-            Cohort((check,)), _submission(tmp_path, [512]), _regions()
-        )
+        findings = Finding.collect(Cohort((check,)), _submission(tmp_path, [512]))
         assert len(findings) == 1
         assert findings[0].verdict.ok is False
         assert findings[0].verdict.why == "expected 0 eq 1, got 0 vs 1"
@@ -96,10 +86,7 @@ class TestFindingsPerEvaluatedRow:
             when=[{"left": 0, "op": "eq", "right": 1}],
             assert_=[{"left": 1, "op": "eq", "right": 1}],
         )
-        assert (
-            Finding.collect(Cohort((check,)), _submission(tmp_path, [512]), _regions())
-            == ()
-        )
+        assert Finding.collect(Cohort((check,)), _submission(tmp_path, [512])) == ()
 
 
 class TestNeedsGate:
@@ -111,7 +98,7 @@ class TestNeedsGate:
             "second", needs=["first"], assert_=[{"left": 1, "op": "eq", "right": 1}]
         )
         findings = Finding.collect(
-            Cohort((first, second)), _submission(tmp_path, [512]), _regions()
+            Cohort((first, second)), _submission(tmp_path, [512])
         )
         assert [f.check_id for f in findings] == ["first"]
         assert findings[0].verdict.ok is False
@@ -122,7 +109,7 @@ class TestNeedsGate:
             "second", needs=["first"], assert_=[{"left": 1, "op": "eq", "right": 1}]
         )
         findings = Finding.collect(
-            Cohort((first, second)), _submission(tmp_path, [512]), _regions()
+            Cohort((first, second)), _submission(tmp_path, [512])
         )
         assert [f.check_id for f in findings] == ["first", "second"]
 
@@ -134,7 +121,7 @@ class TestNeedsGate:
             assert_=[{"left": 1, "op": "eq", "right": 1}],
         )
         findings = Finding.collect(
-            Cohort((first, second)), _submission(tmp_path, [512]), _regions()
+            Cohort((first, second)), _submission(tmp_path, [512])
         )
         assert [f.check_id for f in findings] == ["first", "second"]
 
@@ -147,7 +134,7 @@ class TestNeedsFailLoud:
             "check", needs=["ghost"], assert_=[{"left": 1, "op": "eq", "right": 1}]
         )
         with pytest.raises(ValueError, match="unknown check"):
-            Finding.collect(Cohort((check,)), _submission(tmp_path, [512]), _regions())
+            Finding.collect(Cohort((check,)), _submission(tmp_path, [512]))
 
     def test_needs_cycle_raises(self, tmp_path):
         first = _check(
@@ -157,6 +144,37 @@ class TestNeedsFailLoud:
             "second", needs=["first"], assert_=[{"left": 1, "op": "eq", "right": 1}]
         )
         with pytest.raises(ValueError, match="cycle"):
-            Finding.collect(
-                Cohort((first, second)), _submission(tmp_path, [512]), _regions()
-            )
+            Finding.collect(Cohort((first, second)), _submission(tmp_path, [512]))
+
+
+class TestDerivedExposureLink:
+    """`derived.<name>` rows resolve lazily; an unnamed derivation never runs."""
+
+    def test_derived_fact_row_resolves(self, tmp_path):
+        check = _check(
+            "derived_row",
+            assert_=[{"left": "derived.point_cap", "op": "eq", "right": True}],
+        )
+        findings = Finding.collect(Cohort((check,)), _submission(tmp_path, [512]))
+        assert len(findings) == 1
+        assert findings[0].verdict.ok, findings[0].verdict.why
+
+    def test_unnamed_derivation_never_runs(self, tmp_path):
+        # Two `offline: dedicated` points make `derived.offline_ordering` raise
+        # "exactly one point may carry an `offline` declaration"; a row that
+        # names no derivation must never reach it.
+        root = tmp_path / "acme"
+        for concurrency in (512, 8192):
+            (root / "results" / "sys" / "model" / f"r{concurrency}").mkdir(parents=True)
+        tree = SubmissionNode.from_directory(root)
+        nodes = {
+            int(node.dir.name[1:]): node
+            for node in tree.children[0].children[0].children
+        }
+        submission = Submission(
+            {"max_supported_concurrency": 8192},
+            tuple(Point("dedicated", c, 1.0, nodes[c]) for c in (512, 8192)),
+        )
+        check = _check("plain", assert_=[{"left": 1, "op": "eq", "right": 1}])
+        findings = Finding.collect(Cohort((check,)), submission)
+        assert [f.verdict.ok for f in findings] == [True, True]

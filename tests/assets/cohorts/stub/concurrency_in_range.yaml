@@ -1,9 +1,9 @@
 # Stub check: per-point Concurrency-in-range (Endpoints Policy Section 5.4).
 #
-# Representative stub per PR-1's "machinery + stubs" directive. Rows read
-# exactly the `regions.root` fields `Node.scopes` folds; the point's
-# `concurrency` sits on the `point` scope as `request.concurrency` (to be
-# pinned from the §8.3 tables before PR-2).
+# Representative stub per PR-1's "machinery + stubs" directive. `left` names
+# the point's `concurrency` row-field (Endpoints Policy Section 8.3's
+# `concurrency`, landed under `point.config` per `FILE_TO_KEY_MAP`) and
+# `right` reads `regions.coverage`-interval (Section 5.5's computed region).
 id: concurrency_in_range
 description: Each measurement point's concurrency lands in a valid region (incl. 10% margin).
 rule: "Endpoints Policy Section 5.4, Concurrency Regions and its compliance-checklist row 'Concurrency in range'."
@@ -11,6 +11,6 @@ fix: Adjust the point's target concurrency to fall within one of the five region
 severity: warn
 scope: point
 assert:
-  - left: point.request.concurrency
+  - left: point.config.concurrency
     op: in
     right: regions.coverage
