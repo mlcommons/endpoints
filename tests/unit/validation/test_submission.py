@@ -18,6 +18,7 @@
 from pathlib import Path
 
 import pytest
+
 from inference_endpoint.validation.regions import Regions
 from inference_endpoint.validation.submission import Point, Submission
 from inference_endpoint.validation.tree import SubmissionNode
@@ -149,6 +150,33 @@ class TestOutOfRangePoints:
             {"max_supported_concurrency": 8192}, [_point(tmp_path, 0)]
         )
         assert submission.out_of_range_points(regions) == (submission.points[0],)
+
+
+class TestThresholdsPerShape:
+    """`point_count_min` / `accuracy_run_count_requirement`: §5.3/§4.3-derived counts."""
+
+    def test_dedicated_offline_wants_8_and_5(self, tmp_path):
+        submission = Submission(
+            {"max_supported_concurrency": 8192},
+            [_point(tmp_path, 512, offline="dedicated"), _point(tmp_path, 8192)],
+        )
+        assert submission.point_count_min() == 8
+        assert submission.accuracy_run_count_requirement() == 5
+
+    def test_elected_offline_wants_7_and_5(self, tmp_path):
+        submission = Submission(
+            {"max_supported_concurrency": 8192},
+            [_point(tmp_path, 512), _point(tmp_path, 8192, offline="elected")],
+        )
+        assert submission.point_count_min() == 7
+        assert submission.accuracy_run_count_requirement() == 5
+
+    def test_agentic_wants_7_and_4(self, tmp_path):
+        submission = Submission(
+            {"max_supported_concurrency": 8192}, [_point(tmp_path, 512)]
+        )
+        assert submission.point_count_min() == 7
+        assert submission.accuracy_run_count_requirement() == 4
 
 
 class TestSubmissionCarry:
