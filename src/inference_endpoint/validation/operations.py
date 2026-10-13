@@ -60,6 +60,7 @@ class Op:
     name: ClassVar[str] = ""
     slots: ClassVar[tuple[str, ...]] = ("right",)
     needs_found: ClassVar[bool] = False
+    tolerant: ClassVar[bool] = False
 
     registry: ClassVar[dict[str, type[Op]]] = {}
 
@@ -69,12 +70,14 @@ class Op:
         name: str,
         slots: tuple[str, ...] = ("right",),
         needs_found: bool = False,
+        tolerant: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init_subclass__(**kwargs)
         cls.name = name
         cls.slots = slots
         cls.needs_found = needs_found
+        cls.tolerant = tolerant
         cls.registry[name] = cls
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Op:
@@ -105,9 +108,15 @@ def _close_to(
 ) -> bool:
     """`math.isclose` for a number pair under tolerance; `==` for every other pair.
 
+    Exact integers short-circuit to `==` first (distinct >2^53 integers would
+    coerce-equal through `math.isclose`'s float math even at zero tolerance).
     Ordering has no tolerance semantics (no standard meaning of an ordered
     comparison under `abs_tol`): those ops do not reach here.
     """
+    if abs_tol == 0.0 and rel_tol == 0.0:
+        return left == right
+    if isinstance(left, int) and isinstance(right, int):
+        return left == right
     if isinstance(left, float | int) and isinstance(right, float | int):
         return math.isclose(left, right, abs_tol=abs_tol, rel_tol=rel_tol)
     return left == right
@@ -132,7 +141,7 @@ def _same_multiset(left: Any, right: Any) -> bool:
     return not pool
 
 
-class Eq(Op, name="eq"):
+class Eq(Op, name="eq", tolerant=True):
     """`subject == target` numerically under `abs_tol`/`rel_tol` (see `_close_to`)."""
 
     def holds(
@@ -141,7 +150,7 @@ class Eq(Op, name="eq"):
         return _close_to(predicate.subject, predicate.target, abs_tol, rel_tol)
 
 
-class Ne(Op, name="ne"):
+class Ne(Op, name="ne", tolerant=True):
     """`subject != target` under tolerance: `Eq` negated."""
 
     def holds(
