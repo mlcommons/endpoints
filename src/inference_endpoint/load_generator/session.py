@@ -793,9 +793,7 @@ class BenchmarkSession:
                 self._publisher.publish(
                     EventRecord(
                         event_type=SampleEventType.COMPLETE,
-                        timestamp_ns=resp.completed_at
-                        if isinstance(resp.completed_at, int)
-                        else now_ns,
+                        timestamp_ns=now_ns,
                         sample_uuid=query_id,
                         conversation_id=conv_id_str,
                         turn=turn_num,
