@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -58,6 +59,7 @@ class Op:
     """
 
     name: ClassVar[str] = ""
+    label: ClassVar[str] = ""
     slots: ClassVar[tuple[str, ...]] = ("right",)
     needs_found: ClassVar[bool] = False
     tolerant: ClassVar[bool] = False
@@ -103,20 +105,35 @@ class Op:
         raise NotImplementedError
 
 
+def vet_pattern(pattern: str) -> None:
+    """Compile-check a `matches` regex at load; an uncompilable one raises ValueError.
+
+    Patterns are literal, cohort-authored strings (`Compare._check_shape`
+    refuses resolved operands), so vetting happens once at load where
+    `_load_check` names the offending file -- a malformed pattern must never
+    reach `re.fullmatch` mid-run (its `re.error` is not even a `ValueError`,
+    so it would escape the verdict boundary as a run-aborting surprise).
+    """
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"`matches` pattern does not compile: {exc}") from exc
+
+
 def _close_to(
     left: Any, right: Any, abs_tol: float = 0.0, rel_tol: float = 0.0
 ) -> bool:
     """`math.isclose` for a number pair under tolerance; `==` for every other pair.
 
-    Exact integers short-circuit to `==` first (distinct >2^53 integers would
-    coerce-equal through `math.isclose`'s float math even at zero tolerance).
+    Integer pairs compare exactly, tolerances honored in integer arithmetic
+    (`math.isclose`'s float coercion conflates distinct integers above 2^53).
     Ordering has no tolerance semantics (no standard meaning of an ordered
     comparison under `abs_tol`): those ops do not reach here.
     """
     if abs_tol == 0.0 and rel_tol == 0.0:
         return left == right
     if isinstance(left, int) and isinstance(right, int):
-        return left == right
+        return abs(left - right) <= max(abs_tol, rel_tol * max(abs(left), abs(right)))
     if isinstance(left, float | int) and isinstance(right, float | int):
         return math.isclose(left, right, abs_tol=abs_tol, rel_tol=rel_tol)
     return left == right
@@ -125,20 +142,26 @@ def _close_to(
 def _same_multiset(left: Any, right: Any) -> bool:
     """Unordered, multiplicity-respecting equality; unhashable-safe.
 
-    `[1, 2, 2]` vs `[2, 1, 2]` -> True; `[1]` vs `[1, 1]` -> False. Pairs by `==`
-    scanning, so unhashable values (lists, mappings) compare fine.
+    `[1, 2, 2]` vs `[2, 1, 2]` -> True; `[1]` vs `[1, 1]` -> False. Hashable
+    elements pair in linear time via counts; unhashable ones fall back to the
+    `==` scanning pool, so crafted large lists stay bounded work.
     """
     if not isinstance(left, Sequence) or not isinstance(right, Sequence):
         return left == right
-    pool = list(right)
-    for value in left:
-        for i, other in enumerate(pool):
-            if value == other:
-                del pool[i]
-                break
-        else:
-            return False
-    return not pool
+    if len(left) != len(right):
+        return False
+    try:
+        return Counter(left) == Counter(right)
+    except TypeError:  # unhashable elements: pair by `==` scanning
+        pool = list(right)
+        for value in left:
+            for i, other in enumerate(pool):
+                if value == other:
+                    del pool[i]
+                    break
+            else:
+                return False
+        return not pool
 
 
 class Eq(Op, name="eq", tolerant=True):

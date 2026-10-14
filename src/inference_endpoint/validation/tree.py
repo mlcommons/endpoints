@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -96,9 +98,11 @@ class _StrictLoader(yaml.SafeLoader):
                     None, None, "merge keys are not allowed", key_node.start_mark
                 )
             key = self.construct_object(key_node, deep=deep)
-            if not isinstance(key, (str, int, float, bool)):
-                continue  # the base constructor rejects an unhashable key
-            if key in seen:
+            try:
+                duplicate = key in seen
+            except TypeError:
+                continue  # an unhashable key: the base constructor rejects it
+            if duplicate:
                 raise yaml.constructor.ConstructorError(
                     None, None, f"duplicate key {key!r}", key_node.start_mark
                 )
@@ -144,6 +148,13 @@ class Node:
             if value is not MISSING:
                 self.artifacts[name] = (value, error)
 
+    def root(self) -> Node:
+        """The tree's root node; it carries the `ruleset`/`regions` folds."""
+        node: Node = self
+        while node.parent is not None:
+            node = node.parent
+        return node
+
     def read(self, name: str) -> tuple[Any, str | None]:
         """(value, error) of the artifact `name` of this node; `MISSING` when absent.
 
@@ -164,15 +175,17 @@ class Node:
         scopes: dict[str, dict[str, Any]] = {}
         node: Node | None = self
         while node is not None:
-            scopes[node.kind.value] = {
-                key: node.artifacts[name][0]
-                for name, key in FILE_TO_KEY_MAP.items()
-                if name in node.artifacts
-            }
+            fields = {}
+            for name, key in FILE_TO_KEY_MAP.items():
+                # `read` is the only (value, error) reader: a corrupt artifact
+                # is none of its keys' business (it reads as its key's absence;
+                # `read` keeps the parse error for diagnostics).
+                value, error = node.read(name)
+                if value is not MISSING and error is None:
+                    fields[key] = value
+            scopes[node.kind.value] = fields
             node = node.parent
-        root: Node = self
-        while root.parent is not None:
-            root = root.parent
+        root = self.root()
         if root.ruleset is not None:
             scopes["ruleset"] = root.ruleset.scopes()
         if root.regions is not None:
@@ -236,18 +249,20 @@ def _walk(parent: Node, kind: RuleScopes, where: Path) -> tuple[Node, ...]:
     Points are `r<N>` directories; other kinds take every directory that
     resolves inside the submission (a symlinked directory out of it is skipped).
     """
-    matches = (
-        _POINT_DIR_PATTERN.fullmatch
-        if kind == RuleScopes.POINT
-        else (lambda name: True)
-    )
     children = []
     for entry in sorted(
         where.iterdir() if where.is_dir() else [], key=lambda p: p.name
     ):
+        name_in_kind = (
+            kind != RuleScopes.POINT
+            or _POINT_DIR_PATTERN.fullmatch(entry.name) is not None
+        )
         if (
             not entry.is_dir()
-            or not matches(entry.name)
+            # A symlinked directory multiplies nodes that re-parse shared
+            # artifacts and inflates point counts (the YAML alias ban's spirit).
+            or entry.is_symlink()
+            or not name_in_kind
             or not _inside(parent.dir, entry)
         ):
             continue
@@ -263,17 +278,27 @@ def _read_artifact(directory: Path, name: str) -> tuple[Any, str | None]:
     """(value, error) of `name` in `directory`; nothing here aborts the run.
 
     Present and null -> (None, None); absent -> (MISSING, None); unreadable,
-    oversized or unparsable -> (None, "<name> parse error: ...").
+    oversized or unparsable -> (None, "<name> parse error: ..."). The channel
+    is fd-anchored: the node's directory is opened `O_NOFOLLOW` and the
+    artifact named relative to that fd, so neither a symlinked artifact nor a
+    directory swapped mid-walk can redirect a read out of the submission.
     """
-    path = directory / name
-    if not path.is_file():
-        return MISSING, None
-    if not _inside(directory, path):
-        return None, f"{name} resolves outside the submission"
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as exc:
         return None, f"{name} parse error: {exc.strerror}"
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return MISSING, None
+    except OSError as exc:
+        return None, f"{name} parse error: {exc.strerror}"
+    finally:
+        os.close(dir_fd)
+    # A FIFO/socket/device here would block `open(2)` or `read` forever.
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None, f"{name} parse error: not a regular file"
     try:
         with os.fdopen(fd, "rb") as handle:
             data = handle.read(_MAX_ARTIFACT_BYTES + 1)
@@ -285,19 +310,40 @@ def _read_artifact(directory: Path, name: str) -> tuple[Any, str | None]:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         return None, f"{name} parse error: {exc}"
+    if not text.strip():
+        return None, f"{name} parse error: empty document"
     try:
         value = (
-            json.loads(text)
+            json.loads(text, object_pairs_hook=_json_object_no_duplicates)
             if name.endswith(".json")
             else yaml.load(text, Loader=_StrictLoader)
         )
     except (ValueError, RecursionError, yaml.YAMLError) as exc:
         return None, f"{name} parse error: {exc}"
+    if value is not None and not isinstance(value, Mapping):
+        return None, (
+            f"{name} parse error: expected a mapping document, "
+            f"got {type(value).__name__}"
+        )
     return value, None
+
+
+def _json_object_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """`json.loads` object hook: a repeated key is a parse error, as in YAML.
+
+    Without this, `{"n_errors": 12, "n_errors": 0}` last-wins to `0` on the
+    artifacts carrying the compliance numbers.
+    """
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
 
 
 def _inside(root: Path, entry: Path) -> bool:
     try:
         return root.resolve() in entry.resolve().parents
-    except OSError:
-        return False
+    except (OSError, RuntimeError):
+        return False  # an unresolvable path or a symlink loop is not inside

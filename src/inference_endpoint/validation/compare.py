@@ -32,7 +32,7 @@ from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, model_validator
 
-from inference_endpoint.validation.operations import Op, Predicate
+from inference_endpoint.validation.operations import Op, Predicate, vet_pattern
 from inference_endpoint.validation.ranges import Interval
 from inference_endpoint.validation.sentinels import MISSING
 
@@ -50,7 +50,6 @@ class Ref:
         "derived",
         "ruleset",
         "regions",
-        "cohort",
     )
 
     parts: tuple[str, ...]
@@ -84,7 +83,7 @@ class Ref:
                 if part not in obj:
                     return False, None
                 obj = obj[part]
-            elif hasattr(obj, part):
+            elif not part.startswith("_") and hasattr(obj, part):
                 obj = getattr(obj, part)
             else:
                 return False, None
@@ -94,13 +93,81 @@ class Ref:
         return ".".join(self.parts)
 
 
+def _one_edit_apart(left: str, right: str) -> bool:
+    """Whether the strings differ by exactly one insert/delete/substitute.
+
+    Typo detector for scope roots (`submisson.` is one edit from `submission.`
+    while `pointish.` is two): a dotted operand that would silently decode as a
+    literal raises instead when its head is a near-miss of a root.
+    """
+    if left == right or abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right, strict=True)) == 1
+    short, long = sorted((left, right), key=len)
+    i = j = edits = 0
+    while i < len(short) and j < len(long):
+        if short[i] == long[j]:
+            i += 1
+        else:
+            edits += 1
+        j += 1
+    return edits + (len(long) - j) == 1
+
+
+def _near_root_misspelling(head: str) -> str | None:
+    """The scope root one edit away from `head`, else None."""
+    for root_name in Ref.ROOTS:
+        if _one_edit_apart(head, root_name):
+            return root_name
+    return None
+
+
 def _decode_operand(value: Any) -> Any:
     """YAML decode hook on every `Operand`, run at model-validate time.
 
-    `"point.tps"` -> `Ref(("point", "tps"))`; `"tps"` or `7` -> the literal itself.
+    `"point.tps"` -> `Ref(("point", "tps"))` (a root-prefixed dotted string);
+    `["ruleset", "models", "llama3.1-8b-v1"]` -> a `Ref` over raw segments, for
+    keys that themselves contain dots (only a non-empty all-strings list headed
+    by a scope root decodes this way: every other list is a literal collection);
+    `{"literal": ...}` -> that value verbatim, for a string that would
+    otherwise read as a reference. `"tps"` or `7` -> the literal itself. A
+    dotted scalar whose head is one edit from a root raises rather than
+    silently reading as a literal.
     """
-    ref = Ref.from_string(value) if isinstance(value, str) else None
-    return ref or value
+    if isinstance(value, Ref):
+        return value
+    if (
+        isinstance(value, list)
+        and value
+        and all(isinstance(part, str) and part for part in value)
+    ):
+        head = value[0]
+        if head in Ref.ROOTS:
+            return Ref(tuple(value))
+        near = _near_root_misspelling(head)
+        if near is not None:
+            raise ValueError(
+                f"{value!r} looks like a misspelled {near!r} reference; "
+                'fix the root or write {"literal": ...} to mean the value'
+            )
+        return value
+    if isinstance(value, dict) and set(value) == {"literal"}:
+        return value["literal"]
+    if isinstance(value, str):
+        ref = Ref.from_string(value)
+        if ref is not None:
+            return ref
+        head, dot, _ = value.partition(".")
+        if dot:
+            near = _near_root_misspelling(head)
+            if near is not None:
+                raise ValueError(
+                    f"{value!r} looks like a misspelled {near!r} reference; "
+                    'fix the root or write {"literal": ...} to mean the string'
+                )
+        return value
+    return value
 
 
 Operand = Annotated[Any, BeforeValidator(_decode_operand)]
@@ -109,7 +176,9 @@ MeasureOp = Literal["eq", "ne", "gt", "ge", "lt", "le"]
 
 
 def _show(value: Any, limit: int = 80) -> str:
-    text = repr(value)
+    # `Ref` renders its dotted form, not its dataclass repr: messages quote the
+    # row's own operand syntax.
+    text = str(value) if isinstance(value, Ref) else repr(value)
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
@@ -148,6 +217,10 @@ class Compare(BaseModel):
         used = {name for name in ("right", "lo", "hi") if name in self.model_fields_set}
         if used != want:
             raise ValueError(f"`{self.op}` takes `left` plus {sorted(want) or 'none'}")
+        if self.op == "matches":
+            if not (isinstance(self.right, str) and not isinstance(self.right, Ref)):
+                raise ValueError("`matches` needs `right` as a literal regex string")
+            vet_pattern(self.right)
         if not op.tolerant and (self.abs_tol or self.rel_tol):
             raise ValueError(
                 f"`{self.op}` has no tolerance semantics (use `eq`/`ne` for abs_tol/rel_tol)"
@@ -170,7 +243,7 @@ class Compare(BaseModel):
             held = op.holds(Predicate(value if found else MISSING, None))
             if held:
                 return True, ""
-            got = repr(value) if found else "absent"
+            got = _show(value) if found else "absent"
             return False, f"expected {self.left} {op.label}, got {got}"
 
         out: list[Any] = []
@@ -196,13 +269,30 @@ class Compare(BaseModel):
         # The message's operand form follows the row's slots: a literal `None`
         # on `right` is a real operand, never the interval placeholder.
         if Op(self.op).slots == ("lo", "hi"):
-            target = f"{self.lo}..{self.hi}"
+            target: Any = f"{self.lo}..{self.hi}"
         else:
             target = self.right
         return False, (
             f"expected {self.left} {self.op} {target}, "
             f"got {_show(left)} vs {_show(right)}"
         )
+
+    def describe(self) -> str:
+        """The row as prose: `left op right`, `left between lo..hi`, or `left op`.
+
+        The row label every boundary message reuses: one shape per row kind, so
+        a message never reaches for fields a row does not have.
+        """
+        op = Op(self.op)
+        if op.slots == ("lo", "hi"):
+            return f"{_show(self.left)} {self.op} {_show(self.lo)}..{_show(self.hi)}"
+        if op.slots == ():
+            return f"{_show(self.left)} {self.op}"
+        return f"{_show(self.left)} {self.op} {_show(self.right)}"
+
+    def operands(self) -> tuple[Any, ...]:
+        """Every operand this row resolves; its `Ref`s live among them."""
+        return (self.left, self.right, self.lo, self.hi)
 
 
 class Aggregate(BaseModel):
@@ -242,9 +332,13 @@ class Aggregate(BaseModel):
         """`Aggregate(measure="count", ...)` -> `Count(...)` over the registered family."""
         if cls is Aggregate:
             try:
-                return super().__new__(cls.registry[data["measure"]])
+                measure = data["measure"]
             except KeyError:
-                raise ValueError(f"unknown measure {data['measure']!r}") from None
+                raise ValueError("aggregate row needs a `measure`") from None
+            try:
+                return super().__new__(cls.registry[measure])
+            except KeyError:
+                raise ValueError(f"unknown measure {measure!r}") from None
         return super().__new__(cls)
 
     def __init_subclass__(cls, *, measure: str, **kwargs: Any) -> None:
@@ -253,8 +347,17 @@ class Aggregate(BaseModel):
 
     @model_validator(mode="after")
     def _check_shape(self) -> Aggregate:
-        if "value" not in self.model_fields_set:
-            raise ValueError("`Aggregate` takes `over`, `measure`, `op` and `value`")
+        # The row must run its declared measure: `Count(measure="sum")` would
+        # compute `len` while its messages claim `sum`.
+        if Aggregate.registry.get(self.measure) is not type(self):
+            raise ValueError(
+                f"row computes {type(self).__name__} but declares measure {self.measure!r}"
+            )
+        op = Op(self.op)
+        if not op.tolerant and (self.abs_tol or self.rel_tol):
+            raise ValueError(
+                f"`{self.op}` has no tolerance semantics (use `eq`/`ne` for abs_tol/rel_tol)"
+            )
         return self
 
     def run(self, items: list[Any]) -> Any:
@@ -301,6 +404,18 @@ class Aggregate(BaseModel):
             f"expected {self.measure} of {self.over} {self.op} {self.value}, "
             f"got {_show(measured)} vs {_show(value)}"
         )
+
+    def describe(self) -> str:
+        """The row as prose: `measure of over op value`.
+
+        The row label `Verdict.evaluate`'s boundary message reuses (the
+        `Compare` twin keeps its own shape).
+        """
+        return f"{self.measure} of {_show(self.over)} {self.op} {_show(self.value)}"
+
+    def operands(self) -> tuple[Any, ...]:
+        """Every operand this row resolves; its `Ref`s live among them."""
+        return (self.over, self.value)
 
 
 class Count(Aggregate, measure="count"):
@@ -358,10 +473,17 @@ class AllTrue(Aggregate, measure="all"):
 
 @dataclass(frozen=True)
 class Verdict:
-    """Does a condition hold, and why not: the message is the row's own."""
+    """Does a condition hold, and why not: the message is the row's own.
+
+    `broken` marks a verdict whose row failed to *evaluate* (a deliberate
+    fail-loud or an incommensurable pair) rather than judged False -- gate
+    positions must refuse those loudly instead of reading them as "not
+    applicable".
+    """
 
     ok: bool
     why: str
+    broken: bool = False
 
     @classmethod
     def evaluate(cls, row: Compare | Aggregate, scopes: Mapping[str, Any]) -> Verdict:
@@ -376,11 +498,19 @@ class Verdict:
         """
         try:
             held, why = row._outcome(scopes)
-        except (TypeError, ValueError, OverflowError) as exc:
+        except TypeError as exc:
             return cls(
                 False,
-                f"incommensurable pair: {_show(row.left)} {row.op} {row.right}: "
-                f"{type(exc).__name__}: {exc}",
+                f"incommensurable pair: {row.describe()}: {type(exc).__name__}: {exc}",
+                broken=True,
+            )
+        except (ValueError, OverflowError) as exc:
+            # A deliberate fail-loud (a wiring/shape error) is reported as what
+            # it is -- never as an incommensurable pair that never happened.
+            return cls(
+                False,
+                f"row failed to evaluate: {row.describe()}: {type(exc).__name__}: {exc}",
+                broken=True,
             )
         return cls(held, why)
 

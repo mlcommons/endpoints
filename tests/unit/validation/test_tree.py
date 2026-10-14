@@ -22,6 +22,7 @@ its mapping.
 """
 
 import json
+import os
 
 import pytest
 from inference_endpoint.validation.compare import Ref
@@ -100,6 +101,18 @@ class TestWalk:
         node = SubmissionNode.from_directory(root)
         assert "r99" not in [p.dir.name for p in node.children[0].children[0].children]
 
+    def test_symlinked_directory_inside_the_submission_is_skipped_too(self, tmp_path):
+        _, root = _tree(tmp_path)
+        model = root / "results" / "sys" / "model"
+        (model / "r9").symlink_to(model / "r8", target_is_directory=True)
+        node = SubmissionNode.from_directory(root)
+        # One real point stays one point: symlinks must not multiply nodes (or
+        # inflate `point_cap`/counts the way a YAML alias would).
+        assert [p.dir.name for p in node.children[0].children[0].children] == [
+            "r16",
+            "r8",
+        ]
+
     def test_missing_root_is_a_load_error(self, tmp_path):
         with pytest.raises(NotADirectoryError):
             SubmissionNode.from_directory(tmp_path / "nope")
@@ -143,18 +156,106 @@ class TestRead:
         assert value is None
         assert "duplicate key" in error
 
-    def test_alias_and_merge_yaml_are_parse_errors(self, tmp_path):
-        point = self._point(
-            tmp_path, {"point.yaml": "base: &b {x: 1}\np: {<<: *b, y: 2}\n"}
-        )
+    def test_yaml_aliases_are_a_parse_error(self, tmp_path):
+        point = self._point(tmp_path, {"point.yaml": "base: &b {x: 1}\np: *b\n"})
         value, error = point.read("point.yaml")
         assert value is None
-        assert (
-            "aliases are not allowed" in error or "merge keys are not allowed" in error
-        )
+        assert "aliases are not allowed" in error
+
+    def test_yaml_merge_keys_are_a_parse_error(self, tmp_path):
+        point = self._point(tmp_path, {"point.yaml": "p: {<<: {x: 1}, y: 2}\n"})
+        value, error = point.read("point.yaml")
+        assert value is None
+        assert "merge keys are not allowed" in error
 
     def test_unparsable_json_reports_the_error(self, tmp_path):
         point = self._point(tmp_path, {"result_summary.json": "{bad"})
+        value, error = point.read("result_summary.json")
+        assert value is None
+        assert "parse error" in error
+
+
+class TestReadChannel:
+    """`_read_artifact`: bounded, symlink-safe reads; nothing here aborts the run."""
+
+    def _point_with(self, tmp_path, name: str, data: bytes):
+        root = tmp_path / "acme"
+        point_dir = root / "results" / "sys" / "model" / "r8"
+        point_dir.mkdir(parents=True)
+        (point_dir / name).write_bytes(data)
+        node = SubmissionNode.from_directory(root)
+        return node.children[0].children[0].children[0]
+
+    def test_oversized_artifact_reports_too_large(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("inference_endpoint.validation.tree._MAX_ARTIFACT_BYTES", 8)
+        point = self._point_with(tmp_path, "result_summary.json", b'{"n": 12}')
+        value, error = point.read("result_summary.json")
+        assert value is None
+        assert "too large" in error
+
+    def test_non_utf8_artifact_reports_a_parse_error(self, tmp_path):
+        point = self._point_with(tmp_path, "result_summary.json", b"\xff\xfe{")
+        value, error = point.read("result_summary.json")
+        assert value is None
+        assert "parse error" in error
+
+    def test_a_fifo_artifact_is_refused_not_awaited(self, tmp_path):
+        root = tmp_path / "acme"
+        point_dir = root / "results" / "sys" / "model" / "r8"
+        point_dir.mkdir(parents=True)
+        os.mkfifo(point_dir / "point.yaml")
+        point = SubmissionNode.from_directory(root).children[0].children[0].children[0]
+        value, error = point.read("point.yaml")
+        assert value is None
+        assert "not a regular file" in error
+
+    def test_a_directory_where_an_artifact_belongs_is_refused(self, tmp_path):
+        root = tmp_path / "acme"
+        point_dir = root / "results" / "sys" / "model" / "r8"
+        (point_dir / "result_summary.json").mkdir(parents=True)
+        point = SubmissionNode.from_directory(root).children[0].children[0].children[0]
+        value, error = point.read("result_summary.json")
+        assert value is None
+        assert "not a regular file" in error
+
+    def test_json_duplicate_keys_are_a_parse_error(self, tmp_path):
+        point = self._point_with(tmp_path, "result_summary.json", b'{"n": 1, "n": 2}')
+        value, error = point.read("result_summary.json")
+        assert value is None
+        assert "duplicate key" in error
+
+    def test_yaml_duplicate_null_keys_are_a_parse_error(self, tmp_path):
+        point = self._point_with(tmp_path, "point.yaml", b"null: 1\nnull: 2\n")
+        value, error = point.read("point.yaml")
+        assert value is None
+        assert "duplicate key" in error
+
+    @pytest.mark.parametrize("payload", [b"", b"   \n", b"just a scalar\n", b"- 1\n"])
+    def test_an_unusable_document_is_a_parse_error(self, tmp_path, payload):
+        point = self._point_with(tmp_path, "point.yaml", payload)
+        value, error = point.read("point.yaml")
+        assert value is None
+        assert "parse error" in error
+
+    def test_symlinked_artifact_out_of_the_node_is_refused(self, tmp_path):
+        outside = tmp_path / "outside.json"
+        outside.write_text('{"n": 42}')
+        root = tmp_path / "acme"
+        point_dir = root / "results" / "sys" / "model" / "r8"
+        point_dir.mkdir(parents=True)
+        (point_dir / "result_summary.json").symlink_to(outside)
+        point = SubmissionNode.from_directory(root).children[0].children[0].children[0]
+        value, error = point.read("result_summary.json")
+        assert value is None  # never the outside target's content
+        assert "parse error" in error
+
+    def test_symlinked_artifact_inside_the_node_is_a_parse_error(self, tmp_path):
+        root = tmp_path / "acme"
+        point_dir = root / "results" / "sys" / "model" / "r8"
+        point_dir.mkdir(parents=True)
+        (point_dir / "other.json").write_text('{"n": 1}')
+        (point_dir / "result_summary.json").symlink_to(point_dir / "other.json")
+        point = SubmissionNode.from_directory(root).children[0].children[0].children[0]
         value, error = point.read("result_summary.json")
         assert value is None
         assert "parse error" in error
@@ -184,6 +285,22 @@ class TestScopes:
     def test_stored_null_is_a_present_key(self, tmp_path):
         scopes = self._point(tmp_path).scopes()
         assert scopes["system"]["system_power"] is None
+
+    def test_corrupt_artifact_reads_as_absent_but_keeps_its_error(self, tmp_path):
+        root = tmp_path / "acme"
+        point_dir = root / "results" / "sys" / "model" / "r8"
+        point_dir.mkdir(parents=True)
+        (point_dir / "result_summary.json").write_text("{bad")
+        (point_dir / "point.yaml").write_text("concurrency: 8\n")
+        point = SubmissionNode.from_directory(root).children[0].children[0].children[0]
+        assert "result_summary" not in point.scopes()["point"]
+        assert set(point.scopes()["point"]) == {"config"}
+        value, error = point.read("result_summary.json")
+        assert value is None and "parse error" in error
+
+    def test_root_walks_to_the_submission(self, tmp_path):
+        point = self._point(tmp_path)
+        assert isinstance(point.root(), SubmissionNode)
 
     def test_scopes_serve_ref_resolution(self, tmp_path):
         scopes = self._point(tmp_path).scopes()

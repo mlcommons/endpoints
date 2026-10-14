@@ -105,11 +105,25 @@ class TestBounds:
 
 
 class TestForSubmission:
-    """`Regions.for_submission`: `C_max` from `system_desc`, `C_min` from the lone point."""
+    """`Regions.for_submission`: `C_max` from `system_desc`, `C_min` = the minimum point."""
 
     def test_derives_from_the_verified_fact_names(self):
         regions = Regions.for_submission({"max_supported_concurrency": 8192}, [32, 40])
         assert regions == Regions.for_bounds(8192, 32)
+
+    def test_c_min_is_the_minimum_point_concurrency(self):
+        # Section 5.5: "C_min is derived from the submission points".
+        regions = Regions.for_submission(
+            {"max_supported_concurrency": 1024}, [1000, 24, 16]
+        )
+        assert regions == Regions.for_bounds(1024, 16)
+
+    def test_example_c_seven_point_set_with_two_points_below_32(self):
+        # Section 5.4 Example C's own set: 16 and 24 both sit in [1, 32].
+        regions = Regions.for_submission(
+            {"max_supported_concurrency": 1024}, [16, 24, 64, 96, 128, 256, 1000]
+        )
+        assert regions == Regions.for_bounds(1024, 16)
 
     @pytest.mark.parametrize(
         ("system_desc", "concurrencies"),
@@ -117,7 +131,8 @@ class TestForSubmission:
             ({}, [32, 40]),
             ({"max_supported_concurrency": "8192"}, [32, 40]),
             ({"max_supported_concurrency": 8192}, [40, 80]),
-            ({"max_supported_concurrency": 8192}, [32, 20, 40]),
+            ({"max_supported_concurrency": 8192}, []),
+            ({"max_supported_concurrency": 8192}, [32, 20.0, 40]),
         ],
     )
     def test_missing_or_ambiguous_facts_raise(self, system_desc, concurrencies):

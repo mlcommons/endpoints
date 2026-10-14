@@ -25,8 +25,14 @@ from inference_endpoint.validation.tree import SubmissionNode
 
 def _point(tmp_path: Path, concurrency: int, offline=None, system_tps: float = 1.0):
     root = tmp_path / "acme"
-    (root / "results").mkdir(parents=True, exist_ok=True)
-    point_node = SubmissionNode.from_directory(root)
+    point_dir = root / "results" / "sys" / "model" / f"r{concurrency}"
+    point_dir.mkdir(parents=True, exist_ok=True)
+    tree = SubmissionNode.from_directory(root)
+    point_node = next(
+        node
+        for node in tree.children[0].children[0].children
+        if node.dir.name == f"r{concurrency}"
+    )
     return Point(
         offline=offline,
         concurrency=concurrency,
@@ -83,24 +89,22 @@ class TestOfflineOrdering:
 
     def test_mixed_declarations_raise(self, tmp_path):
         system_desc = {"max_supported_concurrency": 8192}
-        submission = Submission(
-            system_desc,
-            [
-                _point(tmp_path, 8192, offline="elected", system_tps=5400.0),
-                _point(tmp_path, 512, offline="dedicated", system_tps=5292.0),
-            ],
-        )
         with pytest.raises(ValueError, match="offline"):
-            submission.offline_ordering()
+            Submission(
+                system_desc,
+                [
+                    _point(tmp_path, 8192, offline="elected", system_tps=5400.0),
+                    _point(tmp_path, 512, offline="dedicated", system_tps=5292.0),
+                ],
+            )
 
     def test_missing_c_max_point_raises(self, tmp_path):
         system_desc = {"max_supported_concurrency": 8192}
-        submission = Submission(
-            system_desc,
-            [_point(tmp_path, 512, offline="dedicated", system_tps=5292.0)],
-        )
         with pytest.raises(ValueError, match="C_max"):
-            submission.offline_ordering()
+            Submission(
+                system_desc,
+                [_point(tmp_path, 512, offline="dedicated", system_tps=5292.0)],
+            )
 
 
 class TestPointCarry:
@@ -117,11 +121,13 @@ class TestPointCap:
 
     def test_cap_boundary_32_passes(self, tmp_path):
         points = [_point(tmp_path, i + 1) for i in range(32)]
-        assert Submission({}, points).point_cap() is True
+        submission = Submission({"max_supported_concurrency": 8192}, points)
+        assert submission.point_cap() is True
 
     def test_point_33_fails(self, tmp_path):
         points = [_point(tmp_path, i + 1) for i in range(33)]
-        assert Submission({}, points).point_cap() is False
+        submission = Submission({"max_supported_concurrency": 8192}, points)
+        assert submission.point_cap() is False
 
 
 class TestOutOfRangePoints:
@@ -194,6 +200,120 @@ class TestThresholdsPerShape:
         )
         assert submission.point_count_min() == 7
         assert submission.accuracy_run_count_requirement() == 4
+
+
+class TestDerivedExposure:
+    """`Submission.derived`: the named derivations as `derived.<name>` fields."""
+
+    def test_out_of_range_points_exposes_through_the_fold(self, tmp_path):
+        submission = Submission(
+            {"max_supported_concurrency": 8192},
+            [_point(tmp_path, 512), _point(tmp_path, 9013)],
+        )
+        derived = submission.derived(regions=Regions.for_bounds(8192, 32))
+        assert "out_of_range_points" in derived
+        assert derived["out_of_range_points"] == (submission.points[1],)
+
+    def test_region_derivation_without_regions_raises(self, tmp_path):
+        submission = Submission(
+            {"max_supported_concurrency": 8192}, [_point(tmp_path, 512)]
+        )
+        derived = submission.derived()
+        with pytest.raises(ValueError, match="regions"):
+            derived["out_of_range_points"]
+
+    def test_unknown_derivation_is_absent(self, tmp_path):
+        derived = Submission(
+            {"max_supported_concurrency": 8192}, [_point(tmp_path, 512)]
+        ).derived()
+        with pytest.raises(KeyError):
+            derived["nope"]
+
+    def test_the_vocabulary_is_the_named_derivations(self, tmp_path):
+        derived = Submission(
+            {"max_supported_concurrency": 8192}, [_point(tmp_path, 512)]
+        ).derived()
+        assert set(derived) == {
+            "offline_ordering",
+            "point_cap",
+            "point_count_min",
+            "accuracy_run_count_requirement",
+            "out_of_range_points",
+        }
+
+
+class TestFromDirectory:
+    """`Submission.from_directory`: the typed view read from one uploaded tree."""
+
+    def _upload(self, tmp_path: Path) -> Path:
+        root = tmp_path / "upload"
+        (root / "results" / "sys" / "model" / "r16").mkdir(parents=True)
+        (root / "system_desc.json").write_text('{"max_supported_concurrency": 64}')
+        return root
+
+    def test_reads_the_facts_the_rows_read(self, tmp_path):
+        root = self._upload(tmp_path)
+        (root / "results" / "sys" / "model" / "r16" / "point.yaml").write_text(
+            "concurrency: 16\noffline: none\nsystem_tps: 7.5\n"
+        )
+        submission = Submission.from_directory(root)
+        assert submission.system_desc == {"max_supported_concurrency": 64}
+        assert [
+            (p.concurrency, p.offline, p.system_tps) for p in submission.points
+        ] == [(16, None, 7.5)]
+
+    def test_latches_the_regions_fold_onto_the_tree_root(self, tmp_path):
+        root = self._upload(tmp_path)
+        (root / "results" / "sys" / "model" / "r16" / "point.yaml").write_text(
+            "concurrency: 16\nsystem_tps: 7.5\n"
+        )
+        node = Submission.from_directory(root).points[0].node
+        assert node is not None
+        assert node.root().regions is not None
+
+    def test_a_point_without_system_tps_is_refused(self, tmp_path):
+        root = self._upload(tmp_path)
+        (root / "results" / "sys" / "model" / "r16" / "point.yaml").write_text(
+            "concurrency: 16\n"
+        )
+        with pytest.raises(ValueError, match="system_tps"):
+            Submission.from_directory(root)
+
+    def test_a_missing_system_desc_is_refused(self, tmp_path):
+        root = self._upload(tmp_path)
+        (root / "system_desc.json").unlink()
+        with pytest.raises(ValueError, match="system_desc.json"):
+            Submission.from_directory(root)
+
+
+class TestValidateShapeArms:
+    """`Submission._validate_shape`: each refusal arm, matched to its own message."""
+
+    @pytest.mark.parametrize("system_desc", [{}, {"max_supported_concurrency": "8192"}])
+    def test_a_non_integer_max_supported_concurrency(self, tmp_path, system_desc):
+        with pytest.raises(ValueError, match="integer max_supported_concurrency"):
+            Submission(system_desc, [_point(tmp_path, 512)])
+
+    def test_two_declarations_of_one_kind(self, tmp_path):
+        with pytest.raises(ValueError, match="exactly one point may carry"):
+            Submission(
+                {"max_supported_concurrency": 8192},
+                [
+                    _point(tmp_path, 512, offline="dedicated"),
+                    _point(tmp_path, 8192, offline="dedicated"),
+                ],
+            )
+
+    def test_two_c_max_rivals(self, tmp_path):
+        with pytest.raises(ValueError, match="C_max"):
+            Submission(
+                {"max_supported_concurrency": 8192},
+                [
+                    _point(tmp_path, 512, offline="dedicated"),
+                    _point(tmp_path, 8192),
+                    _point(tmp_path, 8192, system_tps=2.0),
+                ],
+            )
 
 
 class TestSubmissionCarry:
