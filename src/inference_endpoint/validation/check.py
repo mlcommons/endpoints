@@ -158,7 +158,34 @@ class Cohort:
             )
         checks: list[Check] = []
         for scope in RuleScopes:
-            checks.extend(_load_scope_checks(root / f"{scope.value}.yaml", scope))
+            path = root / f"{scope.value}.yaml"
+            try:
+                text = path.read_text(encoding="utf-8")
+                data = yaml.load(text, Loader=_StrictLoader)
+                if data is None:
+                    raise ValueError("empty scope file")
+                if not isinstance(data, dict):
+                    raise ValueError("expected a mapping of check id to check")
+                for check_id, body in data.items():
+                    # One id-keyed block as a `Check`; the key and file name its
+                    # id and scope.
+                    if not isinstance(body, dict):
+                        raise ValueError(f"check {check_id!r} must be a mapping")
+                    claimed = sorted({"id", "scope"} & body.keys())
+                    if claimed:
+                        raise ValueError(
+                            f"check {check_id!r} defines its own {claimed}: the key "
+                            "is the id and the filename is the scope"
+                        )
+                    checks.append(
+                        Check.model_validate(
+                            {**body, "id": check_id, "scope": scope.value}
+                        )
+                    )
+            except FileNotFoundError:
+                continue  # a missing scope file means an empty scope
+            except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError) as exc:
+                raise ValueError(f"{path.name} is not a checks file: {exc}") from exc
         if not checks:
             raise ValueError(f"{root} holds no checks")
         seen: set[str] = set()
@@ -167,35 +194,3 @@ class Cohort:
                 raise ValueError(f"duplicate check id {check.id!r}")
             seen.add(check.id)
         return cls(tuple(checks))
-
-
-def _load_scope_checks(path: Path, scope: RuleScopes) -> tuple[Check, ...]:
-    """Every `Check` one scope file describes; the mapping key becomes the id.
-
-    A missing file means an empty scope. Every parse problem names the file.
-    """
-    try:
-        text = path.read_text(encoding="utf-8")
-        data = yaml.load(text, Loader=_StrictLoader)
-        if data is None:
-            raise ValueError("empty scope file")
-        if not isinstance(data, dict):
-            raise ValueError("expected a mapping of check id to check")
-        return tuple(_check_from_entry(key, body, scope) for key, body in data.items())
-    except FileNotFoundError:
-        return ()
-    except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError) as exc:
-        raise ValueError(f"{path.name} is not a checks file: {exc}") from exc
-
-
-def _check_from_entry(check_id: str, body: Any, scope: RuleScopes) -> Check:
-    """One id-keyed block as a `Check`; the key and file name its id and scope."""
-    if not isinstance(body, dict):
-        raise ValueError(f"check {check_id!r} must be a mapping")
-    claimed = sorted({"id", "scope"} & body.keys())
-    if claimed:
-        raise ValueError(
-            f"check {check_id!r} defines its own {claimed}: the key is the id "
-            "and the filename is the scope"
-        )
-    return Check.model_validate({**body, "id": check_id, "scope": scope.value})

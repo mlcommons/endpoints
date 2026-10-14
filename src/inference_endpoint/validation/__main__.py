@@ -30,29 +30,6 @@ from inference_endpoint.validation.submission import Submission
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one cohort's checks against one submission; the process exit code."""
-    args = _parser().parse_args(argv)
-    try:
-        cohort = Cohort.from_directory(args.cohort)
-        submission = Submission.from_directory(
-            args.submission,
-            ruleset=Catalog.from_directory(args.ruleset) if args.ruleset else None,
-        )
-        findings = Finding.collect(cohort, submission)
-    except (OSError, ValueError) as exc:
-        print(f"refused: {exc}", file=sys.stderr)
-        return 2
-    failing = [finding for finding in findings if not finding.verdict.ok]
-    for finding in findings if args.audit else failing:
-        mark = "ok" if finding.verdict.ok else "FAIL"
-        print(
-            f"{mark} {finding.check_id} [{finding.severity.value}] "
-            f"{finding.node_directory}: {finding.verdict.why}"
-        )
-    print(f"{len(findings)} finding(s), {len(failing)} failing")
-    return 1 if failing else 0
-
-
-def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m inference_endpoint.validation",
         description="Run one cohort's checks against one submission.",
@@ -74,7 +51,26 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--audit", action="store_true", help="print held findings alongside failures"
     )
-    return parser
+    args = parser.parse_args(argv)
+    try:
+        cohort = Cohort.from_directory(args.cohort)
+        submission = Submission.from_directory(
+            args.submission,
+            ruleset=Catalog.from_directory(args.ruleset) if args.ruleset else None,
+        )
+        findings = Finding.collect(cohort, submission)
+    except (OSError, ValueError) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+    failing = [finding for finding in findings if not finding.verdict.ok]
+    for finding in findings if args.audit else failing:
+        mark = "ok" if finding.verdict.ok else "FAIL"
+        print(
+            f"{mark} {finding.check_id} [{finding.severity.value}] "
+            f"{finding.node_directory}: {finding.verdict.why}"
+        )
+    print(f"{len(findings)} finding(s), {len(failing)} failing")
+    return 1 if failing else 0
 
 
 if __name__ == "__main__":

@@ -139,31 +139,6 @@ def _close_to(
     return left == right
 
 
-def _same_multiset(left: Any, right: Any) -> bool:
-    """Unordered, multiplicity-respecting equality; unhashable-safe.
-
-    `[1, 2, 2]` vs `[2, 1, 2]` -> True; `[1]` vs `[1, 1]` -> False. Hashable
-    elements pair in linear time via counts; unhashable ones fall back to the
-    `==` scanning pool, so crafted large lists stay bounded work.
-    """
-    if not isinstance(left, Sequence) or not isinstance(right, Sequence):
-        return left == right
-    if len(left) != len(right):
-        return False
-    try:
-        return Counter(left) == Counter(right)
-    except TypeError:  # unhashable elements: pair by `==` scanning
-        pool = list(right)
-        for value in left:
-            for i, other in enumerate(pool):
-                if value == other:
-                    del pool[i]
-                    break
-            else:
-                return False
-        return not pool
-
-
 class Eq(Op, name="eq", tolerant=True):
     """`subject == target` numerically under `abs_tol`/`rel_tol` (see `_close_to`)."""
 
@@ -252,12 +227,34 @@ class Matches(Op, name="matches"):
 
 
 class SameMultiset(Op, name="same_multiset"):
-    """`[1, 2, 2]` matches `[2, 1, 2]`; `[1]` does not match `[1, 1]` (see `_same_multiset`)."""
+    """`[1, 2, 2]` matches `[2, 1, 2]`; `[1]` does not match `[1, 1]`.
+
+    Unordered, multiplicity-respecting equality; hashable elements pair in
+    linear time via counts, unhashable ones fall back to an `==` scanning pool
+    so crafted large lists stay bounded work. A non-`Sequence` pair degrades to
+    plain `==`.
+    """
 
     def holds(
         self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
     ) -> bool:
-        return _same_multiset(predicate.subject, predicate.target)
+        left, right = predicate.subject, predicate.target
+        if not isinstance(left, Sequence) or not isinstance(right, Sequence):
+            return left == right
+        if len(left) != len(right):
+            return False
+        try:
+            return Counter(left) == Counter(right)
+        except TypeError:  # unhashable elements: pair by `==` scanning
+            pool = list(right)
+            for value in left:
+                for i, other in enumerate(pool):
+                    if value == other:
+                        del pool[i]
+                        break
+                else:
+                    return False
+            return not pool
 
 
 class Between(Op, name="between", slots=("lo", "hi")):

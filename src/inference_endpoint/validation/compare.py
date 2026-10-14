@@ -93,32 +93,30 @@ class Ref:
         return ".".join(self.parts)
 
 
-def _one_edit_apart(left: str, right: str) -> bool:
-    """Whether the strings differ by exactly one insert/delete/substitute.
+def _near_root_misspelling(head: str) -> str | None:
+    """The scope root one insert/delete/substitute from `head`, else None.
 
     Typo detector for scope roots (`submisson.` is one edit from `submission.`
     while `pointish.` is two): a dotted operand that would silently decode as a
-    literal raises instead when its head is a near-miss of a root.
+    literal raises instead when its head is a near-miss of a root. A direct hit
+    is not a typo and returns None.
     """
-    if left == right or abs(len(left) - len(right)) > 1:
-        return False
-    if len(left) == len(right):
-        return sum(a != b for a, b in zip(left, right, strict=True)) == 1
-    short, long = sorted((left, right), key=len)
-    i = j = edits = 0
-    while i < len(short) and j < len(long):
-        if short[i] == long[j]:
-            i += 1
-        else:
-            edits += 1
-        j += 1
-    return edits + (len(long) - j) == 1
-
-
-def _near_root_misspelling(head: str) -> str | None:
-    """The scope root one edit away from `head`, else None."""
     for root_name in Ref.ROOTS:
-        if _one_edit_apart(head, root_name):
+        if head == root_name or abs(len(head) - len(root_name)) > 1:
+            continue
+        if len(head) == len(root_name):
+            if sum(a != b for a, b in zip(head, root_name, strict=True)) == 1:
+                return root_name
+            continue
+        short, long = sorted((head, root_name), key=len)
+        i = j = edits = 0
+        while i < len(short) and j < len(long):
+            if short[i] == long[j]:
+                i += 1
+            else:
+                edits += 1
+            j += 1
+        if edits + (len(long) - j) == 1:
             return root_name
     return None
 
@@ -166,6 +164,10 @@ def _decode_operand(value: Any) -> Any:
                     f"{value!r} looks like a misspelled {near!r} reference; "
                     'fix the root or write {"literal": ...} to mean the string'
                 )
+            raise ValueError(
+                f"{value!r} is dotted but {head!r} is no scope root; "
+                'write {"literal": ...} to mean the value'
+            )
         return value
     return value
 
@@ -208,6 +210,30 @@ class Compare(BaseModel):
     abs_tol: float = 0.0
     rel_tol: float = 0.0
 
+    @model_validator(mode="before")
+    @classmethod
+    def _matches_right_is_explicit_literal(cls, data: Any) -> Any:
+        """`matches` alone requires the `{"literal": ...}` form for its pattern.
+
+        A pattern is never a reference, so its literal-ness is not guessed from
+        a dotted-string heuristic here (as `_decode_operand` does for every
+        other operand); it is stated. Bare strings, dotted or not, are refused
+        before `_decode_operand` can misread a regex as a reference.
+        """
+        if not isinstance(data, Mapping) or data.get("op") != "matches":
+            return data
+        raw = data.get("right")
+        if not (
+            isinstance(raw, Mapping)
+            and set(raw) == {"literal"}
+            and isinstance(raw["literal"], str)
+        ):
+            raise ValueError(
+                '`matches` patterns must use the {"literal": ...} form: a '
+                "pattern is always a literal, never a reference"
+            )
+        return data
+
     @model_validator(mode="after")
     def _check_shape(self) -> Compare:
         # Presence, not truthiness: `right: null` is a real operand (eq against
@@ -217,6 +243,11 @@ class Compare(BaseModel):
         used = {name for name in ("right", "lo", "hi") if name in self.model_fields_set}
         if used != want:
             raise ValueError(f"`{self.op}` takes `left` plus {sorted(want) or 'none'}")
+        if op.needs_found and not isinstance(self.left, Ref):
+            raise ValueError(
+                f"`{self.op}` asks about presence: `left` must be a `Reference`, "
+                "not a literal value"
+            )
         if self.op == "matches":
             if not (isinstance(self.right, str) and not isinstance(self.right, Ref)):
                 raise ValueError("`matches` needs `right` as a literal regex string")

@@ -250,12 +250,7 @@ def _collect_candidates(cohort: Cohort) -> tuple[Check, ...]:
         for token in check.needs:
             if token not in by_id:
                 raise ValueError(f"check {check.id!r} needs unknown check {token!r}")
-    _raise_on_needs_cycles(by_id)
-    return cohort.checks
-
-
-def _raise_on_needs_cycles(by_id: Mapping[str, Check]) -> None:
-    """ValueError on a `needs` cycle, found by DFS before any row runs."""
+    # A `needs` cycle is refused here, by DFS before any row runs.
     finished: set[str] = set()
     visiting: set[str] = set()
 
@@ -272,6 +267,7 @@ def _raise_on_needs_cycles(by_id: Mapping[str, Check]) -> None:
 
     for name in by_id:
         visit(name)
+    return cohort.checks
 
 
 class _CheckState(Enum):
@@ -299,7 +295,7 @@ class _GateResolver:
     chain-or-subtree and `HOLDS` at each (see `_chain_holds`). One `FAILS`
     node disavows; "no claim" (`NOT_APPLICABLE`/`SILENCED`) never vouches and
     never disavows. A `needs` cycle is refused at load
-    (`_raise_on_needs_cycles`); the recursion trail here is the backstop.
+    (`_collect_candidates`'s DFS); the recursion trail here is the backstop.
     """
 
     def __init__(self, by_id: Mapping[str, Check], submission: Submission) -> None:

@@ -93,9 +93,48 @@ class TestOperandForms:
         assert row.left == "point.tps"
         assert isinstance(row.right, Ref)
 
-    @pytest.mark.parametrize("value", ["pointish.thing", "llama3.1-8b-v1", "literal"])
-    def test_far_literals_stay_literals(self, value):
+    @pytest.mark.parametrize("value", ["pointish.thing", "llama3.1-8b-v1", "blah.foo"])
+    def test_far_dotted_strings_refuse_to_guess(self, value):
+        with pytest.raises(ValueError, match="no scope root"):
+            _compare(op="eq", left=value, right=value)
+
+    @pytest.mark.parametrize("value", ["literal", "dedicated", "blah"])
+    def test_scalars_without_dots_stay_literals(self, value):
         assert _compare(op="eq", left=value, right=value).left == value
+
+    def test_far_dotted_values_need_the_literal_form(self):
+        row = _compare(op="eq", left="point.dataset", right={"literal": "squad.v2.0"})
+        assert row.right == "squad.v2.0"
+
+    @pytest.mark.parametrize("op", ["exists", "absent", "not_null"])
+    def test_presence_ops_need_a_reference_left(self, op):
+        with pytest.raises(ValueError, match="presence"):
+            _compare(op=op, left={"literal": "point.tps"})
+        with pytest.raises(ValueError, match="presence"):
+            _compare(op=op, left="tps")
+
+    @pytest.mark.parametrize(
+        "right",
+        [
+            "[0-9]+",
+            r"\d+\.\d+",
+            "system\\.model.*",
+            ["point", "pattern"],
+            5,
+            True,
+            [],
+            {"literal": 5},
+        ],
+    )
+    def test_matches_pattern_requires_the_explicit_literal_form(self, right):
+        with pytest.raises(ValueError, match="must use the"):
+            _compare(op="matches", left="point.dataset", right=right)
+
+    def test_matches_pattern_decodes_from_the_explicit_literal_form(self):
+        row = _compare(
+            op="matches", left="point.dataset", right={"literal": r"\d+\.\d+"}
+        )
+        assert row.right == r"\d+\.\d+"
 
 
 class TestResolve:
@@ -171,16 +210,9 @@ class TestCompareShape:
         with pytest.raises(ValueError):
             _compare(**kwargs)
 
-    @pytest.mark.parametrize(
-        "right", ["point.result_summary.pattern", ["point", "pattern"], 5]
-    )
-    def test_matches_needs_a_literal_regex(self, right):
-        with pytest.raises(ValueError, match="literal regex"):
-            _compare(op="matches", left="r16", right=right)
-
     def test_matches_rejects_an_uncompilable_pattern_at_load(self):
         with pytest.raises(ValueError, match="does not compile"):
-            _compare(op="matches", left="r16", right="[")
+            _compare(op="matches", left="r16", right={"literal": "["})
 
 
 class TestCompareVerdict:
@@ -227,8 +259,22 @@ class TestCompareVerdict:
                 },
                 False,
             ),
-            ({"op": "matches", "left": "r16", "right": "r[0-9]+"}, True),
-            ({"op": "matches", "left": 5, "right": "r[0-9]+"}, False),
+            (
+                {
+                    "op": "matches",
+                    "left": "r16",
+                    "right": {"literal": "r[0-9]+"},
+                },
+                True,
+            ),
+            (
+                {
+                    "op": "matches",
+                    "left": 5,
+                    "right": {"literal": "r[0-9]+"},
+                },
+                False,
+            ),
             (
                 {
                     "op": "eq",

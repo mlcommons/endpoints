@@ -239,8 +239,14 @@ flowchart LR
   and the presence ops so the absent-vs-stored-null grid is one rule, not a
   per-module pair of conventions.
 - Operand decode (`compare._decode_operand`) keeps the scalar rule
-  (root-prefixed dotted string = `Ref`) and offers two explicit forms beside it:
-  a root-headed list of raw segments addresses keys that themselves contain
-  dots, and `{"literal": ...}` forces a root-looking string. A dotted scalar
-  whose head is one edit from a root raises at load, so a typo'd root is never
-  silently a literal.
+  (root-prefixed dotted string = `Ref`) and is otherwise strict: a dotted scalar
+  whose head is one edit from a root raises ("misspelled"), and every other
+  dotted scalar raises too ("no scope root") - no guessing between reference and
+  value. The alternatives stay explicit: a root-headed list of raw segments
+  addresses keys that themselves contain dots (near-miss heads refused
+  likewise), and `{"literal": ...}` is the intentional literal. `matches` is the
+  one operator where that form is mandatory for `right` rather than intentional:
+  `Compare._matches_right_is_explicit_literal` refuses anything else at load, so
+  a regex is never mistaken for a dotted reference, and a pattern is never
+  authored as one. Presence ops (`exists`/`absent`/`not_null`) refuse a literal
+  `left` at load - that asks whether a constant exists, which answers itself.
