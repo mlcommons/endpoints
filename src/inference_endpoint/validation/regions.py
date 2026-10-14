@@ -67,24 +67,24 @@ class Regions:
         Maximum Supported Concurrency `M` (`system_desc.json` field name verbatim):
         https://github.com/mlcommons/endpoints_policies/blob/d062b470abd2/endpoints_rules.md#56-maximum-point-cap
 
-        `C_min` is the Low Latency point's concurrency (`concurrencies` entry in
-        [1, 32]; at most one, per 5.4's Ultra Low Concurrency coverage). A
-        missing/non-int `max_supported_concurrency`, zero or multiple [1, 32]
-        entries in `concurrencies`, raises ValueError: the check list rejects
-        such a submission before regions matter.
-
-        `Regions.for_submission({"max_supported_concurrency": 8192}, [32, 40])`
-        -> the worked Example A of Section 5.4.
+        `C_min` is **derived from the submission points**: their minimum
+        concurrency (Section 5.5, "C_min is derived from the submission
+        points"). Multiple points may sit in `[1, 32]` -- Section 5.4 Example
+        C's own seven-point set `{16, 24, 64, 96, 128, 256, 1000}` carries two,
+        and "any concurrency level in the 1-32 range satisfies the region
+        requirement" -- so the Low Latency point is not "the lone point in
+        [1, 32]". A missing/non-int `max_supported_concurrency`, no points, or a
+        non-int concurrency raises ValueError; a minimum outside `[1, 32]`
+        raises `for_bounds`'s own ValueError.
         """
         c_max = system_desc.get("max_supported_concurrency")
         if not isinstance(c_max, int):
             raise ValueError("system_desc needs an integer max_supported_concurrency")
-        low_latency_points = [x for x in concurrencies if 1 <= x <= 32]
-        if len(low_latency_points) != 1:
-            raise ValueError(
-                "need exactly one point in [1, 32] (the Low Latency point)"
-            )
-        return cls.for_bounds(c_max, low_latency_points[0])
+        if not concurrencies:
+            raise ValueError("need at least one point to derive C_min")
+        if not all(isinstance(x, int) for x in concurrencies):
+            raise ValueError("point concurrencies need to be integers")
+        return cls.for_bounds(c_max, min(concurrencies))
 
     @classmethod
     def for_bounds(cls, c_max: int, c_min: int) -> Regions:

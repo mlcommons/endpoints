@@ -21,10 +21,13 @@ each row's `ok` and `why`. Per-op arithmetic is tabled so the boilerplate is one
 shape. Nothing here tests pydantic itself.
 """
 
+from collections.abc import Mapping
+
 import pytest
 from inference_endpoint.validation.compare import (
     Aggregate,
     Compare,
+    Count,
     Ref,
     Verdict,
 )
@@ -55,21 +58,44 @@ def _aggregate(**kwargs) -> Aggregate:
 class TestFromString:
     """`Ref.from_string`: scoped dotted strings become refs, the rest are literals."""
 
-    @pytest.mark.parametrize(
-        ("value", "parts"),
-        [
-            ("point.result_summary.tps", ("point", "result_summary", "tps")),
-            ("cohort.metric_tolerance", ("cohort", "metric_tolerance")),
-        ],
-    )
-    def test_scoped_strings_are_refs(self, value, parts):
-        assert Ref.from_string(value) == Ref(parts)
+    @pytest.mark.parametrize("value", [("point.result_summary.tps")])
+    def test_scoped_strings_are_refs(self, value):
+        assert Ref.from_string(value) == Ref(("point", "result_summary", "tps"))
+
+    def test_unproducible_roots_never_register(self):
+        # A literal: no cohort-params producer exists, so there is no cohort root.
+        assert Ref.from_string("cohort.metric_tolerance") is None
 
     @pytest.mark.parametrize(
         "value", ["result_summary.tps", "pointish.thing", "", "literal", "point."]
     )
     def test_other_strings_are_literals(self, value):
         assert Ref.from_string(value) is None
+
+
+class TestOperandForms:
+    """Operand decode: root strings become refs, explicit forms beat the ambiguity."""
+
+    def test_root_headed_dotted_string_is_a_ref(self):
+        assert isinstance(_compare(op="exists", left="point.tps").left, Ref)
+
+    def test_segment_list_addresses_a_dotted_key(self):
+        row = _compare(op="exists", left=["ruleset", "models", "llama3.1-8b-v1"])
+        assert row.left == Ref(("ruleset", "models", "llama3.1-8b-v1"))
+
+    @pytest.mark.parametrize("value", ["submisson.system_desc.x", ["points", "tps"]])
+    def test_root_typo_raises_instead_of_silently_becoming_a_literal(self, value):
+        with pytest.raises(ValueError, match="misspelled"):
+            _compare(op="exists", left=value)
+
+    def test_literal_form_forces_a_root_looking_string(self):
+        row = _compare(op="eq", left={"literal": "point.tps"}, right="point.tps")
+        assert row.left == "point.tps"
+        assert isinstance(row.right, Ref)
+
+    @pytest.mark.parametrize("value", ["pointish.thing", "llama3.1-8b-v1", "literal"])
+    def test_far_literals_stay_literals(self, value):
+        assert _compare(op="eq", left=value, right=value).left == value
 
 
 class TestResolve:
@@ -90,6 +116,23 @@ class TestResolve:
     def test_object_facts_read_like_mappings(self):
         scopes = {"point": type("P", (), {"tps": 1})()}
         assert Ref(("point", "tps")).resolve(scopes) == (True, 1)
+
+    def test_private_attributes_are_not_facts(self):
+        scopes = {"point": type("P", (), {"_x": 1})()}
+        assert Ref(("point", "_x")).resolve(scopes) == (False, None)
+
+    def test_the_threshold_may_be_a_ref(self):
+        verdict = Verdict.evaluate(
+            _aggregate(
+                over=[1, 2],
+                measure="count",
+                op="eq",
+                value="point.result_summary.n_samples_issued",
+            ),
+            SCOPES,
+        )
+        assert verdict.ok is False
+        assert "count of [1, 2] eq point.result_summary.n_samples_issued" in verdict.why
 
 
 class TestCompareShape:
@@ -127,6 +170,17 @@ class TestCompareShape:
     def test_wrong_arity_is_rejected(self, kwargs):
         with pytest.raises(ValueError):
             _compare(**kwargs)
+
+    @pytest.mark.parametrize(
+        "right", ["point.result_summary.pattern", ["point", "pattern"], 5]
+    )
+    def test_matches_needs_a_literal_regex(self, right):
+        with pytest.raises(ValueError, match="literal regex"):
+            _compare(op="matches", left="r16", right=right)
+
+    def test_matches_rejects_an_uncompilable_pattern_at_load(self):
+        with pytest.raises(ValueError, match="does not compile"):
+            _compare(op="matches", left="r16", right="[")
 
 
 class TestCompareVerdict:
@@ -214,6 +268,41 @@ class TestCompareVerdict:
         assert "5" in verdict.why and "None" in verdict.why
         assert "TypeError" in verdict.why
 
+    def test_incommensurable_aggregate_row_fails_with_why(self):
+        verdict = Verdict.evaluate(
+            _aggregate(over=[1, "a"], measure="sum", op="eq", value=0), SCOPES
+        )
+        assert verdict.ok is False
+        assert "sum of [1, 'a'] eq 0" in verdict.why
+        assert "TypeError" in verdict.why
+
+    def test_describe_labels_follow_the_row_shape(self):
+        assert _compare(op="between", left=1, lo=0, hi=2).describe() == "1 between 0..2"
+        assert _compare(op="exists", left="point.x").describe() == "point.x exists"
+        assert _compare(op="eq", left=1, right=2).describe() == "1 eq 2"
+
+    def test_a_fail_loud_is_reported_as_itself_not_a_type_mismatch(self):
+        class LoudDerived(Mapping):
+            def __contains__(self, name):
+                return True
+
+            def __getitem__(self, name):
+                raise ValueError("derived input missing")
+
+            def __iter__(self):
+                return iter(())
+
+            def __len__(self):
+                return 0
+
+        verdict = Verdict.evaluate(
+            _compare(op="exists", left="derived.x"), {"derived": LoudDerived()}
+        )
+        assert verdict.ok is False
+        assert "row failed to evaluate" in verdict.why
+        assert "derived input missing" in verdict.why
+        assert "incommensurable pair" not in verdict.why
+
     def test_null_right_failure_names_none_not_the_interval_form(self):
         verdict = Verdict.evaluate(_compare(op="eq", left=5, right=None), SCOPES)
         assert verdict.ok is False
@@ -230,6 +319,49 @@ class TestCompareVerdict:
     def test_nonzero_tolerance_on_unsupported_op_is_rejected(self):
         with pytest.raises(ValueError, match="tolerance semantics"):
             _compare(op="ge", left=1, right=1, rel_tol=0.02)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "ok"),
+        [
+            ({"op": "ne", "left": "point.result_summary.tps", "right": 12.5}, False),
+            ({"op": "ne", "left": "point.result_summary.tps", "right": 10.0}, True),
+            (
+                {
+                    "op": "ne",
+                    "left": "point.result_summary.tps",
+                    "right": 12.5001,
+                    "rel_tol": 1e-3,
+                },
+                False,
+            ),
+            (
+                {
+                    "op": "ne",
+                    "left": "point.result_summary.tps",
+                    "right": 12.5001,
+                    "abs_tol": 1e-6,
+                },
+                True,
+            ),
+            (
+                {
+                    "op": "eq",
+                    "left": "point.result_summary.tps",
+                    "right": 12.5001,
+                    "rel_tol": 1e-3,
+                },
+                True,
+            ),
+            ({"op": "eq", "left": 100, "right": 101, "abs_tol": 1}, True),
+            ({"op": "ne", "left": 100, "right": 101, "abs_tol": 1}, False),
+            (
+                {"op": "eq", "left": 2**53 + 1, "right": 2**53 + 3, "abs_tol": 1},
+                False,
+            ),
+        ],
+    )
+    def test_ne_and_rel_tolerance_acceptance(self, kwargs, ok):
+        assert Verdict.evaluate(_compare(**kwargs), SCOPES).ok is ok
 
     @pytest.mark.parametrize(
         ("op", "ok"),
@@ -262,6 +394,14 @@ class TestCompareVerdict:
         )
         assert verdict.ok is False
         assert "missing" in verdict.why and "nope" in verdict.why
+
+    def test_presence_failure_bounds_a_huge_artifact_value(self):
+        scopes = {"point": {"config": {"blob": "x" * 100_000}}}
+        verdict = Verdict.evaluate(
+            _compare(op="absent", left="point.config.blob"), scopes
+        )
+        assert verdict.ok is False
+        assert len(verdict.why) < 150 and "..." in verdict.why
 
 
 class TestAggregateVerdict:
@@ -319,6 +459,18 @@ class TestAggregateVerdict:
     def test_unknown_measure_raises(self):
         with pytest.raises(ValueError, match="unknown measure"):
             _aggregate(over=[1], measure="bogus", op="eq", value=1)
+
+    def test_missing_measure_is_a_value_error(self):
+        with pytest.raises(ValueError, match="needs a"):
+            Aggregate(over=[1], op="eq", value=1)
+
+    def test_a_row_must_run_the_measure_it_declares(self):
+        with pytest.raises(ValueError, match="declares measure"):
+            Count(measure="sum", over=[1, 2], op="eq", value=2)
+
+    def test_aggregate_tolerances_are_guarded_like_compare(self):
+        with pytest.raises(ValueError, match="tolerance semantics"):
+            _aggregate(over=[], measure="count", op="ge", value=1, abs_tol=2)
 
     @pytest.mark.parametrize(
         ("measure", "items", "expected"),
