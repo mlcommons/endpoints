@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import pytest
+from datasets import Dataset as HFDataset
+from datasets import DatasetDict
+from inference_endpoint.dataset_manager import dataset as dataset_module
+from inference_endpoint.dataset_manager.predefined.aime25 import AIME25
 from inference_endpoint.dataset_manager.predefined.random import RandomDataset
 
 
@@ -40,6 +43,18 @@ def test_ds_reader_unique_dataset(ds_reader):
         samples = ds_reader.load_sample(i)
         unique_datasets.add(samples["dataset"])
     assert len(unique_datasets) == 5
+
+
+@pytest.mark.unit
+def test_aime25_generate_keeps_subsets_distinct(tmp_path, monkeypatch):
+    def fake_load_dataset(_dataset_path, dataset_name, **_load_options):
+        return DatasetDict(
+            {"test": HFDataset.from_dict({"question": [dataset_name], "answer": ["1"]})}
+        )
+
+    monkeypatch.setattr(dataset_module, "load_dataset", fake_load_dataset)
+    generated = AIME25.generate(datasets_dir=tmp_path)
+    assert generated["question"].tolist() == ["AIME2025-I", "AIME2025-II"]
 
 
 @pytest.mark.unit
