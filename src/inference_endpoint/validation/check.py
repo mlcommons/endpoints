@@ -68,7 +68,7 @@ from pydantic import (
 )
 
 from inference_endpoint.validation.compare import Aggregate, Compare
-from inference_endpoint.validation.tree import RuleScopes, _StrictLoader
+from inference_endpoint.validation.tree import RuleScopes, StrictLoader
 
 
 class Severity(str, Enum):  # noqa: UP042 - repository wire-enum convention
@@ -161,7 +161,7 @@ class Cohort:
             path = root / f"{scope.value}.yaml"
             try:
                 text = path.read_text(encoding="utf-8")
-                data = yaml.load(text, Loader=_StrictLoader)
+                data = yaml.load(text, Loader=StrictLoader)
                 if data is None:
                     raise ValueError("empty scope file")
                 if not isinstance(data, dict):

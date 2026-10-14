@@ -29,7 +29,7 @@ from typing import Any
 
 import yaml
 
-from inference_endpoint.validation.tree import _StrictLoader
+from inference_endpoint.validation.tree import StrictLoader
 
 
 class Catalog:
@@ -64,7 +64,7 @@ class Catalog:
 def _load_mapping(path: Path) -> dict[str, Any]:
     """That file's top-level mapping; a non-mapping document is a load error."""
     text = path.read_text(encoding="utf-8")
-    value = yaml.load(text, Loader=_StrictLoader)
+    value = yaml.load(text, Loader=StrictLoader)
     if not isinstance(value, dict):
         raise ValueError(f"{path.name} must hold a mapping, got {type(value).__name__}")
     return value

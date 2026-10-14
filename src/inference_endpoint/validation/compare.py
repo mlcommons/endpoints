@@ -42,7 +42,7 @@ class Ref:
     """A dotted reference into the scoped fields, e.g. `point.result_summary.tps`."""
 
     # The scope roots that open a reference; a class constant, not a field.
-    ROOTS = (
+    ROOTS: ClassVar[tuple[str, ...]] = (
         "submission",
         "system",
         "curve",
@@ -504,9 +504,9 @@ class AllTrue(Aggregate, measure="all"):
 
 @dataclass(frozen=True)
 class Verdict:
-    """Does a condition hold, and why not: the message is the row's own.
+    """Does a condition hold, and why not: the message is the assertion's own.
 
-    `broken` marks a verdict whose row failed to *evaluate* (a deliberate
+    `broken` marks a verdict whose assertion failed to *evaluate* (a deliberate
     fail-loud or an incommensurable pair) rather than judged False -- gate
     positions must refuse those loudly instead of reading them as "not
     applicable".

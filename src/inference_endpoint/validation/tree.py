@@ -40,9 +40,7 @@ import yaml
 from inference_endpoint.validation.regions import RegionKind, Regions
 from inference_endpoint.validation.sentinels import MISSING
 
-if (
-    TYPE_CHECKING
-):  # circular-avoidance: `_StrictLoader` lives here, `catalog` borrows it
+if TYPE_CHECKING:  # circular-avoidance: `StrictLoader` lives here, `catalog` borrows it
     from inference_endpoint.validation.catalog import Catalog
 
 _MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
@@ -73,7 +71,7 @@ FILE_TO_KEY_MAP = {
 }
 
 
-class _StrictLoader(yaml.SafeLoader):
+class StrictLoader(yaml.SafeLoader):
     """SafeLoader for untrusted submission artifacts.
 
     A key given twice, a `<<` merge key or any alias is a parse error: the
@@ -316,7 +314,7 @@ def _read_artifact(directory: Path, name: str) -> tuple[Any, str | None]:
         value = (
             json.loads(text, object_pairs_hook=_json_object_no_duplicates)
             if name.endswith(".json")
-            else yaml.load(text, Loader=_StrictLoader)
+            else yaml.load(text, Loader=StrictLoader)
         )
     except (ValueError, RecursionError, yaml.YAMLError) as exc:
         return None, f"{name} parse error: {exc}"
