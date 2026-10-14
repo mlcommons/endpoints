@@ -136,11 +136,13 @@ Every comparison takes `left` and `op`; the remaining keys follow the `op`:
      `right`. `right` is expected to be a list-like container. If `right` is a
      mapping (`dict`-like object), then `in` will use the _keys_ as the list to
      check against.
-   - `matches`: A regex comparison. `right` is ALWAYS the explicit
-     `{"literal": <regex>}` form (i.e. `{"literal": "[0-9]+"}`) — specific to
-     `matches`: a pattern is never a `Reference`, and bare strings are refused
-     at load, exactly because a regex reads like one at a glance. Patterns are
-     compile-checked at load too.
+   - `matches`: A regex comparison. `right` must be a `{"literal": ...}` block
+     (patterns are compile-checked at load). Ex.:
+     ```yaml
+     - left: point.config.target_cohort
+       op: matches
+       right: { "literal": "20[0-9]{2}-(0[1-9]|1[0-2])-C[01]" }
+     ```
    - `same_multiset`: An un-ordered list comparison, respecting counts (aka 'bag
      equality). Ex.:
      - `[1, 2, 2]` matches `[2, 1, 2]`
@@ -321,16 +323,13 @@ dataset_catalogued:
       right: 0
 
 model_naming:
-  description: The model name follows the system.model naming convention.
-  rule: "Endpoints Policy Section 8.2, System Description."
+  description: The model name is one of the cohort's supported models.
+  rule: "MLPerf Endpoints Rules §8.3, Measurement Point (point.yaml)."
   severity: warn
   assert:
-    - left: submission.system_desc.model_name
-      op: matches
-      # `matches` patterns always take the explicit literal form - a pattern is
-      # never a reference, so the wrapper states the intent rather than being
-      # guessed at from the string's shape
-      right: { "literal": "system\\.model.*" }
+    - left: point.config.model_name
+      op: in
+      right: ruleset.models
 ```
 
 ### Refusals
