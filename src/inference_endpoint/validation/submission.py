@@ -51,27 +51,6 @@ def normalize_offline(declared: Any) -> Any:
     return None if declared in (None, "none") else declared
 
 
-def _point_from_node(node: Node) -> Point:
-    """The typed `Point` one `r<N>` node's `point.yaml` carries."""
-    config, error = node.read("point.yaml")
-    if error is not None or not isinstance(config, Mapping):
-        raise ValueError(
-            f"{node.dir} cannot carry a Point: {error or 'point.yaml is not a mapping'}"
-        )
-    concurrency = config.get("concurrency")
-    if isinstance(concurrency, bool) or not isinstance(concurrency, int):
-        raise ValueError(f"{node.dir}/point.yaml needs an integer concurrency")
-    system_tps = config.get("system_tps")
-    if isinstance(system_tps, bool) or not isinstance(system_tps, int | float):
-        raise ValueError(f"{node.dir}/point.yaml needs a numeric system_tps")
-    return Point(
-        offline=normalize_offline(config.get("offline")),
-        concurrency=concurrency,
-        system_tps=float(system_tps),
-        node=node,
-    )
-
-
 @dataclass(frozen=True)
 class Point:
     """One measurement point's named fields, per Endpoints Policy Section 8.3.
@@ -150,12 +129,39 @@ class Submission:
                 f"system_desc.json cannot carry a submission: "
                 f"{error or 'not a mapping'}"
             )
-        points = tuple(
-            _point_from_node(node)
-            for system in tree.children
-            for curve in system.children
-            for node in curve.children
-        )
+        points: list[Point] = []
+        for system in tree.children:
+            for curve in system.children:
+                for node in curve.children:
+                    # The typed `Point` one `r<N>` node's `point.yaml` carries.
+                    config, error = node.read("point.yaml")
+                    if error is not None or not isinstance(config, Mapping):
+                        raise ValueError(
+                            f"{node.dir} cannot carry a Point: "
+                            f"{error or 'point.yaml is not a mapping'}"
+                        )
+                    concurrency = config.get("concurrency")
+                    if isinstance(concurrency, bool) or not isinstance(
+                        concurrency, int
+                    ):
+                        raise ValueError(
+                            f"{node.dir}/point.yaml needs an integer concurrency"
+                        )
+                    system_tps = config.get("system_tps")
+                    if isinstance(system_tps, bool) or not isinstance(
+                        system_tps, int | float
+                    ):
+                        raise ValueError(
+                            f"{node.dir}/point.yaml needs a numeric system_tps"
+                        )
+                    points.append(
+                        Point(
+                            offline=normalize_offline(config.get("offline")),
+                            concurrency=concurrency,
+                            system_tps=float(system_tps),
+                            node=node,
+                        )
+                    )
         submission = cls(system_desc, points)
         tree.regions = Regions.for_submission(
             system_desc, [point.concurrency for point in submission.points]

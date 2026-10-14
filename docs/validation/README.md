@@ -136,8 +136,11 @@ Every comparison takes `left` and `op`; the remaining keys follow the `op`:
      `right`. `right` is expected to be a list-like container. If `right` is a
      mapping (`dict`-like object), then `in` will use the _keys_ as the list to
      check against.
-   - `matches`: A regex comparison. `right` represents a regex pattern (i.e.
-     `[0-9]+`)
+   - `matches`: A regex comparison. `right` is ALWAYS the explicit
+     `{"literal": <regex>}` form (i.e. `{"literal": "[0-9]+"}`) — specific to
+     `matches`: a pattern is never a `Reference`, and bare strings are refused
+     at load, exactly because a regex reads like one at a glance. Patterns are
+     compile-checked at load too.
    - `same_multiset`: An un-ordered list comparison, respecting counts (aka 'bag
      equality). Ex.:
      - `[1, 2, 2]` matches `[2, 1, 2]`
@@ -150,7 +153,8 @@ Every comparison takes `left` and `op`; the remaining keys follow the `op`:
    loaded artifact documents, and a whole-document reference like
    `point.accuracy_results` addresses its artifact file. (Only the artifact
    vocabulary in section 4 can be referenced this way - there is no form for
-   arbitrary file names.)
+   arbitrary file names. `left` must name such a `Reference`: asking whether a
+   literal constant is present is refused at load.)
 
    - `exists`: True if `left` resolves to a value. A key deliberately stored
      with value `null` still counts as present; only a missing key (or a missing
@@ -277,16 +281,20 @@ for `r1024`, but is skipped for `r999999`.
 - Dotted strings (`Reference`s, e.g. `point.accuracy_results`) are resolved
   first to their values from the submission files passed. The first segment of
   the dotted string is its `scope` - e.g. `point.accuracy_results` has a scope
-  of `point`. (Section 4's table lists every scope root.) A dotted string whose
-  first segment is not a scope root stays a literal value (`5`, `true`,
-  `"dedicated"`).
+  of `point`. (Section 4's table lists every scope root.) **Every other dotted
+  string is refused at load** - a one-edit near-miss reports "looks like a
+  misspelled", anything else reports "is no scope root": a dotted _value_ must
+  say so with `{"literal": ...}` (e.g. a dataset name like `squad.v2.0`).
+  Scalars with no dot at all (`5`, `true`, `"dedicated"`) need no wrapper and
+  stay literals.
 - If a key must contain a period `.` character, a list can be used:
   `["ruleset", "datasets", "squad.v2.0"]` addresses the `squad.v2.0` dataset
   entry - each list element is one exact key, and the first must be a scope
   root.
-- `{"literal": ...}` forces a string that would otherwise read as a `Reference`.
-  A dotted string (or all-strings list) whose first segment is one edit from a
-  scope root raises at load instead of silently reading as a literal.
+- `{"literal": ...}` is the intentional literal: the value inside is used
+  verbatim, even when it would otherwise read as a `Reference`. Lists stay
+  literal unless they are non-empty all-strings and scope-root-headed (their
+  near-miss heads are refused at load too).
 
 All three forms in one stub (`point.yaml`):
 
@@ -319,8 +327,9 @@ model_naming:
   assert:
     - left: submission.system_desc.model_name
       op: matches
-      # forced literal: without it `system\.model.*` reads head-first as a
-      # misspelled `system` reference and is refused at load
+      # `matches` patterns always take the explicit literal form - a pattern is
+      # never a reference, so the wrapper states the intent rather than being
+      # guessed at from the string's shape
       right: { "literal": "system\\.model.*" }
 ```
 
@@ -330,7 +339,7 @@ Untrusted uploads are refused loud rather than mis-read, never a silent pass. At
 check load (each names its cohort file):
 
 - a predicate whose shape or `matches` pattern does not validate (`matches`
-  patterns are compile-checked at load)
+  patterns require `{"literal": ...}` and are compile-checked at load)
 - an empty cohort directory (rather than a clean pass)
 
 At `Finding.collect` (per submitted run):
@@ -400,8 +409,10 @@ The `<key>` slots (and multi-segment paths like `steady_state.status`) are open
 
 Everything named here and above is the full decoded vocabulary; an unknown
 `<key>` resolves as **absent** (what `exists`/`absent`/`not_null` are for), not
-an error, and a `Reference` whose first segment is not a scope root is treated
-as a literal value.
+an error. Every dotted string must name a scope root or use `{"literal": ...}`
+(`matches` patterns use that form always, dots or not).
+
+- a stray dotted value is refused at load (near-miss heads likewise).
 
 ## Implementation details
 
