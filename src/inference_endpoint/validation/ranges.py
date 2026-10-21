@@ -15,8 +15,8 @@
 
 """Ranges: one interval type for every bounded value a check reads.
 
-`Interval(2, 5)` is the closed 2..5; `Interval(3)` is 3 or more (no maximum;
-`hi is None`); `Interval(0, 10, hi_inclusive=False)` is the half-open 0..10.
+`Interval(2, 5)` is the closed 2..5. `Interval(3)` is 3 or more (no maximum,
+`hi is None`). `Interval(0, 10, hi_inclusive=False)` is the half-open 0..10.
 A scalar is `Interval(4, 4)`: `x in Interval(4, 4)` is `x == 4`. Used as the
 `between` comparison target (`operations.py`), the concurrency regions of
 `regions.py` (whose `lo`/`hi` are the reference algorithm's `start`/`end`),
@@ -31,12 +31,26 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Interval:
-    """A `lo` with at most a `hi`, with per-side inclusivity; membership is `in`.
+    """A `lo` with at most a `hi`, with per-side inclusivity. Membership is `in`.
 
-    `5 in Interval(2, 5)` -> True (closed); `6 in Interval(2)` -> True (open
-    upper); `10 in Interval(0, 10, hi_inclusive=False)` -> False (half-open);
-    `4 in Interval(4, 4)` -> True and `3 in Interval(4, 4)` -> False (scalar).
+    Example:
+
+        5 in Interval(2, 5)  # True (closed)
+        6 in Interval(2)  # True (open upper)
+        10 in Interval(0, 10, hi_inclusive=False)  # False (half-open)
+        4 in Interval(4, 4)  # True (scalar)
+        3 in Interval(4, 4)  # False
+
     A value that cannot order against the bounds falls outside.
+
+    Args:
+        lo (float): The interval's lower bound.
+        hi (float | None): The interval's upper bound. `None` means no maximum.
+                           (Default: None)
+        lo_inclusive (bool): Whether `lo` itself is inside the interval.
+                             (Default: True)
+        hi_inclusive (bool): Whether `hi` itself is inside the interval.
+                             (Default: True)
     """
 
     lo: float
@@ -64,9 +78,22 @@ class Interval:
         Endpoints Policy Section 2.9.8 states the gate as
         `score >= factor x reference`, with `factor` and the reference score
         taken per benchmark definition:
-        https://github.com/mlcommons/endpoints_policies/blob/d062b470abd2/endpoints_rules.md#298-accuracy-gate
+        https://github.com/mlcommons/endpoints_policies/blob/4ba8224dc746/endpoints_rules.md#298-accuracy-gate
 
-        `Interval.for_accuracy_gate(41.39, 0.97)` -> `Interval(40.1483)`; a
-        score in `Interval.for_accuracy_gate(41.39, 0.97)` is `>= 0.97 * 41.39`.
+        Example:
+
+            gate = Interval.for_accuracy_gate(41.39, 0.97)
+            gate.lo  # 40.1483
+            gate.hi is None  # True
+            41.39 in gate  # True
+
+        Args:
+            reference_score (float): The benchmark definition's reference score
+                                     (`reference` in `score >= factor x reference`).
+            tolerance (float): The definition's `factor`, the fraction of the
+                               reference a passing result must reach.
+        Returns:
+            Interval: The band of every score `>= tolerance * reference_score`.
+                      `lo` is their product, `hi` is `None`.
         """
         return cls(tolerance * reference_score)

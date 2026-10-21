@@ -16,7 +16,7 @@
 """The ruleset's catalog: model and dataset values as plain dictionaries, nothing more.
 
 `Catalog.from_directory("config/rulesets/mlcommons")` reads `models.yaml` and
-`datasets.yaml` once; `catalog.models["gpt-oss-120b"]` is that model's entry as
+`datasets.yaml` once. `catalog.models["gpt-oss-120b"]` is that model's entry as
 written (sizes, flags and values stay raw data, not pseudo-enum classes). A
 check addresses them through the `ruleset` root of `Ref`
 (`ruleset.models.gpt-oss-120b.vocab_size`).
@@ -45,9 +45,15 @@ class Catalog:
     def from_directory(cls, root: Path) -> Catalog:
         """Load `models.yaml` and `datasets.yaml` under `root`.
 
-        Without either file this raises FileNotFoundError: the ruleset is
-        incomplete without its catalog. A document that is not a mapping is a
-        load error too.
+        Args:
+            root (Path): The ruleset directory holding both catalog files.
+        Returns:
+            Catalog: The loaded `models` and `datasets` mappings.
+        Raises:
+            NotADirectoryError: When `root` is not a directory.
+            FileNotFoundError: When `models.yaml` or `datasets.yaml` is missing:
+                               the ruleset is incomplete without its catalog.
+            ValueError: When a document is not a mapping: a load error too.
         """
         if not root.is_dir():
             raise NotADirectoryError(root)
@@ -62,7 +68,7 @@ class Catalog:
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:
-    """That file's top-level mapping; a non-mapping document is a load error."""
+    """That file's top-level mapping. A non-mapping document is a load error."""
     text = path.read_text(encoding="utf-8")
     value = yaml.load(text, Loader=StrictLoader)
     if not isinstance(value, dict):
