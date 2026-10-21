@@ -46,6 +46,11 @@ if TYPE_CHECKING:  # circular-avoidance: `StrictLoader` lives here, `catalog` bo
 _MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 _POINT_DIR_PATTERN = re.compile(r"r(\d+)")
 
+# The whole tree's artifact bytes: the per-file cap times a generous fan-out
+# (32 points x 7 artifacts), so one upload cannot multiply the per-file cap by
+# its node count.
+_MAX_TREE_BYTES = 8 * _MAX_ARTIFACT_BYTES
+
 
 class RuleScopes(str, Enum):  # noqa: UP042 - repository wire-enum convention
     """The scopes a check condition can address, as `Ref` roots and node kinds.
@@ -108,12 +113,16 @@ class StrictLoader(yaml.SafeLoader):
         return super().construct_mapping(node, deep=deep)
 
 
-@dataclass
+@dataclass(eq=False)
 class Node:
     """One directory of the tree: what it is, where it is, who contains it.
 
     Constructing `Node(kind, dir, parent)` yields the subclass registered for
     `kind`. Construction parses the node's artifacts once into `artifacts`.
+
+    Nodes compare by identity (`eq=False`): a value-`eq` over `children`/
+    `parent` recurses through that cycle, and the generated `__hash__ = None`
+    would make any frozen holder (`Point` embeds a node) unhashable.
 
     Args:
         kind (RuleScopes): What the directory is. `Node(...)` construction resolves
@@ -156,8 +165,9 @@ class Node:
         return super().__new__(cls)
 
     def __post_init__(self) -> None:
+        budget = self._artifact_budget()
         for name in FILE_TO_KEY_MAP:
-            value, error = _read_artifact(self.dir, name)
+            value, error = _read_artifact(self.dir, name, budget)
             if value is not MISSING:
                 self.artifacts[name] = (value, error)
 
@@ -167,6 +177,18 @@ class Node:
         while node.parent is not None:
             node = node.parent
         return node
+
+    def _artifact_budget(self) -> _ArtifactBudget:
+        """The submission-wide artifact budget, created once on the root node."""
+        root = self.root()
+        budget = getattr(root, "_tree_budget", None)
+        if budget is None:
+            budget = _ArtifactBudget(_MAX_TREE_BYTES)
+            # Internal wiring, not a dataclass field: the root holds the pot
+            # every node's reads spend from (`object.__setattr__` keeps the
+            # type checker out of the undeclared attribute).
+            object.__setattr__(root, "_tree_budget", budget)
+        return budget
 
     def read(self, name: str) -> tuple[Any, str | None]:
         """(value, error) of the artifact `name` of this node. `MISSING` when absent.
@@ -252,9 +274,18 @@ class SubmissionNode(Node, kind=RuleScopes.SUBMISSION):
         Raises:
             NotADirectoryError: When `root` is not a directory (a load problem, not
                 a report).
+            ValueError: When `root` is a symlink (artifact reads are
+                fd-anchored and refuse symlinked directories: one clear refusal
+                here instead of per-artifact `ELOOP` parse errors), or when the
+                artifact tree exceeds the submission-wide byte budget.
         """
         if not root.is_dir():
             raise NotADirectoryError(root)
+        if root.is_symlink():
+            raise ValueError(
+                f"{root} is a symlink: pass the upload's real directory "
+                "(artifact reads are fd-anchored and refuse symlinked directories)"
+            )
         submission = cls(
             RuleScopes.SUBMISSION, root, None, ruleset=ruleset, regions=regions
         )
@@ -316,20 +347,57 @@ def _walk(parent: Node, kind: RuleScopes, where: Path) -> tuple[Node, ...]:
     return tuple(children)
 
 
-def _read_artifact(directory: Path, name: str) -> tuple[Any, str | None]:
+class _ArtifactBudget:
+    """The submission-wide artifact budget: every read spends one pot.
+
+    `_MAX_ARTIFACT_BYTES` caps one artifact; without a tree budget a crafted
+    upload multiplies that cap by its node count.
+    """
+
+    __slots__ = ("_left",)
+
+    def __init__(self, total: int) -> None:
+        self._left = total
+
+    def spend(self, size: int) -> None:
+        """Refuse once the reads exceed the pot.
+
+        Args:
+            size (int): The bytes this read cost.
+        Raises:
+            ValueError: When the tree's artifact bytes exceed the budget.
+        """
+        self._left -= size
+        if self._left < 0:
+            raise ValueError(
+                f"submission artifacts exceed the "
+                f"{_MAX_TREE_BYTES // (1024 * 1024)} MiB tree budget"
+            )
+
+
+def _read_artifact(
+    directory: Path, name: str, budget: _ArtifactBudget | None = None
+) -> tuple[Any, str | None]:
     """(value, error) of `name` in `directory`. Nothing here aborts the run.
 
-    The channel is fd-anchored: the node's directory is opened `O_NOFOLLOW` and
-    the artifact named relative to that fd, so neither a symlinked artifact nor
-    a directory swapped mid-walk can redirect a read out of the submission.
+    The channel is fd-anchored: the node's directory is opened `O_NOFOLLOW`
+    and the artifact named relative to that fd, so a symlinked artifact cannot
+    redirect a read. Containment of the directory itself is decided earlier by
+    the path-based `_walk`, so a directory swapped between that check and this
+    open is the residual race (a resolved-root, fd-anchored walk is the fixed
+    shape).
 
     Args:
         directory (Path): The node's directory.
         name (str): The artifact's file name.
+        budget (_ArtifactBudget | None): The submission-wide pot this read
+            spends its bytes from. (Default: None)
     Returns:
         tuple[Any, str | None]: Present and null -> (None, None). Absent ->
             (MISSING, None). Unreadable, oversized or unparsable -> (None, "<name> parse
             error: ...").
+    Raises:
+        ValueError: When `budget` is given and this read exhausts it.
     """
     try:
         dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -354,6 +422,8 @@ def _read_artifact(directory: Path, name: str) -> tuple[Any, str | None]:
         return None, f"{name} parse error: {exc.strerror}"
     if len(data) > _MAX_ARTIFACT_BYTES:
         return None, f"{name} parse error: too large"
+    if budget is not None:
+        budget.spend(len(data))
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
