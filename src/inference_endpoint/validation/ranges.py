@@ -46,11 +46,11 @@ class Interval:
     Args:
         lo (float): The interval's lower bound.
         hi (float | None): The interval's upper bound. `None` means no maximum.
-                           (Default: None)
+            (Default: None)
         lo_inclusive (bool): Whether `lo` itself is inside the interval.
-                             (Default: True)
+            (Default: True)
         hi_inclusive (bool): Whether `hi` itself is inside the interval.
-                             (Default: True)
+            (Default: True)
     """
 
     lo: float
@@ -89,11 +89,11 @@ class Interval:
 
         Args:
             reference_score (float): The benchmark definition's reference score
-                                     (`reference` in `score >= factor x reference`).
+                (`reference` in `score >= factor x reference`).
             tolerance (float): The definition's `factor`, the fraction of the
-                               reference a passing result must reach.
+                reference a passing result must reach.
         Returns:
             Interval: The band of every score `>= tolerance * reference_score`.
-                      `lo` is their product, `hi` is `None`.
+                `lo` is their product, `hi` is `None`.
         """
         return cls(tolerance * reference_score)

@@ -52,7 +52,7 @@ class Catalog:
         Raises:
             NotADirectoryError: When `root` is not a directory.
             FileNotFoundError: When `models.yaml` or `datasets.yaml` is missing:
-                               the ruleset is incomplete without its catalog.
+                the ruleset is incomplete without its catalog.
             ValueError: When a document is not a mapping: a load error too.
         """
         if not root.is_dir():

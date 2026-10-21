@@ -44,7 +44,7 @@ class Predicate:
 
     Args:
         subject (Any): The resolved `left`. `MISSING` when no such fact exists at
-                       all.
+            all.
         target (Any): The resolved `right`, or an `Interval` for `between`.
     """
 
@@ -120,14 +120,14 @@ class Op:
         Args:
             predicate (Predicate): The resolved `subject`/`target` pair.
             abs_tol (float): Absolute tolerance, reaching the tolerant ops only
-                             (`Eq`/`Ne`). (Default: 0.0)
+                (`Eq`/`Ne`). (Default: 0.0)
             rel_tol (float): Relative tolerance, reaching the tolerant ops only
-                             (`Eq`/`Ne`). (Default: 0.0)
+                (`Eq`/`Ne`). (Default: 0.0)
         Returns:
             bool: Whether the op's test holds over `predicate`.
         Raises:
             TypeError: On a non-tolerant ordering op over an incommensurable
-                       pair (e.g. `Gt` over a string and a number): fail loud.
+                pair (e.g. `Gt` over a string and a number): fail loud.
         """
         raise NotImplementedError
 
@@ -169,7 +169,7 @@ def _close_to(
         rel_tol (float): Relative tolerance. (Default: 0.0)
     Returns:
         bool: Whether the pair is equal within tolerance. A non-number pair
-              falls back to plain `==`.
+            falls back to plain `==`.
     """
     if abs_tol == 0.0 and rel_tol == 0.0:
         return left == right
