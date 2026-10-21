@@ -49,6 +49,14 @@ fail_check:
   severity: fail
   assert: [{left: 1, op: eq, right: 2}]
 """
+FAIL_WITH_FIX_CHECK = """
+fail_fix_check:
+  description: A violated blocking rule with a remedy.
+  rule: "Upload Rules > Blocks"
+  severity: fail
+  fix: Raise the value to 2 and rerun.
+  assert: [{left: 1, op: eq, right: 2}]
+"""
 
 GATED_OFF_CHECK = """
 gated_off_check:
@@ -105,6 +113,19 @@ class TestExitCodes:
         assert "refused:" in err
         assert "did you mean 'offline'?" in err
 
+    @pytest.mark.unit
+    def test_a_malformed_ruleset_catalog_is_refused(self, tmp_path, capsys):
+        ruleset = tmp_path / "ruleset"
+        ruleset.mkdir()
+        (ruleset / "models.yaml").write_text("a: [b\n", encoding="utf-8")
+        (ruleset / "datasets.yaml").write_text("a: {}\n", encoding="utf-8")
+        cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
+        argv = [str(cohort), str(_upload(tmp_path)), "--ruleset", str(ruleset)]
+        assert main(argv) == 2
+        err = capsys.readouterr().err
+        assert "refused:" in err
+        assert "models.yaml is not a catalog" in err
+
 
 class TestReportLines:
     """Marks, per-check instance counts, and the Never-Ran disclosure."""
@@ -141,3 +162,40 @@ class TestReportLines:
         err = captured.err
         assert "NEVER-RAN gated_off_check:" in err
         assert "no node was applicable" in err
+
+    @pytest.mark.unit
+    def test_control_characters_in_directory_names_stay_one_line(
+        self, tmp_path, capsys
+    ):
+        cohort = write_cohort(tmp_path / "cohort", point=FAIL_CHECK)
+        upload = tmp_path / "upload"
+        write_upload(
+            upload, {("evil\nFAIL forged\x1b[2K", "model"): [Run(concurrency=16)]}
+        )
+        assert main([str(cohort), str(upload)]) == 1
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert "evil\\nFAIL forged\\x1b[2K" in out
+
+    @pytest.mark.unit
+    def test_a_failing_line_labels_the_row_and_carries_its_rule(self, tmp_path, capsys):
+        cohort = write_cohort(tmp_path / "cohort", point=FAIL_CHECK)
+        assert main([str(cohort), str(_upload(tmp_path))]) == 1
+        out = capsys.readouterr().out
+        assert "1 eq 2 ->" in out
+        assert "[Upload Rules > Blocks]" in out
+
+    @pytest.mark.unit
+    def test_a_declared_fix_rides_its_failing_line(self, tmp_path, capsys):
+        cohort = write_cohort(tmp_path / "cohort", point=FAIL_WITH_FIX_CHECK)
+        assert main([str(cohort), str(_upload(tmp_path))]) == 1
+        assert "    fix: Raise the value to 2 and rerun." in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_a_held_line_labels_its_row_without_rule_noise(self, tmp_path, capsys):
+        cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
+        assert main([str(cohort), str(_upload(tmp_path)), "--audit"]) == 0
+        out = capsys.readouterr().out
+        assert "OK hold_check [fail] " in out
+        assert "1 eq 1" in out
+        assert "[Upload Rules > Holds]" not in out

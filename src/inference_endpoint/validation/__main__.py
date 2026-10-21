@@ -28,6 +28,25 @@ from inference_endpoint.validation.runner import Finding
 from inference_endpoint.validation.submission import Submission
 
 
+def _escaped(text: str) -> str:
+    """`text` with every control character made visible.
+
+    Upload-controlled names reach the report (`refused:` messages and every
+    line's `node_directory`); a newline or an escape sequence inside one must
+    not forge or hide a report line.
+
+    Args:
+        text (str): The composed message about to be printed.
+    Returns:
+        str: `text` with non-printable characters escaped: a newline becomes
+            the two characters `\\n`.
+    """
+    return "".join(
+        char if char.isprintable() else char.encode("unicode_escape").decode()
+        for char in text
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one cohort's checks against one submission.
 
@@ -67,7 +86,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         findings = Finding.collect(cohort, submission)
     except (OSError, ValueError) as exc:
-        print(f"refused: {exc}", file=sys.stderr)
+        print(f"refused: {_escaped(str(exc))}", file=sys.stderr)
         return 2
     failing = [finding for finding in findings if not finding.verdict.ok]
     blocking = [finding for finding in failing if finding.severity is Severity.FAIL]
@@ -76,10 +95,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             mark = "OK"
         else:
             mark = "FAIL" if finding.severity is Severity.FAIL else "WARN"
-        print(
+        line = (
             f"{mark} {finding.check_id} [{finding.severity.value}] "
-            f"{finding.node_directory}: {finding.verdict.why}"
+            f"{finding.node_directory}: {finding.row}"
         )
+        if finding.verdict.why:
+            line += f" -> {finding.verdict.why}"
+        if not finding.verdict.ok:
+            line += f"  [{finding.rule}]"
+        print(_escaped(line))
+        if not finding.verdict.ok and finding.fix:
+            # The declared remedy rides its failing line: one fix sentence,
+            # only where a row failed.
+            print(_escaped(f"    fix: {finding.fix}"))
     instances = {check.id: 0 for check in cohort.checks}
     seen: set[tuple[str, Path]] = set()
     for finding in findings:
@@ -94,8 +122,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             # A check that never ran is indistinguishable from one that passed
             # unless the report says so: its `when` gated every node off.
             print(
-                f"NEVER-RAN {check_id}: no node was applicable "
-                "(its `when` gated every instance off)",
+                _escaped(
+                    f"NEVER-RAN {check_id}: no node was applicable "
+                    "(its `when` gated every instance off)"
+                ),
                 file=sys.stderr,
             )
     print(
