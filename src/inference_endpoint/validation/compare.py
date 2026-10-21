@@ -18,7 +18,7 @@
 A row decodes from YAML and evaluates against the scoped fields of one node (a
 mapping per scope root, e.g. `{"point": ...}`). Operands are literals or `Ref`
 dotted references (decode hooks below). Which op does what lives in
-`operations.py` (`Op` subclasses); which aggregation `measure` does what is the
+`operations.py` (`Op` subclasses). Which aggregation `measure` does what is the
 `Aggregate` subclass family below. `Verdict.evaluate` wraps one row's own
 `_outcome`, whose `why` is written by the row (the failing values, bounded), so
 no downstream code has to reconstruct the message.
@@ -26,7 +26,7 @@ no downstream code has to reconstruct the message.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -34,104 +34,76 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, model_validator
 
 from inference_endpoint.validation.operations import Op, Predicate, vet_pattern
 from inference_endpoint.validation.ranges import Interval
+from inference_endpoint.validation.refs import Ref
 from inference_endpoint.validation.sentinels import MISSING
+from inference_endpoint.validation.typo_checks import near_match
 
 
-@dataclass(frozen=True)
-class Ref:
-    """A dotted reference into the scoped fields, e.g. `point.result_summary.tps`."""
+def _rewrite_refs(row: Any, slots: tuple[str, ...], fn: Callable[[Ref], Ref]) -> None:
+    """Replace each `Ref` operand of `row`'s `slots` with `fn`'s result.
 
-    # The scope roots that open a reference; a class constant, not a field.
-    ROOTS: ClassVar[tuple[str, ...]] = (
-        "submission",
-        "system",
-        "curve",
-        "point",
-        "derived",
-        "ruleset",
-        "regions",
-    )
+    The slot names live here (one list per row shape) so no outside caller
+    reaches into row fields to find the operands.
 
-    parts: tuple[str, ...]
-
-    @classmethod
-    def from_string(cls, value: str) -> Ref | None:
-        """A `Ref` from a scope-rooted dotted string, else None for a literal.
-
-        `point.result_summary.tps` -> `Ref(("point", "result_summary", "tps"))`,
-        which locates that field under the `point` scope.
-        `result_summary.tps` -> None: not rooted in a valid scope object root,
-        so YAML keeps it as the literal string. `point.` and `point` -> None too.
-        """
-        head, dot, rest = value.partition(".")
-        if dot and head in cls.ROOTS and rest:
-            return cls(tuple(value.split(".")))
-        return None
-
-    def resolve(self, scopes: Mapping[str, Any]) -> tuple[bool, Any]:
-        """(found, value) of this reference: a missing key is absent, a stored null is a value.
-
-        Against `{"point": {"tps": 1, "bad": None}}`:
-        `point.tps` -> (True, 1); `point.nope` -> (False, None): no such field;
-        `point.bad` -> (True, None): the field exists and is null.
-        Scope roots read nested mappings or node objects alike, so rows test
-        against plain dicts here and typed nodes at run time.
-        """
-        obj: Any = scopes
-        for part in self.parts:
-            if isinstance(obj, Mapping):
-                if part not in obj:
-                    return False, None
-                obj = obj[part]
-            elif not part.startswith("_") and hasattr(obj, part):
-                obj = getattr(obj, part)
-            else:
-                return False, None
-        return True, obj
-
-    def __str__(self) -> str:
-        return ".".join(self.parts)
+    Args:
+        row (Any): A `Compare` or an `Aggregate`: the row whose `slots` fields
+            are rewritten in place.
+        slots (tuple[str, ...]): The row's operand-bearing field names, one
+            tuple per row shape.
+        fn (Callable[[Ref], Ref]): The rewrite applied to each operand that is
+            a `Ref`.
+    """
+    for slot in slots:
+        value = getattr(row, slot, None)
+        if isinstance(value, Ref):
+            setattr(row, slot, fn(value))
 
 
 def _near_root_misspelling(head: str) -> str | None:
-    """The scope root one insert/delete/substitute from `head`, else None.
+    """The scope root one edit from `head`, else None (`submisson` -> `submission`).
 
-    Typo detector for scope roots (`submisson.` is one edit from `submission.`
-    while `pointish.` is two): a dotted operand that would silently decode as a
-    literal raises instead when its head is a near-miss of a root. A direct hit
-    is not a typo and returns None.
+    A dotted operand that would silently decode as a literal raises instead
+    when its head is a near-miss of a root. A direct hit is not a typo and
+    returns None. The matching itself is `typo_checks.near_match`, shared with
+    the ref table's fact names.
+
+    Args:
+        head (str): The head segment of a dotted operand, e.g. `submisson` in
+            `submisson.tps`.
+    Returns:
+        str | None: The scope root one edit from `head` (`submission` above), or
+            `None` when `head` misses every other root.
     """
-    for root_name in Ref.ROOTS:
-        if head == root_name or abs(len(head) - len(root_name)) > 1:
-            continue
-        if len(head) == len(root_name):
-            if sum(a != b for a, b in zip(head, root_name, strict=True)) == 1:
-                return root_name
-            continue
-        short, long = sorted((head, root_name), key=len)
-        i = j = edits = 0
-        while i < len(short) and j < len(long):
-            if short[i] == long[j]:
-                i += 1
-            else:
-                edits += 1
-            j += 1
-        if edits + (len(long) - j) == 1:
-            return root_name
-    return None
+    return near_match(head, (root for root in Ref.ROOTS if root != head))
 
 
 def _decode_operand(value: Any) -> Any:
     """YAML decode hook on every `Operand`, run at model-validate time.
 
-    `"point.tps"` -> `Ref(("point", "tps"))` (a root-prefixed dotted string);
-    `["ruleset", "models", "llama3.1-8b-v1"]` -> a `Ref` over raw segments, for
-    keys that themselves contain dots (only a non-empty all-strings list headed
-    by a scope root decodes this way: every other list is a literal collection);
-    `{"literal": ...}` -> that value verbatim, for a string that would
-    otherwise read as a reference. `"tps"` or `7` -> the literal itself. A
+    Example:
+
+        _decode_operand("point.tps")  # Ref(("point", "tps"))
+        _decode_operand(["ruleset", "models", "llama3.1-8b-v1"])  # Ref, raw segments
+        _decode_operand({"literal": "point.tps"})  # "point.tps"
+        _decode_operand("tps")  # "tps"
+        _decode_operand(7)  # 7
+
+    `"point.tps"` is a root-prefixed dotted string decoded as `Ref(("point", "tps"))`,
+    and `["ruleset", "models", "llama3.1-8b-v1"]` is a raw-segment list for keys
+    that themselves contain dots (only a non-empty all-strings list headed by a
+    scope root decodes this way: every other list is a literal collection).
+    `{"literal": ...}` is that value verbatim, for a string that would
+    otherwise read as a reference. `"tps"` or `7` is the literal itself. A
     dotted scalar whose head is one edit from a root raises rather than
     silently reading as a literal.
+
+    Args:
+        value (Any): The raw YAML value of one operand slot.
+    Returns:
+        Any: A `Ref`, the literal itself, or `{"literal": ...}`'s value.
+    Raises:
+        ValueError: When a dotted scalar's or list's head is one edit from a
+            scope root (likely a misspelling), or is dotted with no scope root at all.
     """
     if isinstance(value, Ref):
         return value
@@ -184,6 +156,57 @@ def _show(value: Any, limit: int = 80) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+def _operand(ref: Ref, scopes: Mapping[str, Any]) -> tuple[bool, Any]:
+    """(found, value) of a comparison operand, materializing its declared default.
+
+    A fact whose cohort declaration spells its absent-state value
+    (`Ref.default`, today §8.3's `offline`: "absent or `none`") judges as that
+    value when the upload omits it -- so `offline ne dedicated` holds for a
+    non-Offline point instead of going dark. Presence rows never come here:
+    `exists`/`absent`/`not_null` key on the key's raw absence.
+
+    Args:
+        ref (Ref): The operand's reference to resolve.
+        scopes (Mapping[str, Any]): The node's scoped fields, one mapping per
+            scope root.
+    Returns:
+        tuple[bool, Any]: `(found, value)`: a non-`MISSING` `Ref.default` is
+            materialized as found when the upload omits the fact.
+    """
+    found, value = ref.resolve(scopes)
+    if found or ref.default is MISSING:
+        return found, value
+    return True, ref.default
+
+
+def _missing_outcome(missing: Sequence[Ref]) -> tuple[bool, str]:
+    """A row's verdict when one of its operands is absent from the upload.
+
+    A **required** fact (`Ref.required`, filled from the cohort's
+    `valid_refs.yaml`) absent is a schema breach, and raises -- `Verdict.evaluate`
+    maps it to a `broken` verdict, so a `when` gate refuses loudly instead of
+    reading "not applicable". Any other absent fact is the declaration's own
+    not-declared state: the row does not hold, and a `when` row over it gates
+    its check off by declared semantics (a check meant to test presence says
+    so with `exists`/`absent`/`not_null`).
+
+    Args:
+        missing (Sequence[Ref]): Every operand `Ref` absent from the upload, in
+            row-slot order.
+    Returns:
+        tuple[bool, str]: The row's `(held, why)`: `False` with the missing
+            refs named, once no absent operand is required.
+    Raises:
+        ValueError: When any absent operand is a required fact (`Ref.required`):
+            the schema breach raises for `Verdict.evaluate` to map to a `broken`
+            verdict.
+    """
+    for ref in missing:
+        if ref.required:
+            raise ValueError(f"required fact {ref} is absent from the upload")
+    return False, f"missing {', '.join(str(ref) for ref in missing)}"
+
+
 class Compare(BaseModel):
     """One condition row: `op` applied to `left` and (per op) `right`/`lo`/`hi`.
 
@@ -194,10 +217,28 @@ class Compare(BaseModel):
             op: eq
             right: point.result_summary.n_samples_issued
 
-    Arity follows the op (`Op.slots` in `operations.py`): `exists`, `absent` and
-    `not_null` take `left` alone; `between` takes `lo` and `hi`; the rest take
-    `right`. A `right` given at all to a left-only op is a shape error.
+    Arity follows the op (`Op.slots` in `operations.py`):
+
+    - `exists`, `absent` and `not_null` take `left` alone.
+    - `between` takes `lo` and `hi`.
+    - The rest take `right`.
+
+    A `right` given at all to a left-only op is a shape error.
     `abs_tol`/`rel_tol` reach `eq` and `ne` only.
+
+    Args:
+        op (str): The YAML op name, resolved to an `Op` subclass
+            (`operations.py`).
+        left (Any): The compared operand, or the `Ref` whose presence a
+            presence op asks about (`exists`/`absent`/`not_null`).
+        right (Any | None): The compare target of every op whose slots take it.
+            (Default: None)
+        lo (Any | None): The lower bound of a `between` row. (Default: None)
+        hi (Any | None): The upper bound of a `between` row. (Default: None)
+        abs_tol (float): Absolute tolerance, reaching `eq`/`ne` only.
+            (Default: 0.0)
+        rel_tol (float): Relative tolerance, reaching `eq`/`ne` only.
+            (Default: 0.0)
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -217,8 +258,16 @@ class Compare(BaseModel):
 
         A pattern is never a reference, so its literal-ness is not guessed from
         a dotted-string heuristic here (as `_decode_operand` does for every
-        other operand); it is stated. Bare strings, dotted or not, are refused
+        other operand). It is stated. Bare strings, dotted or not, are refused
         before `_decode_operand` can misread a regex as a reference.
+
+        Args:
+            data (Any): The raw row mapping, before field validation.
+        Returns:
+            Any: `data` unchanged. The `{"literal": ...}` form is asserted here.
+        Raises:
+            ValueError: When a `matches` row's `right` is not the
+                `{"literal": ...}` form over a string pattern.
         """
         if not isinstance(data, Mapping) or data.get("op") != "matches":
             return data
@@ -259,10 +308,17 @@ class Compare(BaseModel):
         return self
 
     def _outcome(self, scopes: Mapping[str, Any]) -> tuple[bool, str]:
-        """(held, why): presence rows read `left` directly; the rest compare operands.
+        """(held, why): presence rows read `left` directly. The rest compare operands.
 
         A missing reference fails the row (its `why` names it) except where the
         op asks about presence itself. `_show` bounds each failing value.
+
+        Args:
+            scopes (Mapping[str, Any]): The node's scoped fields, one mapping per
+                scope root.
+        Returns:
+            tuple[bool, str]: `(held, why)`: whether the row holds and, when not,
+                why its operand values fail it.
         """
         op = Op(self.op)
         if op.needs_found:
@@ -278,17 +334,17 @@ class Compare(BaseModel):
             return False, f"expected {self.left} {op.label}, got {got}"
 
         out: list[Any] = []
-        missing = []
+        missing: list[Ref] = []
         for side in (self.left, self.right, self.lo, self.hi):
             if isinstance(side, Ref):
-                found, value = side.resolve(scopes)
+                found, value = _operand(side, scopes)
                 out.append(value)
                 if not found:
-                    missing.append(str(side))
+                    missing.append(side)
             else:
                 out.append(side)
         if missing:
-            return False, f"missing {', '.join(missing)}"
+            return _missing_outcome(missing)
         left, right, lo, hi = out
         if Op(self.op).slots == ("lo", "hi"):
             predicate = Predicate(left, Interval(lo, hi))
@@ -313,6 +369,9 @@ class Compare(BaseModel):
 
         The row label every boundary message reuses: one shape per row kind, so
         a message never reaches for fields a row does not have.
+
+        Returns:
+            str: The row's operand form, per its op's slots.
         """
         op = Op(self.op)
         if op.slots == ("lo", "hi"):
@@ -322,8 +381,12 @@ class Compare(BaseModel):
         return f"{_show(self.left)} {self.op} {_show(self.right)}"
 
     def operands(self) -> tuple[Any, ...]:
-        """Every operand this row resolves; its `Ref`s live among them."""
+        """Every operand this row resolves. Its `Ref`s live among them."""
         return (self.left, self.right, self.lo, self.hi)
+
+    def map_refs(self, fn: Callable[[Ref], Ref]) -> None:
+        """Rewrite each `Ref` operand through `fn` (cohort-load name checking)."""
+        _rewrite_refs(self, ("left", "right", "lo", "hi"), fn)
 
 
 class Aggregate(BaseModel):
@@ -343,6 +406,19 @@ class Aggregate(BaseModel):
     fail with `no values` over empty rather than guessing (a vacuous `all` pass
     on an empty upload would be a silent false-pass). `op` is one of the scalar
     ops (`MeasureOp` above).
+
+    Args:
+        over (Any): The operand holding the collection (a list, or a mapping
+            whose values are read).
+        measure (MeasureName): The aggregation to run (`count`, `sum`, `mean`,
+            `min`, `max`, `any`, `all`).
+        op (MeasureOp): The scalar comparison applied to the measured value
+            (`eq`, `ne`, `gt`, `ge`, `lt`, `le`).
+        value (Any): The compare target.
+        abs_tol (float): Absolute tolerance, reaching `eq`/`ne` only.
+            (Default: 0.0)
+        rel_tol (float): Relative tolerance, reaching `eq`/`ne` only.
+            (Default: 0.0)
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -392,27 +468,47 @@ class Aggregate(BaseModel):
         return self
 
     def run(self, items: list[Any]) -> Any:
-        """The aggregation itself over `items`; a subclass owns one.
+        """The aggregation itself over `items`. A subclass owns one.
 
-        `Count().run([1, 2])` -> 2. Called on an empty `items` raises
-        NotImplementedError: the empty-collection policy sits in `_outcome`.
+        Example:
+
+            Count().run([1, 2])  # 2
+
+        Called on an empty `items` raises NotImplementedError: the
+        empty-collection policy sits in `_outcome`.
+
+        Args:
+            items (list[Any]): The collection `_outcome` resolved from `over`.
+        Returns:
+            Any: The measure's value over `items`, e.g. a count or a sum.
+        Raises:
+            NotImplementedError: On `Aggregate` itself: every measure family
+                defines its own aggregation.
         """
         raise NotImplementedError
 
     def _outcome(self, scopes: Mapping[str, Any]) -> tuple[bool, str]:
-        """(held, why) of `measure(over) op value`; `why` names the measured result."""
+        """(held, why) of `measure(over) op value`. `why` names the measured result.
+
+        Args:
+            scopes (Mapping[str, Any]): The node's scoped fields, one mapping per
+                scope root.
+        Returns:
+            tuple[bool, str]: `(held, why)`: whether `measure(over) op value`
+                holds and, when not, why.
+        """
         resolved = []
-        missing = []
+        missing: list[Ref] = []
         for side in (self.over, self.value):
             if isinstance(side, Ref):
-                found, value = side.resolve(scopes)
+                found, value = _operand(side, scopes)
                 resolved.append(value)
                 if not found:
-                    missing.append(str(side))
+                    missing.append(side)
             else:
                 resolved.append(side)
         if missing:
-            return False, f"missing {', '.join(missing)}"
+            return _missing_outcome(missing)
         over, value = resolved
         items = (
             list(over.values())
@@ -441,16 +537,23 @@ class Aggregate(BaseModel):
 
         The row label `Verdict.evaluate`'s boundary message reuses (the
         `Compare` twin keeps its own shape).
+
+        Returns:
+            str: The row's operand form, `measure of over op value`.
         """
         return f"{self.measure} of {_show(self.over)} {self.op} {_show(self.value)}"
 
     def operands(self) -> tuple[Any, ...]:
-        """Every operand this row resolves; its `Ref`s live among them."""
+        """Every operand this row resolves. Its `Ref`s live among them."""
         return (self.over, self.value)
+
+    def map_refs(self, fn: Callable[[Ref], Ref]) -> None:
+        """Rewrite each `Ref` operand through `fn` (cohort-load name checking)."""
+        _rewrite_refs(self, ("over", "value"), fn)
 
 
 class Count(Aggregate, measure="count"):
-    """`len(items)`: `Count().run([1, 2])` -> 2; empty -> 0."""
+    """`len(items)`: `Count().run([1, 2])` -> 2, empty -> 0."""
 
     defines_empty = True
 
@@ -487,7 +590,7 @@ class Max(Aggregate, measure="max"):
 
 
 class AnyTrue(Aggregate, measure="any"):
-    """`any(items)` over truthiness: `AnyTrue().run([0, 5])` -> True; empty -> False."""
+    """`any(items)` over truthiness: `AnyTrue().run([0, 5])` -> True, empty -> False."""
 
     defines_empty = True
 
@@ -510,6 +613,13 @@ class Verdict:
     fail-loud or an incommensurable pair) rather than judged False -- gate
     positions must refuse those loudly instead of reading them as "not
     applicable".
+
+    Args:
+        ok (bool): Whether the condition held.
+        why (str): The assertion's own message, empty when `ok`.
+        broken (bool): Whether the assertion failed to *evaluate* (a deliberate
+            fail-loud or an incommensurable pair) rather than judged False.
+            (Default: False)
     """
 
     ok: bool
@@ -526,6 +636,14 @@ class Verdict:
         policy the semantics grid calls for and the same return-fail shape
         `Interval.__contains__` keeps. No artifact value ever aborts the run
         mid-verdict.
+
+        Args:
+            row (Compare | Aggregate): The condition row to evaluate.
+            scopes (Mapping[str, Any]): The node's scoped fields, one mapping per
+                scope root.
+        Returns:
+            Verdict: The row's verdict. `broken` marks evaluation failure rather
+                than false judgment.
         """
         try:
             held, why = row._outcome(scopes)

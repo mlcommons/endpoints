@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 from inference_endpoint.validation.catalog import Catalog
-from inference_endpoint.validation.compare import Ref
+from inference_endpoint.validation.refs import Ref
 from inference_endpoint.validation.tree import SubmissionNode
 
 MODELS = "gpt: {vocab_size: 50257, is_drafter: false}\n"
@@ -43,15 +43,18 @@ def _catalog(tmp_path: Path, models: str = MODELS, datasets: str = DATASETS) -> 
 class TestCatalogFromDirectory:
     """`Catalog.from_directory`: the two mappings, read as they are written."""
 
+    @pytest.mark.unit
     def test_models_and_datasets_stay_plain_data(self, tmp_path):
         catalog = _catalog(tmp_path)
         assert catalog.models == {"gpt": {"vocab_size": 50257, "is_drafter": False}}
         assert catalog.datasets == {"ds": {"num_prompt": 3}}
 
+    @pytest.mark.unit
     def test_non_mapping_document_is_a_load_error(self, tmp_path):
         with pytest.raises(ValueError, match="mapping"):
             _catalog(tmp_path, models="- a\n")
 
+    @pytest.mark.unit
     def test_missing_directory_is_a_load_error(self, tmp_path):
         with pytest.raises(NotADirectoryError):
             Catalog.from_directory(tmp_path / "nope")
@@ -65,6 +68,7 @@ class TestRulesetRoot:
         (root / "results").mkdir(parents=True)
         return SubmissionNode.from_directory(root, ruleset=_catalog(tmp_path)).scopes()
 
+    @pytest.mark.unit
     def test_ruleset_root_answers_catalog_lookups(self, tmp_path):
         scopes = self._scopes(tmp_path)
         assert Ref(("ruleset", "models", "gpt", "vocab_size")).resolve(scopes) == (
@@ -72,6 +76,7 @@ class TestRulesetRoot:
             50257,
         )
 
+    @pytest.mark.unit
     def test_without_a_catalog_the_ruleset_root_stays_away(self, tmp_path):
         root = tmp_path / "acme"
         (root / "results").mkdir(parents=True)
