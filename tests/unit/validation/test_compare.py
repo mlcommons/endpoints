@@ -248,7 +248,7 @@ class TestResolve:
         verdict = Verdict.evaluate(
             _aggregate(
                 over=[1, 2],
-                measure="count",
+                name="count",
                 op="eq",
                 value="point.result_summary.n_samples_issued",
             ),
@@ -468,7 +468,7 @@ class TestCompareVerdict:
     @pytest.mark.unit
     def test_incommensurable_aggregate_row_fails_with_why(self):
         verdict = Verdict.evaluate(
-            _aggregate(over=[1, "a"], measure="sum", op="eq", value=0), SCOPES
+            _aggregate(over=[1, "a"], name="sum", op="eq", value=0), SCOPES
         )
         assert verdict.ok is False
         assert "sum of [1, 'a'] eq 0" in verdict.why
@@ -623,37 +623,47 @@ class TestAggregateVerdict:
         ("kwargs", "ok"),
         [
             (
-                {"over": "point.accuracy", "measure": "count", "op": "ge", "value": 2},
+                {
+                    "over": "point.accuracy",
+                    "aggregate": "count",
+                    "op": "ge",
+                    "value": 2,
+                },
                 True,
             ),
             (
-                {"over": "point.accuracy", "measure": "count", "op": "ge", "value": 3},
+                {
+                    "over": "point.accuracy",
+                    "aggregate": "count",
+                    "op": "ge",
+                    "value": 3,
+                },
                 False,
             ),
-            ({"over": [1, 2, 3], "measure": "mean", "op": "eq", "value": 2}, True),
-            ({"over": [1, 2, 3], "measure": "min", "op": "le", "value": 1}, True),
-            ({"over": [1, 2, 3], "measure": "max", "op": "gt", "value": 2}, True),
-            ({"over": [0, 0], "measure": "sum", "op": "eq", "value": 0}, True),
+            ({"over": [1, 2, 3], "aggregate": "mean", "op": "eq", "value": 2}, True),
+            ({"over": [1, 2, 3], "aggregate": "min", "op": "le", "value": 1}, True),
+            ({"over": [1, 2, 3], "aggregate": "max", "op": "gt", "value": 2}, True),
+            ({"over": [0, 0], "aggregate": "sum", "op": "eq", "value": 0}, True),
             (
-                {"over": [True, False], "measure": "any", "op": "eq", "value": True},
+                {"over": [True, False], "aggregate": "any", "op": "eq", "value": True},
                 True,
             ),
             (
-                {"over": [True, False], "measure": "all", "op": "eq", "value": True},
+                {"over": [True, False], "aggregate": "all", "op": "eq", "value": True},
                 False,
             ),
-            ({"over": [], "measure": "count", "op": "eq", "value": 0}, True),
-            ({"over": [], "measure": "any", "op": "eq", "value": False}, True),
-            ({"over": [], "measure": "mean", "op": "eq", "value": 0}, False),
-            ({"over": [], "measure": "all", "op": "eq", "value": True}, False),
+            ({"over": [], "aggregate": "count", "op": "eq", "value": 0}, True),
+            ({"over": [], "aggregate": "any", "op": "eq", "value": False}, True),
+            ({"over": [], "aggregate": "mean", "op": "eq", "value": 0}, False),
+            ({"over": [], "aggregate": "all", "op": "eq", "value": True}, False),
             (
-                {"over": {"a": 1, "b": 3}, "measure": "mean", "op": "eq", "value": 2},
+                {"over": {"a": 1, "b": 3}, "aggregate": "mean", "op": "eq", "value": 2},
                 True,
             ),
             (
                 {
                     "over": "point.result_summary.tps",
-                    "measure": "count",
+                    "aggregate": "count",
                     "op": "ge",
                     "value": 0,
                 },
@@ -665,33 +675,33 @@ class TestAggregateVerdict:
         assert Verdict.evaluate(_aggregate(**kwargs), SCOPES).ok is ok
 
     @pytest.mark.unit
-    def test_constructs_its_measure_subclass(self):
-        row = _aggregate(over=[1], measure="count", op="eq", value=1)
+    def test_constructs_its_aggregate_subclass(self):
+        row = _aggregate(over=[1], name="count", op="eq", value=1)
         assert type(row).__name__ == "Count"
 
     @pytest.mark.unit
-    def test_unknown_measure_raises(self):
-        with pytest.raises(ValueError, match="unknown measure"):
-            _aggregate(over=[1], measure="bogus", op="eq", value=1)
+    def test_unknown_aggregate_raises(self):
+        with pytest.raises(ValueError, match="unknown aggregate"):
+            _aggregate(over=[1], name="bogus", op="eq", value=1)
 
     @pytest.mark.unit
-    def test_missing_measure_is_a_value_error(self):
+    def test_missing_aggregate_is_a_value_error(self):
         with pytest.raises(ValueError, match="needs a"):
             Aggregate(over=[1], op="eq", value=1)
 
     @pytest.mark.unit
-    def test_a_row_must_run_the_measure_it_declares(self):
-        with pytest.raises(ValueError, match="declares measure"):
-            Count(measure="sum", over=[1, 2], op="eq", value=2)
+    def test_a_row_must_run_the_aggregate_it_declares(self):
+        with pytest.raises(ValueError, match="declares aggregate"):
+            Count(name="sum", over=[1, 2], op="eq", value=2)
 
     @pytest.mark.unit
     def test_aggregate_tolerances_are_guarded_like_compare(self):
         with pytest.raises(ValueError, match="tolerance semantics"):
-            _aggregate(over=[], measure="count", op="ge", value=1, abs_tol=2)
+            _aggregate(over=[], name="count", op="ge", value=1, abs_tol=2)
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("measure", "items", "expected"),
+        ("name", "items", "expected"),
         [
             ("count", [1, 2], 2),
             ("count", [], 0),
@@ -703,14 +713,15 @@ class TestAggregateVerdict:
             ("all", [0, 5], False),
         ],
     )
-    def test_run_over_items(self, measure, items, expected):
-        row = _aggregate(over=[], measure=measure, op="eq", value=expected)
+    def test_run_over_items(self, name, items, expected):
+        row = _aggregate(over=[], name=name, op="eq", value=expected)
         assert row.run(items) == expected
 
     @pytest.mark.unit
     def test_why_names_the_aggregated_value(self):
         verdict = Verdict.evaluate(
-            _aggregate(over="point.accuracy", measure="count", op="ge", value=3), SCOPES
+            _aggregate(over="point.accuracy", name="count", op="ge", value=3),
+            SCOPES,
         )
         assert verdict.ok is False
         assert "count" in verdict.why and "2" in verdict.why
@@ -718,14 +729,14 @@ class TestAggregateVerdict:
     @pytest.mark.unit
     def test_empty_mean_says_no_values_in_why(self):
         verdict = Verdict.evaluate(
-            _aggregate(over=[], measure="mean", op="eq", value=0), SCOPES
+            _aggregate(over=[], name="mean", op="eq", value=0), SCOPES
         )
         assert "no values" in verdict.why
 
     @pytest.mark.unit
     def test_missing_collection_fails_and_names_it(self):
         verdict = Verdict.evaluate(
-            _aggregate(over="point.results", measure="count", op="ge", value=0), SCOPES
+            _aggregate(over="point.results", name="count", op="ge", value=0), SCOPES
         )
         assert verdict.ok is False
         assert "missing" in verdict.why and "results" in verdict.why
@@ -733,9 +744,7 @@ class TestAggregateVerdict:
     @pytest.mark.unit
     def test_non_collection_fails_with_why(self):
         verdict = Verdict.evaluate(
-            _aggregate(
-                over="point.result_summary.tps", measure="count", op="ge", value=0
-            ),
+            _aggregate(over="point.result_summary.tps", name="count", op="ge", value=0),
             SCOPES,
         )
         assert "collection" in verdict.why
@@ -763,7 +772,7 @@ class TestEvaluateAll:
     def test_mixed_rows_in_order(self):
         rows = [
             _compare(op="eq", left=1, right=1),
-            _aggregate(over=[1], measure="count", op="eq", value=1),
+            _aggregate(over=[1], name="count", op="eq", value=1),
             _compare(op="eq", left=1, right=2),
         ]
         assert [v.ok for v in Verdict.evaluate_all(rows, SCOPES)] == [True, True, False]

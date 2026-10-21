@@ -18,7 +18,7 @@
 A row decodes from YAML and evaluates against the scoped fields of one node (a
 mapping per scope root, e.g. `{"point": ...}`). Operands are literals or `Ref`
 dotted references (decode hooks below). Which op does what lives in
-`operations.py` (`Op` subclasses). Which aggregation `measure` does what is the
+`operations.py` (`Op` subclasses). Which aggregate does what is the
 `Aggregate` subclass family below. `Verdict.evaluate` wraps one row's own
 `_outcome`, whose `why` is written by the row (the failing values, bounded), so
 no downstream code has to reconstruct the message.
@@ -31,7 +31,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from inference_endpoint.validation.operations import Op, Predicate, vet_pattern
 from inference_endpoint.validation.ranges import Interval
@@ -146,8 +146,8 @@ def _decode_operand(value: Any) -> Any:
 
 
 Operand = Annotated[Any, BeforeValidator(_decode_operand)]
-MeasureName = Literal["count", "sum", "mean", "min", "max", "any", "all"]
-MeasureOp = Literal["eq", "ne", "gt", "ge", "lt", "le"]
+AggregateName = Literal["count", "sum", "mean", "min", "max", "any", "all"]
+AggregateOp = Literal["eq", "ne", "gt", "ge", "lt", "le"]
 
 
 def _show(value: Any, limit: int = 80) -> str:
@@ -217,7 +217,7 @@ def _finite(value: Any, where: str) -> Any:
     operands resolve, instead of patching every op.
 
     Args:
-        value (Any): One resolved comparison operand (or a measure's result).
+        value (Any): One resolved comparison operand (or an aggregate's result).
         where (str): The operand's row syntax, for the message.
     Returns:
         Any: `value`, unchanged.
@@ -446,29 +446,29 @@ class Compare(BaseModel):
 
 
 class Aggregate(BaseModel):
-    """One collection row: `measure` of `over`, compared to `value`.
+    """One collection row: an `aggregate` over `over`, compared to `value`.
 
     A YAML row this decodes from:
 
         when:
           - over: point.results.accuracy
-            measure: count
+            aggregate: count
             op: ge
             value: 1
 
-    `over` reads a list, or the values of a mapping. `measure` picks the
-    subclass registered for it (see `__new__`): `Count` over an empty collection
-    is 0 and `AnyTrue` is False, while `Sum`, `Mean`, `Min`, `Max` and `AllTrue`
-    fail with `no values` over empty rather than guessing (a vacuous `all` pass
-    on an empty upload would be a silent false-pass). `op` is one of the scalar
-    ops (`MeasureOp` above).
+    `over` reads a list, or the values of a mapping. The `aggregate` key picks
+    the subclass registered for it (see `__new__`): `Count` over an empty
+    collection is 0 and `AnyTrue` is False, while `Sum`, `Mean`, `Min`, `Max`
+    and `AllTrue` fail with `no values` over empty rather than guessing (a
+    vacuous `all` pass on an empty upload would be a silent false-pass). `op`
+    is one of the scalar ops (`AggregateOp` above).
 
     Args:
         over (Any): The operand holding the collection (a list, or a mapping
             whose values are read).
-        measure (MeasureName): The aggregation to run (`count`, `sum`, `mean`,
-            `min`, `max`, `any`, `all`).
-        op (MeasureOp): The scalar comparison applied to the measured value
+        name (AggregateName): The computation to run (`count`, `sum`, `mean`,
+            `min`, `max`, `any`, `all`); the YAML key is `aggregate`.
+        op (AggregateOp): The scalar comparison applied to the computed value
             (`eq`, `ne`, `gt`, `ge`, `lt`, `le`).
         value (Any): The compare target.
         abs_tol (float): Absolute tolerance, reaching `eq`/`ne` only.
@@ -477,14 +477,14 @@ class Aggregate(BaseModel):
             (Default: 0.0)
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    # kind -> subclass, filled by `__init_subclass__` on each measure family.
+    # name -> subclass, filled by `__init_subclass__` on the family.
     registry: ClassVar[dict[str, type[Aggregate]]] = {}
 
     over: Operand
-    measure: MeasureName
-    op: MeasureOp
+    name: AggregateName = Field(alias="aggregate")
+    op: AggregateOp
     value: Operand
     abs_tol: float = 0.0
     rel_tol: float = 0.0
@@ -492,29 +492,29 @@ class Aggregate(BaseModel):
     defines_empty: ClassVar[bool] = False
 
     def __new__(cls, **data: Any) -> Aggregate:
-        """`Aggregate(measure="count", ...)` -> `Count(...)` over the registered family."""
+        """`Aggregate(name="count", ...)` -> `Count(...)` over the registered family."""
         if cls is Aggregate:
+            name = data.get("aggregate", data.get("name"))
+            if name is None:
+                raise ValueError("aggregate row needs an `aggregate` key") from None
             try:
-                measure = data["measure"]
+                return super().__new__(cls.registry[name])
             except KeyError:
-                raise ValueError("aggregate row needs a `measure`") from None
-            try:
-                return super().__new__(cls.registry[measure])
-            except KeyError:
-                raise ValueError(f"unknown measure {measure!r}") from None
+                raise ValueError(f"unknown aggregate {name!r}") from None
         return super().__new__(cls)
 
-    def __init_subclass__(cls, *, measure: str, **kwargs: Any) -> None:
+    def __init_subclass__(cls, *, name: str, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        cls.registry[measure] = cls
+        cls.registry[name] = cls
 
     @model_validator(mode="after")
     def _check_shape(self) -> Aggregate:
-        # The row must run its declared measure: `Count(measure="sum")` would
+        # The row must run its declared aggregate: `Count(name="sum")` would
         # compute `len` while its messages claim `sum`.
-        if Aggregate.registry.get(self.measure) is not type(self):
+        if Aggregate.registry.get(self.name) is not type(self):
             raise ValueError(
-                f"row computes {type(self).__name__} but declares measure {self.measure!r}"
+                f"row computes {type(self).__name__} but declares aggregate "
+                f"{self.name!r}"
             )
         op = self._operation()
         if not op.tolerant and (self.abs_tol or self.rel_tol):
@@ -544,21 +544,21 @@ class Aggregate(BaseModel):
         Args:
             items (list[Any]): The collection `_outcome` resolved from `over`.
         Returns:
-            Any: The measure's value over `items`, e.g. a count or a sum.
+            Any: The aggregate's value over `items`, e.g. a count or a sum.
         Raises:
-            NotImplementedError: On `Aggregate` itself: every measure family
-                defines its own aggregation.
+            NotImplementedError: On `Aggregate` itself: every registered
+                family defines its own aggregation.
         """
         raise NotImplementedError
 
     def _outcome(self, scopes: Mapping[str, Any]) -> tuple[bool, str]:
-        """(held, why) of `measure(over) op value`. `why` names the measured result.
+        """(held, why) of `aggregate(over) op value`. `why` names the computed result.
 
         Args:
             scopes (Mapping[str, Any]): The node's scoped fields, one mapping per
                 scope root.
         Returns:
-            tuple[bool, str]: `(held, why)`: whether `measure(over) op value`
+            tuple[bool, str]: `(held, why)`: whether `aggregate(over) op value`
                 holds and, when not, why.
         """
         resolved = []
@@ -586,11 +586,11 @@ class Aggregate(BaseModel):
         if items is None:
             return False, f"expected {self.over} to be a collection, got {_show(over)}"
         if not items and not self.defines_empty:
-            return False, f"expected {self.measure} of {self.over}, got no values"
+            return False, f"expected {self.name} of {self.over}, got no values"
         measured = self.run(items)
         held = self._operation().holds(
             Predicate(
-                _finite(measured, f"{self.measure} of {self.over}"),
+                _finite(measured, f"{self.name} of {self.over}"),
                 _finite(value, str(self.value)),
             ),
             self.abs_tol,
@@ -599,20 +599,20 @@ class Aggregate(BaseModel):
         if held:
             return True, ""
         return False, (
-            f"expected {self.measure} of {self.over} {self.op} {self.value}, "
+            f"expected {self.name} of {self.over} {self.op} {self.value}, "
             f"got {_show(measured)} vs {_show(value)}"
         )
 
     def describe(self) -> str:
-        """The row as prose: `measure of over op value`.
+        """The row as prose: `aggregate of over op value`.
 
         The row label `Verdict.evaluate`'s boundary message reuses (the
         `Compare` twin keeps its own shape).
 
         Returns:
-            str: The row's operand form, `measure of over op value`.
+            str: The row's operand form, `aggregate of over op value`.
         """
-        return f"{self.measure} of {_show(self.over)} {self.op} {_show(self.value)}"
+        return f"{self.name} of {_show(self.over)} {self.op} {_show(self.value)}"
 
     def operands(self) -> tuple[Any, ...]:
         """Every operand this row resolves. Its `Ref`s live among them."""
@@ -623,7 +623,7 @@ class Aggregate(BaseModel):
         _rewrite_refs(self, ("over", "value"), fn)
 
 
-class Count(Aggregate, measure="count"):
+class Count(Aggregate, name="count"):
     """`len(items)`: `Count().run([1, 2])` -> 2, empty -> 0."""
 
     defines_empty = True
@@ -632,35 +632,35 @@ class Count(Aggregate, measure="count"):
         return len(items)
 
 
-class Sum(Aggregate, measure="sum"):
+class Sum(Aggregate, name="sum"):
     """`sum(items)`: `Sum().run([1, 2, 3])` -> 6."""
 
     def run(self, items: list[Any]) -> Any:
         return sum(items)
 
 
-class Mean(Aggregate, measure="mean"):
+class Mean(Aggregate, name="mean"):
     """`sum(items) / len(items)`: `Mean().run([1, 3])` -> 2.0."""
 
     def run(self, items: list[Any]) -> Any:
         return sum(items) / len(items)
 
 
-class Min(Aggregate, measure="min"):
+class Min(Aggregate, name="min"):
     """`min(items)`: `Min().run([2, 1, 3])` -> 1."""
 
     def run(self, items: list[Any]) -> Any:
         return min(items)
 
 
-class Max(Aggregate, measure="max"):
+class Max(Aggregate, name="max"):
     """`max(items)`: `Max().run([2, 1, 3])` -> 3."""
 
     def run(self, items: list[Any]) -> Any:
         return max(items)
 
 
-class AnyTrue(Aggregate, measure="any"):
+class AnyTrue(Aggregate, name="any"):
     """`any(items)` over truthiness: `AnyTrue().run([0, 5])` -> True, empty -> False."""
 
     defines_empty = True
@@ -669,7 +669,7 @@ class AnyTrue(Aggregate, measure="any"):
         return any(items)
 
 
-class AllTrue(Aggregate, measure="all"):
+class AllTrue(Aggregate, name="all"):
     """`all(items)` over truthiness: `AllTrue().run([1, 0])` -> False (empty fails in `_outcome`)."""
 
     def run(self, items: list[Any]) -> Any:

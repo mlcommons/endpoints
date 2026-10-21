@@ -173,7 +173,7 @@ class Severity(str, Enum):  # noqa: UP042 - repository wire-enum convention
 def _decode_row(value: Any) -> Any:
     """YAML decode hook on every `when`/`assert` row, before model validation.
 
-    `{"over": ..., "measure": "count", ...}` -> `Aggregate`. Anything else with
+    `{"over": ..., "aggregate": "count", ...}` -> `Aggregate`. Anything else with
     `left`/`op` -> `Compare`. An already-built row passes through, and any
     construction failure (a non-identifier key, a shape error) re-raises as
     ValueError so `_load_check`'s net can name the file. A bare value raises
@@ -184,7 +184,7 @@ def _decode_row(value: Any) -> Any:
             or an already-built `Compare` /`Aggregate`.
     Returns:
         Compare | Aggregate: The row as a model: `Aggregate` when it carries a
-            `measure` field, `Compare` otherwise.
+            `aggregate` field, `Compare` otherwise.
     Raises:
         ValueError: When the mapping builds neither row model (a non-identifier
             key, a shape error), or when `value` is neither row kind.
@@ -193,7 +193,7 @@ def _decode_row(value: Any) -> Any:
         return value
     if isinstance(value, dict):
         try:
-            return Aggregate(**value) if "measure" in value else Compare(**value)
+            return Aggregate(**value) if "aggregate" in value else Compare(**value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"bad row {value!r}: {exc}") from exc
     raise ValueError(f"expected a `Compare` or `Aggregate` row, got {value!r}")
