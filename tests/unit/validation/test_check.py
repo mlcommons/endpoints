@@ -101,7 +101,7 @@ class TestDecodeRow:
 
     @pytest.mark.unit
     def test_a_scalar_row_is_a_shape_error(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="expected a `Compare` or `Aggregate` row"):
             _decode_row("not-a-row")
 
     @pytest.mark.unit
@@ -172,7 +172,7 @@ class TestCheckShape:
 
     @pytest.mark.unit
     def test_unknown_field_is_rejected(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Extra inputs are not permitted"):
             Check.model_validate(self._yaml_dict() | {"extra_key": 1})
 
     @pytest.mark.unit
@@ -588,7 +588,7 @@ class TestCohortFromDirectory:
 
     @pytest.mark.unit
     def test_missing_directory_is_a_load_error(self, tmp_path):
-        with pytest.raises(NotADirectoryError):
+        with pytest.raises(NotADirectoryError, match="nope"):
             Cohort.from_directory(tmp_path / "nope")
 
     @pytest.mark.unit
