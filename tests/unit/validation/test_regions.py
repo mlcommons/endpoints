@@ -104,7 +104,13 @@ class TestBounds:
         [(1, 32), (0, 256), (33, 256), (1, 0)],
     )
     def test_bounds_outside_the_admitted_range_raise(self, c_min, c_max):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=(
+                "Maximum Supported Concurrency must be"
+                "|C_min must be between|concurrencies need to be integers"
+            ),
+        ):
             Regions.for_bounds(c_min=c_min, c_max=c_max)
 
     @pytest.mark.unit
@@ -160,7 +166,13 @@ class TestForPareto:
         ],
     )
     def test_missing_or_ambiguous_facts_raise(self, system_desc, concurrencies):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=(
+                "max_supported_concurrency|must be between|need at least one point"
+                "|concurrencies need to be integers"
+            ),
+        ):
             Regions.for_pareto(system_desc, concurrencies)
 
 

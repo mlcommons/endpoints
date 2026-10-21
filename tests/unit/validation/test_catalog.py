@@ -56,7 +56,7 @@ class TestCatalogFromDirectory:
 
     @pytest.mark.unit
     def test_missing_directory_is_a_load_error(self, tmp_path):
-        with pytest.raises(NotADirectoryError):
+        with pytest.raises(NotADirectoryError, match="nope"):
             Catalog.from_directory(tmp_path / "nope")
 
 
