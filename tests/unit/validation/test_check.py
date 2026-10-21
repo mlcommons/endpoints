@@ -90,8 +90,8 @@ class TestDecodeRow:
     """`_decode_row` selects the row model by what the YAML row holds."""
 
     @pytest.mark.unit
-    def test_aggregate_row_by_measure(self):
-        row = _decode_row({"over": [], "measure": "count", "op": "eq", "value": 0})
+    def test_aggregate_row_by_aggregate_key(self):
+        row = _decode_row({"over": [], "aggregate": "count", "op": "eq", "value": 0})
         assert isinstance(row, Aggregate)
 
     @pytest.mark.unit
@@ -107,7 +107,7 @@ class TestDecodeRow:
     @pytest.mark.unit
     def test_typed_rows_pass_through(self):
         compare = Compare.model_validate({"left": 1, "op": "eq", "right": 1})
-        aggregate = Aggregate(over=[1], measure="count", op="eq", value=1)
+        aggregate = Aggregate(over=[1], name="count", op="eq", value=1)
         assert _decode_row(compare) is compare
         assert _decode_row(aggregate) is aggregate
 
@@ -157,7 +157,7 @@ class TestCheckShape:
     def test_when_rows_decode_too(self):
         check = Check.model_validate(
             self._yaml_dict()
-            | {"when": [{"over": [], "measure": "count", "op": "eq", "value": 0}]}
+            | {"when": [{"over": [], "aggregate": "count", "op": "eq", "value": 0}]}
         )
         assert isinstance(check.when[0], Aggregate)
 

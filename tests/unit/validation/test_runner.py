@@ -682,7 +682,7 @@ class TestCollectFailsLoud:
     def test_a_when_row_that_cannot_be_judged_is_refused(self, tmp_path):
         gated = _check(
             "gated",
-            when=[{"over": [1, "a"], "measure": "mean", "op": "eq", "value": 0}],
+            when=[{"over": [1, "a"], "aggregate": "mean", "op": "eq", "value": 0}],
             assert_=[LITERAL_ROW],
         )
         with pytest.raises(ValueError, match="cannot be evaluated"):
@@ -769,7 +769,7 @@ class TestDerivedExposureLink:
             assert_=[
                 {
                     "over": "derived.out_of_range_points",
-                    "measure": "count",
+                    "aggregate": "count",
                     "op": "eq",
                     "value": 1,
                 }

@@ -189,7 +189,7 @@ block's fields:
 | `assert`            | predicates | Condition predicates; each is one finding per instance; this list may be empty or absent when `when` carries at least one |
 
 `when` and `assert` take lists of predicates. A predicate is either a
-**comparison** or a **measure** (an aggregate over a collection); the
+**comparison** or an **aggregate** (a named computation over a collection); the
 subsections below spell out each form. (A check runs once per **instance** of
 its scope: once per submission, system, pareto, or measurement point.) A full
 check block in `point.yaml` (both kinds in one check):
@@ -330,31 +330,30 @@ table (`Cohort.refs` is `None`) and no annotations, so every absent fact of
 theirs reads as the third case; `required`/`default` are filled only when
 `Cohort.from_directory` loads the cohort's `valid_refs.yaml`.
 
-### Measures
+### Aggregates
 
-Measures, or aggregates, are similar to the comparison operators above, but
-additionally take a `measure` key to indicate an aggregation method to perform
-on `over` (functionally the same as `left` in comparisons) before performing the
-specified `op`.
+Aggregates are similar to the comparison operators above, but additionally take
+an `aggregate` key naming the computation to perform on `over` (functionally the
+same as `left` in comparisons) before applying the specified `op`.
 
-It is expected that `over`, unlike `left` is a list-like collection. If `over`
-is a mapping (`dict`-like), then the `measure` aggregates over the _values_ of
-the mapping. A bare string does not count as a collection.
+It is expected that `over`, unlike `left`, is a list-like collection. If `over`
+is a mapping (`dict`-like), then the aggregate uses the _values_ of the mapping.
+A bare string does not count as a collection.
 
-Accepted `measure`s:
+Accepted `aggregate` values:
 
-| `measure` | What it computes                    | Expected elements of `over`                       | Empty `over` |
-| --------- | ----------------------------------- | ------------------------------------------------- | ------------ |
-| `count`   | `len(over)`, the number of elements | any                                               | `0`          |
-| `sum`     | `sum(over)`                         | numbers (`int`/`float`)                           | fails        |
-| `mean`    | `sum(over) / len(over)`             | numbers (`int`/`float`)                           | fails        |
-| `min`     | the smallest element                | mutually orderable values (numbers, also strings) | fails        |
-| `max`     | the largest element                 | mutually orderable values (numbers, also strings) | fails        |
-| `any`     | whether any element is truthy       | any (truthiness is tested)                        | `false`      |
-| `all`     | whether every element is truthy     | any (truthiness is tested)                        | fails        |
+| `aggregate` | What it computes                    | Expected elements of `over`                       | Empty `over` |
+| ----------- | ----------------------------------- | ------------------------------------------------- | ------------ |
+| `count`     | `len(over)`, the number of elements | any                                               | `0`          |
+| `sum`       | `sum(over)`                         | numbers (`int`/`float`)                           | fails        |
+| `mean`      | `sum(over) / len(over)`             | numbers (`int`/`float`)                           | fails        |
+| `min`       | the smallest element                | mutually orderable values (numbers, also strings) | fails        |
+| `max`       | the largest element                 | mutually orderable values (numbers, also strings) | fails        |
+| `any`       | whether any element is truthy       | any (truthiness is tested)                        | `false`      |
+| `all`       | whether every element is truthy     | any (truthiness is tested)                        | fails        |
 
-Unlike normal comparisons, `measure`s only accept `op`s that are binary numeric
-operations:
+Unlike normal comparisons, aggregate rows only accept `op`s that are binary
+numeric operations:
 
 - `eq` (`==`)
 - `ne` (`!=`)
@@ -367,7 +366,7 @@ operations:
 # A check that uses `count` to check that there are at least 3 accuracy results
 assert:
   - over: point.accuracy_results
-    measure: count
+    aggregate: count
     op: ge
     value: 3
 ```
@@ -399,8 +398,8 @@ check **passed**:
   every point in that pareto.
 - Unknown ids and `needs` cycles are refused at load.
 
-Example of `point.yaml` check below, with both `needs` and a measure predicate
-(the dependent runs only where `concurrency_in_range` was queued and passed.
+Example of `point.yaml` check below, with both `needs` and an aggregate (the
+dependent runs only where `concurrency_in_range` was queued and passed.
 
 ```yaml
 accuracy_sane:
@@ -410,7 +409,7 @@ accuracy_sane:
   needs: [concurrency_in_range]
   assert:
     - over: point.accuracy_results
-      measure: count
+      aggregate: count
       op: ge
       value: 1
 ```
@@ -448,7 +447,7 @@ accuracy_sane:
   assert:
     # a dotted Ref (scope `point`)
     - over: point.accuracy_results
-      measure: count
+      aggregate: count
       op: ge
       value: 1
 

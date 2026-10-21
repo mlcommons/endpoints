@@ -23,7 +23,7 @@ Twelve modules. Each entry is the role first, then the names you will grep for.
   - `Check` is a block's typed shape: `id` and `scope` are synthesized from the
     scope file and the mapping key; `description`, `rule`, `severity`,
     `fix: str | None`, `needs`, `when` and `assert` come from the YAML.
-    `_decode_row` picks `Compare` vs `Aggregate` by `measure` presence.
+    `_decode_row` picks `Compare` vs `Aggregate` by `aggregate` presence.
   - `_validate_row_ref` holds the scope-depth rule: `derived.<name>` must name a
     derivation, and only from a pareto- or point-scoped file; `regions.*` only
     `regions.coverage`/`regions.by_kind.<kind>`, likewise; `ruleset.*` is the
@@ -44,7 +44,7 @@ Twelve modules. Each entry is the role first, then the names you will grep for.
 
   - `Compare` is the op row model (`Op`-driven arity; slots `left`/`right`; an
     `in` range literal `{lo, hi}` resolves to an `Interval`); `Aggregate` is the
-    collection row (`__new__` measure dispatch; the
+    collection row (`__new__` aggregate dispatch; the
     `Count`/`Sum`/`Mean`/`Min`/`Max`/`AnyTrue`/`AllTrue` family; slots
     `over`/`value`). `map_refs`/`operands` is the rows' `Ref`-slot API, what
     cohort-load name checking drives.
