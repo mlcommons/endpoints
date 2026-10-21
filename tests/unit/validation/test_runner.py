@@ -576,6 +576,29 @@ class TestNeedsGatePerNode:
         )
         assert findings == ()
 
+    @pytest.mark.unit
+    def test_a_silenced_claim_at_one_node_disavows_a_coarser_dependent(self, tmp_path):
+        # `bottom` fails at r512, `middle` is SILENCED there and holds at r16;
+        # the system-scoped `top` must not run off middle's r16 hold -- an
+        # indirect failure cannot hide behind a silenced check.
+        bottom = _check("bottom", assert_=[NODES_USED_ONE])
+        middle = _check("middle", needs=["bottom"], assert_=[LITERAL_ROW])
+        top = _check("top", scope="system", needs=["middle"], assert_=[LITERAL_ROW])
+        findings = Finding.collect(
+            Cohort((bottom, middle, top)),
+            _submission(
+                tmp_path,
+                [16, 512],
+                extras={16: {"nodes_used": 1}, 512: {"nodes_used": 2}},
+            ),
+        )
+        got = [(f.check_id, f.node_directory.name, f.verdict.ok) for f in findings]
+        assert got == [
+            ("bottom", "r16", True),
+            ("bottom", "r512", False),
+            ("middle", "r16", True),
+        ]
+
 
 class TestNeedsFailLoud:
     """Unknown referenced ids and `needs` cycles are load mistakes, not report items."""
