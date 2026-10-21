@@ -13,23 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""W4 layer tests: the `Check` model, row decoding and `Cohort.from_directory`.
+"""Check-block tests: `Check` shape, row decode, and `Cohort.from_directory`.
 
 Fixtures build tiny YAML strings on disk (`_cohort`), not stored files. Cases
 assert the values each subject computes: `Check` its shape, `_decode_row` its
-row-type selection, `Cohort.from_directory` its loaded set.
+row-type selection, `Cohort.from_directory` its loaded set and its load-time
+refusals of rows that name no resolvable fact.
 """
 
 from pathlib import Path
 
 import pytest
-import yaml
 from inference_endpoint.validation.check import Check, Cohort, Severity, _decode_row
 from inference_endpoint.validation.compare import Aggregate, Compare
-from inference_endpoint.validation.regions import Regions
+from inference_endpoint.validation.refs import _Fact
 from inference_endpoint.validation.runner import Finding
-from inference_endpoint.validation.submission import Point, Submission
-from inference_endpoint.validation.tree import RuleScopes, SubmissionNode
+from inference_endpoint.validation.sentinels import MISSING
+from inference_endpoint.validation.tree import RuleScopes
+from submission_helpers import Run, write_cohort, write_upload
 
 CHECK_ONE = """
 offline_ordering:
@@ -55,54 +56,76 @@ another_check:
   fix: Fix the other thing.
   severity: warn
   assert:
-    - left: system.config.is_public
-      op: eq
-      right: true
+    - left: system.system_power.total
+      op: ge
+      right: 0
+"""
+
+DUP_CHECK = """
+dup_check:
+  description: A plain literal row.
+  rule: "Upload Rules > Plain"
+  severity: warn
+  assert: [{left: 1, op: eq, right: 1}]
+"""
+
+LITERAL_CHECK = """
+literal_check:
+  description: One satisfied literal row.
+  rule: "Upload Rules > Literal"
+  severity: warn
+  assert: [{left: 1, op: eq, right: 1}]
 """
 
 
 def _cohort(tmp_path: Path, one: str = CHECK_ONE, two: str | None = None) -> Path:
     """A cohort directory with `one` in `point.yaml` and `two` in `system.yaml`."""
-    root = tmp_path / "cohort"
-    root.mkdir()
-    (root / "point.yaml").write_text(one)
+    scopes = {"point": one}
     if two is not None:
-        (root / "system.yaml").write_text(two)
-    return root
+        scopes["system"] = two
+    return write_cohort(tmp_path / "cohort", **scopes)
 
 
 class TestDecodeRow:
     """`_decode_row` selects the row model by what the YAML row holds."""
 
+    @pytest.mark.unit
     def test_aggregate_row_by_measure(self):
         row = _decode_row({"over": [], "measure": "count", "op": "eq", "value": 0})
         assert isinstance(row, Aggregate)
 
+    @pytest.mark.unit
     def test_compare_row_by_default(self):
         row = _decode_row({"left": 1, "op": "eq", "right": 1})
         assert type(row) is Compare
 
+    @pytest.mark.unit
     def test_a_scalar_row_is_a_shape_error(self):
         with pytest.raises(ValueError):
             _decode_row("not-a-row")
 
+    @pytest.mark.unit
     def test_typed_rows_pass_through(self):
         compare = Compare.model_validate({"left": 1, "op": "eq", "right": 1})
         aggregate = Aggregate(over=[1], measure="count", op="eq", value=1)
         assert _decode_row(compare) is compare
         assert _decode_row(aggregate) is aggregate
 
+    @pytest.mark.unit
     @pytest.mark.parametrize("row", [{2: 3}, {"left": 1}])
     def test_construction_failures_are_value_errors_naming_the_row(self, row):
         with pytest.raises(ValueError, match="bad row"):
             _decode_row(row)
 
+    @pytest.mark.unit
     def test_broken_row_yaml_names_the_scope_file(self, tmp_path):
-        root = tmp_path / "cohort"
-        root.mkdir()
-        (root / "point.yaml").write_text(
-            "x:\n  description: d\n  rule: r\n  severity: warn\n"
-            "  when:\n    - 2: 3\n  assert:\n    - left: 1\n      op: eq\n      right: 1\n"
+        root = write_cohort(
+            tmp_path / "cohort",
+            point=(
+                "x:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  when:\n    - 2: 3\n  assert:\n    - left: 1\n      op: eq\n"
+                "      right: 1\n"
+            ),
         )
         with pytest.raises(ValueError, match="point.yaml"):
             Cohort.from_directory(root)
@@ -122,6 +145,7 @@ class TestCheckShape:
             "assert": [{"left": 1, "op": "eq", "right": 1}],
         }
 
+    @pytest.mark.unit
     def test_metadata_binds(self):
         check = Check.model_validate(self._yaml_dict())
         assert check.id == "check_id"
@@ -129,6 +153,7 @@ class TestCheckShape:
         assert check.scope is RuleScopes.POINT
         assert [type(row) for row in check.assert_] == [Compare]
 
+    @pytest.mark.unit
     def test_when_rows_decode_too(self):
         check = Check.model_validate(
             self._yaml_dict()
@@ -136,6 +161,7 @@ class TestCheckShape:
         )
         assert isinstance(check.when[0], Aggregate)
 
+    @pytest.mark.unit
     def test_fix_is_optional_with_absent_grid(self):
         present = Check.model_validate(self._yaml_dict())
         assert present.fix == "How to resolve it."
@@ -144,10 +170,12 @@ class TestCheckShape:
         )
         assert absent.fix is None
 
+    @pytest.mark.unit
     def test_unknown_field_is_rejected(self):
         with pytest.raises(ValueError):
             Check.model_validate(self._yaml_dict() | {"extra_key": 1})
 
+    @pytest.mark.unit
     def test_without_when_or_assert_is_rejected(self):
         bare = {
             key: value for key, value in self._yaml_dict().items() if key != "assert"
@@ -156,9 +184,317 @@ class TestCheckShape:
             Check.model_validate(bare)
 
 
-class TestStubCohort:
-    """The 2 PR-1 stub checks decode through `Cohort.from_directory` against real rows."""
+class TestRowRefValidation:
+    """Every row `Ref` must name a fact resolvable at its check's scope."""
 
+    @pytest.mark.unit
+    def test_a_misspelled_when_key_is_refused_at_cohort_load(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            point=(
+                "typo:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  when:\n    - left: point.config.ofline\n      op: eq\n"
+                "      right: dedicated\n"
+                "  assert: [{left: 1, op: eq, right: 1}]\n"
+            ),
+        )
+        with pytest.raises(
+            ValueError, match="names no fact; did you mean 'offline'\\?"
+        ):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_an_over_deep_fact_path_is_refused_at_cohort_load(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            point=(
+                "deep:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  assert:\n    - left: point.system_desc.cooling.detail\n"
+                "      op: eq\n      right: 1\n"
+            ),
+        )
+        with pytest.raises(ValueError, match="leaf fact"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_an_artifact_whole_ref_is_accepted_at_cohort_load(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            point=(
+                "whole:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  assert:\n    - left: point.accuracy_results\n      op: exists\n"
+            ),
+        )
+        assert [check.id for check in Cohort.from_directory(root).checks] == ["whole"]
+
+    @pytest.mark.unit
+    def test_an_open_dict_subtree_allows_deeper_names(self, tmp_path):
+        # `result_summary.percentiles` is an open document (`dict`): its deeper
+        # names resolve, unlike a name below a plain typed leaf.
+        root = write_cohort(
+            tmp_path / "cohort",
+            point=(
+                "deep_open:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  assert:\n    - left: point.result_summary.percentiles.p99\n"
+                "      op: exists\n"
+            ),
+        )
+        assert [check.id for check in Cohort.from_directory(root).checks] == [
+            "deep_open"
+        ]
+
+    @pytest.mark.unit
+    def test_fold_refs_load_unannotated_since_folds_have_no_table_leaf(self, tmp_path):
+        # `derived`/`regions` rows load through the loader (their names are
+        # checker-owned), and their `Ref`s carry no table policy notes.
+        root = write_cohort(
+            tmp_path / "cohort",
+            point=(
+                "fold_rows:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  assert:\n"
+                "    - left: derived.point_cap\n      op: exists\n"
+                "    - left: point.config.concurrency\n      op: in\n"
+                "      right: regions.coverage\n"
+            ),
+        )
+        check = Cohort.from_directory(root).checks[0]
+        derived, in_range = check.assert_
+        assert derived.left.parts == ("derived", "point_cap")
+        assert derived.left.required is False
+        assert derived.left.default is MISSING
+        coverage = in_range.operands()[1]
+        assert coverage.parts == ("regions", "coverage")
+        assert coverage.required is False
+        assert coverage.default is MISSING
+
+    @pytest.mark.unit
+    def test_a_check_cannot_name_a_finer_scopes_facts(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            system=(
+                "overreach:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  assert:\n    - left: point.config.concurrency\n      op: exists\n"
+            ),
+        )
+        with pytest.raises(ValueError, match="cannot name"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_derivation_is_a_pareto_or_point_fact_only(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            system=(
+                "misplaced:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  assert:\n    - left: derived.point_cap\n      op: exists\n"
+            ),
+        )
+        with pytest.raises(ValueError, match="per-pareto fact fold"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_an_unknown_derivation_name_is_refused(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            point=(
+                "ghost:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  assert:\n    - left: derived.point_capp\n      op: exists\n"
+            ),
+        )
+        with pytest.raises(ValueError, match="names no derivation"):
+            Cohort.from_directory(root)
+
+
+class TestCohortRefTable:
+    """`valid_refs.yaml`: required beside the scope files, per-cohort by name.
+
+    The table is the cohort's own declaration of what its rows may name and
+    how an omitted fact reads (`missing` singular). The pins below show the
+    load refusals and the per-cohort updatability that motivates it.
+    """
+
+    @pytest.mark.unit
+    def test_a_cohort_without_a_ref_table_is_refused(self, tmp_path):
+        root = write_cohort(tmp_path / "cohort", refs=None, point=LITERAL_CHECK)
+        with pytest.raises(ValueError, match="cohort needs valid_refs.yaml"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("fold", ["derived", "regions", "ruleset"])
+    def test_checker_owned_fold_roots_are_refused_inside_the_ref_table(
+        self, tmp_path, fold
+    ):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={fold: {"some": "int"}},
+            point=LITERAL_CHECK,
+        )
+        with pytest.raises(ValueError, match="is not a node scope"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_an_unknown_type_name_is_refused(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={"point": {"config": {"concurrency": "integer"}}},
+            point=LITERAL_CHECK,
+        )
+        with pytest.raises(ValueError, match="is no type name"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_every_declared_type_name_has_a_value_test(self):
+        # `VALID_TYPES` and the tests inlined in `_Fact.matches` are declared
+        # separately, so this pin keeps the vocabulary and the behavior in step.
+        for name in sorted(_Fact.VALID_TYPES - {"dict"}):
+            assert isinstance(_Fact(type=name).matches(0), bool)
+
+    @pytest.mark.unit
+    def test_a_scalar_where_a_block_or_type_name_belongs_is_refused(self, tmp_path):
+        root = write_cohort(tmp_path / "cohort", refs={"point": 5}, point=LITERAL_CHECK)
+        with pytest.raises(ValueError, match="expected a type name"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("allowlist", [[], "dedicated", [["a"]]])
+    def test_an_allowlist_must_be_a_non_empty_list_of_values(self, tmp_path, allowlist):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={
+                "point": {
+                    "config": {
+                        "offline": {
+                            "type": "str",
+                            "allowlist": allowlist,
+                            "default": None,
+                        }
+                    }
+                }
+            },
+            point=LITERAL_CHECK,
+        )
+        with pytest.raises(ValueError, match="needs a non-empty list"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_an_allowlist_on_a_dict_subtree_is_refused(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={
+                "point": {"config": {"window": {"type": "dict", "allowlist": ["a"]}}}
+            },
+            point=LITERAL_CHECK,
+        )
+        with pytest.raises(ValueError, match="needs a leaf type"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_non_null_default_must_live_in_its_allowlist(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={
+                "point": {
+                    "config": {
+                        "mood": {"type": "str", "allowlist": ["a"], "default": "b"}
+                    }
+                }
+            },
+            point=LITERAL_CHECK,
+        )
+        with pytest.raises(ValueError, match="is not in its allowlist"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_null_default_is_the_absent_state_and_exempt_from_its_allowlist(
+        self, tmp_path
+    ):
+        # `default: null` IS the absent-state's own value ("absent or `none`"),
+        # so `null` need not be listed.
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={
+                "point": {
+                    "config": {
+                        "offline": {
+                            "type": "str",
+                            "allowlist": ["dedicated", "elected", "none"],
+                            "default": None,
+                        }
+                    }
+                }
+            },
+            point=LITERAL_CHECK,
+        )
+        assert [check.id for check in Cohort.from_directory(root).checks] == [
+            "literal_check"
+        ]
+
+    @pytest.mark.unit
+    def test_a_custom_table_that_omits_a_field_refuses_rows_naming_it(self, tmp_path):
+        # Per-cohort updatability: dropping `config.offline` retires the name,
+        # so a row naming it dies at cohort load instead of silently switching
+        # its check off against some submission.
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={
+                "point": {"config": {"concurrency": {"type": "int", "required": True}}}
+            },
+            point=(
+                "retired:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  when:\n    - left: point.config.offline\n      op: eq\n"
+                "      right: dedicated\n"
+                "  assert: [{left: 1, op: eq, right: 1}]\n"
+            ),
+        )
+        with pytest.raises(ValueError, match="names no fact"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_custom_table_that_adds_a_rule_field_accepts_rows_naming_it(
+        self, tmp_path
+    ):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={"point": {"config": {"new_rule_field": "dict"}}},
+            point=(
+                "fresh:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  assert:\n    - left: point.config.new_rule_field\n      op: exists\n"
+            ),
+        )
+        assert [check.id for check in Cohort.from_directory(root).checks] == ["fresh"]
+
+
+class TestRowAnnotations:
+    """`Cohort.from_directory` fills each table leaf's policy notes onto its row."""
+
+    @pytest.mark.unit
+    def test_required_and_declared_default_land_on_the_row_operands(self, tmp_path):
+        # `STANDARD_REFS` declares `concurrency` required and `offline`
+        # `{default: null}`; those notes ride along on the operands the rows
+        # resolve (`row.left`, reachable through `operands()`).
+        root = write_cohort(
+            tmp_path / "cohort",
+            point=(
+                "policy:\n  description: d\n  rule: r\n  severity: warn\n"
+                "  when:\n    - left: point.config.offline\n      op: eq\n"
+                "      right: dedicated\n"
+                "  assert:\n    - left: point.config.concurrency\n      op: ge\n"
+                "      right: 0\n"
+            ),
+        )
+        check = Cohort.from_directory(root).checks[0]
+        concurrency = check.assert_[0].left
+        assert concurrency in check.assert_[0].operands()
+        assert concurrency.required is True
+        offline = check.when[0].left
+        assert offline in check.when[0].operands()
+        assert offline.required is False
+        assert offline.default is None
+
+
+class TestStubCohort:
+    """The stub checks decode through `Cohort.from_directory` against real rows."""
+
+    @pytest.mark.unit
     def test_stub_cohort_loads_in_full(self):
         cohort = Cohort.from_directory(Path("tests/assets/cohorts/stub"))
         assert [check.id for check in cohort.checks] == [
@@ -167,43 +503,22 @@ class TestStubCohort:
         ]
         assert [check.severity for check in cohort.checks] == [Severity.WARN] * 2
 
+    @pytest.mark.unit
     def test_stub_checks_evaluate_against_a_submission(self, tmp_path):
         # End-to-end over a real tree: the range stub holds at every in-band
         # point and flags r9013 (above the 10% margin); the offline stub reads
         # the dedicated point's declaration and reports its clause verdict.
         cohort = Cohort.from_directory(Path("tests/assets/cohorts/stub"))
-        root = tmp_path / "acme"
-        configs = {
-            32: {"concurrency": 32},
-            512: {"concurrency": 512, "offline": "dedicated"},
-            8192: {"concurrency": 8192},
-            9013: {"concurrency": 9013},
-        }
-        for concurrency, config in configs.items():
-            point_dir = root / "results" / "sys" / "model" / f"r{concurrency}"
-            point_dir.mkdir(parents=True)
-            (point_dir / "point.yaml").write_text(yaml.dump(config))
-        system_desc = {"max_supported_concurrency": 8192}
-        tree = SubmissionNode.from_directory(
-            root,
-            regions=Regions.for_submission(system_desc, sorted(configs)),
-        )
-        nodes = {
-            int(node.dir.name[1:]): node
-            for node in tree.children[0].children[0].children
-        }
-        tps = {32: 1.0, 512: 5292.0, 8192: 5400.0, 9013: 1.0}
-        submission = Submission(
-            system_desc,
-            tuple(
-                Point(
-                    "dedicated" if concurrency == 512 else None,
-                    concurrency,
-                    tps[concurrency],
-                    nodes[concurrency],
-                )
-                for concurrency in sorted(configs)
-            ),
+        submission = write_upload(
+            tmp_path / "acme",
+            {
+                ("sys", "model"): [
+                    Run(concurrency=32),
+                    Run(concurrency=512, offline="dedicated", system_tps=5292.0),
+                    Run(concurrency=8192, system_tps=5400.0),
+                    Run(concurrency=9013, system_tps=1.0),
+                ]
+            },
         )
         findings = Finding.collect(cohort, submission)
         got = sorted(
@@ -221,18 +536,21 @@ class TestStubCohort:
 class TestCohortFromDirectory:
     """`Cohort.from_directory`: loads the four scope files as id-keyed blocks."""
 
+    @pytest.mark.unit
     def test_checks_keep_their_mapping_order(self, tmp_path):
-        root = tmp_path / "cohort"
-        root.mkdir()
-        (root / "point.yaml").write_text(
-            "first_check:\n  description: First.\n  rule: R1\n  severity: warn\n"
-            "  assert: [{left: 1, op: eq, right: 1}]\n"
-            "second_check:\n  description: Second.\n  rule: R2\n  severity: warn\n"
-            "  assert: [{left: 2, op: eq, right: 2}]\n"
+        root = write_cohort(
+            tmp_path / "cohort",
+            point=(
+                "first_check:\n  description: First.\n  rule: R1\n  severity: warn\n"
+                "  assert: [{left: 1, op: eq, right: 1}]\n"
+                "second_check:\n  description: Second.\n  rule: R2\n  severity: warn\n"
+                "  assert: [{left: 2, op: eq, right: 2}]\n"
+            ),
         )
         cohort = Cohort.from_directory(root)
         assert [check.id for check in cohort.checks] == ["first_check", "second_check"]
 
+    @pytest.mark.unit
     def test_scope_and_id_come_from_path_and_key(self, tmp_path):
         cohort = Cohort.from_directory(_cohort(tmp_path, two=CHECK_TWO))
         assert {c.id: c.scope.value for c in cohort.checks} == {
@@ -240,53 +558,54 @@ class TestCohortFromDirectory:
             "another_check": "system",
         }
 
+    @pytest.mark.unit
     def test_duplicate_id_across_scope_files_is_rejected(self, tmp_path):
         with pytest.raises(ValueError, match="duplicate check id"):
-            Cohort.from_directory(_cohort(tmp_path, two=CHECK_ONE))
+            Cohort.from_directory(_cohort(tmp_path, one=DUP_CHECK, two=DUP_CHECK))
 
+    @pytest.mark.unit
     def test_a_check_does_not_declare_its_own_id_or_scope(self, tmp_path):
-        root = tmp_path / "cohort"
-        root.mkdir()
-        (root / "point.yaml").write_text(
-            CHECK_ONE.replace("severity: warn\n", "severity: warn\n  id: other\n")
+        root = write_cohort(
+            tmp_path / "cohort",
+            point=CHECK_ONE.replace(
+                "severity: warn\n", "severity: warn\n  id: other\n"
+            ),
         )
         with pytest.raises(ValueError, match="defines its own"):
             Cohort.from_directory(root)
 
+    @pytest.mark.unit
     def test_broken_yaml_names_the_scope_file(self, tmp_path):
-        root = tmp_path / "cohort"
-        root.mkdir()
-        (root / "point.yaml").write_text("bad: not-a-mapping\n")
+        root = write_cohort(tmp_path / "cohort", point="bad: not-a-mapping\n")
         with pytest.raises(ValueError, match="point.yaml"):
             Cohort.from_directory(root)
 
+    @pytest.mark.unit
     def test_parse_problems_name_the_scope_file_too(self, tmp_path):
-        root = tmp_path / "cohort"
-        root.mkdir()
-        (root / "point.yaml").write_text("first: 1\nfirst: 2\n")
+        root = write_cohort(tmp_path / "cohort", point="first: 1\nfirst: 2\n")
         with pytest.raises(ValueError, match="point.yaml"):
             Cohort.from_directory(root)
 
+    @pytest.mark.unit
     def test_missing_directory_is_a_load_error(self, tmp_path):
         with pytest.raises(NotADirectoryError):
             Cohort.from_directory(tmp_path / "nope")
 
+    @pytest.mark.unit
     def test_an_empty_cohort_is_refused_not_a_clean_pass(self, tmp_path):
-        root = tmp_path / "cohort"
-        root.mkdir()
+        root = write_cohort(tmp_path / "cohort")
         with pytest.raises(ValueError, match="holds no checks"):
             Cohort.from_directory(root)
 
+    @pytest.mark.unit
     def test_an_empty_scope_file_is_a_load_error(self, tmp_path):
-        root = tmp_path / "cohort"
-        root.mkdir()
-        (root / "point.yaml").write_text("")
+        root = write_cohort(tmp_path / "cohort", point="")
         with pytest.raises(ValueError, match="empty scope file"):
             Cohort.from_directory(root)
 
+    @pytest.mark.unit
     def test_a_stray_file_names_what_it_found(self, tmp_path):
-        root = tmp_path / "cohort"
-        root.mkdir()
+        root = write_cohort(tmp_path / "cohort", point=LITERAL_CHECK)
         (root / "almost.yaml.bak").write_text(CHECK_ONE)
         with pytest.raises(ValueError, match="almost.yaml.bak"):
             Cohort.from_directory(root)
