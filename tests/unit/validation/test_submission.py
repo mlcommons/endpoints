@@ -13,227 +13,453 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""W5f tests: `Point`/`Submission` hold the carry-set facts without drift."""
+"""Point/Pareto/Submission tests: the parsed facts and the named derivations.
+
+Tests prefer `Submission.from_directory` over hand-built objects: each `r<N>`
+run directory carries its `point.yaml`, `system_desc.json` and
+`result_summary.json` (via `submission_helpers.write_upload`) and the suite
+asserts what each subject computes on the walked upload. Hand-built `Point`/
+`Pareto` appear only where a derivation needs facts no conforming upload can
+declare (e.g. a concurrency below 1).
+"""
 
 from pathlib import Path
 
 import pytest
 from inference_endpoint.validation.regions import Regions
-from inference_endpoint.validation.submission import Point, Submission
-from inference_endpoint.validation.tree import SubmissionNode
+from inference_endpoint.validation.submission import (
+    DERIVATION_NAMES,
+    OFFLINE_TPS_RATIO,
+    Pareto,
+    Point,
+)
+from submission_helpers import OMITTED, Run, write_run, write_upload
+
+SYSTEM = ("sys", "model")
 
 
-def _point(tmp_path: Path, concurrency: int, offline=None, system_tps: float = 1.0):
-    root = tmp_path / "acme"
-    point_dir = root / "results" / "sys" / "model" / f"r{concurrency}"
-    point_dir.mkdir(parents=True, exist_ok=True)
-    tree = SubmissionNode.from_directory(root)
-    point_node = next(
-        node
-        for node in tree.children[0].children[0].children
-        if node.dir.name == f"r{concurrency}"
+def _pareto(tmp_path: Path, runs: list[Run]) -> Pareto:
+    """The one pareto an upload of `runs` under `tmp_path` derives."""
+    return write_upload(tmp_path / "acme", {SYSTEM: runs}).paretos[0]
+
+
+class TestPointFromNode:
+    """`Point.from_node`: one run directory's named facts, enforced at load."""
+
+    @pytest.mark.unit
+    def test_point_facts_come_from_the_three_run_artifacts(self, tmp_path):
+        submission = write_upload(
+            tmp_path / "acme",
+            {
+                SYSTEM: [
+                    Run(
+                        concurrency=16,
+                        system_tps=7.5,
+                        max_supported_concurrency=64,
+                    )
+                ]
+            },
+        )
+        point = submission.points[0]
+        assert (point.concurrency, point.system_tps) == (16, 7.5)
+        assert point.system_desc == {"max_supported_concurrency": 64}
+        assert point.node is not None
+
+    @pytest.mark.unit
+    def test_the_offline_declaration_keeps_its_two_named_states_and_null(
+        self, tmp_path
+    ):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16),
+                Run(concurrency=24, offline="none"),
+                Run(concurrency=512, offline="dedicated", system_tps=5292.0),
+                Run(concurrency=8192, system_tps=5400.0),
+            ],
+        )
+        by_concurrency = {point.concurrency: point.offline for point in pareto.points}
+        assert by_concurrency == {
+            16: None,
+            24: None,  # the `none` spelling is "no declaration" (§8.3)
+            512: "dedicated",
+            8192: None,
+        }
+
+    @pytest.mark.unit
+    def test_an_elected_offline_point_is_kept_as_declared(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16), Run(concurrency=8192, offline="elected")],
+        )
+        assert pareto.points[1].offline == "elected"
+
+    @pytest.mark.unit
+    def test_an_offline_token_outside_the_three_states_is_refused(self):
+        with pytest.raises(ValueError, match="offline must be"):
+            Point(offline="dedicatd", concurrency=512, system_tps=1.0, system_desc={})
+
+    @pytest.mark.unit
+    def test_an_offline_token_outside_the_three_states_is_refused_at_upload_load(
+        self, tmp_path
+    ):
+        # Loader-minimum precedence: `Point`'s own domain check speaks at
+        # `Submission.from_directory`, before any collect-time table value
+        # checking could judge `offline`.
+        with pytest.raises(ValueError, match="offline must be"):
+            write_upload(
+                tmp_path / "acme",
+                {SYSTEM: [Run(concurrency=16, offline="maybe")]},
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("system_tps", [None, OMITTED, "7.5", True])
+    def test_a_result_summary_without_numeric_system_tps_is_refused(
+        self, tmp_path, system_tps
+    ):
+        with pytest.raises(ValueError, match="needs a numeric system_tps"):
+            write_upload(
+                tmp_path / "acme",
+                {SYSTEM: [Run(concurrency=16, system_tps=system_tps)]},
+            )
+
+    @pytest.mark.unit
+    def test_a_non_integer_concurrency_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="needs an integer concurrency"):
+            write_upload(
+                tmp_path / "acme",
+                {SYSTEM: [Run(concurrency="16", dir_name="r16")]},
+            )
+
+    @pytest.mark.unit
+    def test_a_system_desc_without_max_supported_concurrency_is_refused(self, tmp_path):
+        with pytest.raises(
+            ValueError, match="needs an integer max_supported_concurrency"
+        ):
+            write_upload(
+                tmp_path / "acme",
+                {SYSTEM: [Run(concurrency=16, max_supported_concurrency=OMITTED)]},
+            )
+
+    @pytest.mark.unit
+    def test_a_run_without_a_result_summary_file_is_refused(self, tmp_path):
+        run_dir = tmp_path / "acme" / "results" / "sys" / "model" / "r16"
+        write_run(run_dir, Run(concurrency=16))
+        (run_dir / "result_summary.json").unlink()
+        with pytest.raises(ValueError, match="cannot carry its facts"):
+            write_upload(tmp_path / "acme", {SYSTEM: []})
+
+
+class TestParetoShape:
+    """`Pareto._validate_shape`'s refusal arms (Endpoints Policy §9.1 rows)."""
+
+    @pytest.mark.unit
+    def test_two_offline_declarations_are_refused(self, tmp_path):
+        runs = [
+            Run(concurrency=16, offline="dedicated", system_tps=5292.0),
+            Run(concurrency=8192, offline="elected"),
+        ]
+        with pytest.raises(ValueError, match="exactly one point may carry"):
+            write_upload(tmp_path / "acme", {SYSTEM: runs})
+
+    @pytest.mark.unit
+    def test_a_dedicated_run_needs_exactly_one_c_max_point(self, tmp_path):
+        runs = [
+            Run(concurrency=16, offline="dedicated", system_tps=5292.0),
+            Run(concurrency=512),
+        ]
+        with pytest.raises(ValueError, match="needs exactly one C_max point"):
+            write_upload(tmp_path / "acme", {SYSTEM: runs})
+
+    @pytest.mark.unit
+    def test_two_c_max_points_beside_a_dedicated_run_are_refused(self, tmp_path):
+        runs = [
+            Run(concurrency=16, offline="dedicated", system_tps=5292.0),
+            Run(concurrency=8192, system_tps=5400.0),
+            Run(concurrency=8192, dir_name="r8193", system_tps=5200.0),
+        ]
+        with pytest.raises(ValueError, match="needs exactly one C_max point"):
+            write_upload(tmp_path / "acme", {SYSTEM: runs})
+
+    @pytest.mark.unit
+    def test_an_elected_offline_point_not_at_c_max_is_refused(self, tmp_path):
+        runs = [
+            Run(concurrency=16),
+            Run(concurrency=512, offline="elected"),
+            Run(concurrency=8192, system_tps=5400.0),
+        ]
+        with pytest.raises(ValueError, match="Offline point present"):
+            write_upload(tmp_path / "acme", {SYSTEM: runs})
+
+    @pytest.mark.unit
+    def test_the_points_must_agree_on_max_supported_concurrency(self, tmp_path):
+        runs = [
+            Run(concurrency=16, max_supported_concurrency=8192),
+            Run(concurrency=8192, max_supported_concurrency=4096),
+        ]
+        with pytest.raises(ValueError, match="must declare the same"):
+            write_upload(tmp_path / "acme", {SYSTEM: runs})
+
+    @pytest.mark.unit
+    def test_the_points_must_agree_on_a_declared_c_min_override(self, tmp_path):
+        runs = [
+            Run(concurrency=16, c_min_override=16),
+            Run(concurrency=8192),
+        ]
+        with pytest.raises(ValueError, match="C_min override"):
+            write_upload(tmp_path / "acme", {SYSTEM: runs})
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "system_desc",
+        [
+            {},
+            {"max_supported_concurrency": "8192"},
+            {"max_supported_concurrency": True},
+        ],
     )
-    return Point(
-        offline=offline,
-        concurrency=concurrency,
-        system_tps=system_tps,
-        node=point_node,
-    )
+    def test_a_pareto_needs_one_integer_max_supported_concurrency(self, system_desc):
+        point = Point(
+            offline=None, concurrency=16, system_tps=1.0, system_desc=system_desc
+        )
+        with pytest.raises(ValueError, match="one integer max_supported_concurrency"):
+            Pareto(system_desc, [point])
+
+
+class TestFromDirectory:
+    """`Submission.from_directory`: the typed view read from one uploaded tree."""
+
+    @pytest.mark.unit
+    def test_one_pareto_is_walked_per_system_model_node(self, tmp_path):
+        submission = write_upload(
+            tmp_path / "acme",
+            {
+                ("sys", "modelA"): [Run(concurrency=16), Run(concurrency=8192)],
+                ("sys", "modelB"): [Run(concurrency=24)],
+            },
+        )
+        assert [p.node.dir.name for p in submission.paretos] == ["modelA", "modelB"]
+        assert [point.concurrency for point in submission.points] == [16, 8192, 24]
+
+    @pytest.mark.unit
+    def test_pareto_at_locates_the_pareto_of_a_node_only(self, tmp_path):
+        submission = write_upload(tmp_path / "acme", {SYSTEM: [Run(concurrency=16)]})
+        pareto = submission.paretos[0]
+        assert submission.pareto_at(pareto.node) is pareto
+        assert submission.pareto_at(pareto.points[0].node) is pareto
+        assert submission.pareto_at(submission.tree) is None
+
+    @pytest.mark.unit
+    def test_a_pareto_without_run_directories_is_refused(self, tmp_path):
+        root = tmp_path / "acme"
+        (root / "results" / "sys" / "model").mkdir(parents=True)
+        with pytest.raises(ValueError, match="has no run directories"):
+            write_upload(root, {})
+
+
+class TestMultiPareto:
+    """One upload, many paretos: each keeps its own declarations and derivations."""
+
+    @pytest.mark.unit
+    def test_each_pareto_keeps_one_dedicated_run_and_counts_its_own_points(
+        self, tmp_path
+    ):
+        # 35 run directories across the two modelA/modelB paretos: the two
+        # dedicated Offline runs never trip the one-declaration arm across
+        # paretos, and the point cap judges each pareto on its own count.
+        model_a = [Run(concurrency=i, system_tps=float(i)) for i in range(1, 32)] + [
+            Run(concurrency=8192, system_tps=5400.0),
+            Run(concurrency=200000, offline="dedicated", system_tps=5291.0),
+        ]
+        model_b = [
+            Run(concurrency=16),
+            Run(concurrency=8192, system_tps=5400.0),
+            Run(concurrency=200000, offline="dedicated", system_tps=5292.0),
+        ]
+        submission = write_upload(
+            tmp_path / "acme",
+            {("sys", "modelA"): model_a, ("sys", "modelB"): model_b},
+        )
+        pareto_a, pareto_b = submission.paretos
+        assert len(submission.points) == 36
+        assert pareto_a.point_cap() is False
+        assert pareto_b.point_cap() is True
+        assert pareto_a.offline_ordering() is False
+        assert pareto_b.offline_ordering() is True
 
 
 class TestOfflineOrdering:
-    """`Submission.offline_ordering`: 5.7.2's pair of clauses, or None when n/a."""
+    """`Pareto.offline_ordering`: 5.7.2's pair of clauses, or None when n/a."""
 
-    def _submission(self, tmp_path, offline_off=None, offline_tps=5292.0):
-        system_desc = {"max_supported_concurrency": 8192}
-        c_max_point = _point(tmp_path, 8192, system_tps=5400.0)
-        points = [c_max_point]
-        if offline_off is not None:
-            points.append(
-                _point(tmp_path, 8192, offline=offline_off, system_tps=offline_tps)
-            )
-        return Submission(system_desc, points)
-
+    @pytest.mark.unit
     def test_dedicated_at_the_ratio_boundary_passes(self, tmp_path):
-        assert (
-            self._submission(tmp_path, offline_off="dedicated").offline_ordering()
-            is True
-        )
-
-    def test_dedicated_below_the_ratio_fails(self, tmp_path):
-        assert (
-            self._submission(
-                tmp_path, offline_off="dedicated", offline_tps=5291.0
-            ).offline_ordering()
-            is False
-        )
-
-    def test_dedicated_below_c_max_concurrency_fails(self, tmp_path):
-        system_desc = {"max_supported_concurrency": 8192}
-        submission = Submission(
-            system_desc,
+        assert OFFLINE_TPS_RATIO == 0.98
+        pareto = _pareto(
+            tmp_path,
             [
-                _point(tmp_path, 8192, system_tps=5400.0),
-                _point(tmp_path, 512, offline="dedicated", system_tps=5292.0),
+                Run(concurrency=16),
+                Run(concurrency=8192, system_tps=5400.0),
+                Run(concurrency=8193, offline="dedicated", system_tps=5292.0),
             ],
         )
-        assert submission.offline_ordering() is False
+        assert pareto.offline_ordering() is True
 
-    def test_elected_offline_is_not_applicable(self, tmp_path):
-        assert (
-            self._submission(tmp_path, offline_off="elected").offline_ordering() is None
+    @pytest.mark.unit
+    def test_dedicated_below_the_ratio_fails(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16),
+                Run(concurrency=8192, system_tps=5400.0),
+                Run(concurrency=8193, offline="dedicated", system_tps=5291.0),
+            ],
         )
+        assert pareto.offline_ordering() is False
 
+    @pytest.mark.unit
+    def test_dedicated_below_c_max_concurrency_fails(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16),
+                Run(concurrency=512, offline="dedicated", system_tps=5292.0),
+                Run(concurrency=8192, system_tps=5400.0),
+            ],
+        )
+        assert pareto.offline_ordering() is False
+
+    @pytest.mark.unit
+    def test_elected_offline_is_not_applicable(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16), Run(concurrency=8192, offline="elected")],
+        )
+        assert pareto.offline_ordering() is None
+
+    @pytest.mark.unit
     def test_no_offline_declaration_is_not_applicable(self, tmp_path):
-        assert self._submission(tmp_path).offline_ordering() is None
-
-    def test_mixed_declarations_raise(self, tmp_path):
-        system_desc = {"max_supported_concurrency": 8192}
-        with pytest.raises(ValueError, match="offline"):
-            Submission(
-                system_desc,
-                [
-                    _point(tmp_path, 8192, offline="elected", system_tps=5400.0),
-                    _point(tmp_path, 512, offline="dedicated", system_tps=5292.0),
-                ],
-            )
-
-    def test_missing_c_max_point_raises(self, tmp_path):
-        system_desc = {"max_supported_concurrency": 8192}
-        with pytest.raises(ValueError, match="C_max"):
-            Submission(
-                system_desc,
-                [_point(tmp_path, 512, offline="dedicated", system_tps=5292.0)],
-            )
-
-
-class TestPointCarry:
-    """`Point` keeps the three Section 8.3 facts and its node link as declared."""
-
-    def test_offline_declaration_three_states(self, tmp_path):
-        assert _point(tmp_path, 32).offline is None
-        assert _point(tmp_path, 32, offline="dedicated").offline == "dedicated"
-        assert _point(tmp_path, 32, offline="elected").offline == "elected"
+        pareto = _pareto(tmp_path, [Run(concurrency=16), Run(concurrency=8192)])
+        assert pareto.offline_ordering() is None
 
 
 class TestPointCap:
-    """`Submission.point_cap`: Section 5.6's "<=32 total points" cap, Offline counted."""
+    """`Pareto.point_cap`: Section 5.6's "<= 32 points per pareto" cap."""
 
+    @pytest.mark.unit
     def test_cap_boundary_32_passes(self, tmp_path):
-        points = [_point(tmp_path, i + 1) for i in range(32)]
-        submission = Submission({"max_supported_concurrency": 8192}, points)
-        assert submission.point_cap() is True
+        pareto = _pareto(tmp_path, [Run(concurrency=i) for i in range(1, 33)])
+        assert pareto.point_cap() is True
 
+    @pytest.mark.unit
     def test_point_33_fails(self, tmp_path):
-        points = [_point(tmp_path, i + 1) for i in range(33)]
-        submission = Submission({"max_supported_concurrency": 8192}, points)
-        assert submission.point_cap() is False
+        pareto = _pareto(tmp_path, [Run(concurrency=i) for i in range(1, 34)])
+        assert pareto.point_cap() is False
 
 
 class TestOutOfRangePoints:
-    """`Submission.out_of_range_points`: the flagged Points per Section 5.4's row."""
+    """`Pareto.out_of_range_points`: §9.1's Concurrency-in-range row per point."""
 
-    def test_points_above_the_margin_flag(self, tmp_path):
-        regions = Regions.for_bounds(8192, 32)
-        submission = Submission(
-            {"max_supported_concurrency": 8192},
-            [_point(tmp_path, 512), _point(tmp_path, 9013)],
+    @pytest.mark.unit
+    def test_a_dedicated_offline_run_is_exempt_but_a_fixed_point_above_the_margin_is_flagged(
+        self, tmp_path
+    ):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16),
+                Run(concurrency=8192, system_tps=5400.0),
+                Run(concurrency=9013),
+                Run(concurrency=200000, offline="dedicated", system_tps=5292.0),
+            ],
         )
-        assert submission.out_of_range_points(regions) == (submission.points[1],)
+        flagged = pareto.out_of_range_points(pareto.regions())
+        assert tuple(point.concurrency for point in flagged) == (9013,)
 
+    @pytest.mark.unit
     def test_in_band_points_flag_nothing(self, tmp_path):
-        regions = Regions.for_bounds(8192, 32)
-        submission = Submission(
-            {"max_supported_concurrency": 8192},
-            [_point(tmp_path, 32), _point(tmp_path, 52)],
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16), Run(concurrency=40), Run(concurrency=8192)],
         )
-        assert submission.out_of_range_points(regions) == ()
+        assert pareto.out_of_range_points(pareto.regions()) == ()
 
-    def test_points_below_1_flag_too(self, tmp_path):
-        regions = Regions.for_bounds(8192, 32)
-        submission = Submission(
-            {"max_supported_concurrency": 8192}, [_point(tmp_path, 0)]
-        )
-        assert submission.out_of_range_points(regions) == (submission.points[0],)
-
-
-class TestPointPowerKw:
-    """`Point.point_power_kw`: the Section 4.5.3 per-point denominator golden rows."""
-
-    def _point(self, concurrency: int = 32):
-        return Point(
+    @pytest.mark.unit
+    def test_points_below_one_flag_too(self, tmp_path):
+        # No conforming upload declares a concurrency below 1 (C_min would not
+        # derive); the derivation itself still judges one out of range.
+        point = Point(
             offline=None,
-            concurrency=concurrency,
-            system_tps=6000.0,
-            node=None,
+            concurrency=0,
+            system_tps=1.0,
+            system_desc={"max_supported_concurrency": 8192},
         )
+        pareto = Pareto({"max_supported_concurrency": 8192}, [point])
+        flagged = pareto.out_of_range_points(Regions.for_bounds(c_min=32, c_max=8192))
+        assert flagged == (point,)
 
-    def test_golden_row_partial_engagement(self):
-        assert self._point().point_power_kw(152.10, 16, 18) == 135.2
-
-    def test_golden_row_full_engagement_reduces_to_provisioned(self):
-        assert self._point().point_power_kw(152.10, 18, 18) == 152.1
+    @pytest.mark.unit
+    def test_the_c_min_override_still_covers_the_points_below_it(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16, c_min_override=32),
+                Run(concurrency=32, c_min_override=32),
+                Run(concurrency=64, c_min_override=32),
+                Run(concurrency=8192, c_min_override=32, system_tps=5400.0),
+            ],
+        )
+        regions = pareto.regions()
+        assert regions == Regions.for_bounds(c_min=32, c_max=8192)
+        assert regions.low_concurrency.lo == 33
+        assert 16 in regions.coverage()
+        assert (
+            Regions.for_pareto(
+                {"max_supported_concurrency": 8192, "c_min_override": 32},
+                [16, 32, 64, 8192],
+            )
+            == regions
+        )
+        assert pareto.out_of_range_points(regions) == ()
 
 
 class TestThresholdsPerShape:
-    """`point_count_min` / `accuracy_run_count_requirement`: §5.3/§4.3-derived counts."""
+    """`point_count_min` / `accuracy_run_count_requirement`: §5.3/§4.3 counts."""
 
+    @pytest.mark.unit
     def test_dedicated_offline_wants_8_and_5(self, tmp_path):
-        submission = Submission(
-            {"max_supported_concurrency": 8192},
-            [_point(tmp_path, 512, offline="dedicated"), _point(tmp_path, 8192)],
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16),
+                Run(concurrency=512, offline="dedicated", system_tps=5292.0),
+                Run(concurrency=8192, system_tps=5400.0),
+            ],
         )
-        assert submission.point_count_min() == 8
-        assert submission.accuracy_run_count_requirement() == 5
+        assert pareto.point_count_min() == 8
+        assert pareto.accuracy_run_count_requirement() == 5
 
+    @pytest.mark.unit
     def test_elected_offline_wants_7_and_5(self, tmp_path):
-        submission = Submission(
-            {"max_supported_concurrency": 8192},
-            [_point(tmp_path, 512), _point(tmp_path, 8192, offline="elected")],
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16), Run(concurrency=8192, offline="elected")],
         )
-        assert submission.point_count_min() == 7
-        assert submission.accuracy_run_count_requirement() == 5
+        assert pareto.point_count_min() == 7
+        assert pareto.accuracy_run_count_requirement() == 5
 
+    @pytest.mark.unit
     def test_agentic_wants_7_and_4(self, tmp_path):
-        submission = Submission(
-            {"max_supported_concurrency": 8192}, [_point(tmp_path, 512)]
-        )
-        assert submission.point_count_min() == 7
-        assert submission.accuracy_run_count_requirement() == 4
+        pareto = _pareto(tmp_path, [Run(concurrency=16), Run(concurrency=8192)])
+        assert pareto.point_count_min() == 7
+        assert pareto.accuracy_run_count_requirement() == 4
 
 
 class TestDerivedExposure:
-    """`Submission.derived`: the named derivations as `derived.<name>` fields."""
+    """`Pareto.derived`: the `derived.<name>` fields, resolved from the pareto itself."""
 
-    def test_out_of_range_points_exposes_through_the_fold(self, tmp_path):
-        submission = Submission(
-            {"max_supported_concurrency": 8192},
-            [_point(tmp_path, 512), _point(tmp_path, 9013)],
-        )
-        derived = submission.derived(regions=Regions.for_bounds(8192, 32))
-        assert "out_of_range_points" in derived
-        assert derived["out_of_range_points"] == (submission.points[1],)
-
-    def test_region_derivation_without_regions_raises(self, tmp_path):
-        submission = Submission(
-            {"max_supported_concurrency": 8192}, [_point(tmp_path, 512)]
-        )
-        derived = submission.derived()
-        with pytest.raises(ValueError, match="regions"):
-            derived["out_of_range_points"]
-
-    def test_unknown_derivation_is_absent(self, tmp_path):
-        derived = Submission(
-            {"max_supported_concurrency": 8192}, [_point(tmp_path, 512)]
-        ).derived()
-        with pytest.raises(KeyError):
-            derived["nope"]
-
-    def test_the_vocabulary_is_the_named_derivations(self, tmp_path):
-        derived = Submission(
-            {"max_supported_concurrency": 8192}, [_point(tmp_path, 512)]
-        ).derived()
-        assert set(derived) == {
+    @pytest.mark.unit
+    def test_the_derivation_names_are_the_five_policy_derivations(self):
+        assert set(DERIVATION_NAMES) == {
             "offline_ordering",
             "point_cap",
             "point_count_min",
@@ -241,92 +467,50 @@ class TestDerivedExposure:
             "out_of_range_points",
         }
 
+    @pytest.mark.unit
+    def test_every_named_derivation_resolves_for_one_pareto(self, tmp_path):
+        pareto = _pareto(tmp_path, [Run(concurrency=16), Run(concurrency=8192)])
+        derived = pareto.derived()
+        assert set(derived) == set(DERIVATION_NAMES)
+        assert derived["point_count_min"] == 7
+        assert derived["out_of_range_points"] == ()
 
-class TestFromDirectory:
-    """`Submission.from_directory`: the typed view read from one uploaded tree."""
-
-    def _upload(self, tmp_path: Path) -> Path:
-        root = tmp_path / "upload"
-        (root / "results" / "sys" / "model" / "r16").mkdir(parents=True)
-        (root / "system_desc.json").write_text('{"max_supported_concurrency": 64}')
-        return root
-
-    def test_reads_the_facts_the_rows_read(self, tmp_path):
-        root = self._upload(tmp_path)
-        (root / "results" / "sys" / "model" / "r16" / "point.yaml").write_text(
-            "concurrency: 16\noffline: none\nsystem_tps: 7.5\n"
+    @pytest.mark.unit
+    def test_out_of_range_points_derivation_uses_the_paretos_own_regions(
+        self, tmp_path
+    ):
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16), Run(concurrency=9013), Run(concurrency=8192)],
         )
-        submission = Submission.from_directory(root)
-        assert submission.system_desc == {"max_supported_concurrency": 64}
-        assert [
-            (p.concurrency, p.offline, p.system_tps) for p in submission.points
-        ] == [(16, None, 7.5)]
-
-    def test_latches_the_regions_fold_onto_the_tree_root(self, tmp_path):
-        root = self._upload(tmp_path)
-        (root / "results" / "sys" / "model" / "r16" / "point.yaml").write_text(
-            "concurrency: 16\nsystem_tps: 7.5\n"
+        derived = pareto.derived()
+        assert "out_of_range_points" in derived
+        assert tuple(point.concurrency for point in derived["out_of_range_points"]) == (
+            9013,
         )
-        node = Submission.from_directory(root).points[0].node
-        assert node is not None
-        assert node.root().regions is not None
 
-    def test_a_point_without_system_tps_is_refused(self, tmp_path):
-        root = self._upload(tmp_path)
-        (root / "results" / "sys" / "model" / "r16" / "point.yaml").write_text(
-            "concurrency: 16\n"
+    @pytest.mark.unit
+    def test_unknown_derivation_is_absent(self, tmp_path):
+        derived = _pareto(tmp_path, [Run(concurrency=16)]).derived()
+        with pytest.raises(KeyError):
+            derived["nope"]
+
+
+class TestPointPowerKw:
+    """`Point.point_power_kw`: the Section 4.5.3 per-point denominator golden rows."""
+
+    def _point(self) -> Point:
+        return Point(
+            offline=None,
+            concurrency=32,
+            system_tps=6000.0,
+            system_desc={},
         )
-        with pytest.raises(ValueError, match="system_tps"):
-            Submission.from_directory(root)
 
-    def test_a_missing_system_desc_is_refused(self, tmp_path):
-        root = self._upload(tmp_path)
-        (root / "system_desc.json").unlink()
-        with pytest.raises(ValueError, match="system_desc.json"):
-            Submission.from_directory(root)
+    @pytest.mark.unit
+    def test_golden_row_partial_engagement(self):
+        assert self._point().point_power_kw(152.10, 16, 18) == 135.2
 
-
-class TestValidateShapeArms:
-    """`Submission._validate_shape`: each refusal arm, matched to its own message."""
-
-    @pytest.mark.parametrize("system_desc", [{}, {"max_supported_concurrency": "8192"}])
-    def test_a_non_integer_max_supported_concurrency(self, tmp_path, system_desc):
-        with pytest.raises(ValueError, match="integer max_supported_concurrency"):
-            Submission(system_desc, [_point(tmp_path, 512)])
-
-    def test_two_declarations_of_one_kind(self, tmp_path):
-        with pytest.raises(ValueError, match="exactly one point may carry"):
-            Submission(
-                {"max_supported_concurrency": 8192},
-                [
-                    _point(tmp_path, 512, offline="dedicated"),
-                    _point(tmp_path, 8192, offline="dedicated"),
-                ],
-            )
-
-    def test_two_c_max_rivals(self, tmp_path):
-        with pytest.raises(ValueError, match="C_max"):
-            Submission(
-                {"max_supported_concurrency": 8192},
-                [
-                    _point(tmp_path, 512, offline="dedicated"),
-                    _point(tmp_path, 8192),
-                    _point(tmp_path, 8192, system_tps=2.0),
-                ],
-            )
-
-
-class TestSubmissionCarry:
-    """`Submission` pairs system fields with the declared points."""
-
-    def test_regions_agree_with_the_trio_fields(self, tmp_path):
-        system_desc = {"max_supported_concurrency": 8192}
-        submission = Submission(
-            system_desc, [_point(tmp_path, 32), _point(tmp_path, 40, system_tps=2.0)]
-        )
-        regions = Regions.for_submission(
-            submission.system_desc,
-            [p.concurrency for p in submission.points],
-        )
-        assert regions == Regions.for_bounds(8192, 32)
-        assert submission.points[1].system_tps == 2.0
+    @pytest.mark.unit
+    def test_golden_row_full_engagement_reduces_to_provisioned(self):
+        assert self._point().point_power_kw(152.10, 18, 18) == 152.1

@@ -17,26 +17,27 @@
 
 The Examples A/B/C constants come from Endpoints Policy Section 5.4's worked
 examples (A: C_min=32/C_max=8192, B: 1/256, C: 16/1024):
-https://github.com/mlcommons/endpoints_policies/blob/d062b470abd2/endpoints_rules.md#54-regions-of-interest
+https://github.com/mlcommons/endpoints_policies/blob/4ba8224dc746/endpoints_rules.md#54-regions-of-interest
 
-A and B match the formula's computation exactly. Example C carries two
-hand-typo slips of its own printed expression: it starts Low Concurrency at 16
-where `C_min + 1` and its own Med start of 27 say 17, and it prints
-`round(16 + 2^6.652) = 116` where the truncated-exponent coincidence is the
-only route to 116 (`round(16 + 2**6.652) == 117`, verified by `python -c`;
-`2*span = 6.65152`, never 6.65). Endpoints Policy Section 5.5 names the
-pseudocode the authoritative computation, so C's expectations here are the
-formula's; both printed slips are noted in `Regions.for_bounds`.
+Section 5.5 names the pseudocode the authoritative computation and the three
+printed examples match it exactly, so the expectations here are the formula's.
 """
 
 import pytest
 from inference_endpoint.validation.ranges import Interval
-from inference_endpoint.validation.regions import RegionKind, Regions
+from inference_endpoint.validation.regions import (
+    C_MIN_HIGHEST,
+    C_MIN_LOWEST,
+    MARGIN_FACTOR,
+    RegionKind,
+    Regions,
+)
 
 
 class TestWorkedExamples:
     """`Regions.for_bounds` reproduces 5.4's printed Examples A, B and C."""
 
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("c_max", "c_min", "expected"),
         [
@@ -76,7 +77,7 @@ class TestWorkedExamples:
         ],
     )
     def test_worked_example_boundaries(self, c_max, c_min, expected):
-        regions = Regions.for_bounds(c_max, c_min)
+        regions = Regions.for_bounds(c_min=c_min, c_max=c_max)
         assert {
             name: (bounds.lo, bounds.hi)
             for name, bounds in {
@@ -88,43 +89,66 @@ class TestWorkedExamples:
             }.items()
         } == expected
 
+    @pytest.mark.unit
+    def test_the_margin_is_the_ten_percent_high_concurrency_extension(self):
+        assert Regions.for_bounds(c_min=32, c_max=8192).margin == Interval(8193, 9012)
+        assert MARGIN_FACTOR == 1.10
+
 
 class TestBounds:
     """The printed bounds-checks of the reference algorithm."""
 
+    @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("c_max", "c_min"),
-        [(32, 1), (256, 0), (256, 33), (0, 1)],
+        ("c_min", "c_max"),
+        [(1, 32), (0, 256), (33, 256), (1, 0)],
     )
-    def test_bounds_outside_the_admitted_range_raise(self, c_max, c_min):
+    def test_bounds_outside_the_admitted_range_raise(self, c_min, c_max):
         with pytest.raises(ValueError):
-            Regions.for_bounds(c_max, c_min)
+            Regions.for_bounds(c_min=c_min, c_max=c_max)
 
+    @pytest.mark.unit
     def test_c_max_of_33_is_admitted(self):
-        assert Regions.for_bounds(33, 1).high_concurrency == Interval(12, 33)
+        assert Regions.for_bounds(c_min=1, c_max=33).high_concurrency == Interval(
+            12, 33
+        )
+
+    @pytest.mark.unit
+    def test_declared_constants_frame_the_c_min_range(self):
+        assert (C_MIN_LOWEST, C_MIN_HIGHEST) == (1, 32)
 
 
-class TestForSubmission:
-    """`Regions.for_submission`: `C_max` from `system_desc`, `C_min` = the minimum point."""
+class TestForPareto:
+    """`Regions.for_pareto`: `C_max` from `system_desc`, `C_min` derived or overridden."""
 
-    def test_derives_from_the_verified_fact_names(self):
-        regions = Regions.for_submission({"max_supported_concurrency": 8192}, [32, 40])
-        assert regions == Regions.for_bounds(8192, 32)
+    @pytest.mark.unit
+    def test_a_declared_override_wins_over_the_points(self):
+        # Endpoints Policy 5.4's override example: with `c_min_override: 32`,
+        # Low Concurrency starts at 33 and the point at 16 still sits in
+        # the Ultra Low Concurrency region's coverage.
+        system_desc = {"max_supported_concurrency": 8192, "c_min_override": 32}
+        regions = Regions.for_pareto(system_desc, [16, 24, 32, 64, 1000])
+        assert regions == Regions.for_bounds(c_min=32, c_max=8192)
+        assert regions.low_concurrency.lo == 33
+        assert 16 in regions.coverage()
 
-    def test_c_min_is_the_minimum_point_concurrency(self):
-        # Section 5.5: "C_min is derived from the submission points".
-        regions = Regions.for_submission(
+    @pytest.mark.unit
+    def test_an_absent_override_derives_c_min_from_the_minimum_point(self):
+        regions = Regions.for_pareto(
             {"max_supported_concurrency": 1024}, [1000, 24, 16]
         )
-        assert regions == Regions.for_bounds(1024, 16)
+        assert regions == Regions.for_bounds(c_min=16, c_max=1024)
 
-    def test_example_c_seven_point_set_with_two_points_below_32(self):
-        # Section 5.4 Example C's own set: 16 and 24 both sit in [1, 32].
-        regions = Regions.for_submission(
-            {"max_supported_concurrency": 1024}, [16, 24, 64, 96, 128, 256, 1000]
-        )
-        assert regions == Regions.for_bounds(1024, 16)
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "override", [C_MIN_LOWEST - 1, C_MIN_HIGHEST + 1, None, 40, "32"]
+    )
+    def test_an_invalid_override_is_refused_naming_the_rule_row(self, override):
+        system_desc = {"max_supported_concurrency": 8192, "c_min_override": override}
+        with pytest.raises(ValueError, match="C_min override"):
+            Regions.for_pareto(system_desc, [16, 24, 32, 64, 1000])
 
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("system_desc", "concurrencies"),
         [
@@ -137,16 +161,17 @@ class TestForSubmission:
     )
     def test_missing_or_ambiguous_facts_raise(self, system_desc, concurrencies):
         with pytest.raises(ValueError):
-            Regions.for_submission(system_desc, concurrencies)
+            Regions.for_pareto(system_desc, concurrencies)
 
 
 class TestCovers:
     """`Regions.covers`: which `RegionKind` covers a concurrency, or `None`."""
 
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("value", "kind"),
         [
-            (32, RegionKind.LOW_LATENCY),
+            (32, RegionKind.ULTRA_LOW_CONCURRENCY),
             (52, RegionKind.LOW_CONCURRENCY),
             (53, RegionKind.MED_CONCURRENCY),
             (437, RegionKind.MED_CONCURRENCY),
@@ -157,9 +182,14 @@ class TestCovers:
         ],
     )
     def test_kind_of_each_example_a_boundary(self, value, kind):
-        assert Regions.for_bounds(8192, 32).covers(value) is kind
+        assert Regions.for_bounds(c_min=32, c_max=8192).covers(value) is kind
 
+    @pytest.mark.unit
     def test_outside_gives_none(self):
-        regions = Regions.for_bounds(8192, 32)
+        regions = Regions.for_bounds(c_min=32, c_max=8192)
         assert regions.covers(0) is None
         assert regions.covers(9013) is None
+
+    @pytest.mark.unit
+    def test_the_ultra_low_wire_name_is_the_reference_algorithm_key(self):
+        assert RegionKind.ULTRA_LOW_CONCURRENCY.value == "low_latency"

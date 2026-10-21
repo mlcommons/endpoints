@@ -22,6 +22,7 @@ from inference_endpoint.validation.ranges import Interval
 class TestAccuracyGate:
     """`Interval.for_accuracy_gate`: the passing band of Endpoints Policy 2.9.8's gate."""
 
+    @pytest.mark.unit
     def test_open_upper_threshold_band(self):
         band = Interval.for_accuracy_gate(41.39, 0.97)
         assert band == Interval(0.97 * 41.39)
@@ -29,9 +30,11 @@ class TestAccuracyGate:
         assert (0.97 * 41.39 - 0.001) not in band
         assert 100.0 in band
 
+    @pytest.mark.unit
     def test_tolerance_one_is_the_reference_score(self):
         assert Interval.for_accuracy_gate(10.0, 1.0) == Interval(10.0)
 
+    @pytest.mark.unit
     def test_tolerance_zero_admits_nonnegative_scores(self):
         band = Interval.for_accuracy_gate(10.0, 0.0)
         assert 0 in band and 5 in band
@@ -41,6 +44,7 @@ class TestAccuracyGate:
 class TestIntervalContains:
     """`value in interval`: closed, open upper, half-open, scalar, non-ordering."""
 
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("interval", "value", "inside"),
         [
