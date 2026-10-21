@@ -23,13 +23,20 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from inference_endpoint.validation.catalog import Catalog
-from inference_endpoint.validation.check import Cohort
+from inference_endpoint.validation.check import Cohort, Severity
 from inference_endpoint.validation.runner import Finding
 from inference_endpoint.validation.submission import Submission
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run one cohort's checks against one submission; the process exit code."""
+    """Run one cohort's checks against one submission.
+
+    Returns:
+        int: `0` = every applicable check held, or failed only at `warn` severity (a
+            warning is reported and passes through). `1` = at least one failing `fail`
+            finding. `2` = the cohort or the submission was refused before any check ran
+            (a bad check file, an unwalkable tree, an unreadable artifact).
+    """
     parser = argparse.ArgumentParser(
         prog="python -m inference_endpoint.validation",
         description="Run one cohort's checks against one submission.",
@@ -40,7 +47,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "submission",
         type=Path,
-        help="submission root (system_desc.json + results/<system>/<model>/r<N>/)",
+        help="submission root (results/<system>/<model>/r<N>/)",
     )
     parser.add_argument(
         "--ruleset",
@@ -63,14 +70,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
     failing = [finding for finding in findings if not finding.verdict.ok]
+    blocking = [finding for finding in failing if finding.severity is Severity.FAIL]
     for finding in findings if args.audit else failing:
-        mark = "ok" if finding.verdict.ok else "FAIL"
+        if finding.verdict.ok:
+            mark = "OK"
+        else:
+            mark = "FAIL" if finding.severity is Severity.FAIL else "WARN"
         print(
             f"{mark} {finding.check_id} [{finding.severity.value}] "
             f"{finding.node_directory}: {finding.verdict.why}"
         )
-    print(f"{len(findings)} finding(s), {len(failing)} failing")
-    return 1 if failing else 0
+    instances = {check.id: 0 for check in cohort.checks}
+    seen: set[tuple[str, Path]] = set()
+    for finding in findings:
+        key = (finding.check_id, finding.node_directory)
+        if key not in seen:
+            seen.add(key)
+            instances[finding.check_id] += 1
+    for check_id, count in instances.items():
+        if count:
+            print(f"{check_id} ran at {count} instance(s)")
+        else:
+            # A check that never ran is indistinguishable from one that passed
+            # unless the report says so: its `when` gated every node off.
+            print(
+                f"NEVER-RAN {check_id}: no node was applicable "
+                "(its `when` gated every instance off)",
+                file=sys.stderr,
+            )
+    print(
+        f"{len(findings)} finding(s), {len(failing)} failing ({len(blocking)} blocking)"
+    )
+    return 1 if blocking else 0
 
 
 if __name__ == "__main__":
