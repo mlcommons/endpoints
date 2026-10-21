@@ -72,14 +72,17 @@ throughput. Pass `--ruleset config/rulesets/<name>/` to make the `ruleset` fold
 (its `models.yaml`/`datasets.yaml`) available to rows; the `regions` fold is
 derived per pareto (Section 5.5).
 
-The run prints one line per failing finding (a line is one evaluated `assert`
-predicate) marked `FAIL` or `WARN`, a `<id> ran at N instance(s)` line per
-check, and a closing `N finding(s), F failing (B blocking)` summary -- findings
-count holds and failures alike, failing means a predicate did not hold, and
-blocking means a failing `fail`. `--audit` prints the holds as well, marked
-`OK`, so the session doubles as the audit trail. A check that ran at no instance
-at all prints `NEVER-RAN <id>: ...` on stderr: a check its `when` leaves out
-everywhere stays visible instead of passing by omission.
+The run prints one line per failing finding -- the line is one evaluated
+`assert` predicate, labeled by the predicate itself (`1 le 128`) -- marked
+`FAIL` or `WARN`, with the check's rules citation at the end; when the check
+declares a `fix`, an indented `fix:` line follows the failing line. Also a
+`<id> ran at N instance(s)` line per check and a closing
+`N finding(s), F failing (B blocking)` summary: findings count holds and
+failures alike, failing means a predicate did not hold, and blocking means a
+failing `fail`. `--audit` prints the holds as well, marked `OK` (row label, no
+rule/fix), so the session doubles as the audit trail. A check that ran at no
+instance at all prints `NEVER-RAN <id>: ...` on stderr: a check its `when`
+leaves out everywhere stays visible instead of passing by omission.
 
 Exit codes, in plain words:
 
@@ -177,10 +180,10 @@ block's fields:
 | Field               | Required   | What it is                                                                                                                |
 | ------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------- |
 | _(the mapping key)_ | yes        | The check's `id`; the scope file it lives in (`point.yaml`, ...) is its `scope      `                                     |
-| `description`       | yes        | The human sentence the report shows for the finding                                                                       |
-| `rule`              | yes        | Where in the Endpoints Rules this comes from                                                                              |
+| `description`       | yes        | The human sentence describing this check                                                                                  |
+| `rule`              | yes        | Where in the Endpoints Rules this comes from (rendered at the end of each failing line)                                   |
 | `severity`          | yes        | `fail` (a blocking finding) or `warn` (reported and passes through)                                                       |
-| `fix`               | no         | How to resolve a failing report                                                                                           |
+| `fix`               | no         | How to resolve a failing row (rendered after each failing line)                                                           |
 | `needs`             | no         | Upstream check ids that must pass before this check speaks                                                                |
 | `when`              | predicates | Gate predicates: the check runs only where all hold; this list may be empty or absent when `assert` carries at least one  |
 | `assert`            | predicates | Condition predicates; each is one finding per instance; this list may be empty or absent when `when` carries at least one |
@@ -390,6 +393,9 @@ check **passed**:
   prerequisite.
 - A needed check was never queued (its `when` left that instance out): the
   dependent is skipped and de-queued.
+- A needed check was silenced in turn (its own `needs` refused to vouch): the
+  dependent is skipped and de-queued too - a failure one level down does not
+  hide behind the check it silenced.
 - Any check may be listed in `needs`. If a listed check is at a finer scope,
   **all** of its instances must pass: a pareto-level `pareto_clean` with
   `needs: [point_accuracy_pass]` runs only if `point_accuracy_pass` passes for
