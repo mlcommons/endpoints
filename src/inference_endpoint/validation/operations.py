@@ -29,6 +29,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from inference_endpoint.validation.ranges import Interval
 from inference_endpoint.validation.sentinels import MISSING
 
 
@@ -240,17 +241,31 @@ class In(Op, name="in"):
     Example:
 
         In().holds(Predicate("k", {"k": 1}))  # True: `k` is one of the mapping's keys
+
+    A string (or bytes) target refuses: `subject in "abc"` is substring
+    matching, never meant (ValueError -> a `broken` verdict). Any other
+    scalar target refuses the same way.
     """
 
     def holds(
         self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
     ) -> bool:
-        keys = (
-            predicate.target.keys()
-            if isinstance(predicate.target, Mapping)
-            else predicate.target
-        )
+        target = predicate.target
+        if isinstance(target, str | bytes | bytearray) or not isinstance(
+            target, Mapping | Sequence | set | frozenset | Interval
+        ):
+            raise ValueError(
+                f"`in` needs a list, mapping or interval target, got "
+                f"{type(target).__name__}"
+            )
+        keys = target.keys() if isinstance(target, Mapping) else target
         return predicate.subject in keys
+
+
+# A `matches` pattern is cohort-authored and compile-vetted; the SUBJECT is
+# upload-controlled, so a multi-megabyte one against a backtracking pattern
+# would be unbounded work.
+_MATCH_SUBJECT_LIMIT = 64 * 1024
 
 
 class Matches(Op, name="matches"):
@@ -260,24 +275,41 @@ class Matches(Op, name="matches"):
 
         Matches().holds(Predicate("r16", "r[0-9]+"))  # True
         Matches().holds(Predicate(5, "r[0-9]+"))  # False: not a string, so no match
+
+    A subject over `_MATCH_SUBJECT_LIMIT` refuses (ValueError -> a
+    `broken` verdict): the pattern is vetted at load, the subject is not.
     """
 
     def holds(
         self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
     ) -> bool:
+        if (
+            isinstance(predicate.subject, str)
+            and len(predicate.subject) > _MATCH_SUBJECT_LIMIT
+        ):
+            raise ValueError(
+                f"`matches` subject is {len(predicate.subject)} characters: "
+                f"the cap is {_MATCH_SUBJECT_LIMIT}"
+            )
         matched = isinstance(predicate.subject, str) and re.fullmatch(
             predicate.target, predicate.subject
         )
         return bool(matched)
 
 
+# The unhashable fallback pairs by `==` scanning (O(n*m)); the cap keeps a
+# crafted pair from burning the report's budget.
+_MULTISET_SCAN_LIMIT = 1024
+
+
 class SameMultiset(Op, name="same_multiset"):
     """`[1, 2, 2]` matches `[2, 1, 2]`. `[1]` does not match `[1, 1]`.
 
     Unordered, multiplicity-respecting equality. Hashable elements pair in
-    linear time via counts, unhashable ones fall back to an `==` scanning pool
-    so crafted large lists stay bounded work. A non-`Sequence` pair degrades to
-    plain `==`.
+    linear time via counts; unhashable ones fall back to an `==` scanning pool
+    capped at `_MULTISET_SCAN_LIMIT` elements (past the cap the pair refuses:
+    ValueError -> a `broken` verdict). A non-`Sequence` pair degrades to plain
+    `==`.
     """
 
     def holds(
@@ -291,6 +323,11 @@ class SameMultiset(Op, name="same_multiset"):
         try:
             return Counter(left) == Counter(right)
         except TypeError:  # unhashable elements: pair by `==` scanning
+            if len(left) > _MULTISET_SCAN_LIMIT:
+                raise ValueError(
+                    f"cannot pair {len(left)} unhashable elements: the `==` "
+                    f"scanning pool caps at {_MULTISET_SCAN_LIMIT}"
+                ) from None
             pool = list(right)
             for value in left:
                 for i, other in enumerate(pool):

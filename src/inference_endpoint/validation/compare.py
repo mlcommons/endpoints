@@ -26,6 +26,7 @@ no downstream code has to reconstruct the message.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, ClassVar, Literal
@@ -207,6 +208,27 @@ def _missing_outcome(missing: Sequence[Ref]) -> tuple[bool, str]:
     return False, f"missing {', '.join(str(ref) for ref in missing)}"
 
 
+def _finite(value: Any, where: str) -> Any:
+    """`value` if a comparison can carry it, else refuse (ValueError -> broken).
+
+    `NaN`/`Infinity` decode from `json.loads` (`NaN`/`Infinity`) and YAML
+    (`.nan`, `.inf`); a comparison over one answers quietly False and would
+    switch a `when` gate off by omission. Refused here, at the one place
+    operands resolve, instead of patching every op.
+
+    Args:
+        value (Any): One resolved comparison operand (or a measure's result).
+        where (str): The operand's row syntax, for the message.
+    Returns:
+        Any: `value`, unchanged.
+    Raises:
+        ValueError: When `value` is a non-finite float.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{where} resolved to a non-finite {value!r}")
+    return value
+
+
 class Compare(BaseModel):
     """One condition row: `op` applied to `left` and (per op) `right`/`lo`/`hi`.
 
@@ -287,7 +309,7 @@ class Compare(BaseModel):
     def _check_shape(self) -> Compare:
         # Presence, not truthiness: `right: null` is a real operand (eq against
         # a literal null is legal), so arity is decided by field presence.
-        op = Op(self.op)
+        op = self._operation()
         want = set(op.slots)
         used = {name for name in ("right", "lo", "hi") if name in self.model_fields_set}
         if used != want:
@@ -307,6 +329,14 @@ class Compare(BaseModel):
             )
         return self
 
+    def _operation(self) -> Op:
+        """The row's `Op` instance: the one dispatch site for the string name.
+
+        The YAML stores an op by name; binding it here keeps `_check_shape`
+        and `_outcome` from re-dispatching the string at each use.
+        """
+        return Op(self.op)
+
     def _outcome(self, scopes: Mapping[str, Any]) -> tuple[bool, str]:
         """(held, why): presence rows read `left` directly. The rest compare operands.
 
@@ -320,7 +350,7 @@ class Compare(BaseModel):
             tuple[bool, str]: `(held, why)`: whether the row holds and, when not,
                 why its operand values fail it.
         """
-        op = Op(self.op)
+        op = self._operation()
         if op.needs_found:
             found, value = (
                 self.left.resolve(scopes)
@@ -345,8 +375,16 @@ class Compare(BaseModel):
                 out.append(side)
         if missing:
             return _missing_outcome(missing)
-        left, right, lo, hi = out
-        if Op(self.op).slots == ("lo", "hi"):
+        raw_left, raw_right, raw_lo, raw_hi = out
+        left = _finite(raw_left, str(self.left))
+        right = _finite(raw_right, str(self.right))
+        lo = _finite(raw_lo, str(self.lo))
+        hi = _finite(raw_hi, str(self.hi))
+        if op.slots == ("lo", "hi"):
+            if lo is None or hi is None:
+                raise ValueError(
+                    f"`between` bounds must both be values, got {self.lo}..{self.hi}"
+                )
             predicate = Predicate(left, Interval(lo, hi))
         else:
             predicate = Predicate(left, right)
@@ -355,7 +393,7 @@ class Compare(BaseModel):
             return True, ""
         # The message's operand form follows the row's slots: a literal `None`
         # on `right` is a real operand, never the interval placeholder.
-        if Op(self.op).slots == ("lo", "hi"):
+        if op.slots == ("lo", "hi"):
             target: Any = f"{self.lo}..{self.hi}"
         else:
             target = self.right
@@ -373,7 +411,7 @@ class Compare(BaseModel):
         Returns:
             str: The row's operand form, per its op's slots.
         """
-        op = Op(self.op)
+        op = self._operation()
         if op.slots == ("lo", "hi"):
             return f"{_show(self.left)} {self.op} {_show(self.lo)}..{_show(self.hi)}"
         if op.slots == ():
@@ -460,12 +498,20 @@ class Aggregate(BaseModel):
             raise ValueError(
                 f"row computes {type(self).__name__} but declares measure {self.measure!r}"
             )
-        op = Op(self.op)
+        op = self._operation()
         if not op.tolerant and (self.abs_tol or self.rel_tol):
             raise ValueError(
                 f"`{self.op}` has no tolerance semantics (use `eq`/`ne` for abs_tol/rel_tol)"
             )
         return self
+
+    def _operation(self) -> Op:
+        """The row's `Op` instance: the one dispatch site for the string name.
+
+        The YAML stores an op by name; binding it here keeps `_check_shape`
+        and `_outcome` from re-dispatching the string at each use.
+        """
+        return Op(self.op)
 
     def run(self, items: list[Any]) -> Any:
         """The aggregation itself over `items`. A subclass owns one.
@@ -524,7 +570,14 @@ class Aggregate(BaseModel):
         if not items and not self.defines_empty:
             return False, f"expected {self.measure} of {self.over}, got no values"
         measured = self.run(items)
-        held = Op(self.op).holds(Predicate(measured, value), self.abs_tol, self.rel_tol)
+        held = self._operation().holds(
+            Predicate(
+                _finite(measured, f"{self.measure} of {self.over}"),
+                _finite(value, str(self.value)),
+            ),
+            self.abs_tol,
+            self.rel_tol,
+        )
         if held:
             return True, ""
         return False, (

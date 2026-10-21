@@ -32,7 +32,13 @@ from inference_endpoint.validation.compare import (
     Count,
     Verdict,
 )
-from inference_endpoint.validation.operations import Eq, Op
+from inference_endpoint.validation.operations import (
+    Eq,
+    Matches,
+    Op,
+    Predicate,
+    SameMultiset,
+)
 from inference_endpoint.validation.refs import Ref, RefTable
 from submission_helpers import STANDARD_REFS
 
@@ -351,7 +357,7 @@ class TestCompareShape:
         ],
     )
     def test_wrong_arity_is_rejected(self, kwargs):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="takes `left`"):
             _compare(**kwargs)
 
     @pytest.mark.unit
@@ -761,3 +767,44 @@ class TestEvaluateAll:
             _compare(op="eq", left=1, right=2),
         ]
         assert [v.ok for v in Verdict.evaluate_all(rows, SCOPES)] == [True, True, False]
+
+
+class TestHostileValues:
+    """Crafted values refuse loudly instead of comparing quietly (B2/B6)."""
+
+    @pytest.mark.unit
+    def test_matches_subject_over_the_cap_refuses(self):
+        with pytest.raises(ValueError, match="`matches` subject"):
+            Matches().holds(Predicate("x" * (64 * 1024 + 1), "x+"))
+
+    @pytest.mark.unit
+    def test_same_multiset_unhashable_scan_caps(self):
+        pair = [[1]] * 1025
+        with pytest.raises(ValueError, match="unhashable"):
+            SameMultiset().holds(Predicate(pair, pair))
+
+    @pytest.mark.unit
+    def test_a_non_finite_operand_is_broken_not_quietly_false(self):
+        verdict = Verdict.evaluate(
+            _compare(op="gt", left="point.tps", right=1),
+            {"point": {"tps": float("nan")}},
+        )
+        assert verdict.broken
+        assert "non-finite" in verdict.why
+
+    @pytest.mark.unit
+    def test_between_with_a_null_bound_is_broken_not_unbounded(self):
+        verdict = Verdict.evaluate(
+            _compare(op="between", left=1, lo=1, hi=None), SCOPES
+        )
+        assert verdict.broken
+        assert "bounds" in verdict.why
+
+    @pytest.mark.unit
+    def test_in_against_a_string_target_is_broken(self):
+        verdict = Verdict.evaluate(
+            _compare(op="in", left="point.name", right="abc"),
+            {"point": {"name": "b"}},
+        )
+        assert verdict.broken
+        assert "needs a list" in verdict.why
