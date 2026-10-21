@@ -35,7 +35,7 @@ second copy can drift from the first.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -119,7 +119,7 @@ class Point:
     offline: Literal["dedicated", "elected"] | None
     concurrency: int
     system_tps: float
-    system_desc: Mapping[str, Any]
+    system_desc: Mapping[str, Any] = field(hash=False)
     # A derivation-only Point carries no tree link; `Finding.collect` refuses
     # one without its point node.
     node: Node | None = None
@@ -222,7 +222,7 @@ class Pareto:
             `Finding.collect` refuses to walk.
     """
 
-    system_desc: Mapping[str, Any]
+    system_desc: Mapping[str, Any] = field(hash=False)
     points: Sequence[Point]
     # The tree's pareto node when built from an upload (`Pareto.from_nodes`);
     # `None` for a derivation-only hand-built Pareto.

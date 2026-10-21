@@ -30,6 +30,7 @@ from inference_endpoint.validation.ranges import Interval
 from inference_endpoint.validation.refs import Ref
 from inference_endpoint.validation.regions import Regions
 from inference_endpoint.validation.sentinels import MISSING
+from inference_endpoint.validation.submission import Point
 from inference_endpoint.validation.tree import (
     Node,
     ParetoNode,
@@ -121,7 +122,7 @@ class TestWalk:
 
     @pytest.mark.unit
     def test_missing_root_is_a_load_error(self, tmp_path):
-        with pytest.raises(NotADirectoryError):
+        with pytest.raises(NotADirectoryError, match="nope"):
             SubmissionNode.from_directory(tmp_path / "nope")
 
 
@@ -368,3 +369,43 @@ class TestRegionsRoot:
         root = tmp_path / "acme"
         (root / "results").mkdir(parents=True)
         assert "regions" not in SubmissionNode.from_directory(root).scopes()
+
+
+class TestLoadBoundaries:
+    """The per-tree byte budget and the symlink-root refusal."""
+
+    @pytest.mark.unit
+    def test_a_symlinked_upload_root_is_refused_clearly(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        with pytest.raises(ValueError, match="is a symlink"):
+            SubmissionNode.from_directory(link)
+
+    @pytest.mark.unit
+    def test_the_tree_artifact_budget_refuses_a_bloated_upload(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("inference_endpoint.validation.tree._MAX_TREE_BYTES", 32)
+        root = tmp_path / "acme"
+        point = root / "results" / "sys" / "model" / "r16"
+        point.mkdir(parents=True)
+        _write(point / "point.yaml", {"concurrency": 16})
+        _write(point / "system_desc.json", {"max_supported_concurrency": 16})
+        with pytest.raises(ValueError, match="tree budget"):
+            SubmissionNode.from_directory(root)
+
+
+class TestNodeIdentity:
+    """Nodes compare by identity; frozen holders stay hashable (B13)."""
+
+    @pytest.mark.unit
+    def test_nodes_compare_by_identity_and_points_stay_hashable(self, tmp_path):
+        node = SubmissionNode(RuleScopes.SUBMISSION, tmp_path)
+        twin = SubmissionNode(RuleScopes.SUBMISSION, tmp_path)
+        assert node != twin
+        point = Point(
+            offline=None, concurrency=16, system_tps=1.0, system_desc={}, node=node
+        )
+        assert isinstance(hash(point), int)
