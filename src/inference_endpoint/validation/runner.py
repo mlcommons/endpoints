@@ -17,7 +17,7 @@
 
 `Finding.collect(cohort, submission)` walks each `Check.scope` kind over the
 submission's `Point`/`Node` tree, gates on `when` rows, and evaluates each
-assert` row through `Verdict.evaluate`. A `needs` gate speaks per node: a
+`assert` row through `Verdict.evaluate`. A `needs` gate speaks per node: a
 check runs only where every named upstream chain ran and held at the nodes
 that vouch for it.
 """
@@ -32,12 +32,7 @@ from typing import Any
 
 from inference_endpoint.validation.check import Check, Cohort, Severity
 from inference_endpoint.validation.compare import Ref, Verdict
-from inference_endpoint.validation.submission import (
-    REGION_DERIVATION_METHODS,
-    Point,
-    Submission,
-    normalize_offline,
-)
+from inference_endpoint.validation.submission import Point, Submission
 from inference_endpoint.validation.tree import Node, RuleScopes
 
 
@@ -56,7 +51,13 @@ class Finding:
     def from_check_row(
         cls, check: Check, scope, node_directory: Path, verdict: Verdict
     ) -> Finding:
-        """`Finding.from_check_row(check, RuleScopes.POINT, dir, Verdict(True, ""))`."""
+        """The `Finding` for one evaluated row.
+
+        Example:
+
+            finding = Finding.from_check_row(check, RuleScopes.POINT, dir, verdict)
+            finding.check_id  # check.id
+        """
         return cls(
             check_id=check.id,
             severity=check.severity,
@@ -71,22 +72,23 @@ class Finding:
         """One `Finding` per evaluated `assert` row at each `when`-applicable node (holds too).
 
         A load-level check first (`_validate_*`: a submission the walk cannot
-        cover, an unreadable artifact, hand-mirrored facts that disagree with
-        the parsed tree, or a fold the cohort names but the tree lacks are all
-        errors -- silence must never be the verdict); then
+        cover, an unreadable artifact, or a fold the cohort names but the tree
+        lacks is an error -- silence must never be the verdict). Then
         `_collect_candidates` validates `needs` names (unknown -> ValueError)
         and `_GateResolver` resolves every `needs` chain per node. Row
-        evaluation emits one Finding per row at each `when`-applicable node
+        `_row_findings` emits one `Finding` per row at each `when`-applicable node
         whose chain holds -- holds and failures alike (the report side filters
         `not verdict.ok`). `derived.<name>` rows resolve via
-        `submission.derived()` folded into each node's row-scope at evaluation.
-        A check whose own rows fail still emits its Findings; only its
+        the owning `Pareto.derived()`, folded into each node's row-scope at
+        evaluation.
+
+        A check whose own rows fail still emits its Findings. Only its
         dependents stay silent, and only at the nodes whose upstreams did not
         hold there.
         """
         _validate_points(submission)
         _validate_artifacts(submission)
-        _validate_agreement(submission)
+        _validate_declared_values(cohort, submission)
         _validate_fold_needs(cohort, submission)
         candidates = _collect_candidates(cohort)
         gate = _GateResolver({check.id: check for check in candidates}, submission)
@@ -144,11 +146,8 @@ def _validate_points(submission: Submission) -> None:
 
 
 def _tree_root(submission: Submission) -> Node:
-    """The validated submission's tree root (after `_validate_points`, nodes exist)."""
-    node = submission.points[0].node
-    if node is None:
-        raise ValueError("point needs its point node")
-    return node.root()
+    """The submission's tree root (the carried `tree`)."""
+    return submission.tree
 
 
 def _validate_artifacts(submission: Submission) -> None:
@@ -168,66 +167,41 @@ def _validate_artifacts(submission: Submission) -> None:
         raise ValueError("unreadable artifacts: " + "; ".join(broken))
 
 
-def _validate_agreement(submission: Submission) -> None:
-    """Fail loud where a hand-carried fact disagrees with the parsed artifact.
+def _validate_declared_values(cohort: Cohort, submission: Submission) -> None:
+    """Fail loud on a present fact value its declaration will not carry.
 
-    `Point` and the tree are two views of the same facts (the tree feeds rows,
-    `Point` feeds derivations); a silent disagreement would make a check's row
-    and its derivation judge different submissions. Compared symmetrically: a
-    declaration missing from `point.yaml` disagrees with a carried declaration
-    just as loudly as the other direction.
+    One pass per node through `RefTable.validate_values` (type match, allowlist
+    membership, declared-block shape): the cohort's `valid_refs.yaml` owns the
+    values' contract, so this is a collect-time refusal, never a finding.
     """
-    for point in submission.points:
-        node = point.node
-        if node is None:  # `_validate_points` has refused these; narrows the type
-            continue
-        config, _ = node.read("point.yaml")
-        if not isinstance(config, Mapping):
-            continue  # shape problems are `_validate_artifacts`' story
-        declared_concurrencies: list[tuple[str, Any, Any]] = [
-            ("concurrency", config.get("concurrency"), point.concurrency),
-            ("offline", normalize_offline(config.get("offline")), point.offline),
-        ]
-        for field_name, declared, carried in declared_concurrencies:
-            if declared != carried:
-                raise ValueError(
-                    f"point at {node.dir.name} carries {field_name}={carried!r} "
-                    f"but its point.yaml declares {declared!r}"
-                )
-    parsed, _ = _tree_root(submission).read("system_desc.json")
-    if isinstance(parsed, Mapping):
-        for key, value in submission.system_desc.items():
-            if key in parsed and parsed[key] != value:
-                raise ValueError(
-                    f"carried system_desc {key}={value!r} disagrees with "
-                    f"system_desc.json ({parsed[key]!r})"
-                )
+    if cohort.refs is None:
+        return
+    for node in _all_nodes(_tree_root(submission)):
+        fields = node.scopes().get(node.kind.value, {})
+        try:
+            cohort.refs.validate_values(node.kind.value, fields)
+        except ValueError as exc:
+            # The run directory names the offending node: a multi-pareto upload
+            # has many `point.config.…` paths, one per run.
+            raise ValueError(f"{node.dir}: {exc}") from exc
 
 
 def _validate_fold_needs(cohort: Cohort, submission: Submission) -> None:
-    """Fail loud when a cohort names a scope fold the tree was built without.
+    """Fail loud when a cohort names the `ruleset` fold the tree was built without.
 
-    A forgotten `regions=`/`ruleset=` kwarg must be a load error, not rows
-    resolving "missing" on a healthy upload. Which derivations need which fold
-    is asked of `submission.REGION_DERIVATION_METHODS`, its single owner.
+    A forgotten `ruleset=` kwarg must be a load error, not rows resolving
+    "missing" on a healthy upload. (`derived`/`regions` are per-pareto and
+    always present at a pareto's nodes. Cohort load already refuses rows
+    naming them anywhere else.)
     """
     root = _tree_root(submission)
-    folds = {"regions": root.regions, "ruleset": root.ruleset}
     for check in cohort.checks:
         for row in (*check.when, *check.assert_):
             for ref in (r for r in row.operands() if isinstance(r, Ref)):
-                head = ref.parts[0]
-                fold = head if head in folds else None
-                if (
-                    ref.parts[0] == "derived"
-                    and len(ref.parts) > 1
-                    and ref.parts[1] in REGION_DERIVATION_METHODS
-                ):
-                    fold = "regions"
-                if fold is not None and folds[fold] is None:
+                if ref.parts[0] == "ruleset" and root.ruleset is None:
                     raise ValueError(
                         f"check {check.id!r} names {ref} but the tree was built "
-                        f"without {fold}"
+                        "without ruleset"
                     )
 
 
@@ -241,9 +215,10 @@ def _all_nodes(node: Node) -> Iterator[Node]:
 def _collect_candidates(cohort: Cohort) -> tuple[Check, ...]:
     """Every check in the cohort with `needs` names validated against itself.
 
-    An id referenced but absent from the cohort, or a `needs` cycle, raises
-    ValueError at load -- a malformed cohort must fail identically for every
-    submission, never only where the `when` rows happen to lead the walk.
+    Raises:
+        ValueError: When an id is referenced but absent from the cohort, or a `needs`
+            cycle exists, at load -- a malformed cohort must fail identically for every
+            submission, never only where the `when` rows happen to lead the walk.
     """
     by_id = {check.id: check for check in cohort.checks}
     for check in cohort.checks:
@@ -293,9 +268,9 @@ class _GateResolver:
     A check speaks at a node only where every named upstream chain **vouches**
     for it -- claims at least one node of its scope in the dependent node's
     chain-or-subtree and `HOLDS` at each (see `_chain_holds`). One `FAILS`
-    node disavows; "no claim" (`NOT_APPLICABLE`/`SILENCED`) never vouches and
+    node disavows. A "no claim" (`NOT_APPLICABLE`/`SILENCED`) never vouches and
     never disavows. A `needs` cycle is refused at load
-    (`_collect_candidates`'s DFS); the recursion trail here is the backstop.
+    (`_collect_candidates`'s DFS). The recursion trail here is the backstop.
     """
 
     def __init__(self, by_id: Mapping[str, Check], submission: Submission) -> None:
@@ -358,7 +333,7 @@ class _GateResolver:
 _SCOPE_DEPTH = {
     RuleScopes.SUBMISSION: 0,
     RuleScopes.SYSTEM: 1,
-    RuleScopes.CURVE: 2,
+    RuleScopes.PARETO: 2,
     RuleScopes.POINT: 3,
 }
 
@@ -366,11 +341,14 @@ _SCOPE_DEPTH = {
 def _chain_nodes(scope: RuleScopes, node: Node) -> tuple[Node, ...]:
     """The `scope`-kind nodes a check at `node` depends on: up the chain, or down the subtree.
 
-    Same-or-ancestor scope resolves to the one chain node (a point's curve,
-    system and submission ancestors); a finer scope resolves to every such node
+    Same-or-ancestor scope resolves to the one chain node (a point's pareto,
+    system and submission ancestors). A finer scope resolves to every such node
     below `node` (a system-scoped check vouches with all of its points). A
-    missing ancestor raises ValueError (a load-level mistake); a subtree
-    without any yields no nodes -- the chain claims nothing there.
+    subtree without any yields no nodes -- the chain claims nothing there.
+
+    Raises:
+        ValueError: When no ancestor of the requested `scope` kind exists above `node`
+            (a load-level mistake).
     """
     if _SCOPE_DEPTH[scope] <= _SCOPE_DEPTH[node.kind]:
         probe: Node | None = node
@@ -397,7 +375,7 @@ def _row_findings(
     """The check's `assert` rows at one `when`-applicable node, one Finding each.
 
     Emits holds and failures alike -- the report side filters `not verdict.ok`
-    for a failure summary; the audit trail keeps the record. A scalar `left`
+    for a failure summary. The audit trail keeps the record. A scalar `left`
     row that never names a `derived.<name>` runs no derivation.
     """
     return tuple(
@@ -412,26 +390,30 @@ def _row_findings(
 
 
 def _scopes_rows_view(node: Node, submission: Submission) -> dict[str, Any]:
-    """Row-resolvable scope map at `node`: the tree's per-node fields plus `derived`.
+    """Row-resolvable scope map at `node`: the tree's fields plus the pareto's `derived`.
 
-    The region-fold stays the tree's single source (fed by
-    `SubmissionNode.from_directory(root, regions=...)` upstream) and reaches
-    `derived.out_of_range_points` too -- one region derivation source;
-    `derived` folds here because its values are submission-wide named facts
-    (`Submission.derived()`, `derived.<name>` rows).
+    `derived.<name>` rows address per-pareto named facts (`Pareto.derived()`),
+    so the fold rides in only where a pareto owns the node: nodes above every
+    pareto (a multi-pareto upload's system/submission) carry no `derived`
+    root, and cohort load refuses rows naming one there.
     """
     scopes: dict[str, Any] = node.scopes()
-    scopes["derived"] = submission.derived(regions=node.root().regions)
+    pareto = submission.pareto_at(node)
+    if pareto is not None:
+        scopes["derived"] = pareto.derived()
     return scopes
 
 
 def _scope_nodes(scope: RuleScopes, submission: Submission) -> tuple[Node, ...]:
     """Unique nodes of `scope` kind reached by walking each point's node chain.
 
-    `Point` reaches the points' own `PointNode`s; `curve`/`system`/`submission`
-    walk the parents (deduplicated because a curve's points share a curve
-    node). A chain without the requested kind raises ValueError -- a
-    load-level mistake, not a report item.
+    `Point` reaches the points' own `PointNode`s. `pareto`/`system`/`submission`
+    walk the parents (deduplicated because a pareto's points share a pareto
+    node).
+
+    Raises:
+        ValueError: When a chain lacks the requested kind -- a load-level mistake, not
+            a report item.
     """
     nodes: list[Node] = []
     if scope == RuleScopes.POINT:  # `_validate_points` has refused node-less points
@@ -454,7 +436,10 @@ def _when_rows_hold(check: Check, node: Node, submission: Submission) -> bool:
 
     A `when` row that failed to *evaluate* is refused loud: an unjudgeable gate
     must never read as a false predicate, which would switch the check -- and
-    its dependents' vouches -- off by omission.
+    its dependents' vouches -- off by omission. An operand whose optional fact
+    the upload never declared is not unjudgeable: by schema the row does not
+    hold, and `compare._missing_outcome` keeps that case distinct from an
+    unjudgeable one.
     """
     scopes = _scopes_rows_view(node, submission)
     for row in check.when:
