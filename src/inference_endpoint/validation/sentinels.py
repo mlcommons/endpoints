@@ -16,8 +16,8 @@
 """The one sentinel for "no such fact", shared across validation modules.
 
 `MISSING` is how `tree.read`, `Predicate` and presence ops say an uploaded
-fact is absent, as distinct from a fact present with a null value; `value is
-MISSING` is the test.
+fact is absent, as distinct from a fact present with a null value.
+`value is MISSING` is the test.
 """
 
 
