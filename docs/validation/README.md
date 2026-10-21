@@ -218,11 +218,8 @@ offline_ordering:
 
 Every comparison takes `left` and `op`; the remaining keys follow the `op`:
 
-1. `between` takes an `Interval` in the form of the `lo` and `hi` keys,
-   inclusive. For instance, `lo: 1` and `hi: 10` denotes the interval `[1, 10]`,
-   checking if `1 <= left <= 10`.
-2. All other binary operators take in a single value `right`. The following
-   binary ops are available:
+1. All binary operators take a single value under `right`. The following binary
+   ops are available:
 
    - `eq`: Equality check. By default, floating point values will be computed
      with strict equality. Accepts the following optional fields:
@@ -232,9 +229,10 @@ Every comparison takes `left` and `op`; the remaining keys follow the `op`:
    - `gt`, `ge`, `lt`, and `le`: The `>`, `>=`, `<`, and `<=` operators
      respectively.
    - `in`: A `contains` / membership operator. True if `left` is contained in
-     `right`. `right` is expected to be a list-like container. If `right` is a
-     mapping (`dict`-like object), then `in` will use the _keys_ as the list to
-     check against.
+     `right`. `right` is a list-like container or an `Interval` (e.g. a fold
+     like `regions.coverage`). If `right` is a mapping, `in` uses its _keys_ -
+     unless it is exactly a `{"lo": ..., "hi": ...}` range literal, an inclusive
+     interval (`lo <= left <= hi`; both bounds required, `null` bounds refused).
    - `matches`: A regex comparison. `right` must be a `{"literal": ...}` block
      (patterns are compile-checked at load). Ex.:
      ```yaml
@@ -248,7 +246,7 @@ Every comparison takes `left` and `op`; the remaining keys follow the `op`:
      - `[1]` does _not_ match `[1, 1]`
      - `[[1], [2]]` matches `[[2], [1]]`
 
-3. Unary operators do not accept a `right` parameter. They key on whether the
+2. Unary operators do not accept a `right` parameter. They key on whether the
    `left` reference resolves to a fact in the parsed submission files: a dotted
    reference like `point.config.steady_state.status` addresses a key in the
    loaded artifact documents, and a whole-document reference like
@@ -275,9 +273,8 @@ Example:
 assert:
   # a range comparison, inclusive at both ends
   - left: point.config.concurrency
-    op: between
-    lo: 1
-    hi: 32
+    op: in
+    right: { lo: 1, hi: 32 }
 
   # a unary presence check
   - left: point.accuracy_results

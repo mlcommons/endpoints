@@ -16,8 +16,9 @@
 """Compare-row operations: one self-registering subclass per YAML `op` name.
 
 Each op owns its operand `slots` and its `holds` test over a `Predicate`.
-An `Interval` target gives `between` natural bounds semantics
-(`5 in Interval(0, 10)` is True).
+A range test is `in` over an `Interval` target (`5 in Interval(0, 10)` is
+True): the `Interval` resolves from a fold, or the row spells it
+`{"lo": ..., "hi": ...}` (turned into an `Interval` in `compare.py`).
 """
 
 from __future__ import annotations
@@ -37,16 +38,16 @@ from inference_endpoint.validation.sentinels import MISSING
 class Predicate:
     """One comparison's resolved operands: the subject tested against its target.
 
-    `subject` is the resolved `left`. `target` is the resolved `right`, or an
-    `Interval` for `between`. A `MISSING` `subject` means no `left` fact exists
-    at all: `Predicate(MISSING, 1)` is an absent fact where `Predicate(None, 1)`
-    is a present fact whose value is null (the absent-vs-null grid lives in that
-    distinction).
+    `subject` is the resolved `left`. `target` is the resolved `right`; a
+    range test (`in`) carries an `Interval`. A `MISSING` `subject` means no
+    `left` fact exists at all: `Predicate(MISSING, 1)` is an absent fact
+    where `Predicate(None, 1)` is a present fact whose value is null (the
+    absent-vs-null grid lives in that distinction).
 
     Args:
         subject (Any): The resolved `left`. `MISSING` when no such fact exists at
             all.
-        target (Any): The resolved `right`, or an `Interval` for `between`.
+        target (Any): The resolved `right`, or an `Interval` for a range test.
     """
 
     subject: Any
@@ -236,12 +237,15 @@ class Le(Op, name="le"):
 
 
 class In(Op, name="in"):
-    """`subject` is among `target`'s keys (mapping) or values (list).
+    """`subject` is among `target`'s keys (mapping), values (list), or range.
 
     Example:
 
         In().holds(Predicate("k", {"k": 1}))  # True: `k` is one of the mapping's keys
+        In().holds(Predicate(5, Interval(0, 10)))  # True: 5 is inside the interval
 
+    An `Interval` target is the range form; the row layer turns an `in` row's
+    `{"lo": ..., "hi": ...}` right into one before the op runs (`compare.py`).
     A string (or bytes) target refuses: `subject in "abc"` is substring
     matching, never meant (ValueError -> a `broken` verdict). Any other
     scalar target refuses the same way.
@@ -337,20 +341,6 @@ class SameMultiset(Op, name="same_multiset"):
                 else:
                     return False
             return not pool
-
-
-class Between(Op, name="between", slots=("lo", "hi")):
-    """`subject in target`, where `target` is an `Interval`.
-
-    Example:
-
-        Between().holds(Predicate(5, Interval(0, 10)))  # True
-    """
-
-    def holds(
-        self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
-    ) -> bool:
-        return predicate.subject in predicate.target
 
 
 class Exists(Op, name="exists", slots=(), needs_found=True):

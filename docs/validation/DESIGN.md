@@ -42,9 +42,10 @@ Twelve modules. Each entry is the role first, then the names you will grep for.
 
 - **`compare.py`** — the row model and the verdict boundary.
 
-  - `Compare` is the op row model (`Op`-driven arity; slots `left`/`right`/
-    `lo`/`hi`); `Aggregate` is the collection row (`__new__` measure dispatch;
-    the `Count`/`Sum`/`Mean`/`Min`/`Max`/`AnyTrue`/`AllTrue` family; slots
+  - `Compare` is the op row model (`Op`-driven arity; slots `left`/`right`; an
+    `in` range literal `{lo, hi}` resolves to an `Interval`); `Aggregate` is the
+    collection row (`__new__` measure dispatch; the
+    `Count`/`Sum`/`Mean`/`Min`/`Max`/`AnyTrue`/`AllTrue` family; slots
     `over`/`value`). `map_refs`/`operands` is the rows' `Ref`-slot API, what
     cohort-load name checking drives.
   - `_operand`/`_missing_outcome` decide how an absent fact reads: one whose
@@ -57,14 +58,12 @@ Twelve modules. Each entry is the role first, then the names you will grep for.
     `row failed to evaluate`; every failing verdict names both sides. Anything
     else propagates.
 
-- **`operations.py`** — the `Op` family (13 ops) and `Predicate`.
+- **`operations.py`** — the `Op` family (12 ops) and `Predicate`.
 
   - Ops self-register on `Op(name)` via `__new__`: `Eq`, `Ne`, `Gt`, `Ge`, `Lt`,
-    `Le`, `In`, `Matches`, `SameMultiset`, `Between`, `Exists`, `Absent`,
-    `NotNull`.
+    `Le`, `In`, `Matches`, `SameMultiset`, `Exists`, `Absent`, `NotNull`.
   - `Predicate(subject, target)` is the resolved-operand carrier; `target` is
-    the resolved `right`, or an `Interval` for `between` (whose `slots` are
-    `("lo", "hi")` — the only interval-bound consumer).
+    the resolved `right`, or the `Interval` a range test resolves to.
   - `Op.tolerant` is True on `Eq`/`Ne` only; `Compare._check_shape` rejects
     nonzero tolerances on non-tolerant ops.
 
