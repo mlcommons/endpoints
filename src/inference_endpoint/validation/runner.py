@@ -38,7 +38,8 @@ from inference_endpoint.validation.tree import Node, RuleScopes
 
 @dataclass(frozen=True)
 class Finding:
-    """One `Check`'s outcome at one applicable node (its row-Verdict plus provenance)."""
+    """One evaluated row's outcome at one applicable node: its `Verdict`, the
+    row's own label, and the check's provenance (`rule`, `fix`)."""
 
     check_id: str
     severity: Severity
@@ -46,17 +47,33 @@ class Finding:
     node_directory: Path
     verdict: Verdict
     rule: str
+    row: str = ""
+    fix: str | None = None
 
     @classmethod
     def from_check_row(
-        cls, check: Check, scope, node_directory: Path, verdict: Verdict
+        cls,
+        check: Check,
+        scope,
+        node_directory: Path,
+        verdict: Verdict,
+        row: str = "",
     ) -> Finding:
         """The `Finding` for one evaluated row.
 
         Example:
 
-            finding = Finding.from_check_row(check, RuleScopes.POINT, dir, verdict)
+            finding = Finding.from_check_row(check, RuleScopes.POINT, dir, verdict, "1 eq 2")
             finding.check_id  # check.id
+
+        Args:
+            check (Check): The check the row belongs to.
+            scope (RuleScopes | str): The check's scope (a `str` is coerced).
+            node_directory (Path): The node the row was evaluated at.
+            verdict (Verdict): The row's own verdict.
+            row (str): The row's prose label (`row.describe()`). (Default: "")
+        Returns:
+            Finding: The record with the check's `rule`/`fix` attached.
         """
         return cls(
             check_id=check.id,
@@ -65,22 +82,22 @@ class Finding:
             node_directory=node_directory,
             verdict=verdict,
             rule=check.rule,
+            row=row,
+            fix=check.fix,
         )
 
     @classmethod
     def collect(cls, cohort: Cohort, submission: Submission) -> tuple[Finding, ...]:
-        """One `Finding` per evaluated `assert` row at each `when`-applicable node (holds too).
+        """One `Finding` per evaluated `assert` row at each applicable node (holds too).
 
         A load-level check first (`_validate_*`: a submission the walk cannot
         cover, an unreadable artifact, or a fold the cohort names but the tree
         lacks is an error -- silence must never be the verdict). Then
         `_collect_candidates` validates `needs` names (unknown -> ValueError)
-        and `_GateResolver` resolves every `needs` chain per node. Row
-        `_row_findings` emits one `Finding` per row at each `when`-applicable node
-        whose chain holds -- holds and failures alike (the report side filters
-        `not verdict.ok`). `derived.<name>` rows resolve via
-        the owning `Pareto.derived()`, folded into each node's row-scope at
-        evaluation.
+        and `_GateResolver` resolves each `needs` chain per node. Each
+        (check, node) is evaluated exactly once -- the chain first (a disavowed
+        chain silences the check without evaluating anything), then its `when`,
+        then its rows -- and the same record feeds gating and `_row_findings`.
 
         A check whose own rows fail still emits its Findings. Only its
         dependents stay silent, and only at the nodes whose upstreams did not
@@ -95,11 +112,10 @@ class Finding:
         findings: list[Finding] = []
         for check in candidates:
             for node in _scope_nodes(check.scope, submission):
-                if not _when_rows_hold(check, node, submission):
+                evaluation = gate.evaluation_at(check, node)
+                if evaluation.state not in (_CheckState.HOLDS, _CheckState.FAILS):
                     continue
-                if not gate.to_run_at(check, node):
-                    continue
-                findings.extend(_row_findings(check, node, submission))
+                findings.extend(_row_findings(check, node, evaluation))
         return tuple(findings)
 
 
@@ -251,9 +267,10 @@ class _CheckState(Enum):
     `HOLDS`: its `when` applied there, its own chains vouched, every `assert`
     row held. `FAILS`: it ran there and a row failed. `NOT_APPLICABLE`: its
     `when` excluded the node -- it makes no claim there. `SILENCED`: its own
-    `needs` chain refused to vouch, so its rows never ran. Keeping "no claim"
-    and "cannot vouch" apart is what lets a `when`-gated upstream vouch exactly
-    where it speaks instead of silencing whole subtrees.
+    `needs` chain refused to vouch, so its rows never ran; a silenced check
+    disavows its own dependents in turn. Keeping "no claim" and "cannot vouch"
+    apart is what lets a `when`-gated upstream vouch exactly where it speaks
+    instead of silencing whole subtrees.
     """
 
     HOLDS = "holds"
@@ -262,53 +279,76 @@ class _CheckState(Enum):
     SILENCED = "silenced"
 
 
+@dataclass(frozen=True)
+class _Evaluation:
+    """One (check, node) evaluation: computed once, consumed by gate and report.
+
+    Gating reads `state`; `_row_findings` renders `verdicts` -- the same row
+    verdicts, so the two consumers can never disagree. `verdicts` is empty
+    unless the check actually ran here (`HOLDS`/`FAILS`).
+
+    Args:
+        state (_CheckState): The check's state at the node.
+        verdicts (tuple[Verdict, ...]): One verdict per `assert` row, in row
+            order. Empty when the check did not run here. (Default: ())
+    """
+
+    state: _CheckState
+    verdicts: tuple[Verdict, ...] = ()
+
+
 class _GateResolver:
-    """Per-(check, node) `needs` resolution over one submission, memoized.
+    """Per-(check, node) `needs` resolution and row evaluation, memoized.
 
     A check speaks at a node only where every named upstream chain **vouches**
     for it -- claims at least one node of its scope in the dependent node's
     chain-or-subtree and `HOLDS` at each (see `_chain_holds`). One `FAILS`
-    node disavows. A "no claim" (`NOT_APPLICABLE`/`SILENCED`) never vouches and
-    never disavows. A `needs` cycle is refused at load
-    (`_collect_candidates`'s DFS). The recursion trail here is the backstop.
+    node disavows, and so does a `SILENCED` one: a check whose own premises
+    refused cannot vouch for anything downstream. A `when`-gated
+    `NOT_APPLICABLE` node is no claim at all. Every (check, node) is evaluated
+    exactly once (`_evaluate`) and every consumer reads that record. A `needs`
+    cycle is refused at load (`_collect_candidates`'s DFS); the recursion trail
+    here is the backstop.
     """
 
     def __init__(self, by_id: Mapping[str, Check], submission: Submission) -> None:
         self._by_id = by_id
         self._submission = submission
-        self._memo: dict[tuple[str, str], _CheckState] = {}
+        self._memo: dict[tuple[str, str], _Evaluation] = {}
+        self._scopes: dict[str, dict[str, Any]] = {}
 
-    def to_run_at(self, check: Check, node: Node) -> bool:
-        """Whether `check`'s rows are litigated at `node`: every `needs` chain HOLDS there."""
-        return self._chain_holds(check, node, ())
+    def evaluation_at(self, check: Check, node: Node) -> _Evaluation:
+        """`check`'s one evaluation at `node` (chain, then `when`, then rows)."""
+        return self._evaluate(check, node, ())
 
     def _chain_holds(
         self, check: Check, node: Node, trail: tuple[tuple[str, str], ...]
     ) -> bool:
         """Whether every named upstream chain vouches for `node`.
 
-        An upstream vouches when it **claims** at least one node of its scope in
-        the dependent node's chain-or-subtree (`_chain_nodes`) and `HOLDS` at
-        every node where it claims: `NOT_APPLICABLE` and `SILENCED` nodes are no
-        claim at all, while one `FAILS` disavows. An empty vouch-set is no
-        vouch -- an unverified premise never passes a dependent.
+        An upstream vouches when it **claims** at least one node of its scope
+        in the dependent node's chain-or-subtree (`_chain_nodes`) and `HOLDS`
+        at every node where it claims. A `SILENCED` claim disavows like a
+        `FAILS` one -- an indirect failure must not hide behind it -- while a
+        `when`-gated `NOT_APPLICABLE` node is no claim at all. An empty
+        vouch-set is no vouch: an unverified premise never passes a dependent.
         """
         for token in check.needs:
             upstream = self._by_id[token]
             claims = [
                 state
                 for upstream_node in _chain_nodes(upstream.scope, node)
-                if (state := self._state(upstream, upstream_node, trail))
-                in (_CheckState.HOLDS, _CheckState.FAILS)
+                if (state := self._evaluate(upstream, upstream_node, trail).state)
+                in (_CheckState.HOLDS, _CheckState.FAILS, _CheckState.SILENCED)
             ]
             if not claims or any(state is not _CheckState.HOLDS for state in claims):
                 return False
         return True
 
-    def _state(
+    def _evaluate(
         self, check: Check, node: Node, trail: tuple[tuple[str, str], ...]
-    ) -> _CheckState:
-        """`check`'s state at `node`: its chain first, then its `when`, then its rows."""
+    ) -> _Evaluation:
+        """`check`'s record at `node`: chain first, then `when`, then its rows."""
         key = (check.id, str(node.dir))
         if key in self._memo:
             return self._memo[key]
@@ -316,18 +356,28 @@ class _GateResolver:
             raise ValueError(f"`needs` cycle through {check.id!r}")
         trail = (*trail, key)
         if not self._chain_holds(check, node, trail):
-            state = _CheckState.SILENCED
-        elif not _when_rows_hold(check, node, self._submission):
-            state = _CheckState.NOT_APPLICABLE
-        elif all(
-            Verdict.evaluate(row, _scopes_rows_view(node, self._submission)).ok
-            for row in check.assert_
-        ):
-            state = _CheckState.HOLDS
+            evaluation = _Evaluation(_CheckState.SILENCED)
         else:
-            state = _CheckState.FAILS
-        self._memo[key] = state
-        return state
+            scopes = self._row_scopes(node)
+            if not _when_rows_hold(check, scopes, node.dir):
+                evaluation = _Evaluation(_CheckState.NOT_APPLICABLE)
+            else:
+                verdicts = tuple(Verdict.evaluate(row, scopes) for row in check.assert_)
+                state = (
+                    _CheckState.HOLDS
+                    if all(verdict.ok for verdict in verdicts)
+                    else _CheckState.FAILS
+                )
+                evaluation = _Evaluation(state, verdicts)
+        self._memo[key] = evaluation
+        return evaluation
+
+    def _row_scopes(self, node: Node) -> dict[str, Any]:
+        """The row-resolvable scope map at `node`, built once per node."""
+        key = str(node.dir)
+        if key not in self._scopes:
+            self._scopes[key] = _scopes_rows_view(node, self._submission)
+        return self._scopes[key]
 
 
 _SCOPE_DEPTH = {
@@ -370,22 +420,19 @@ def _below(node: Node, scope: RuleScopes) -> Iterator[Node]:
 
 
 def _row_findings(
-    check: Check, node: Node, submission: Submission
+    check: Check, node: Node, evaluation: _Evaluation
 ) -> tuple[Finding, ...]:
-    """The check's `assert` rows at one `when`-applicable node, one Finding each.
+    """The check's evaluated rows at one node, one Finding each.
 
-    Emits holds and failures alike -- the report side filters `not verdict.ok`
-    for a failure summary. The audit trail keeps the record. A scalar `left`
-    row that never names a `derived.<name>` runs no derivation.
+    Consumes the record `_GateResolver` already computed: holds and failures
+    alike -- the report side filters `not verdict.ok` for a failure summary.
+    The audit trail keeps the record.
     """
     return tuple(
         Finding.from_check_row(
-            check,
-            check.scope,
-            node.dir,
-            Verdict.evaluate(row, _scopes_rows_view(node, submission)),
+            check, check.scope, node.dir, verdict, row=row.describe()
         )
-        for row in check.assert_
+        for row, verdict in zip(check.assert_, evaluation.verdicts, strict=True)
     )
 
 
@@ -431,7 +478,7 @@ def _scope_nodes(scope: RuleScopes, submission: Submission) -> tuple[Node, ...]:
     return tuple({node.dir: node for node in nodes}.values())
 
 
-def _when_rows_hold(check: Check, node: Node, submission: Submission) -> bool:
+def _when_rows_hold(check: Check, scopes: Mapping[str, Any], where: Path) -> bool:
     """Every `when` row holds at this node (a `when`-free check always applies).
 
     A `when` row that failed to *evaluate* is refused loud: an unjudgeable gate
@@ -440,14 +487,22 @@ def _when_rows_hold(check: Check, node: Node, submission: Submission) -> bool:
     the upload never declared is not unjudgeable: by schema the row does not
     hold, and `compare._missing_outcome` keeps that case distinct from an
     unjudgeable one.
+
+    Args:
+        check (Check): The check whose `when` rows gate.
+        scopes (Mapping[str, Any]): The node's row-resolvable scope map.
+        where (Path): The node's directory, for the refusal message.
+    Returns:
+        bool: Whether every `when` row holds.
+    Raises:
+        ValueError: When a `when` row cannot be evaluated.
     """
-    scopes = _scopes_rows_view(node, submission)
     for row in check.when:
         verdict = Verdict.evaluate(row, scopes)
         if verdict.broken:
             raise ValueError(
                 f"check {check.id!r}: `when` row cannot be evaluated at "
-                f"{node.dir}: {verdict.why}"
+                f"{where}: {verdict.why}"
             )
         if not verdict.ok:
             return False
