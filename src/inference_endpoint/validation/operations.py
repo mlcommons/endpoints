@@ -17,7 +17,7 @@
 
 Each op owns its operand `slots` and its `holds` test over a `Predicate`.
 An `Interval` target gives `between` natural bounds semantics
-(`5 in Interval(0, 10)` is True). Example under `Eq`.
+(`5 in Interval(0, 10)` is True).
 """
 
 from __future__ import annotations
@@ -36,11 +36,16 @@ from inference_endpoint.validation.sentinels import MISSING
 class Predicate:
     """One comparison's resolved operands: the subject tested against its target.
 
-    `subject` is the resolved `left`; `target` is the resolved `right`, or an
+    `subject` is the resolved `left`. `target` is the resolved `right`, or an
     `Interval` for `between`. A `MISSING` `subject` means no `left` fact exists
     at all: `Predicate(MISSING, 1)` is an absent fact where `Predicate(None, 1)`
     is a present fact whose value is null (the absent-vs-null grid lives in that
     distinction).
+
+    Args:
+        subject (Any): The resolved `left`. `MISSING` when no such fact exists at
+                       all.
+        target (Any): The resolved `right`, or an `Interval` for `between`.
     """
 
     subject: Any
@@ -50,20 +55,28 @@ class Predicate:
 class Op:
     """One operation: its operand slots and its test, keyed on the YAML name.
 
-        class Eq(Op, name="eq"): holds(Predicate(1.0, 1.0)) -> True
+    Subclasses register themselves on `name`. Unknown names refuse:
+    `Op("bogus")` raises ValueError, while `Op("eq")` is `Eq()`.
 
-    Subclasses register themselves on `name`. `Op("eq")` -> `Eq()` and
-    `Op("bogus")` -> ValueError. `slots` are the `Compare` fields beside `left`
-    an op fills. `needs_found` marks presence ops: their `holds` keys on
-    `predicate.subject is MISSING`.
+    Example of automatic class conversion based on name:
+
+        eq = Op("eq")  # Equivalent to Eq()
+        eq.holds(Predicate(1.0, 1.0))  # True
     """
 
+    # YAML `op` name the subclass registers under (`__init_subclass__` keyword).
     name: ClassVar[str] = ""
+    # Expectation phrase in a presence op's failure message
+    # (`expected <left> to exist, got ...`), empty for the comparison ops.
     label: ClassVar[str] = ""
+    # The `Compare` fields beside `left` that this op fills (e.g. `("lo", "hi")`).
     slots: ClassVar[tuple[str, ...]] = ("right",)
+    # Presence op (`needs_found`): `holds` keys on `predicate.subject is MISSING`.
     needs_found: ClassVar[bool] = False
+    # Tolerant op: `holds` honors `abs_tol`/`rel_tol`.
     tolerant: ClassVar[bool] = False
 
+    # `name` -> subclass, filled by `__init_subclass__`.
     registry: ClassVar[dict[str, type[Op]]] = {}
 
     def __init_subclass__(
@@ -83,7 +96,7 @@ class Op:
         cls.registry[name] = cls
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Op:
-        """`Op("eq")` -> `Eq()` (dispatch on the YAML name, like `Node`); unknown -> ValueError."""
+        """`Op("eq")` -> `Eq()` (dispatch on the YAML name, like `Node`). Unknown names raise ValueError."""
         if cls is Op:
             name = args[0] if args else kwargs.get("name")
             try:
@@ -93,26 +106,45 @@ class Op:
         return super().__new__(cls)
 
     def __init__(self, name: str | None = None) -> None:
-        """Accepts the keying name so construction stays argument-symmetric; no instance state."""
+        """Accepts the keying name so construction stays argument-symmetric. Instances hold no state."""
 
     def holds(
         self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
     ) -> bool:
-        """Whether this op holds over `predicate`; an incommensurable pair raises TypeError.
+        """Whether this op holds over `predicate`. An incommensurable pair raises TypeError.
 
-        `Eq().holds(Predicate(2, 2))` -> True.
+        Example:
+
+            Eq().holds(Predicate(2, 2))  # True
+
+        Args:
+            predicate (Predicate): The resolved `subject`/`target` pair.
+            abs_tol (float): Absolute tolerance, reaching the tolerant ops only
+                             (`Eq`/`Ne`). (Default: 0.0)
+            rel_tol (float): Relative tolerance, reaching the tolerant ops only
+                             (`Eq`/`Ne`). (Default: 0.0)
+        Returns:
+            bool: Whether the op's test holds over `predicate`.
+        Raises:
+            TypeError: On a non-tolerant ordering op over an incommensurable
+                       pair (e.g. `Gt` over a string and a number): fail loud.
         """
         raise NotImplementedError
 
 
 def vet_pattern(pattern: str) -> None:
-    """Compile-check a `matches` regex at load; an uncompilable one raises ValueError.
+    """Compile-check a `matches` regex at load. An uncompilable one raises ValueError.
 
     Patterns are literal, cohort-authored strings (`Compare._check_shape`
     refuses resolved operands), so vetting happens once at load where
     `_load_check` names the offending file -- a malformed pattern must never
     reach `re.fullmatch` mid-run (its `re.error` is not even a `ValueError`,
     so it would escape the verdict boundary as a run-aborting surprise).
+
+    Args:
+        pattern (str): The literal regex a `matches` row declares.
+    Raises:
+        ValueError: When the pattern does not compile (the `re.error` re-raised).
     """
     try:
         re.compile(pattern)
@@ -123,12 +155,21 @@ def vet_pattern(pattern: str) -> None:
 def _close_to(
     left: Any, right: Any, abs_tol: float = 0.0, rel_tol: float = 0.0
 ) -> bool:
-    """`math.isclose` for a number pair under tolerance; `==` for every other pair.
+    """`math.isclose` for a number pair under tolerance. `==` for every other pair.
 
     Integer pairs compare exactly, tolerances honored in integer arithmetic
     (`math.isclose`'s float coercion conflates distinct integers above 2^53).
     Ordering has no tolerance semantics (no standard meaning of an ordered
     comparison under `abs_tol`): those ops do not reach here.
+
+    Args:
+        left (Any): One side of the comparison (the `subject`).
+        right (Any): The other side (the `target`).
+        abs_tol (float): Absolute tolerance. (Default: 0.0)
+        rel_tol (float): Relative tolerance. (Default: 0.0)
+    Returns:
+        bool: Whether the pair is equal within tolerance. A non-number pair
+              falls back to plain `==`.
     """
     if abs_tol == 0.0 and rel_tol == 0.0:
         return left == right
@@ -158,7 +199,7 @@ class Ne(Op, name="ne", tolerant=True):
 
 
 class Gt(Op, name="gt"):
-    """`subject > target`; an incommensurable pair raises TypeError (fail loud)."""
+    """`subject > target`. An incommensurable pair raises TypeError (fail loud)."""
 
     def holds(
         self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
@@ -167,7 +208,7 @@ class Gt(Op, name="gt"):
 
 
 class Ge(Op, name="ge"):
-    """`subject >= target`; an incommensurable pair raises TypeError (fail loud)."""
+    """`subject >= target`. An incommensurable pair raises TypeError (fail loud)."""
 
     def holds(
         self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
@@ -176,7 +217,7 @@ class Ge(Op, name="ge"):
 
 
 class Lt(Op, name="lt"):
-    """`subject < target`; an incommensurable pair raises TypeError (fail loud)."""
+    """`subject < target`. An incommensurable pair raises TypeError (fail loud)."""
 
     def holds(
         self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
@@ -185,7 +226,7 @@ class Lt(Op, name="lt"):
 
 
 class Le(Op, name="le"):
-    """`subject <= target`; an incommensurable pair raises TypeError (fail loud)."""
+    """`subject <= target`. An incommensurable pair raises TypeError (fail loud)."""
 
     def holds(
         self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
@@ -196,7 +237,9 @@ class Le(Op, name="le"):
 class In(Op, name="in"):
     """`subject` is among `target`'s keys (mapping) or values (list).
 
-    `In().holds(Predicate("k", {"k": 1}))` -> True.
+    Example:
+
+        In().holds(Predicate("k", {"k": 1}))  # True: `k` is one of the mapping's keys
     """
 
     def holds(
@@ -213,8 +256,10 @@ class In(Op, name="in"):
 class Matches(Op, name="matches"):
     """`subject` is a string fully matching the regex `target`.
 
-    `Matches().holds(Predicate("r16", "r[0-9]+"))` -> True;
-    the number 5 gives False: not a string, so no match.
+    Example:
+
+        Matches().holds(Predicate("r16", "r[0-9]+"))  # True
+        Matches().holds(Predicate(5, "r[0-9]+"))  # False: not a string, so no match
     """
 
     def holds(
@@ -227,9 +272,9 @@ class Matches(Op, name="matches"):
 
 
 class SameMultiset(Op, name="same_multiset"):
-    """`[1, 2, 2]` matches `[2, 1, 2]`; `[1]` does not match `[1, 1]`.
+    """`[1, 2, 2]` matches `[2, 1, 2]`. `[1]` does not match `[1, 1]`.
 
-    Unordered, multiplicity-respecting equality; hashable elements pair in
+    Unordered, multiplicity-respecting equality. Hashable elements pair in
     linear time via counts, unhashable ones fall back to an `==` scanning pool
     so crafted large lists stay bounded work. A non-`Sequence` pair degrades to
     plain `==`.
@@ -260,7 +305,9 @@ class SameMultiset(Op, name="same_multiset"):
 class Between(Op, name="between", slots=("lo", "hi")):
     """`subject in target`, where `target` is an `Interval`.
 
-    `Between().holds(Predicate(5, Interval(0, 10)))` -> True.
+    Example:
+
+        Between().holds(Predicate(5, Interval(0, 10)))  # True
     """
 
     def holds(
