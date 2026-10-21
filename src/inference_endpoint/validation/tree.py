@@ -17,8 +17,8 @@
 
 `SubmissionNode.from_directory("submission/acme")` walks
 `results/<system>/<model>/r<N>/` into nodes whose class follows the node kind
-(`PointNode`, `CurveNode`, ...; each subclass registers under its `RuleScopes`
-kind and `Node(...)` construction picks it). Every artifact is parsed once at
+(`PointNode`, `ParetoNode`, ...). Each subclass registers under its `RuleScopes`
+kind and `Node(...)` construction picks it. Every artifact is parsed once at
 construction, so nothing re-reads disk while checks run. `node.scopes()` is
 what `Ref.resolve` reads.
 """
@@ -50,12 +50,12 @@ _POINT_DIR_PATTERN = re.compile(r"r(\d+)")
 class RuleScopes(str, Enum):  # noqa: UP042 - repository wire-enum convention
     """The scopes a check condition can address, as `Ref` roots and node kinds.
 
-    `point` -> the run directory; `curve`, `system`, `submission` likewise.
+    `point` -> the run directory. `pareto`, `system`, `submission` likewise.
     """
 
     SUBMISSION = "submission"
     SYSTEM = "system"
-    CURVE = "curve"
+    PARETO = "pareto"
     POINT = "point"
 
 
@@ -113,7 +113,22 @@ class Node:
     """One directory of the tree: what it is, where it is, who contains it.
 
     Constructing `Node(kind, dir, parent)` yields the subclass registered for
-    `kind`; construction parses the node's artifacts once into `artifacts`.
+    `kind`. Construction parses the node's artifacts once into `artifacts`.
+
+    Args:
+        kind (RuleScopes): What the directory is. `Node(...)` construction resolves
+            the subclass through this `registry` key.
+        dir (Path): Where the directory is.
+        parent (Node | None): Who contains it. `None` at the upload root.
+            (Default: None)
+        children (tuple[Node, ...]): The nodes below it, each with their own subtree.
+            (Default: ())
+        artifacts (dict[str, tuple[Any, str | None]]): Each `FILE_TO_KEY_MAP`
+            artifact present: name -> its parsed `(value, error)` pair. (Default: {})
+        ruleset (Catalog | None): The `ruleset` fold `scopes()` exposes. The root
+            node holds it when the submission was built with one. (Default: None)
+        regions (Regions | None): The `regions` fold `scopes()` exposes. Each pareto
+            node latches its own. (Default: None)
     """
 
     registry: ClassVar[
@@ -147,28 +162,37 @@ class Node:
                 self.artifacts[name] = (value, error)
 
     def root(self) -> Node:
-        """The tree's root node; it carries the `ruleset`/`regions` folds."""
+        """The tree's root node. It carries the `ruleset` fold (see `regions`)."""
         node: Node = self
         while node.parent is not None:
             node = node.parent
         return node
 
     def read(self, name: str) -> tuple[Any, str | None]:
-        """(value, error) of the artifact `name` of this node; `MISSING` when absent.
+        """(value, error) of the artifact `name` of this node. `MISSING` when absent.
 
-        `result_summary.json` -> ({"n": 1}, None); absent -> (MISSING, None);
-        unparsable or oversized -> (None, "<name> parse error: ...").
+        Args:
+            name (str): The artifact's file name, one of the
+                `FILE_TO_KEY_MAP` keys.
+        Returns:
+            tuple[Any, str | None]: `result_summary.json` -> ({"n": 1}, None).
+                Absent -> (MISSING, None). Unparsable or oversized -> (None, "<name>
+                parse error: ...").
         """
         return self.artifacts.get(name, (MISSING, None))
 
     def scopes(self) -> dict[str, dict[str, Any]]:
-        """Per-node field mappings; what `Ref.resolve` in `compare.py` reads.
+        """Per-node field mappings that `Ref.resolve` in `compare.py` reads.
 
-        For a `point` holding only `result_summary.json` -> `{"point":
-        {"result_summary": {"n": 1}}, "curve": {}, "system": {}, "submission":
-        {}}`; its ancestors contribute their own fields, an artifactless node
-        just `{}`. The `ruleset` root holds `Catalog.scopes()` when the
-        submission was built with one.
+        Returns:
+            dict[str, dict[str, Any]]: For a `point` holding only `result_summary.json`
+                ->
+                `{"point": {"result_summary": {"n": 1}}, "pareto": {}, "system": {}, "submission": {}}`.
+                Its ancestors contribute their own fields, an artifactless node just
+                `{}`. The `ruleset` root holds `Catalog.scopes()` when the submission
+                was built with one. The `regions` fold rides the nearest ancestor that
+                carries one (each pareto node latches its own, so the fold is
+                per-pareto. Nodes above every pareto resolve no `regions`).
         """
         scopes: dict[str, dict[str, Any]] = {}
         node: Node | None = self
@@ -186,22 +210,25 @@ class Node:
         root = self.root()
         if root.ruleset is not None:
             scopes["ruleset"] = root.ruleset.scopes()
-        if root.regions is not None:
+        fold: Node | None = self
+        while fold is not None and fold.regions is None:
+            fold = fold.parent
+        if fold is not None and fold.regions is not None:
             scopes["regions"] = {
-                "coverage": root.regions.coverage(),
+                "coverage": fold.regions.coverage(),
                 "by_kind": {
-                    RegionKind.LOW_LATENCY: root.regions.low_latency,
-                    RegionKind.LOW_CONCURRENCY: root.regions.low_concurrency,
-                    RegionKind.MED_CONCURRENCY: root.regions.med_concurrency,
-                    RegionKind.HIGH_CONCURRENCY: root.regions.high_concurrency,
-                    RegionKind.MARGIN: root.regions.margin,
+                    RegionKind.ULTRA_LOW_CONCURRENCY: fold.regions.low_latency,
+                    RegionKind.LOW_CONCURRENCY: fold.regions.low_concurrency,
+                    RegionKind.MED_CONCURRENCY: fold.regions.med_concurrency,
+                    RegionKind.HIGH_CONCURRENCY: fold.regions.high_concurrency,
+                    RegionKind.MARGIN: fold.regions.margin,
                 },
             }
         return scopes
 
 
 class SubmissionNode(Node, kind=RuleScopes.SUBMISSION):
-    """The upload root; entry point via `from_directory`."""
+    """The upload root. Entry point via `from_directory`."""
 
     @classmethod
     def from_directory(
@@ -212,10 +239,19 @@ class SubmissionNode(Node, kind=RuleScopes.SUBMISSION):
     ) -> Node:
         """The `submission` node for `root`, with `results/<system>/<model>/r<N>` below.
 
-        `submission/acme` -> that submission's tree. A path that is not a
-        directory raises NotADirectoryError (a load problem, not a report).
-        `ruleset` (a `Catalog`) becomes the `ruleset` root of `Ref.resolve`
-        and `regions` (a `Regions`) its `regions` root.
+        Args:
+            root (Path): The upload root. `submission/acme` -> that submission's
+                tree.
+            ruleset (Catalog | None): The `ruleset` root of `Ref.resolve`: a
+                `Catalog`, or `None` for no `ruleset` fold. (Default: None)
+            regions (Regions | None): The `regions` root of `Ref.resolve`: a
+                `Regions`, or `None` for no `regions` fold. (Default: None)
+        Returns:
+            Node: The `submission` node, with its `results/<system>/<model>/r<N>`
+                tree walked.
+        Raises:
+            NotADirectoryError: When `root` is not a directory (a load problem, not
+                a report).
         """
         if not root.is_dir():
             raise NotADirectoryError(root)
@@ -230,22 +266,30 @@ class SystemNode(Node, kind=RuleScopes.SYSTEM):
     """`results/<system>/`, where `system_power.json` and the curves live."""
 
 
-class CurveNode(Node, kind=RuleScopes.CURVE):
-    """`results/<system>/<model>/`, holding the `r<N>` points of one curve."""
+class ParetoNode(Node, kind=RuleScopes.PARETO):
+    """`results/<system>/<model>/`, holding the `r<N>` points of one pareto."""
 
 
 class PointNode(Node, kind=RuleScopes.POINT):
     """`results/<system>/<model>/r<N>/`, one measured run."""
 
 
-_BRANCH = {RuleScopes.SYSTEM: RuleScopes.CURVE, RuleScopes.CURVE: RuleScopes.POINT}
+_BRANCH = {RuleScopes.SYSTEM: RuleScopes.PARETO, RuleScopes.PARETO: RuleScopes.POINT}
 
 
 def _walk(parent: Node, kind: RuleScopes, where: Path) -> tuple[Node, ...]:
     """`parent`'s children of `kind` below `where`, each with their own subtree.
 
-    Points are `r<N>` directories; other kinds take every directory that
+    Points are `r<N>` directories. Other kinds take every directory that
     resolves inside the submission (a symlinked directory out of it is skipped).
+
+    Args:
+        parent (Node): The node whose children are walked.
+        kind (RuleScopes): Which child kind to take.
+        where (Path): The directory the children are listed under.
+    Returns:
+        tuple[Node, ...]: The children of `kind`, sorted by name, each with their
+            own subtree below it.
     """
     children = []
     for entry in sorted(
@@ -273,13 +317,19 @@ def _walk(parent: Node, kind: RuleScopes, where: Path) -> tuple[Node, ...]:
 
 
 def _read_artifact(directory: Path, name: str) -> tuple[Any, str | None]:
-    """(value, error) of `name` in `directory`; nothing here aborts the run.
+    """(value, error) of `name` in `directory`. Nothing here aborts the run.
 
-    Present and null -> (None, None); absent -> (MISSING, None); unreadable,
-    oversized or unparsable -> (None, "<name> parse error: ..."). The channel
-    is fd-anchored: the node's directory is opened `O_NOFOLLOW` and the
-    artifact named relative to that fd, so neither a symlinked artifact nor a
-    directory swapped mid-walk can redirect a read out of the submission.
+    The channel is fd-anchored: the node's directory is opened `O_NOFOLLOW` and
+    the artifact named relative to that fd, so neither a symlinked artifact nor
+    a directory swapped mid-walk can redirect a read out of the submission.
+
+    Args:
+        directory (Path): The node's directory.
+        name (str): The artifact's file name.
+    Returns:
+        tuple[Any, str | None]: Present and null -> (None, None). Absent ->
+            (MISSING, None). Unreadable, oversized or unparsable -> (None, "<name> parse
+            error: ...").
     """
     try:
         dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -331,6 +381,15 @@ def _json_object_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
     Without this, `{"n_errors": 12, "n_errors": 0}` last-wins to `0` on the
     artifacts carrying the compliance numbers.
+
+    Args:
+        pairs (list[tuple[str, Any]]): An object's key-value pairs, in document
+            order, as `json.loads` hands them to the hook.
+    Returns:
+        dict[str, Any]: The object as a mapping, its keys in first-seen order.
+    Raises:
+        ValueError: When a key repeats, naming the duplicate: the report's
+            compliance numbers must not last-win.
     """
     out: dict[str, Any] = {}
     for key, value in pairs:
