@@ -53,7 +53,8 @@ class Catalog:
             NotADirectoryError: When `root` is not a directory.
             FileNotFoundError: When `models.yaml` or `datasets.yaml` is missing:
                 the ruleset is incomplete without its catalog.
-            ValueError: When a document is not a mapping: a load error too.
+            ValueError: When a document does not parse or is not a mapping: a
+                load error, refused like every other bad cohort input.
         """
         if not root.is_dir():
             raise NotADirectoryError(root)
@@ -68,9 +69,18 @@ class Catalog:
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:
-    """That file's top-level mapping. A non-mapping document is a load error."""
+    """That file's top-level mapping. A malformed document is a load error.
+
+    Raises:
+        ValueError: When the document does not parse (a YAML error is a
+            refusal, not a traceback escaping the CLI) or does not hold a
+            mapping.
+    """
     text = path.read_text(encoding="utf-8")
-    value = yaml.load(text, Loader=StrictLoader)
+    try:
+        value = yaml.load(text, Loader=StrictLoader)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path.name} is not a catalog: {exc}") from exc
     if not isinstance(value, dict):
         raise ValueError(f"{path.name} must hold a mapping, got {type(value).__name__}")
     return value
