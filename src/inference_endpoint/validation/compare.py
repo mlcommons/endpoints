@@ -230,7 +230,7 @@ def _finite(value: Any, where: str) -> Any:
 
 
 class Compare(BaseModel):
-    """One condition row: `op` applied to `left` and (per op) `right`/`lo`/`hi`.
+    """One condition row: `op` applied to `left` and the operands the op takes.
 
     A YAML row this decodes from, inside a check's `when` or `assert` block:
 
@@ -239,11 +239,11 @@ class Compare(BaseModel):
             op: eq
             right: point.result_summary.n_samples_issued
 
-    Arity follows the op (`Op.slots` in `operations.py`):
-
-    - `exists`, `absent` and `not_null` take `left` alone.
-    - `between` takes `lo` and `hi`.
-    - The rest take `right`.
+    Arity follows the op (`Op.slots` in `operations.py`): `exists`, `absent`
+    and `not_null` take `left` alone, every other op takes `right`. An `in`
+    row may spell `right` as an inclusive `{"lo": ..., "hi": ...}` range
+    literal; the bounds are literals (a dynamic range names a fold that
+    yields an `Interval`, e.g. `regions.coverage`).
 
     A `right` given at all to a left-only op is a shape error.
     `abs_tol`/`rel_tol` reach `eq` and `ne` only.
@@ -253,10 +253,9 @@ class Compare(BaseModel):
             (`operations.py`).
         left (Any): The compared operand, or the `Ref` whose presence a
             presence op asks about (`exists`/`absent`/`not_null`).
-        right (Any | None): The compare target of every op whose slots take it.
+        right (Any | None): The compare target of every op whose slots take it,
+            or an `in` row's inclusive `{"lo": ..., "hi": ...}` range literal.
             (Default: None)
-        lo (Any | None): The lower bound of a `between` row. (Default: None)
-        hi (Any | None): The upper bound of a `between` row. (Default: None)
         abs_tol (float): Absolute tolerance, reaching `eq`/`ne` only.
             (Default: 0.0)
         rel_tol (float): Relative tolerance, reaching `eq`/`ne` only.
@@ -268,8 +267,6 @@ class Compare(BaseModel):
     op: str
     left: Operand
     right: Operand | None = None
-    lo: Operand | None = None
-    hi: Operand | None = None
     abs_tol: float = 0.0
     rel_tol: float = 0.0
 
@@ -311,7 +308,7 @@ class Compare(BaseModel):
         # a literal null is legal), so arity is decided by field presence.
         op = self._operation()
         want = set(op.slots)
-        used = {name for name in ("right", "lo", "hi") if name in self.model_fields_set}
+        used = {"right"} if "right" in self.model_fields_set else set()
         if used != want:
             raise ValueError(f"`{self.op}` takes `left` plus {sorted(want) or 'none'}")
         if op.needs_found and not isinstance(self.left, Ref):
@@ -337,11 +334,27 @@ class Compare(BaseModel):
         """
         return Op(self.op)
 
+    def _range_bounds(self) -> tuple[Any, Any] | None:
+        """The `{lo, hi}` bounds of an `in` range literal, or None elsewhere.
+
+        Only `in` reads this form. Every other mapping (and every other op)
+        keeps the ordinary key-set meaning, so `in` over `{"k": 1}` still asks
+        whether `left` is one of `k`'s keys. The bounds are literals, never
+        references: a dynamic range names a fold that yields an `Interval`.
+        """
+        right = self.right
+        if self.op != "in" or not isinstance(right, Mapping):
+            return None
+        if set(right) != {"lo", "hi"}:
+            return None
+        return right["lo"], right["hi"]
+
     def _outcome(self, scopes: Mapping[str, Any]) -> tuple[bool, str]:
         """(held, why): presence rows read `left` directly. The rest compare operands.
 
         A missing reference fails the row (its `why` names it) except where the
-        op asks about presence itself. `_show` bounds each failing value.
+        op asks about presence itself; an `in` range literal resolves its
+        bounds into an `Interval`. `_show` bounds each failing value.
 
         Args:
             scopes (Mapping[str, Any]): The node's scoped fields, one mapping per
@@ -365,7 +378,9 @@ class Compare(BaseModel):
 
         out: list[Any] = []
         missing: list[Ref] = []
-        for side in (self.left, self.right, self.lo, self.hi):
+        bounds = self._range_bounds()
+        sides = (self.left, self.right, *bounds) if bounds else (self.left, self.right)
+        for side in sides:
             if isinstance(side, Ref):
                 found, value = _operand(side, scopes)
                 out.append(value)
@@ -375,56 +390,59 @@ class Compare(BaseModel):
                 out.append(side)
         if missing:
             return _missing_outcome(missing)
-        raw_left, raw_right, raw_lo, raw_hi = out
+        raw_left, raw_right, *raw_bounds = out
         left = _finite(raw_left, str(self.left))
         right = _finite(raw_right, str(self.right))
-        lo = _finite(raw_lo, str(self.lo))
-        hi = _finite(raw_hi, str(self.hi))
-        if op.slots == ("lo", "hi"):
+        if bounds:
+            lo, hi = (
+                _finite(value, str(side))
+                for value, side in zip(raw_bounds, bounds, strict=False)
+            )
             if lo is None or hi is None:
                 raise ValueError(
-                    f"`between` bounds must both be values, got {self.lo}..{self.hi}"
+                    f"`in` range bounds must both be values, got "
+                    f"{bounds[0]}..{bounds[1]}"
                 )
-            predicate = Predicate(left, Interval(lo, hi))
-        else:
-            predicate = Predicate(left, right)
+            right = Interval(lo, hi)
+        predicate = Predicate(left, right)
         held = op.holds(predicate, self.abs_tol, self.rel_tol)
         if held:
             return True, ""
-        # The message's operand form follows the row's slots: a literal `None`
-        # on `right` is a real operand, never the interval placeholder.
-        if op.slots == ("lo", "hi"):
-            target: Any = f"{self.lo}..{self.hi}"
-        else:
-            target = self.right
+        if bounds:
+            return False, (
+                f"expected {self.left} {self.op} {bounds[0]}..{bounds[1]}, "
+                f"got {_show(left)}"
+            )
         return False, (
-            f"expected {self.left} {self.op} {target}, "
+            f"expected {self.left} {self.op} {self.right}, "
             f"got {_show(left)} vs {_show(right)}"
         )
 
     def describe(self) -> str:
-        """The row as prose: `left op right`, `left between lo..hi`, or `left op`.
+        """The row as prose: `left op right`, `left in lo..hi`, or `left op`.
 
         The row label every boundary message reuses: one shape per row kind, so
         a message never reaches for fields a row does not have.
 
         Returns:
-            str: The row's operand form, per its op's slots.
+            str: The row's operand form, per its op's slots and range literal.
         """
         op = self._operation()
-        if op.slots == ("lo", "hi"):
-            return f"{_show(self.left)} {self.op} {_show(self.lo)}..{_show(self.hi)}"
+        bounds = self._range_bounds()
+        if bounds:
+            lo, hi = (_show(bound) for bound in bounds)
+            return f"{_show(self.left)} {self.op} {lo}..{hi}"
         if op.slots == ():
             return f"{_show(self.left)} {self.op}"
         return f"{_show(self.left)} {self.op} {_show(self.right)}"
 
     def operands(self) -> tuple[Any, ...]:
         """Every operand this row resolves. Its `Ref`s live among them."""
-        return (self.left, self.right, self.lo, self.hi)
+        return (self.left, self.right)
 
     def map_refs(self, fn: Callable[[Ref], Ref]) -> None:
         """Rewrite each `Ref` operand through `fn` (cohort-load name checking)."""
-        _rewrite_refs(self, ("left", "right", "lo", "hi"), fn)
+        _rewrite_refs(self, ("left", "right"), fn)
 
 
 class Aggregate(BaseModel):

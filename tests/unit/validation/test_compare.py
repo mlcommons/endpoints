@@ -39,6 +39,7 @@ from inference_endpoint.validation.operations import (
     Predicate,
     SameMultiset,
 )
+from inference_endpoint.validation.ranges import Interval
 from inference_endpoint.validation.refs import Ref, RefTable
 from submission_helpers import STANDARD_REFS
 
@@ -201,7 +202,7 @@ class TestMapRefs:
         assert row.left.required is True
         assert row.right == 32
         assert isinstance(row.right, int) and not isinstance(row.right, bool)
-        assert row.operands() == (row.left, 32, None, None)
+        assert row.operands() == (row.left, 32)
 
 
 class TestResolve:
@@ -333,10 +334,9 @@ class TestCompareShape:
             ({"op": "eq", "left": 1, "right": 1}, False),
             (
                 {
-                    "op": "between",
+                    "op": "in",
                     "left": "point.result_summary.tps",
-                    "lo": 0,
-                    "hi": 1,
+                    "right": {"lo": 0, "hi": 1},
                 },
                 True,
             ),
@@ -353,7 +353,6 @@ class TestCompareShape:
         [
             {"op": "exists", "left": "point.x", "right": 1},
             {"op": "eq", "left": "point.x"},
-            {"op": "between", "left": "point.x", "lo": 0},
         ],
     )
     def test_wrong_arity_is_rejected(self, kwargs):
@@ -395,19 +394,17 @@ class TestCompareVerdict:
             ({"op": "in", "left": "k", "right": {"k": 1}}, True),
             (
                 {
-                    "op": "between",
+                    "op": "in",
                     "left": "point.result_summary.tps",
-                    "lo": 0,
-                    "hi": 100,
+                    "right": {"lo": 0, "hi": 100},
                 },
                 True,
             ),
             (
                 {
-                    "op": "between",
+                    "op": "in",
                     "left": "point.result_summary.tps",
-                    "lo": "point.result_summary.n_samples_failed",
-                    "hi": 20,
+                    "right": {"lo": 0, "hi": 10},
                 },
                 False,
             ),
@@ -479,7 +476,10 @@ class TestCompareVerdict:
 
     @pytest.mark.unit
     def test_describe_labels_follow_the_row_shape(self):
-        assert _compare(op="between", left=1, lo=0, hi=2).describe() == "1 between 0..2"
+        assert (
+            _compare(op="in", left=1, right={"lo": 0, "hi": 2}).describe()
+            == "1 in 0..2"
+        )
         assert _compare(op="exists", left="point.x").describe() == "point.x exists"
         assert _compare(op="eq", left=1, right=2).describe() == "1 eq 2"
 
@@ -793,12 +793,27 @@ class TestHostileValues:
         assert "non-finite" in verdict.why
 
     @pytest.mark.unit
-    def test_between_with_a_null_bound_is_broken_not_unbounded(self):
+    def test_in_range_with_a_null_bound_is_broken_not_unbounded(self):
         verdict = Verdict.evaluate(
-            _compare(op="between", left=1, lo=1, hi=None), SCOPES
+            _compare(op="in", left=1, right={"lo": 1, "hi": None}), SCOPES
         )
         assert verdict.broken
         assert "bounds" in verdict.why
+
+    @pytest.mark.unit
+    def test_in_over_an_interval_value_tests_membership(self):
+        inside = _compare(op="in", left=5, right=Interval(0, 10))
+        assert Verdict.evaluate(inside, SCOPES).ok is True
+        outside = _compare(op="in", left=5, right=Interval(6))
+        assert Verdict.evaluate(outside, SCOPES).ok is False
+
+    @pytest.mark.unit
+    def test_in_with_a_lo_hi_literal_is_a_range_not_a_key_set(self):
+        # Exactly `{lo, hi}` is a range; any other mapping keeps key membership.
+        literal = _compare(op="in", left="lo", right={"lo": 1, "hi": 2})
+        assert Verdict.evaluate(literal, SCOPES).ok is False
+        keys = _compare(op="in", left="lo", right={"lo": 1, "hi": 2, "x": 3})
+        assert Verdict.evaluate(keys, SCOPES).ok is True
 
     @pytest.mark.unit
     def test_in_against_a_string_target_is_broken(self):
