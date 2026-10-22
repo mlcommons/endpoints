@@ -15,6 +15,7 @@
 
 """Integration tests for benchmark commands against echo server."""
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -268,11 +269,21 @@ class TestBenchmarkCommandIntegration:
 
     @pytest.mark.integration
     def test_cli_run_dispatches_main_run_before_audit(
-        self, mock_http_echo_server, ds_dataset_path, tmp_path, monkeypatch
+        self, mock_http_echo_server_factory, ds_dataset_path, tmp_path, monkeypatch
     ):
         """cli._run must dispatch the main benchmark run before the audit
         (upstream MLPerf order)."""
         from inference_endpoint.commands.benchmark import cli
+
+        # Pace every response so the audit's five-query QPS comparison is not
+        # dominated by connection-setup jitter. Without a floor per request, the
+        # reference phase (which pays the cold connections) can measure half the
+        # audit phase's QPS and spuriously trip TEST04's caching threshold.
+        async def _slow_handler(request):
+            await asyncio.sleep(0.05)
+            return None
+
+        echo_server = mock_http_echo_server_factory(_slow_handler)
 
         config = BenchmarkConfig(
             type=TestType.OFFLINE,
@@ -283,7 +294,7 @@ class TestBenchmarkCommandIntegration:
                 sample_index=0,
                 threshold=0.9,
             ),
-            endpoint_config=EndpointConfig(endpoints=[mock_http_echo_server.url]),
+            endpoint_config=EndpointConfig(endpoints=[echo_server.url]),
             model_params=ModelParams(name="echo-server", streaming=StreamingMode.OFF),
             datasets=[Dataset(path=ds_dataset_path, type=DatasetType.PERFORMANCE)],
             settings=Settings(

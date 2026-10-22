@@ -91,11 +91,8 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 
     num_workers: Annotated[
         int,
-        cyclopts.Parameter(
-            alias=["--workers", "--num-workers"],
-            help="Worker processes (-1=auto)",
-        ),
-    ] = Field(-1, ge=-1)
+        cyclopts.Parameter(alias=["--workers", "--num-workers"]),
+    ] = Field(-1, ge=-1, description="Worker processes (-1=auto)")
 
     log_level: str = Field("INFO", description="Worker log level")
 
@@ -139,13 +136,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # pooled-connection reuse path never touches it.
     max_concurrent_warmup_connects: Annotated[
         int,
-        cyclopts.Parameter(
-            alias="--max-concurrent-warmup-connects",
-            help=(
-                "Max in-flight connection establishments per worker pool "
-                "(paces the warmup stampede AND on-demand pool growth)"
-            ),
-        ),
+        cyclopts.Parameter(alias="--max-concurrent-warmup-connects"),
     ] = Field(
         128,
         ge=1,
@@ -164,10 +155,8 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     #   - -1: unlimited (bound by system ephemeral_port_limit)
     max_connections: Annotated[
         int,
-        cyclopts.Parameter(
-            alias="--max-connections", help="Max TCP connections (-1=unlimited)"
-        ),
-    ] = Field(-1, ge=-1)
+        cyclopts.Parameter(alias="--max-connections"),
+    ] = Field(-1, ge=-1, description="Max TCP connections (-1=unlimited)")
 
     # Transport configuration
     transport: AnyTransportConfig = Field(
@@ -201,10 +190,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # Set to True to skip certificate verification (e.g. self-signed certs).
     insecure: Annotated[
         bool,
-        cyclopts.Parameter(
-            alias="--insecure",
-            help="Skip TLS certificate verification",
-        ),
+        cyclopts.Parameter(alias="--insecure"),
     ] = Field(False, description="Skip TLS certificate verification")
 
     # Connection idle timeout - discard connections idle longer than this.

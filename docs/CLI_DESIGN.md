@@ -220,15 +220,21 @@ Annotate the schema field — zero CLI code changes:
 class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     buffer_size: Annotated[
         int,
-        cyclopts.Parameter(alias="--buffer-size", help="Socket buffer size"),
-    ] = 4096
+        cyclopts.Parameter(alias="--buffer-size"),
+    ] = Field(4096, description="Socket buffer size")
     # → --client.buffer-size AND --buffer-size
 ```
+
+Help text comes from `Field(description=...)`: cyclopts uses it for `--help`,
+and `scripts/regenerate_templates.py` copies it into the YAML template comment.
+Setting `cyclopts.Parameter(help=...)` as well would give the two surfaces
+separate copies of the same sentence and let them drift apart.
 
 ### Flag generation rules
 
 - Dotted paths auto-generated in kebab-case from model hierarchy
 - Shorthands explicit via `cyclopts.Parameter(alias=...)`
+- Help text from `Field(description=...)` — not `cyclopts.Parameter(help=...)`
 - Booleans get `--no-` negation
 - `show=False` hides from `--help`
 

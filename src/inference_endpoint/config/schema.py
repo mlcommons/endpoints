@@ -281,7 +281,7 @@ class ModelParams(BaseModel):
     seed: Annotated[
         int | None,
         cyclopts.Parameter(
-            alias="--seed", help="Random seed for reproducible sampling"
+            alias="--seed",
         ),
     ] = Field(None, description="Random seed for reproducible sampling")
     top_k: int | None = Field(None, description="Top-K sampling")
@@ -749,14 +749,13 @@ class WarmupConfig(BaseModel):
     enabled: Annotated[
         bool,
         cyclopts.Parameter(
-            alias="--warmup", help="Enable warmup phase before performance run"
+            alias="--warmup",
         ),
     ] = Field(False, description="Enable warmup phase before performance run")
     n_requests: Annotated[
         int | None,
         cyclopts.Parameter(
             alias="--warmup-requests",
-            help="Warmup request count (None = full dataset once)",
         ),
     ] = Field(None, gt=0, description="Warmup request count (None = full dataset once)")
     salt: Annotated[
@@ -774,7 +773,6 @@ class WarmupConfig(BaseModel):
         bool,
         cyclopts.Parameter(
             name="--warmup-drain",
-            help="Drain in-flight warmup requests before starting the performance phase",
         ),
     ] = Field(
         False,
@@ -784,7 +782,6 @@ class WarmupConfig(BaseModel):
         int,
         cyclopts.Parameter(
             alias="--warmup-seed",
-            help="RNG seed for warmup scheduling and sample ordering",
         ),
     ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
 
@@ -884,7 +881,6 @@ class ProfilingConfig(BaseModel):
         ProfilerEngine | None,
         cyclopts.Parameter(
             alias="--profile",
-            help="Profile the named inference engine around the performance phase",
         ),
     ] = Field(
         None,
@@ -894,8 +890,6 @@ class ProfilingConfig(BaseModel):
         list[str] | None,
         cyclopts.Parameter(
             alias="--profile-urls",
-            help="Override URL(s) for profiler triggers; "
-            "defaults to endpoint_config.endpoints",
             negative="",
         ),
     ] = Field(
@@ -938,9 +932,11 @@ class EarlyStoppingConfig(BaseModel):
         bool,
         cyclopts.Parameter(
             alias="--early-stopping",  # --no-early-stopping is the meaningful opt-out
-            help="Report MLPerf early-stopping percentile estimates for TTFT/TPOT/latency",
         ),
-    ] = Field(True, description="Early-stopping percentile estimates (default on)")
+    ] = Field(
+        True,
+        description="Report MLPerf early-stopping percentile estimates for TTFT/TPOT/latency (default on)",
+    )
 
 
 @cyclopts.Parameter(name="*")
@@ -967,9 +963,10 @@ class SteadyStateConfig(BaseModel):
         # single-field option models.
         cyclopts.Parameter(
             name="--steady-state",
-            help="Detect the run's steady window and report it",
         ),
-    ] = Field(False, description="Steady-state window detection (default off)")
+    ] = Field(
+        False, description="Detect the run's steady window and report it (default off)"
+    )
 
 
 @cyclopts.Parameter(name="*")
@@ -1010,7 +1007,6 @@ class Settings(WithUpdatesMixin, BaseModel):
         bool,
         cyclopts.Parameter(
             alias="--metrics-isl",
-            help="Collect input sequence length (ISL) metrics",
         ),
     ] = Field(
         True,
@@ -1056,7 +1052,7 @@ class EndpointConfig(BaseModel):
 
     endpoints: Annotated[
         list[str],
-        cyclopts.Parameter(alias="--endpoints", help="Endpoint URL(s)", negative=""),
+        cyclopts.Parameter(alias="--endpoints", negative=""),
     ] = Field(
         min_length=1,
         description="Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.",
