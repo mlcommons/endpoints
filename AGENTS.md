@@ -479,6 +479,15 @@ All of these run automatically on commit:
 - `regenerate-templates`: auto-regenerates YAML config templates from schema
   defaults when any `config/*.py` module, `endpoint_client/config.py`, or
   `regenerate_templates.py` changes
+- `gitleaks`: secret scan of staged changes. Rules live in `.gitleaks.toml`
+  (upstream defaults plus DB-URI, Neon, Supabase, NVIDIA/NGC, W&B, and Docker
+  Hub rules), reviewed exceptions in `.gitleaksignore`, and the rule self-test
+  in `tests/unit/test_gitleaks_config.py`
+
+`pre-commit install` also installs a pre-push hook, `gitleaks-push`, which
+rescans the commits being pushed (catching `--no-verify` commits). In CI,
+`.github/workflows/secret-scan.yml` runs the same scan on every branch push and
+PR; the pre-commit CI jobs skip `gitleaks`.
 
 **IMPORTANT: Always run `pre-commit run --all-files` before every commit.**
 Hooks may modify files (prettier, ruff-format, license headers). If files are

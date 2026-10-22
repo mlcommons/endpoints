@@ -1,0 +1,82 @@
+# gitleaks config, used by the pre-commit hooks and
+# .github/workflows/secret-scan.yml. Rule self-test: tests/unit/test_gitleaks_config.py
+
+title = "endpoints"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "db-uri-credentials"
+description = "Password embedded in a database connection URI"
+regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb|rediss?|amqps?)(?:\+[a-z0-9]+)?://[^\s:@/'"`]+:([^\s:@/'"`]+)@[a-z0-9.\-]+'''
+secretGroup = 1
+keywords = ["postgres", "mysql", "mariadb", "mongodb", "redis", "amqp"]
+
+[[rules]]
+id = "neon-password"
+description = "Neon Postgres role password"
+regex = '''\bnpg_[A-Za-z0-9]{12,}\b'''
+keywords = ["npg_"]
+
+[[rules]]
+id = "supabase-token"
+description = "Supabase personal access token or secret API key"
+regex = '''\b(?:sbp_[a-f0-9]{40}\b|sb_secret_[A-Za-z0-9_\-]{20,})'''
+keywords = ["sbp_", "sb_secret_"]
+
+[[rules]]
+id = "nvidia-api-key"
+description = "NVIDIA API key (build.nvidia.com, NIM, NGC personal keys)"
+regex = '''\bnvapi-[A-Za-z0-9_\-]{60,}'''
+keywords = ["nvapi-"]
+
+[[rules]]
+id = "ngc-api-key"
+description = "Legacy NGC API key"
+regex = '''(?i)ngc[\w.\-]{0,20}['"]?\s*[:=]\s*['"]?([a-z0-9]{84}|[a-z0-9]{26}:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b'''
+secretGroup = 1
+keywords = ["ngc"]
+
+[[rules]]
+id = "wandb-api-key"
+description = "Weights & Biases API key"
+regex = '''(?i)(?:wandb[\w.\-]{0,10}api[\w.\-]{0,10}key['"]?\s*[:=]\s*['"]?|wandb\s+login\s+)([a-f0-9]{40})\b'''
+secretGroup = 1
+keywords = ["wandb"]
+
+[[rules]]
+id = "dockerhub-pat"
+description = "Docker Hub personal or organization access token"
+regex = '''\bdckr_(?:pat|oat)_[A-Za-z0-9_\-]{20,}'''
+keywords = ["dckr_"]
+
+# Placeholder values in docs, templates, and code that builds URIs from
+# variables. Scoped to the rules above; upstream rules keep their own
+# allowlists.
+[[allowlists]]
+description = "Placeholder credentials"
+targetRules = [
+  "db-uri-credentials",
+  "neon-password",
+  "supabase-token",
+  "nvidia-api-key",
+  "ngc-api-key",
+  "wandb-api-key",
+  "dockerhub-pat",
+]
+regexTarget = "secret"
+regexes = [
+  '''^\{[^{}]*\}$''',   # f-string / str.format field: {password}
+  '''^\[[^\[\]]*\]$''', # template marker: [YOUR-PASSWORD]
+  '''^<[^<>]*>$''',     # doc placeholder: <password>
+  '''(?i)^(?:pass|passwd|password|secret|changeme|redacted)$''',
+]
+
+# generic-api-key reads `name=number` settings in prose near the word
+# "tokens" (e.g. `max_concurrency=100000`) as a secret.
+[[allowlists]]
+description = "Numeric settings"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = ['''^[A-Za-z_]+=\d+$''']
