@@ -787,10 +787,14 @@ class TestHostileValues:
             Matches().holds(Predicate("x" * (64 * 1024 + 1), "x+"))
 
     @pytest.mark.unit
-    def test_same_multiset_unhashable_scan_caps(self):
+    def test_same_multiset_pair_over_the_cap_refuses(self):
+        # Past the cap the pair refuses before either pass: the hashable
+        # path's `Counter` work is bounded, not just the `==` scan.
         pair = [[1]] * 1025
-        with pytest.raises(ValueError, match="unhashable"):
+        with pytest.raises(ValueError, match="caps at"):
             SameMultiset().holds(Predicate(pair, pair))
+        with pytest.raises(ValueError, match="caps at"):
+            SameMultiset().holds(Predicate(list(range(1025)), list(range(1025))))
 
     @pytest.mark.unit
     def test_a_non_finite_operand_is_broken_not_quietly_false(self):

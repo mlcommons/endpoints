@@ -420,10 +420,13 @@ def _read_artifact(
             data = handle.read(_MAX_ARTIFACT_BYTES + 1)
     except OSError as exc:
         return None, f"{name} parse error: {exc.strerror}"
+    if budget is not None:
+        # Charge before the size refusal: an oversized artifact is still a read,
+        # and billing only the affordable ones re-opens the per-file cap times
+        # node-count multiplication the tree budget exists to stop.
+        budget.spend(len(data))
     if len(data) > _MAX_ARTIFACT_BYTES:
         return None, f"{name} parse error: too large"
-    if budget is not None:
-        budget.spend(len(data))
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:

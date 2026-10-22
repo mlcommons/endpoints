@@ -301,8 +301,10 @@ class Matches(Op, name="matches"):
         return bool(matched)
 
 
-# The unhashable fallback pairs by `==` scanning (O(n*m)); the cap keeps a
-# crafted pair from burning the report's budget.
+# The cap bounds both passes: the unhashable fallback pairs by `==` scanning
+# (O(n*m)) and `Counter` degrades quadratically on same-hash collisions, so a
+# crafted pair refuses before either can burn the report's budget.
+
 _MULTISET_SCAN_LIMIT = 1024
 
 
@@ -310,10 +312,11 @@ class SameMultiset(Op, name="same_multiset"):
     """`[1, 2, 2]` matches `[2, 1, 2]`. `[1]` does not match `[1, 1]`.
 
     Unordered, multiplicity-respecting equality. Hashable elements pair in
-    linear time via counts; unhashable ones fall back to an `==` scanning pool
-    capped at `_MULTISET_SCAN_LIMIT` elements (past the cap the pair refuses:
-    ValueError -> a `broken` verdict). A non-`Sequence` pair degrades to plain
-    `==`.
+    linear time via counts; a pair longer than `_MULTISET_SCAN_LIMIT` elements
+    refuses before either pass, so neither the counting pass's collision worst
+    case nor the unhashable `==` scanning pool can be stretched by a crafted
+    pair (past the cap: ValueError -> a `broken` verdict). A non-`Sequence`
+    pair degrades to plain `==`.
     """
 
     def holds(
@@ -324,14 +327,14 @@ class SameMultiset(Op, name="same_multiset"):
             return left == right
         if len(left) != len(right):
             return False
+        if len(left) > _MULTISET_SCAN_LIMIT:
+            raise ValueError(
+                f"cannot pair {len(left)} elements: the multiset pair caps at "
+                f"{_MULTISET_SCAN_LIMIT}"
+            )
         try:
             return Counter(left) == Counter(right)
         except TypeError:  # unhashable elements: pair by `==` scanning
-            if len(left) > _MULTISET_SCAN_LIMIT:
-                raise ValueError(
-                    f"cannot pair {len(left)} unhashable elements: the `==` "
-                    f"scanning pool caps at {_MULTISET_SCAN_LIMIT}"
-                ) from None
             pool = list(right)
             for value in left:
                 for i, other in enumerate(pool):
