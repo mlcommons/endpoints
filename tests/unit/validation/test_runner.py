@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 from inference_endpoint.validation.check import Check, Cohort
-from inference_endpoint.validation.runner import Finding
+from inference_endpoint.validation.runner import CheckRun, Finding
 from inference_endpoint.validation.sentinels import MISSING
 from inference_endpoint.validation.submission import Pareto, Point, Submission
 from inference_endpoint.validation.tree import SubmissionNode
@@ -143,7 +143,9 @@ class TestFindingsPerEvaluatedRow:
     @pytest.mark.unit
     def test_one_finding_per_assert_row_per_point(self, tmp_path):
         check = _check("cap", assert_=[LITERAL_ROW])
-        findings = Finding.collect(Cohort((check,)), _submission(tmp_path, [16, 8192]))
+        findings = Finding.collect(
+            Cohort((check,)), _submission(tmp_path, [16, 8192])
+        ).findings
         assert len(findings) == 2
         assert all(isinstance(f, Finding) for f in findings)
         assert [f.check_id for f in findings] == ["cap", "cap"]
@@ -152,7 +154,9 @@ class TestFindingsPerEvaluatedRow:
     @pytest.mark.unit
     def test_failing_verdict_records_why(self, tmp_path):
         check = _check("failing", assert_=[{"left": 0, "op": "eq", "right": 1}])
-        findings = Finding.collect(Cohort((check,)), _submission(tmp_path, [16]))
+        findings = Finding.collect(
+            Cohort((check,)), _submission(tmp_path, [16])
+        ).findings
         assert len(findings) == 1
         assert findings[0].verdict.ok is False
         assert findings[0].verdict.why == "expected 0 eq 1, got 0 vs 1"
@@ -164,7 +168,10 @@ class TestFindingsPerEvaluatedRow:
             when=[{"left": 0, "op": "eq", "right": 1}],
             assert_=[LITERAL_ROW],
         )
-        assert Finding.collect(Cohort((check,)), _submission(tmp_path, [16])) == ()
+        findings = Finding.collect(
+            Cohort((check,)), _submission(tmp_path, [16])
+        ).findings
+        assert findings == ()
 
 
 class TestWhenGateAbsentStates:
@@ -182,7 +189,8 @@ class TestWhenGateAbsentStates:
         # `eq dedicated` cleanly reads false: the check is not applicable and
         # nothing fails.
         cohort = _declared_cohort(tmp_path, point=OMITTED_OFFLINE_GATE)
-        assert Finding.collect(cohort, _submission(tmp_path, [16])) == ()
+        findings = Finding.collect(cohort, _submission(tmp_path, [16])).findings
+        assert findings == ()
 
     @pytest.mark.unit
     def test_ne_dedicated_applies_identically_to_omitted_and_none_offline(
@@ -192,7 +200,7 @@ class TestWhenGateAbsentStates:
         findings = Finding.collect(
             cohort,
             _submission(tmp_path, [16, 24], extras={24: {"offline": "none"}}),
-        )
+        ).findings
         assert [(f.node_directory.name, f.verdict.ok) for f in findings] == [
             ("r16", True),
             ("r24", True),
@@ -214,7 +222,7 @@ class TestWhenGateAbsentStates:
         self, tmp_path
     ):
         cohort = _declared_cohort(tmp_path, pareto=REQUIRED_ASSERT)
-        findings = Finding.collect(cohort, _submission(tmp_path, [16]))
+        findings = Finding.collect(cohort, _submission(tmp_path, [16])).findings
         assert len(findings) == 1
         assert findings[0].verdict.broken is True
         assert findings[0].verdict.ok is False
@@ -235,7 +243,10 @@ class TestWhenGateAbsentStates:
         gate = check.when[0].left
         assert gate.required is False
         assert gate.default is MISSING
-        assert Finding.collect(Cohort((check,)), _submission(tmp_path, [16])) == ()
+        findings = Finding.collect(
+            Cohort((check,)), _submission(tmp_path, [16])
+        ).findings
+        assert findings == ()
 
 
 class TestDeclaredValueChecking:
@@ -296,7 +307,7 @@ class TestDeclaredValueChecking:
         findings = Finding.collect(
             cohort,
             _submission(tmp_path, [16], extras={16: {"warmup": {"duration_s": 42}}}),
-        )
+        ).findings
         assert [f.verdict.ok for f in findings] == [True]
 
     @pytest.mark.unit
@@ -360,7 +371,8 @@ class TestDeclaredValueChecking:
                 ]
             },
         )
-        assert [f.verdict.ok for f in Finding.collect(cohort, submission)] == [True]
+        findings = Finding.collect(cohort, submission).findings
+        assert [f.verdict.ok for f in findings] == [True]
 
     @pytest.mark.unit
     def test_an_undeclared_key_is_not_checked(self, tmp_path):
@@ -374,7 +386,7 @@ class TestDeclaredValueChecking:
         findings = Finding.collect(
             cohort,
             _submission(tmp_path, [16], extras={16: {"mystery": {"any": ["shape"]}}}),
-        )
+        ).findings
         assert [f.verdict.ok for f in findings] == [True]
 
     @pytest.mark.unit
@@ -414,7 +426,9 @@ class TestNeedsGate:
     def test_failed_needs_gate_suppresses_only_the_dependent(self, tmp_path):
         first = _check("first", assert_=[{"left": 0, "op": "eq", "right": 1}])
         second = _check("second", needs=["first"], assert_=[LITERAL_ROW])
-        findings = Finding.collect(Cohort((first, second)), _submission(tmp_path, [16]))
+        findings = Finding.collect(
+            Cohort((first, second)), _submission(tmp_path, [16])
+        ).findings
         assert [f.check_id for f in findings] == ["first"]
         assert findings[0].verdict.ok is False
 
@@ -422,7 +436,9 @@ class TestNeedsGate:
     def test_holding_needs_gate_allows_both(self, tmp_path):
         first = _check("first", assert_=[LITERAL_ROW])
         second = _check("second", needs=["first"], assert_=[LITERAL_ROW])
-        findings = Finding.collect(Cohort((first, second)), _submission(tmp_path, [16]))
+        findings = Finding.collect(
+            Cohort((first, second)), _submission(tmp_path, [16])
+        ).findings
         assert [f.check_id for f in findings] == ["first", "second"]
 
     @pytest.mark.unit
@@ -459,7 +475,7 @@ class TestNeedsGatePerNode:
         findings = Finding.collect(
             Cohort((upstream, dependent)),
             _submission(tmp_path, [16, 512], extras={16: {"nodes_used": 1}}),
-        )
+        ).findings
         got = [(f.check_id, f.node_directory.name, f.verdict.ok) for f in findings]
         assert sorted(got) == [
             ("dependent", "sys", True),
@@ -474,7 +490,7 @@ class TestNeedsGatePerNode:
         findings = Finding.collect(
             Cohort((bottom, middle, top)),
             _submission(tmp_path, [16], extras={16: {"nodes_used": 2}}),
-        )
+        ).findings
         assert findings == ()
 
     @pytest.mark.unit
@@ -485,7 +501,7 @@ class TestNeedsGatePerNode:
         dependent = _check("dep", needs=["sys_up"], assert_=[LITERAL_ROW])
         findings = Finding.collect(
             Cohort((upstream, dependent)), _submission(tmp_path, [16, 8192])
-        )
+        ).findings
         assert [(f.check_id, f.verdict.ok) for f in findings] == [
             ("sys_up", True),
             ("dep", True),
@@ -498,7 +514,9 @@ class TestNeedsGatePerNode:
             "rows",
             assert_=[{"left": 0, "op": "eq", "right": 1}, LITERAL_ROW],
         )
-        findings = Finding.collect(Cohort((check,)), _submission(tmp_path, [16]))
+        findings = Finding.collect(
+            Cohort((check,)), _submission(tmp_path, [16])
+        ).findings
         assert [f.verdict.ok for f in findings] == [False, True]
 
     @pytest.mark.unit
@@ -512,7 +530,7 @@ class TestNeedsGatePerNode:
                 [16, 512],
                 extras={16: {"nodes_used": 1}, 512: {"nodes_used": 2}},
             ),
-        )
+        ).findings
         got = sorted(
             (f.check_id, f.node_directory.name, f.verdict.ok) for f in findings
         )
@@ -541,7 +559,7 @@ class TestNeedsGatePerNode:
                 [16, 512],
                 extras={16: {"nodes_used": 1}, 512: {"nodes_used": 2}},
             ),
-        )
+        ).findings
         assert [(f.check_id, f.verdict.ok) for f in findings] == [
             ("upstream", True),
             ("upstream", False),
@@ -558,7 +576,7 @@ class TestNeedsGatePerNode:
                 [16, 512],
                 extras={16: {"nodes_used": 2}, 512: {"nodes_used": 1}},
             ),
-        )
+        ).findings
         got = [(f.check_id, f.node_directory.name) for f in findings]
         assert got == [("upstream", "r512"), ("dependent", "r512")]
 
@@ -573,7 +591,7 @@ class TestNeedsGatePerNode:
                 [16, 512],
                 extras={16: {"nodes_used": 2}, 512: {"nodes_used": 2}},
             ),
-        )
+        ).findings
         assert findings == ()
 
     @pytest.mark.unit
@@ -591,7 +609,7 @@ class TestNeedsGatePerNode:
                 [16, 512],
                 extras={16: {"nodes_used": 1}, 512: {"nodes_used": 2}},
             ),
-        )
+        ).findings
         got = [(f.check_id, f.node_directory.name, f.verdict.ok) for f in findings]
         assert got == [
             ("bottom", "r16", True),
@@ -758,7 +776,9 @@ class TestDerivedExposureLink:
             "derived_row",
             assert_=[{"left": "derived.point_cap", "op": "eq", "right": True}],
         )
-        findings = Finding.collect(Cohort((check,)), _submission(tmp_path, [16]))
+        findings = Finding.collect(
+            Cohort((check,)), _submission(tmp_path, [16])
+        ).findings
         assert len(findings) == 1
         assert findings[0].verdict.ok, findings[0].verdict.why
 
@@ -775,5 +795,41 @@ class TestDerivedExposureLink:
                 }
             ],
         )
-        findings = Finding.collect(Cohort((check,)), _submission(tmp_path, [16, 9013]))
+        findings = Finding.collect(
+            Cohort((check,)), _submission(tmp_path, [16, 9013])
+        ).findings
         assert [f.verdict.ok for f in findings] == [True, True]
+
+
+class TestCheckRunRecords:
+    """`CheckRun` counts the states a check met, not the findings it emitted."""
+
+    @pytest.mark.unit
+    def test_a_when_only_check_ran_everywhere(self, tmp_path):
+        # A `when`-only check is a legal shape: it holds at every applicable
+        # node and emits no findings -- the run record is its only witness.
+        check = _check("when_only", when=[{"left": 1, "op": "eq", "right": 1}])
+        collected = Finding.collect(Cohort((check,)), _submission(tmp_path, [16, 8192]))
+        assert collected.findings == ()
+        assert collected.runs["when_only"] == CheckRun(
+            ran_at=2, gated_off=0, silenced=0
+        )
+
+    @pytest.mark.unit
+    def test_gated_and_silenced_nodes_are_counted(self, tmp_path):
+        upstream = _check("upstream", when=[NODES_USED_ONE], assert_=[LITERAL_ROW])
+        dependent = _check("dependent", needs=["upstream"], assert_=[LITERAL_ROW])
+        collected = Finding.collect(
+            Cohort((upstream, dependent)),
+            _submission(tmp_path, [16, 512], extras={16: {"nodes_used": 1}}),
+        )
+        assert collected.runs["upstream"] == CheckRun(ran_at=1, gated_off=1, silenced=0)
+        assert collected.runs["dependent"] == CheckRun(
+            ran_at=1, gated_off=0, silenced=1
+        )
+
+    @pytest.mark.unit
+    def test_the_run_key_set_is_the_cohort(self, tmp_path):
+        check = _check("cap", assert_=[LITERAL_ROW])
+        collected = Finding.collect(Cohort((check,)), _submission(tmp_path, [16]))
+        assert set(collected.runs) == {"cap"}

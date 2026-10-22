@@ -179,6 +179,47 @@ class TestReportLines:
         assert "no node was applicable" in err
 
     @pytest.mark.unit
+    def test_a_when_only_check_reports_it_ran_at_every_instance(self, tmp_path, capsys):
+        check = (
+            "when_only:\n"
+            "  description: A rule that only gates.\n"
+            "  rule: R\n"
+            "  severity: fail\n"
+            "  when: [{left: 1, op: eq, right: 1}]\n"
+        )
+        cohort = write_cohort(tmp_path / "cohort", point=check)
+        assert main([str(cohort), str(_upload(tmp_path))]) == 0
+        captured = capsys.readouterr()
+        assert "when_only ran at 1 instance(s)" in captured.out
+        assert "NEVER-RAN when_only" not in captured.err
+
+    @pytest.mark.unit
+    def test_never_ran_says_whether_when_or_needs_kept_the_check_out(
+        self, tmp_path, capsys
+    ):
+        check = (
+            "upstream:\n"
+            "  description: An upstream whose gate excludes every node.\n"
+            "  rule: R\n"
+            "  severity: fail\n"
+            "  when: [{left: 1, op: eq, right: 2}]\n"
+            "  assert: [{left: 1, op: eq, right: 1}]\n"
+            "dependent:\n"
+            "  description: A dependent behind the upstream.\n"
+            "  rule: R\n"
+            "  severity: fail\n"
+            "  needs: [upstream]\n"
+            "  assert: [{left: 1, op: eq, right: 1}]\n"
+        )
+        cohort = write_cohort(tmp_path / "cohort", point=check)
+        assert main([str(cohort), str(_upload(tmp_path))]) == 0
+        err = capsys.readouterr().err
+        assert "NEVER-RAN upstream:" in err
+        assert "its `when` gated every instance off" in err
+        assert "NEVER-RAN dependent:" in err
+        assert "its `needs` chain silenced every instance" in err
+
+    @pytest.mark.unit
     def test_control_characters_in_directory_names_stay_one_line(
         self, tmp_path, capsys
     ):
