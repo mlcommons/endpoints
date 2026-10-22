@@ -25,13 +25,11 @@ conflicts = [
 # in 83.0.0).
 # fsspec (datasets) and multidict (aiohttp) require fixes for CVE-2026-104851
 # and CVE-2026-104874, respectively.
-# certifi (httpx, requests) requires the fix for PYSEC-2026-4320.
 constraint-dependencies = [
     "click>=8.3.3",
     "setuptools>=83.0.0",
     "fsspec>=2026.6.0",
     "multidict>=6.9.1",
-    "certifi>=2026.10.19",
 ]
 
 [tool.uv.build-backend]
@@ -111,6 +109,9 @@ dependencies = [
     # force past CVE-2026-63374 / CVE-2026-64847 (both fixed in 4.14.2), which
     # otherwise fail `uv run pip-audit`.
     "anyio==4.14.2",
+    # certifi is pulled in transitively (httpx, requests); pinned here so pip
+    # installs also get the PYSEC-2026-4320 fix (2026.10.19).
+    "certifi==2026.10.19",
 ]
 
 [project.optional-dependencies]

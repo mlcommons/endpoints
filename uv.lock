@@ -50,7 +50,6 @@ conflicts = [[
 
 [manifest]
 constraints = [
-    { name = "certifi", specifier = ">=2026.10.19" },
     { name = "click", specifier = ">=8.3.3" },
     { name = "fsspec", specifier = ">=2026.6.0" },
     { name = "multidict", specifier = ">=6.9.1" },
@@ -1362,6 +1361,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
+    { name = "certifi" },
     { name = "colorama" },
     { name = "cyclopts" },
     { name = "datasets" },
@@ -1448,6 +1448,7 @@ requires-dist = [
     { name = "aiohttp", marker = "extra == 'test'", specifier = "==3.14.5" },
     { name = "anyio", specifier = "==4.14.2" },
     { name = "bfcl-eval", marker = "extra == 'bfcl'", specifier = "==2026.3.23" },
+    { name = "certifi", specifier = "==2026.10.19" },
     { name = "colorama", specifier = "==0.4.6" },
     { name = "coverage", marker = "extra == 'test'", specifier = "==7.13.4" },
     { name = "cyclopts", specifier = "==4.10.0" },
