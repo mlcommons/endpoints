@@ -139,7 +139,7 @@ def vet_pattern(pattern: str) -> None:
 
     Patterns are literal, cohort-authored strings (`Compare._check_shape`
     refuses resolved operands), so vetting happens once at load where
-    `_load_check` names the offending file -- a malformed pattern must never
+    `Cohort.from_directory` names the offending file -- a malformed pattern must never
     reach `re.fullmatch` mid-run (its `re.error` is not even a `ValueError`,
     so it would escape the verdict boundary as a run-aborting surprise).
 

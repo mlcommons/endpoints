@@ -176,7 +176,7 @@ def _decode_row(value: Any) -> Any:
     `{"over": ..., "aggregate": "count", ...}` -> `Aggregate`. Anything else with
     `left`/`op` -> `Compare`. An already-built row passes through, and any
     construction failure (a non-identifier key, a shape error) re-raises as
-    ValueError so `_load_check`'s net can name the file. A bare value raises
+    ValueError so `Cohort.from_directory` can name the file. A bare value raises
     too: both row kinds are models, so a scalar cannot be either.
 
     Args:

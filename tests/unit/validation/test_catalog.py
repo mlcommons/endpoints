@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""W5 slice tests: the `Catalog` view and its `ruleset` root on `Node.scopes`.
+"""The `Catalog` view and its `ruleset` root on `Node.scopes`.
 
 Fixtures write tiny catalog YAMLs on demand. Cases assert the values each
 subject computes: `Catalog.from_directory` its parsed mappings and

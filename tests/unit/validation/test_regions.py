@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""W5 slice tests: the reference algorithm against its three worked examples.
+"""The reference algorithm against its three worked examples.
 
 The Examples A/B/C constants come from Endpoints Policy Section 5.4's worked
 examples (A: C_min=32/C_max=8192, B: 1/256, C: 16/1024):
