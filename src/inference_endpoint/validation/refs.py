@@ -394,7 +394,9 @@ def _entry(name: str, node: Any) -> Any:
     - `offline: { type: str, allowlist: [dedicated, elected, none], default: null }`
       -> a leaf with policy notes (the allowlist is checked against the upload
       at collect time, and a non-`null` `default` must live in its allowlist,
-      `null` being the absent-state's own value)
+      `null` being the absent-state's own value). The notes are cross-validated
+      at load: `default` and every allowlist value must match the leaf's type,
+      and `required` cannot carry a `default`.
     - `warmup: { ... }` -> a block
 
     A mapping is the annotated-leaf form when `type` names one of the valid
@@ -441,6 +443,11 @@ def _entry(name: str, node: Any) -> Any:
                     f"{name}: `allowlist` needs a non-empty list of values"
                 )
             default = node.get("default", MISSING)
+            if required and default is not MISSING:
+                raise ValueError(
+                    f"{name}: `required` and `default` contradict: a declared "
+                    "default answers the fact's absence"
+                )
             if (
                 allowlist is not None
                 and default is not MISSING
@@ -451,12 +458,28 @@ def _entry(name: str, node: Any) -> Any:
                     f"{name}: the declared `default` {default!r} is not in its "
                     f"allowlist {allowlist!r}"
                 )
-            return _Fact(
+            fact = _Fact(
                 type=node["type"],
                 required=required,
                 default=default,
                 allowlist=tuple(allowlist) if allowlist is not None else None,
             )
+            if (
+                default is not MISSING
+                and default is not None
+                and not fact.matches(default)
+            ):
+                raise ValueError(
+                    f"{name}: the declared `default` {default!r} does not match "
+                    f"its type {fact.type!r}"
+                )
+            mistyped = [value for value in allowlist or () if not fact.matches(value)]
+            if mistyped:
+                raise ValueError(
+                    f"{name}: allowlist values {mistyped!r} do not match the "
+                    f"declared type {fact.type!r}"
+                )
+            return fact
         return {str(key): _entry(str(key), value) for key, value in node.items()}
     raise ValueError(
         f"{name}: expected a type name ('int', 'dict', ...) or a block of field names"

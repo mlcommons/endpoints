@@ -34,6 +34,7 @@ second copy can drift from the first.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,11 +91,40 @@ def _mapping_artifact(node: Node, name: str) -> Mapping[str, Any]:
 
 
 def _int_fact(source: Mapping[str, Any], name: str, where: str) -> int:
-    """`source[name]` as the integer fact `where` documents."""
+    """`source[name]` as the integer fact `where` documents.
+
+    The value must survive `float()` too: the region algorithm computes in
+    floats, so an integer Python cannot widen would crash a derivation instead
+    of refusing the upload.
+    """
     value = source.get(name)
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{where} needs an integer {name}")
+    try:
+        float(value)
+    except OverflowError:
+        raise ValueError(f"{where} {name} {value} is outside float range") from None
     return value
+
+
+def _finite_fact(source: Mapping[str, Any], name: str, where: str) -> float:
+    """`source[name]` as the finite float fact `where` documents.
+
+    `NaN`/`Infinity` decode from `result_summary.json` and a huge integer cannot
+    widen to `float`: either would reach a derivation as a number that compares
+    quietly (or raises uncaught), so both are refused at load, where the refusal
+    is a report line instead of a crash mid-derivation.
+    """
+    value = source.get(name)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{where} needs a numeric {name}")
+    try:
+        converted = float(value)
+    except OverflowError:
+        raise ValueError(f"{where} {name} {value} is outside float range") from None
+    if not math.isfinite(converted):
+        raise ValueError(f"{where} {name} needs a finite value, got {value!r}")
+    return converted
 
 
 @dataclass(frozen=True)
@@ -143,7 +173,8 @@ class Point:
         Returns:
             Point: The run's named facts, with `node` carried on the point.
         Raises:
-            ValueError: When a named source is missing or mistyped. Each named
+            ValueError: When a named source is missing, mistyped, or a number no
+                arithmetic can carry (non-finite, or outside `float` range). Each named
                 source is enforced here, at load: a missing or mistyped fact names its
                 artifact rather than reaching a row as an absent value.
         """
@@ -160,15 +191,13 @@ class Point:
             system_desc, "max_supported_concurrency", f"{node.dir}/system_desc.json"
         )
         summary = _mapping_artifact(node, "result_summary.json")
-        system_tps = summary.get("system_tps")
-        if isinstance(system_tps, bool) or not isinstance(system_tps, int | float):
-            raise ValueError(
-                f"{node.dir}/result_summary.json needs a numeric system_tps"
-            )
+        system_tps = _finite_fact(
+            summary, "system_tps", f"{node.dir}/result_summary.json"
+        )
         return cls(
             offline=offline,
             concurrency=concurrency,
-            system_tps=float(system_tps),
+            system_tps=system_tps,
             system_desc=system_desc,
             node=node,
         )
@@ -465,6 +494,8 @@ class Submission:
         tree = SubmissionNode.from_directory(root, ruleset=ruleset)
         paretos: list[Pareto] = []
         for system in tree.children:
+            if not system.children:
+                raise ValueError(f"{system.dir} has no model directories to check")
             for pareto_node in system.children:
                 if not pareto_node.children:
                     raise ValueError(
@@ -489,18 +520,40 @@ class Submission:
 
 
 def _shared_facts(points: Sequence[Point], where: Path) -> Mapping[str, Any]:
-    """The declared facts one pareto's points must agree on (§8.3/§5.4)."""
+    """The declared facts one pareto's points must agree on (§8.3/§5.4).
+
+    Agreement is presence plus typed value: an omitted key, an explicit `null`
+    and a value of another type are three different declarations, so a later
+    run cannot smuggle an invalid override (e.g. `c_min_override: null`) past a
+    comparison against the first run's spelling.
+    """
     if not points:
         raise ValueError(f"{where} has no run directories (r<N>) to check")
     first = points[0].system_desc
     for point in points[1:]:
         for key in ("max_supported_concurrency", "c_min_override"):
-            if point.system_desc.get(key) != first.get(key):
+            if not _same_declaration(first, point.system_desc, key):
                 raise ValueError(
                     f"every point of {where} must declare the same {key} "
                     "(Endpoints Policy §8.3; §5.4, C_min override)"
                 )
     return first
+
+
+def _same_declaration(
+    first: Mapping[str, Any], other: Mapping[str, Any], key: str
+) -> bool:
+    """Whether both descriptors declare `key` identically: presence and typed value."""
+    if (key in first) != (key in other):
+        return False
+    if key not in first:
+        return True
+    first_value, other_value = first[key], other[key]
+    # Same type exactly, not `isinstance`: `True` must not agree with `1`, nor
+    # `16.0` with `16` -- the conflations this comparison exists to refuse.
+    if type(first_value) is not type(other_value):  # noqa: E721
+        return False
+    return first_value == other_value
 
 
 class DerivedFields(Mapping[str, Any]):
