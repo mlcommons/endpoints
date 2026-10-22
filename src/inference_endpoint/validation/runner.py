@@ -17,9 +17,11 @@
 
 `Finding.collect(cohort, submission)` walks each `Check.scope` kind over the
 submission's `Point`/`Node` tree, gates on `when` rows, and evaluates each
-`assert` row through `Verdict.evaluate`. A `needs` gate speaks per node: a
-check runs only where every named upstream chain ran and held at the nodes
-that vouch for it.
+`assert` row through `Verdict.evaluate`, returning the `Collected` record: the
+row findings plus one `CheckRun` per check (the state counts the report words
+its `ran at N`/`NEVER-RAN` lines from). A `needs` gate speaks per node: a check
+runs only where every named upstream chain ran and held at the nodes that
+vouch for it.
 """
 
 from __future__ import annotations
@@ -87,8 +89,14 @@ class Finding:
         )
 
     @classmethod
-    def collect(cls, cohort: Cohort, submission: Submission) -> tuple[Finding, ...]:
-        """One `Finding` per evaluated `assert` row at each applicable node (holds too).
+    def collect(cls, cohort: Cohort, submission: Submission) -> Collected:
+        """The `Collected` record of one cohort run over one submission.
+
+        One `Finding` per evaluated `assert` row at each applicable node (holds
+        too), plus one `CheckRun` per check: the state counts the report's
+        `ran at N instance(s)`/`NEVER-RAN` lines are worded from, so a check
+        the `when` rows or a `needs` chain kept from running is told apart
+        from one that ran and failed.
 
         A load-level check first (`_validate_*`: a submission the walk cannot
         cover, an unreadable artifact, or a checker root the cohort names but
@@ -110,13 +118,58 @@ class Finding:
         candidates = _collect_candidates(cohort)
         gate = _GateResolver({check.id: check for check in candidates}, submission)
         findings: list[Finding] = []
+        runs: dict[str, CheckRun] = {}
         for check in candidates:
+            ran_at = gated_off = silenced = 0
             for node in _scope_nodes(check.scope, submission):
                 evaluation = gate.evaluation_at(check, node)
-                if evaluation.state not in (_CheckState.HOLDS, _CheckState.FAILS):
+                if evaluation.state is _CheckState.NOT_APPLICABLE:
+                    gated_off += 1
                     continue
+                if evaluation.state is _CheckState.SILENCED:
+                    silenced += 1
+                    continue
+                ran_at += 1
                 findings.extend(_row_findings(check, node, evaluation))
-        return tuple(findings)
+            runs[check.id] = CheckRun(
+                ran_at=ran_at, gated_off=gated_off, silenced=silenced
+            )
+        return Collected(tuple(findings), runs)
+
+
+@dataclass(frozen=True)
+class CheckRun:
+    """One check's fate across the nodes `Finding.collect` offered it.
+
+    State counts, not inference from emitted findings: a `when`-only check runs
+    at every applicable node and emits none, and a check its `needs` chain
+    silenced ran nowhere -- the report must tell these apart, and say which.
+
+    Args:
+        ran_at (int): Nodes where its `assert` rows were evaluated (holds and
+            failures alike).
+        gated_off (int): Nodes its `when` rows excluded.
+        silenced (int): Nodes where its `needs` chain refused to vouch.
+    """
+
+    ran_at: int
+    gated_off: int
+    silenced: int
+
+
+@dataclass(frozen=True)
+class Collected:
+    """One collection pass: the row findings and every check's run record.
+
+    Args:
+        findings (tuple[Finding, ...]): One per evaluated `assert` row at each
+            applicable node (holds too).
+        runs (Mapping[str, CheckRun]): One record per candidate check (cohort
+            order), keyed by check id.
+    """
+
+    findings: tuple[Finding, ...]
+    runs: Mapping[str, CheckRun]
 
 
 def _validate_points(submission: Submission) -> None:

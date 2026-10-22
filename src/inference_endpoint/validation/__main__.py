@@ -24,7 +24,7 @@ from pathlib import Path
 
 from inference_endpoint.validation.catalog import Catalog
 from inference_endpoint.validation.check import Cohort, Severity
-from inference_endpoint.validation.runner import Finding
+from inference_endpoint.validation.runner import CheckRun, Finding
 from inference_endpoint.validation.submission import Submission
 
 
@@ -47,6 +47,23 @@ def _escaped(text: str) -> str:
     )
 
 
+def _never_ran_cause(run: CheckRun) -> str:
+    """Why a check ran at zero nodes, in the report's words.
+
+    Args:
+        run (CheckRun): The check's run record.
+    Returns:
+        str: The cause clause: the `when` gate, the `needs` chain, or both.
+    """
+    if run.silenced and not run.gated_off:
+        return "no node was applicable (its `needs` chain silenced every instance)"
+    if run.gated_off and not run.silenced:
+        return "no node was applicable (its `when` gated every instance off)"
+    return (
+        f"no node was applicable ({run.gated_off} gated off, {run.silenced} silenced)"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one cohort's checks against one submission.
 
@@ -54,7 +71,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         int: `0` = every applicable check held, or failed only at `warn` severity (a
             warning is reported and passes through). `1` = at least one failing `fail`
             finding. `2` = the cohort or the submission was refused before any check ran
-            (a bad check file, an unwalkable tree, an unreadable artifact).
+            (a bad check file, an unwalkable tree, an unreadable artifact, a
+            number no `float` can carry).
     """
     parser = argparse.ArgumentParser(
         prog="python -m inference_endpoint.validation",
@@ -78,13 +96,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         cohort = Cohort.from_directory(args.cohort)
         catalog = Catalog.from_ruleset(cohort.ruleset) if cohort.ruleset else None
         submission = Submission.from_directory(args.submission, ruleset=catalog)
-        findings = Finding.collect(cohort, submission)
-    except (OSError, ValueError) as exc:
+        collected = Finding.collect(cohort, submission)
+    except (OSError, ValueError, OverflowError) as exc:
         print(f"refused: {_escaped(str(exc))}", file=sys.stderr)
         return 2
-    failing = [finding for finding in findings if not finding.verdict.ok]
+    failing = [finding for finding in collected.findings if not finding.verdict.ok]
     blocking = [finding for finding in failing if finding.severity is Severity.FAIL]
-    for finding in findings if args.audit else failing:
+    for finding in collected.findings if args.audit else failing:
         if finding.verdict.ok:
             mark = "OK"
         else:
@@ -102,28 +120,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             # The declared remedy rides its failing line: one fix sentence,
             # only where a row failed.
             print(_escaped(f"    fix: {finding.fix}"))
-    instances = {check.id: 0 for check in cohort.checks}
-    seen: set[tuple[str, Path]] = set()
-    for finding in findings:
-        key = (finding.check_id, finding.node_directory)
-        if key not in seen:
-            seen.add(key)
-            instances[finding.check_id] += 1
-    for check_id, count in instances.items():
-        if count:
-            print(f"{check_id} ran at {count} instance(s)")
+    for check in cohort.checks:
+        run = collected.runs[check.id]
+        if run.ran_at:
+            print(f"{check.id} ran at {run.ran_at} instance(s)")
         else:
             # A check that never ran is indistinguishable from one that passed
-            # unless the report says so: its `when` gated every node off.
+            # unless the report says so, and the cause is the check's own
+            # record: `when` gated it off, a `needs` chain silenced it, or both.
             print(
-                _escaped(
-                    f"NEVER-RAN {check_id}: no node was applicable "
-                    "(its `when` gated every instance off)"
-                ),
+                _escaped(f"NEVER-RAN {check.id}: {_never_ran_cause(run)}"),
                 file=sys.stderr,
             )
     print(
-        f"{len(findings)} finding(s), {len(failing)} failing ({len(blocking)} blocking)"
+        f"{len(collected.findings)} finding(s), {len(failing)} failing "
+        f"({len(blocking)} blocking)"
     )
     return 1 if blocking else 0
 
