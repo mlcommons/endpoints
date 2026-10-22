@@ -53,7 +53,7 @@ _MAX_TREE_BYTES = 8 * _MAX_ARTIFACT_BYTES
 
 
 class RuleScopes(str, Enum):  # noqa: UP042 - repository wire-enum convention
-    """The scopes a check condition can address, as `Ref` roots and node kinds.
+    """The scopes a check condition can address, as ref namespaces and node kinds.
 
     `point` -> the run directory. `pareto`, `system`, `submission` likewise.
     """
@@ -134,9 +134,9 @@ class Node:
             (Default: ())
         artifacts (dict[str, tuple[Any, str | None]]): Each `FILE_TO_KEY_MAP`
             artifact present: name -> its parsed `(value, error)` pair. (Default: {})
-        ruleset (Catalog | None): The `ruleset` root `scopes()` exposes. The root
+        ruleset (Catalog | None): The `ruleset` namespace `scopes()` exposes. The root
             node holds it when the submission was built with one. (Default: None)
-        regions (Regions | None): The `regions` root `scopes()` exposes. Each pareto
+        regions (Regions | None): The `regions` namespace `scopes()` exposes. Each pareto
             node latches its own. (Default: None)
     """
 
@@ -172,7 +172,7 @@ class Node:
                 self.artifacts[name] = (value, error)
 
     def root(self) -> Node:
-        """The tree's root node. It carries the `ruleset` root (see `regions`)."""
+        """The tree's root node. It carries the `ruleset` namespace (see `regions`)."""
         node: Node = self
         while node.parent is not None:
             node = node.parent
@@ -211,8 +211,8 @@ class Node:
                 ->
                 `{"point": {"result_summary": {"n": 1}}, "pareto": {}, "system": {}, "submission": {}}`.
                 Its ancestors contribute their own fields, an artifactless node just
-                `{}`. The `ruleset` root holds `Catalog.scopes()` when the submission
-                was built with one. The `regions` root rides the nearest ancestor that
+                `{}`. The `ruleset` namespace holds `Catalog.scopes()` when the submission
+                was built with one. The `regions` namespace rides the nearest ancestor that
                 carries one (each pareto node latches its own, so it is
                 per-pareto. Nodes above every pareto resolve no `regions`).
         """

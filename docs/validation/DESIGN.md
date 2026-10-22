@@ -94,7 +94,7 @@ for.
 
   - `Node` registers its kind subclasses via `__init_subclass__(kind=...)` and
     dispatches through `__new__`: `SubmissionNode`/`SystemNode`/`ParetoNode`/
-    `PointNode`. `Node.scopes()` is the facts-projection map each scope root
+    `PointNode`. `Node.scopes()` is the facts-projection map each ref namespace
     reads.
   - `StrictLoader` refuses duplicate keys, `<<` merge keys and all YAML aliases
     at parse time.
@@ -108,12 +108,12 @@ for.
 
 - **`refs.py`** — references and the cohort's ref table.
 
-  - `Ref` is the row model's dotted reference. `Ref.SCOPE_ROOTS` is the four
-    node scopes, `Ref.CHECKER_ROOTS` the checker-owned `derived`/`ruleset`/
-    `regions`; `Ref.ROOTS` is their union and `from_string` gates on it.
-    `resolve` is mapping-only: a resolved leaf is returned as-is, so a checker
-    root's `Interval` is a value and never walked through. The `found`/`MISSING`
-    tells absent from stored-null.
+  - `Ref` is the row model's dotted reference. A ref's first segment is its
+    namespace: `Ref.SCOPE_ROOTS` the four node scopes, `Ref.CHECKER_ROOTS` the
+    checker-owned `derived`/`ruleset`/`regions`; `Ref.ROOTS` is their union and
+    `from_string` gates on it. `resolve` is mapping-only: a resolved leaf is
+    returned as-is, so a namespace's `Interval` is a value and never walked
+    through. The `found`/`MISSING` grid tells absent from stored-null.
   - `RefTable.from_yaml` parses one cohort's `RefTable.FILENAME`
     (`valid_refs.yaml`; scope → document → fields) and refuses a `derived`/
     `regions`/`ruleset` top-level key (`is not a node scope`). Notes are
@@ -136,8 +136,8 @@ for.
 - **`typo_checks.py`** — the one one-edit name matcher (`near_match`: one
   insert/delete/substitute). It serves both hint paths:
   `RefTable.validate_names`'s declared fact names and
-  `compare._near_root_misspelling`'s operand roots. Dependency-free so both may
-  import it.
+  `compare._near_namespace_misspelling`'s operand namespaces. Dependency-free so
+  both may import it.
 
 - **`sentinels.py`** — the shared `MISSING` sentinel. `value is MISSING` is the
   fact's absence, distinct from a stored null.
@@ -327,7 +327,7 @@ findings plus one `CheckRun` per check) and runs four phases, then the walk.
    that failed to parse (a corrupt file must never read as an absent fact and
    switch checks off); a present value its `valid_refs.yaml` declaration will
    not carry (one per-node `RefTable.validate_values` pass); or a cohort naming
-   the `ruleset` root the tree was built without (`derived`/`regions` are
+   the `ruleset` namespace the tree was built without (`derived`/`regions` are
    per-pareto and always present at their nodes). The rule behind all four:
    silence must never be the verdict. A `when` row that failed to evaluate is
    refused loudly for the same reason — `Verdict.broken` separates "judged
@@ -417,26 +417,26 @@ Each formula below is anchored to the Endpoints Policy section it implements.
 
 ## 7. Known boundaries (deliberate, priced)
 
-- **Fact names are cohort data; the roots are code.** What a row may name under
-  `submission`/`system`/`pareto`/`point` is declared per cohort in its
+- **Fact names are cohort data; the namespaces are code.** What a row may name
+  under `submission`/`system`/`pareto`/`point` is declared per cohort in its
   `valid_refs.yaml` (the shipped declarations draw on the policy's field tables,
   pinned `4ba8224dc746`), so a misspelled row dies at cohort load instead of
-  silently gating a check off by omission. The roots themselves stay the
-  checker's — the four scope names and the checker-owned roots — as do `derived`
+  silently gating a check off by omission. The namespaces themselves stay the
+  checker's — the four scope names and the checker-owned ones — as do `derived`
   names (`DERIVATION_NAMES`), `regions` paths and `ruleset` keys. The price: a
   rule over a brand-new field first needs that field declared in the cohort's
-  ref table, and a brand-new root or derivation still needs code. One caveat on
-  the mapping form: a mapping is the annotated-leaf form when its `type` value
-  is a type name and every key is reserved
+  ref table, and a brand-new namespace or derivation still needs code. One
+  caveat on the mapping form: a mapping is the annotated-leaf form when its
+  `type` value is a type name and every key is reserved
   (`type`/`required`/`default`/`allowlist`), so `field: { type: int }` is a leaf
   while `field: { type: { ... } }` is a block (its `type` value is itself a
   mapping, not a type name).
 
 - **Rows above a pareto cannot aggregate over points.** There is no
-  `derived`/`regions` root above a pareto (both are per-pareto by construction),
-  so a system- or submission-scoped row cannot count over points at all.
-  Per-pareto aggregate rows (point-count-from-nodes, region-coverage counts,
-  accuracy-run counting) await a points-collection in the row model.
+  `derived`/`regions` namespace above a pareto (both are per-pareto by
+  construction), so a system- or submission-scoped row cannot count over points
+  at all. Per-pareto aggregate rows (point-count-from-nodes, region-coverage
+  counts, accuracy-run counting) await a points-collection in the row model.
 
 - **Agentic shape is inferred from omission.** With no `offline` declaration,
   `point_count_min` and `accuracy_run_count_requirement` report the agentic 7/4.
@@ -489,12 +489,12 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   `Predicate` and the presence ops, so the absent-vs-stored-null grid is one
   rule, not a per-module pair of conventions.
 
-- **Operand decode (`compare._decode_operand`) keeps the scalar rule**
-  (root-prefixed dotted string = `Ref`) and is otherwise strict: a dotted scalar
-  whose head is one edit from a root raises ("misspelled"), and every other
-  dotted scalar raises too ("no scope root") — no guessing between reference and
-  value. The alternatives stay explicit: a root-headed list of raw segments
-  addresses keys that themselves contain dots (near-miss heads refused
+- **Operand decode (`compare._decode_operand`) keeps the scalar rule** (a dotted
+  string headed by a namespace = `Ref`) and is otherwise strict: a dotted scalar
+  whose head is one edit from a namespace raises ("misspelled"), and every other
+  dotted scalar raises too ("no ref namespace") — no guessing between reference
+  and value. The alternatives stay explicit: a namespace-headed list of raw
+  segments addresses keys that themselves contain dots (near-miss heads refused
   likewise), and `{"literal": ...}` is the intentional literal. `matches` is the
   one operator where that form is mandatory for `right` rather than intentional:
   `Compare._matches_right_is_explicit_literal` refuses anything else at load, so

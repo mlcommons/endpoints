@@ -20,7 +20,7 @@ from the packaged ruleset the cohort names (`config/ruleset_registry.py`,
 e.g. `mlperf-inference-v6.1`), so the checker and the benchmark read one
 source. `Catalog.from_directory(root)` loads a development
 `models.yaml` + `datasets.yaml` pair instead. Values stay raw data, not
-pseudo-enum classes; a check addresses them through the `ruleset` root of
+pseudo-enum classes; a check addresses them through the `ruleset` namespace of
 `Ref` (`ruleset.models.deepseek-r1.dataset.size`).
 """
 
@@ -103,7 +103,7 @@ class Catalog:
         )
 
     def scopes(self) -> dict[str, dict[str, Any]]:
-        """What the `ruleset` root of `Ref.resolve` answers, for `Node.scopes`."""
+        """What the `ruleset` namespace of `Ref.resolve` answers, for `Node.scopes`."""
         return {"models": self.models, "datasets": self.datasets}
 
 

@@ -17,7 +17,7 @@
 
 Each op owns its operand `slots` and its `holds` test over a `Predicate`.
 A range test is `in` over an `Interval` target (`5 in Interval(0, 10)` is
-True): the `Interval` resolves from a checker root, or the row spells it
+True): the `Interval` resolves from a checker namespace, or the row spells it
 `{"lo": ..., "hi": ...}` (turned into an `Interval` in `compare.py`).
 """
 

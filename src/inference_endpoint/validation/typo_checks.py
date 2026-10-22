@@ -15,9 +15,9 @@
 
 """The one-edit name matcher behind every "did you mean ...?" hint.
 
-`near_match` serves two callers: `RefTable.validate_names`'s declared fact names
-(`refs.py`) and `compare._near_root_misspelling`'s operand roots
-(`compare.py`). It is dependency-free so both can import it.
+`near_match` serves two callers: `RefTable.validate_names`'s declared fact
+names (`refs.py`) and `compare._near_namespace_misspelling`'s operand
+namespaces (`compare.py`). It is dependency-free so both can import it.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def near_match(name: str, candidates: Iterable[str]) -> str | None:
         near_match("ofline", ["offline"])  # "offline": one insert
         near_match("oflin", ["offline"])  # None: two edits, matches nothing
 
-    The one matcher behind every name check (scope roots and declared facts).
+    The one matcher behind every name check (ref namespaces and declared facts).
 
     Args:
         name (str): The name to find the near match for.

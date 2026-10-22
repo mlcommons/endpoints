@@ -290,7 +290,7 @@ class TestRowRefValidation:
                 "  assert:\n    - left: derived.point_cap\n      op: exists\n"
             ),
         )
-        with pytest.raises(ValueError, match="per-pareto checker root"):
+        with pytest.raises(ValueError, match="per-pareto checker namespace"):
             Cohort.from_directory(root)
 
     @pytest.mark.unit
@@ -321,13 +321,13 @@ class TestCohortRefTable:
             Cohort.from_directory(root)
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("root_name", ["derived", "regions", "ruleset"])
-    def test_checker_owned_roots_are_refused_inside_the_ref_table(
-        self, tmp_path, root_name
+    @pytest.mark.parametrize("namespace", ["derived", "regions", "ruleset"])
+    def test_checker_owned_namespaces_are_refused_inside_the_ref_table(
+        self, tmp_path, namespace
     ):
         root = write_cohort(
             tmp_path / "cohort",
-            refs={root_name: {"some": "int"}},
+            refs={namespace: {"some": "int"}},
             point=LITERAL_CHECK,
         )
         with pytest.raises(ValueError, match="is not a node scope"):

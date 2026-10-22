@@ -267,7 +267,7 @@ class Pareto:
         """The Pareto one `<system>/<model>` node's run directories declare.
 
         The pareto's §5.5 regions latch onto its tree node here, so the
-        `regions` root reaches every row below it (`Node.scopes` reads the
+        `regions` namespace reaches every row below it (`Node.scopes` reads the
         nearest ancestor's regions).
 
         Args:
@@ -559,7 +559,7 @@ def _same_declaration(
 class DerivedFields(Mapping[str, Any]):
     """Lazy `derived.<name>` mapping: a derivation runs only when a row names it.
 
-    `Ref.resolve` walks this like any scope root. `view["point_cap"]` ->
+    `Ref.resolve` walks this like any namespace. `view["point_cap"]` ->
     `Pareto.point_cap()`'s value, memoized. `view["nope"]` -> `KeyError`, so
     `Ref.resolve` reports the field absent. Membership asks the known-names
     tables only and never runs a derivation, so one derivation's fail-loud
