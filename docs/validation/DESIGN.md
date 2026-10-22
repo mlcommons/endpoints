@@ -7,7 +7,8 @@ maintainers and reviewers, not for check authors.
 
 ## 1. Module map
 
-Twelve modules. Each entry is the role first, then the names you will grep for.
+Thirteen modules. Each entry is the role first, then the names you will grep
+for.
 
 - **`__main__.py`** — the user-facing CLI. `main(argv) -> exit code` (argparse)
   wires `Cohort.from_directory` + `Catalog.from_ruleset` (the ruleset the
