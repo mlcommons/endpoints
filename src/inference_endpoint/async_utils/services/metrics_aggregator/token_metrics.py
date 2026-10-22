@@ -455,9 +455,9 @@ class BatchTokenizer:
         if key in self._fallback_warned:
             return
         self._fallback_warned.add(key)
-        logger.exception(
-            "apply_chat_template failed for %s (%s); falling back to "
-            "whitespace tokenization. %s",
+        logger.info(
+            "apply_chat_template failed for %s (%s); "
+            "tokenizing as plain text instead. %s",
             self._tokenizer_name,
             type(exc).__name__,
             impact,
