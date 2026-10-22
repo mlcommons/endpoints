@@ -238,8 +238,8 @@ class Pareto:
         """The Pareto one `<system>/<model>` node's run directories declare.
 
         The pareto's §5.5 regions latch onto its tree node here, so the
-        `regions` fold reaches every row below it (`Node.scopes` reads the
-        nearest ancestor's fold).
+        `regions` root reaches every row below it (`Node.scopes` reads the
+        nearest ancestor's regions).
 
         Args:
             node (Node): The `<system>/<model>` pareto node.

@@ -242,8 +242,8 @@ class Compare(BaseModel):
     Arity follows the op (`Op.slots` in `operations.py`): `exists`, `absent`
     and `not_null` take `left` alone, every other op takes `right`. An `in`
     row may spell `right` as an inclusive `{"lo": ..., "hi": ...}` range
-    literal; the bounds are literals (a dynamic range names a fold that
-    yields an `Interval`, e.g. `regions.coverage`).
+    literal; the bounds are literals (a dynamic range names a checker root
+    that yields an `Interval`, e.g. `regions.coverage`).
 
     A `right` given at all to a left-only op is a shape error.
     `abs_tol`/`rel_tol` reach `eq` and `ne` only.
@@ -340,7 +340,7 @@ class Compare(BaseModel):
         Only `in` reads this form. Every other mapping (and every other op)
         keeps the ordinary key-set meaning, so `in` over `{"k": 1}` still asks
         whether `left` is one of `k`'s keys. The bounds are literals, never
-        references: a dynamic range names a fold that yields an `Interval`.
+        references: a dynamic range names a checker root that yields an `Interval`.
         """
         right = self.right
         if self.op != "in" or not isinstance(right, Mapping):

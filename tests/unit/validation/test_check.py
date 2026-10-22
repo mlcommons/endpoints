@@ -244,13 +244,15 @@ class TestRowRefValidation:
         ]
 
     @pytest.mark.unit
-    def test_fold_refs_load_unannotated_since_folds_have_no_table_leaf(self, tmp_path):
+    def test_checker_root_refs_load_unannotated_since_they_have_no_table_leaf(
+        self, tmp_path
+    ):
         # `derived`/`regions` rows load through the loader (their names are
         # checker-owned), and their `Ref`s carry no table policy notes.
         root = write_cohort(
             tmp_path / "cohort",
             point=(
-                "fold_rows:\n  description: d\n  rule: r\n  severity: warn\n"
+                "root_rows:\n  description: d\n  rule: r\n  severity: warn\n"
                 "  assert:\n"
                 "    - left: derived.point_cap\n      op: exists\n"
                 "    - left: point.config.concurrency\n      op: in\n"
@@ -288,7 +290,7 @@ class TestRowRefValidation:
                 "  assert:\n    - left: derived.point_cap\n      op: exists\n"
             ),
         )
-        with pytest.raises(ValueError, match="per-pareto fact fold"):
+        with pytest.raises(ValueError, match="per-pareto checker root"):
             Cohort.from_directory(root)
 
     @pytest.mark.unit
@@ -319,13 +321,13 @@ class TestCohortRefTable:
             Cohort.from_directory(root)
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("fold", ["derived", "regions", "ruleset"])
-    def test_checker_owned_fold_roots_are_refused_inside_the_ref_table(
-        self, tmp_path, fold
+    @pytest.mark.parametrize("root_name", ["derived", "regions", "ruleset"])
+    def test_checker_owned_roots_are_refused_inside_the_ref_table(
+        self, tmp_path, root_name
     ):
         root = write_cohort(
             tmp_path / "cohort",
-            refs={fold: {"some": "int"}},
+            refs={root_name: {"some": "int"}},
             point=LITERAL_CHECK,
         )
         with pytest.raises(ValueError, match="is not a node scope"):

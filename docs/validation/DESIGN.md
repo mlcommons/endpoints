@@ -107,10 +107,10 @@ for.
 - **`refs.py`** — references and the cohort's ref table.
 
   - `Ref` is the row model's dotted reference. `Ref.SCOPE_ROOTS` is the four
-    node scopes, `Ref.FOLD_ROOTS` the checker-owned `derived`/`ruleset`/
+    node scopes, `Ref.CHECKER_ROOTS` the checker-owned `derived`/`ruleset`/
     `regions`; `Ref.ROOTS` is their union and `from_string` gates on it.
-    `resolve` is mapping-only: a resolved leaf is returned as-is, so a fold's
-    `Interval` is a value and never walked through. The `found`/`MISSING` grid
+    `resolve` is mapping-only: a resolved leaf is returned as-is, so a checker
+    root's `Interval` is a value and never walked through. The `found`/`MISSING`
     tells absent from stored-null.
   - `RefTable.from_yaml` parses one cohort's `RefTable.FILENAME`
     (`valid_refs.yaml`; scope → document → fields) and refuses a `derived`/
@@ -154,7 +154,7 @@ for.
     (Section 4.5.2/4.5.3, 2dp-rounded-once).
   - `Pareto` (frozen `system_desc` + ordered `points`) is one
     `results/<system>/<model>/` and the unit every policy derivation is per;
-    `Pareto.from_nodes` latches that pareto's `regions` fold on its tree node.
+    `Pareto.from_nodes` latches that pareto's `regions` root on its tree node.
     Its methods: `offline_ordering` (Section 5.7.2's two clauses), `point_cap`
     (Section 5.6's `<= 32`), `point_count_min` (Section 5.3's 8-or-7),
     `accuracy_run_count_requirement` (Section 4.3's 5/4), `out_of_range_points`
@@ -257,7 +257,7 @@ flowchart LR
     TREE["SubmissionNode.from_directory → Submission/System/Pareto/PointNode. Node.read: _read_artifact probes the 7 known names per level"]
     SUB["Submission.from_directory → Submission(tree, paretos). Pareto.from_nodes per results/sys/model/ latches its regions. Point.from_node reads per r<N>/: point.yaml (concurrency, offline), system_desc.json (max_supported_concurrency), result_summary.json (system_tps)"]
   end
-  CAT["Catalog.from_ruleset → ruleset fold"]
+  CAT["Catalog.from_ruleset → ruleset root"]
   COH["Cohort.from_directory → RefTable.from_yaml (valid_refs.yaml first) + cohort.yaml ruleset, then Cohort((Check, …), refs, ruleset). id = key, scope = filename"]
   MAIN["__main__.main (CLI wiring)"]
   RUN["Finding.collect(cohort, submission). _validate_* refuse loud; _GateResolver; Verdict.evaluate"]
@@ -298,18 +298,18 @@ flowchart LR
 `Finding.collect(cohort, submission)` runs four phases.
 
 1. **Contract validation.** `_validate_points`, `_validate_artifacts`,
-   `_validate_declared_values` and `_validate_fold_needs` fail loud wherever the
-   walk cannot happen: no points, or a point without its node; an artifact that
-   failed to parse (a corrupt file must never read as an absent fact and switch
-   checks off); a present value its `valid_refs.yaml` declaration will not carry
-   (one per-node `RefTable.validate_values` pass); or a cohort naming the
-   `ruleset` fold the tree was built without (`derived`/`regions` are per-pareto
-   and always present at their nodes). The rule behind all four: silence must
-   never be the verdict. A `when` row that failed to evaluate is refused loudly
-   for the same reason — `Verdict.broken` separates "judged false" from "could
-   not be judged" — while an optional fact the upload never declared stays
-   judgeable: the row reads false, and `compare._missing_outcome` keeps that
-   case distinct (README, "Absent facts").
+   `_validate_declared_values` and `_validate_ruleset_needs` fail loud wherever
+   the walk cannot happen: no points, or a point without its node; an artifact
+   that failed to parse (a corrupt file must never read as an absent fact and
+   switch checks off); a present value its `valid_refs.yaml` declaration will
+   not carry (one per-node `RefTable.validate_values` pass); or a cohort naming
+   the `ruleset` root the tree was built without (`derived`/`regions` are
+   per-pareto and always present at their nodes). The rule behind all four:
+   silence must never be the verdict. A `when` row that failed to evaluate is
+   refused loudly for the same reason — `Verdict.broken` separates "judged
+   false" from "could not be judged" — while an optional fact the upload never
+   declared stays judgeable: the row reads false, and `compare._missing_outcome`
+   keeps that case distinct (README, "Absent facts").
 
 2. **Candidate validation.** `_collect_candidates(cohort)` validates `needs` id
    references against the cohort and refuses a `needs` cycle outright (the DFS
@@ -397,18 +397,19 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   `submission`/`system`/`pareto`/`point` is declared per cohort in its
   `valid_refs.yaml` (the shipped declarations draw on the policy's field tables,
   pinned `4ba8224dc746`), so a misspelled row dies at cohort load instead of
-  silently gating a check off by omission. The scope roots and the folds stay
-  checker-owned: `derived` names (`DERIVATION_NAMES`), `regions` paths and
-  `ruleset` keys. The price: a rule over a brand-new field first needs that
-  field declared in the cohort's ref table, and a brand-new root or derivation
-  still needs code. One caveat on the mapping form: a mapping is the
-  annotated-leaf form when its `type` value is a type name and every key is
-  reserved (`type`/`required`/`default`/`allowlist`), so `field: { type: int }`
-  is a leaf while `field: { type: { ... } }` is a block (its `type` value is
-  itself a mapping, not a type name).
+  silently gating a check off by omission. The roots themselves stay the
+  checker's — the four scope names and the checker-owned roots — as do `derived`
+  names (`DERIVATION_NAMES`), `regions` paths and `ruleset` keys. The price: a
+  rule over a brand-new field first needs that field declared in the cohort's
+  ref table, and a brand-new root or derivation still needs code. One caveat on
+  the mapping form: a mapping is the annotated-leaf form when its `type` value
+  is a type name and every key is reserved
+  (`type`/`required`/`default`/`allowlist`), so `field: { type: int }` is a leaf
+  while `field: { type: { ... } }` is a block (its `type` value is itself a
+  mapping, not a type name).
 
 - **Rows above a pareto cannot aggregate over points.** There is no
-  `derived`/`regions` fold above a pareto (both are per-pareto by construction),
+  `derived`/`regions` root above a pareto (both are per-pareto by construction),
   so a system- or submission-scoped row cannot count over points at all.
   Per-pareto aggregate rows (point-count-from-nodes, region-coverage counts,
   accuracy-run counting) await a points-collection in the row model.
