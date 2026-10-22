@@ -14,8 +14,9 @@ for.
   wires `Cohort.from_directory` + `Catalog.from_ruleset` (the ruleset the
   cohort's `cohort.yaml` names) + `Submission.from_directory` +
   `Finding.collect`; `--audit` prints holds too. The report marks
-  `OK`/`FAIL`/`WARN`, prints `<id> ran at N instance(s)` per check
-  (`NEVER-RAN <id>` on stderr at zero) and a closing
+  `OK`/`FAIL`/`WARN`, prints `<id> ran at N instance(s)` per check and
+  `NEVER-RAN <id>` on stderr at zero, both worded from the check's own
+  `CheckRun` (its `when` gate, its `needs` chain, or both), and a closing
   `N finding(s), F failing (B blocking)` summary. Exit codes: `0` everything
   applicable held or failed only at `warn`; `1` a failing `fail` finding; `2`
   cohort or submission refused before any check ran.
@@ -100,8 +101,9 @@ for.
   - `_read_artifact` is the single bounded, symlink-safe byte channel (see
     "Notable engineering calls"): fd-anchored per node directory, `O_NONBLOCK`
     - `S_ISREG` refusing FIFO/socket/device artifacts instantly, a byte cap
-      applied before decode, and `UnicodeDecodeError` funneled into
-      `(value, error)`. An empty or non-mapping document reads as
+      applied before decode (and charged to the tree budget before the size
+      refusal: an oversized artifact is still a read), and `UnicodeDecodeError`
+      funneled into `(value, error)`. An empty or non-mapping document reads as
       `(None, "<name> parse error: ...")`.
 
 - **`refs.py`** — references and the cohort's ref table.
@@ -114,11 +116,14 @@ for.
     tells absent from stored-null.
   - `RefTable.from_yaml` parses one cohort's `RefTable.FILENAME`
     (`valid_refs.yaml`; scope → document → fields) and refuses a `derived`/
-    `regions`/`ruleset` top-level key (`is not a node scope`). `validate_names`
-    refuses a path naming no fact (`names no fact`, with a one-edit
-    `typo_checks.near_match` hint) or stepping below a leaf fact
-    (`is one leaf fact, nothing deeper`); a `dict` open subtree takes any deeper
-    name. `annotate` fills `Ref.required`/`Ref.default` from the leaf it names.
+    `regions`/`ruleset` top-level key (`is not a node scope`). Notes are
+    cross-validated at load: a `default` and every allowlist value must match
+    the declared type, and `required` cannot carry a `default` (a default
+    answers the fact's absence). `validate_names` refuses a path naming no fact
+    (`names no fact`, with a one-edit `typo_checks.near_match` hint) or stepping
+    below a leaf fact (`is one leaf fact, nothing deeper`); a `dict` open
+    subtree takes any deeper name. `annotate` fills `Ref.required`/`Ref.default`
+    from the leaf it names.
   - `validate_values` checks one node's present values against its scope's
     declaration: `_check_values` walks declared-vs-carried and `_Fact.matches`
     types each leaf (`bool` is not `int`; `float` accepts ints), `allowlist`
@@ -149,9 +154,11 @@ for.
   - `Point` (frozen: `offline`/`concurrency`/`system_tps`/`system_desc`/`node`)
     and `Point.from_node`, which reads one `r<N>` run directory — `point.yaml`'s
     `concurrency`/`offline`, its own `system_desc.json`, and
-    `result_summary.json`'s `system_tps` — refusing each missing or mistyped
-    fact at load. `Point.point_power_kw` derives `provisioned_power_kw x Y/N`
-    (Section 4.5.2/4.5.3, 2dp-rounded-once).
+    `result_summary.json`'s `system_tps` — refusing each missing, mistyped, or
+    unrepresentable fact at load (a `NaN`/`Infinity` `system_tps`, or an integer
+    no `float` can widen, would otherwise judge quietly or crash a derivation).
+    `Point.point_power_kw` derives `provisioned_power_kw x Y/N` (Section
+    4.5.2/4.5.3, 2dp-rounded-once).
   - `Pareto` (frozen `system_desc` + ordered `points`) is one
     `results/<system>/<model>/` and the unit every policy derivation is per;
     `Pareto.from_nodes` latches that pareto's `regions` root on its tree node.
@@ -160,15 +167,23 @@ for.
     `accuracy_run_count_requirement` (Section 4.3's 5/4), `out_of_range_points`
     (Section 5.4's Concurrency-in-range row), `derived()` (the lazy
     `derived.<name>` facts-projection), and `_validate_shape`, which refuses
-    shapes the derivations would trip on.
+    shapes the derivations would trip on. Points must agree on their
+    `max_supported_concurrency`/`c_min_override` by presence and typed value
+    (`_shared_facts`), so a later run's `null` override cannot compare equal to
+    a first run's omission.
   - `Submission` (frozen `tree` + `paretos`) is built by
     `Submission.from_directory(root, ruleset=...)` — one `Pareto` per
-    `<system>/<model>`; `pareto_at(node)` locates the pareto a tree node belongs
-    to.
+    `<system>/<model>`, refusing a `<system>` with no model directories and a
+    `<model>` with no run directories (an empty system cannot hide from
+    system-scoped checks); `pareto_at(node)` locates the pareto a tree node
+    belongs to.
 
 - **`runner.py`** — `Finding` (the audit-trail record: `check_id`/`severity`/
-  `scope`/`node_directory`/`verdict`/`rule`) and `Finding.collect`, whose phases
-  are "The runner's cascade" below.
+  `scope`/`node_directory`/`verdict`/`rule`), `Finding.collect` (whose phases
+  are "The runner's cascade" below), and the record it returns: `Collected` (the
+  findings + one `CheckRun` per check) and `CheckRun`'s state counts
+  (`ran_at`/`gated_off`/`silenced`), what the report's `ran at N`/`NEVER-RAN`
+  lines are worded from.
 
 ## 2. Row and operator mechanics
 
@@ -183,12 +198,18 @@ Two mechanics are worth spelling out:
 
 - **Region membership is an `op: in` row** against `regions.coverage` or
   `regions.by_kind.<kind>`. The stub cohort's `concurrency_in_range` is the
-  shape to copy:
+  shape to copy (its `when` exempts a dedicated Offline run — §5.7.2's dedicated
+  point is not a fixed-concurrency point):
 
   ```yaml
-  - left: point.config.concurrency
-    op: in
-    right: regions.coverage
+  when:
+    - left: point.config.offline
+      op: ne
+      right: dedicated
+  assert:
+    - left: point.config.concurrency
+      op: in
+      right: regions.coverage
   ```
 
 - **Tolerances are integer-exact where it matters.** `_close_to` compares
@@ -207,7 +228,9 @@ from inference_endpoint.validation.submission import Submission
 
 cohort = Cohort.from_directory(Path("my_cohort"))
 submission = Submission.from_directory(Path("upload"))
-findings = Finding.collect(cohort, submission)
+collected = Finding.collect(cohort, submission)
+collected.findings  # one per evaluated `assert` row (holds too)
+collected.runs  # one `CheckRun` per check: ran_at/gated_off/silenced
 ```
 
 `Submission.from_directory` reads the same artifacts the rows read — per `r<N>`
@@ -295,7 +318,8 @@ flowchart LR
 
 ## 5. The runner's cascade and emission
 
-`Finding.collect(cohort, submission)` runs four phases.
+`Finding.collect(cohort, submission)` returns a `Collected` record (the row
+findings plus one `CheckRun` per check) and runs four phases, then the walk.
 
 1. **Contract validation.** `_validate_points`, `_validate_artifacts`,
    `_validate_declared_values` and `_validate_ruleset_needs` fail loud wherever
