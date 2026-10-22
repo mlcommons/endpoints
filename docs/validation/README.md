@@ -37,8 +37,9 @@ Filenames correspond to the scope of the checks:
 Scope files are optional - a missing file indicates there are no checks to run
 for that scope. `valid_refs.yaml` is required: it is the cohort's ref table,
 which every row's names are checked against (see "The cohort's
-`valid_refs.yaml`" below). Only `valid_refs.yaml` and the four scope files
-belong here; anything else in the directory is refused at load.
+`valid_refs.yaml`" below). Only `valid_refs.yaml`, the four scope files and the
+optional `cohort.yaml` manifest belong here; anything else in the directory is
+refused at load.
 
 Each scope file contains a list of checks, with the check's ID as its key.
 Example:
@@ -68,21 +69,36 @@ The submission argument is the upload root (`results/<system>/<model>/r<N>/`
 below it). Each run directory `r<N>/` carries its own `system_desc.json`
 (Section 8.2.1), its `point.yaml` (`concurrency`, `offline` declaration) and its
 `result_summary.json`, whose Section 4.1 aggregate `system_tps` is the point's
-throughput. Pass `--ruleset config/rulesets/<name>/` to make the `ruleset` fold
-(its `models.yaml`/`datasets.yaml`) available to rows; the `regions` fold is
-derived per pareto (Section 5.5).
+throughput.
 
-The run prints one line per failing finding -- the line is one evaluated
-`assert` predicate, labeled by the predicate itself (`1 le 128`) -- marked
-`FAIL` or `WARN`, with the check's rules citation at the end; when the check
-declares a `fix`, an indented `fix:` line follows the failing line. Also a
-`<id> ran at N instance(s)` line per check and a closing
-`N finding(s), F failing (B blocking)` summary: findings count holds and
-failures alike, failing means a predicate did not hold, and blocking means a
-failing `fail`. `--audit` prints the holds as well, marked `OK` (row label, no
-rule/fix), so the session doubles as the audit trail. A check that ran at no
-instance at all prints `NEVER-RAN <id>: ...` on stderr: a check its `when`
-leaves out everywhere stays visible instead of passing by omission.
+A submission may carry several paretos - one `<system>/<model>` pair each; each
+check runs once per instance of its scope ("Check blocks" below), so a
+`pareto.yaml` check judges every pareto in turn, and a `point.yaml` check every
+`r<N>/`.
+
+The cohort's optional `cohort.yaml` manifest names the packaged ruleset its
+`ruleset.*` refs read (e.g. `mlperf-inference-v6.1`); without it, a `ruleset.*`
+row is refused (`the tree was built without ruleset`).
+
+The run prints one line per failing finding:
+
+- The evaluated `assert` predicate (`1 le 128`), marked `FAIL` or `WARN`
+- The check's rules citation (i.e. section in the Endpoints Policies document)
+- When the check declares a `fix`, an indented `fix:` line follows the failing
+  line.
+- Additionally, each check prints `<id> ran at N instance(s)`
+
+A summary (`N finding(s), F failing (B blocking)`) is shown at the end:
+
+- `Findings` counts every evaluated `assert` predicate (holds included)
+- `Failing` means a predicate did not hold (a row that failed to evaluate counts
+  too)
+  - `Blocking` is the subset whose check declares severity `fail`
+
+Specifying `--audit` prints the holds as well, marked `OK` (row label, no
+rule/fix), so the session doubles as the audit trail. Checks that did not run
+print `NEVER-RAN <id>: ...` on stderr with their reason: the `when` conditions
+did not hold at that instance, or a check in their `needs` chain did not vouch.
 
 Exit codes, in plain words:
 
@@ -131,42 +147,53 @@ Each entry is one of four forms:
   addressable below it.
 - `field: dict` - an open subtree: any deeper name below it resolves.
 - the mapping form
-  `field: { type: ..., required: ..., default: ..., allowlist: [...] }` - a leaf
-  with policy notes. Its reserved keys are `type`, `required`, `default` and
-  `allowlist` (`type` names one of `bool`/`dict`/ `float`/`int`/`list`/`str`);
-  `required:` and `default:` set the absent states under "Absent facts" below (a
-  mapping with no `default`, e.g. `{ type: str }`, declares no absent-state
-  value), and `allowlist:` fixes the values a present fact may carry (leaf types
-  only: a `dict` subtree has nothing to enumerate). Three checks at cohort load
-  guard the notes: an `allowlist` holds a non-empty list of scalar values and
-  sits on a leaf type, and a non-`null` `default` must be one of its
-  `allowlist`'s values (`null` exempt - it is the absent-state's own value).
+  `field: { type: ..., required: ..., default: ..., allowlist: [...] }`
+  - `type`: one of `bool`/`dict`/`float`/`int`/`list`/`str`
+  - `required`: denotes whether an entry must be present
+  - `default:` sets the fact's absent-state value under "Absent facts" below (a
+    mapping with no `default`, e.g. `{ type: str }`, declares no absent-state
+    value)
+  - `allowlist:` fixes the values a present fact may carry (leaf types only: a
+    `dict` subtree has nothing to enumerate)
+  - cohort load guards the notes: an `allowlist` holds a non-empty list of
+    scalar values and sits on a leaf type, a non-`null` `default` must match its
+    declared type and be one of its `allowlist`'s values where one is declared
+    (`null` exempt - it is the absent-state's own value), every `allowlist`
+    value must match the declared type, and `required: true` cannot carry a
+    `default` (a default answers the fact's absence)
 - a mapping without `type` - a nested block of sub-entries (`config:`, `warmup:`
   above), as deep as the names go.
 
-Because those four keys are reserved in the mapping form, a rule field literally
-named `type` keeps its value a nested block by carrying any sibling key
-(`field: { type: { ... } }` is a block).
+A mapping matches the schema of a declared leaf only when its `type` value is a
+type name (`int`, `bool`, `float`, `str`, `list`, `dict`) and every key is one
+of that leaf's annotation keys (`type`, `required`, `default`, `allowlist`);
+otherwise it is a nested block. So `field: { type: int }` is a leaf, while a
+rule field literally named `type` keeps its value a block (its `type` value
+there is a mapping, not a type name: `field: { type: { ... } }`).
 
-Read against that table, `point.config.warmup.duration_s` is addressable and
-nothing below it is (`is one leaf fact, nothing deeper`), anything below
-`point.config.steady_state.window` resolves, and `accuracy_results` leaves the
-whole `accuracy_results.json` document open (a whole artifact is addressable as
-is, when declared `dict`). A row naming anything else is refused at cohort load
-with `names no fact` (a one-edit near-miss adds `did you mean 'offline'?`). The
-policy spells value domains out per field -- `offline` is Section 8.3's "One of:
-dedicated, elected, absent or `none`", and `region` (five values,
-`submitters_choice` among them) or `division` (`Standardized`/`Serviced`/`RDI`)
-declare likewise where a cohort holds rows to them.
+Read against that table:
+
+- `point.config.warmup.duration_s` is addressable; nothing below it is
+  (`is one leaf fact, nothing deeper`)
+- anything below `point.config.steady_state.window` resolves (declared `dict`)
+- `accuracy_results` leaves the whole `accuracy_results.json` document open - a
+  whole artifact is addressable as is, when declared `dict`
+
+A row naming anything else is refused at cohort load with `names no fact` (a
+one-edit near-miss adds `did you mean 'offline'?`). The policy spells value
+domains out per field: `offline` is Section 8.3's "One of: dedicated, elected,
+absent or `none`", and `region` (five values, `submitters_choice` among them) or
+`division` (`Standardized`/`Serviced`/`RDI`) declare likewise where a cohort
+holds rows to them.
 
 Two limits on what the file may declare:
 
 - Only node scopes declare under (`submission`/`system`/`pareto`/`point`). A
   `derived:`, `regions:` or `ruleset:` top-level key is refused
-  (`is not a node scope`): those roots are checker-owned (the derivation
+  (`is not a node scope`): those namespaces are checker-owned (the derivation
   registry, the region kinds, the catalog's own data). Rows still name those
-  folds as "Possible keys" describes; their names are the checker's, not the
-  table's.
+  namespaces as "Possible keys" describes; their names are the checker's, not
+  the table's.
 - The file parses with the same strict loader as the scope files: a duplicate
   key, a `<<` merge key or a YAML alias is a parse error, and an empty or
   non-mapping document is refused as
@@ -179,7 +206,7 @@ block's fields:
 
 | Field               | Required   | What it is                                                                                                                |
 | ------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------- |
-| _(the mapping key)_ | yes        | The check's `id`; the scope file it lives in (`point.yaml`, ...) is its `scope      `                                     |
+| _(the mapping key)_ | yes        | The check's `id`; the scope file it lives in (`point.yaml`, ...) is its `scope`                                           |
 | `description`       | yes        | The human sentence describing this check                                                                                  |
 | `rule`              | yes        | Where in the Endpoints Rules this comes from (rendered at the end of each failing line)                                   |
 | `severity`          | yes        | `fail` (a blocking finding) or `warn` (reported and passes through)                                                       |
@@ -188,11 +215,13 @@ block's fields:
 | `when`              | predicates | Gate predicates: the check runs only where all hold; this list may be empty or absent when `assert` carries at least one  |
 | `assert`            | predicates | Condition predicates; each is one finding per instance; this list may be empty or absent when `when` carries at least one |
 
-`when` and `assert` take lists of predicates. A predicate is either a
-**comparison** or an **aggregate** (a named computation over a collection); the
-subsections below spell out each form. (A check runs once per **instance** of
-its scope: once per submission, system, pareto, or measurement point.) A full
-check block in `point.yaml` (both kinds in one check):
+- `when` and `assert` each take a list of predicates; a predicate is either a
+  **comparison** or an **aggregate** (a named computation over a collection) -
+  the subsections below spell out each form
+- a check runs once per **instance** of its scope: once per submission, system,
+  pareto, or measurement point
+
+A full check block in `point.yaml` (both kinds in one check):
 
 ```yaml
 offline_ordering:
@@ -223,15 +252,17 @@ Every comparison takes `left` and `op`; the remaining keys follow the `op`:
 
    - `eq`: Equality check. By default, floating point values will be computed
      with strict equality. Accepts the following optional fields:
-     - `abs_tol` - Absolute tolerance to be forwarded to `math.isclose`
-     - `rel_tol` - Relative tolerance to be forwarded to `math.isclose`
+     - `abs_tol` - Absolute tolerance (`eq`/`ne` only): number pairs compare
+       under tolerance (integer pairs in integer arithmetic, float pairs via
+       `math.isclose`); any other pair compares with `==`
+     - `rel_tol` - Relative tolerance, same rules as `abs_tol`
    - `ne`: Negation of `eq` - see notes above for optional fields.
    - `gt`, `ge`, `lt`, and `le`: The `>`, `>=`, `<`, and `<=` operators
      respectively.
    - `in`: A `contains` / membership operator. True if `left` is contained in
-     `right`. `right` is a list-like container or an `Interval` (e.g. a fold
-     like `regions.coverage`). If `right` is a mapping, `in` uses its _keys_ -
-     unless it is exactly a `{"lo": ..., "hi": ...}` range literal, an inclusive
+     `right`. `right` is a list-like container or an `Interval` (e.g.
+     `regions.coverage`). If `right` is a mapping, `in` uses its _keys_ - unless
+     it is exactly a `{"lo": ..., "hi": ...}` range literal, an inclusive
      interval (`lo <= left <= hi`; both bounds required, `null` bounds refused).
    - `matches`: A regex comparison. `right` must be a `{"literal": ...}` block
      (patterns are compile-checked at load). Ex.:
@@ -332,13 +363,14 @@ theirs reads as the third case; `required`/`default` are filled only when
 
 ### Aggregates
 
-Aggregates are similar to the comparison operators above, but additionally take
-an `aggregate` key naming the computation to perform on `over` (functionally the
-same as `left` in comparisons) before applying the specified `op`.
+An aggregate row is a comparison over a computed value: it names the computation
+under `aggregate` and the collection it reads under `over` (functionally `left`
+in comparisons), then applies the row's `op` to the computed value:
 
-It is expected that `over`, unlike `left`, is a list-like collection. If `over`
-is a mapping (`dict`-like), then the aggregate uses the _values_ of the mapping.
-A bare string does not count as a collection.
+- `over` is expected to be a list-like collection - a mapping is read as its
+  _values_, and a bare string does not count as a collection
+- an empty collection passes only where the table below says so (`count` -> 0,
+  `any` -> false); every other aggregate fails rather than pass vacuously
 
 Accepted `aggregate` values:
 
@@ -399,7 +431,7 @@ check **passed**:
 - Unknown ids and `needs` cycles are refused at load.
 
 Example of `point.yaml` check below, with both `needs` and an aggregate (the
-dependent runs only where `concurrency_in_range` was queued and passed.
+dependent runs only where `concurrency_in_range` was queued and passed).
 
 ```yaml
 accuracy_sane:
@@ -422,19 +454,20 @@ for `r1024`, but is skipped for `r999999`.
 
 - Dotted strings (`Ref`s, e.g. `point.accuracy_results`) are resolved first to
   their values from the submission files passed. The first segment of the dotted
-  string is its `scope` - e.g. `point.accuracy_results` has a scope of `point`.
-  (Section 4's table lists every scope root.) **Every other dotted string is
-  refused at load** - a one-edit near-miss reports "looks like a misspelled",
-  anything else reports "is no scope root": a dotted _value_ must say so with
-  `{"literal": ...}` (e.g. a dataset name like `squad.v2.0`). Scalars with no
-  dot at all (`5`, `true`, `"dedicated"`) need no wrapper and stay literals.
+  string is its namespace - e.g. `point.accuracy_results`'s namespace is
+  `point`. (Section 4's table lists every ref namespace.) **Every other dotted
+  string is refused at load** - a one-edit near-miss reports "looks like a
+  misspelled", anything else reports "is no ref namespace": a dotted _value_
+  must say so with `{"literal": ...}` (e.g. a dataset name like `squad.v2.0`).
+  Scalars with no dot at all (`5`, `true`, `"dedicated"`) need no wrapper and
+  stay literals.
 - If a key must contain a period `.` character, a list can be used:
   `["ruleset", "datasets", "squad.v2.0"]` addresses the `squad.v2.0` dataset
-  entry - each list element is one exact key, and the first must be a scope
-  root.
+  entry - each list element is one exact key, and the first must be a ref
+  namespace.
 - `{"literal": ...}` is the intentional literal: the value inside is used
   verbatim, even when it would otherwise read as a `Ref`. Lists stay literal
-  unless they are non-empty all-strings and scope-root-headed (their near-miss
+  unless they are non-empty all-strings and namespace-headed (their near-miss
   heads are refused at load too).
 
 All three forms in one stub (`point.yaml`):
@@ -482,7 +515,7 @@ check load (each names its cohort file):
   `valid_refs.yaml` declares the valid names; `names no fact`; a one-edit
   near-miss adds "did you mean 'offline'?"), a `derived.<name>` outside the
   known derivation names, a `regions` path beyond
-  `regions.coverage`/`regions.by_kind.<kind>`, a `derived`/`regions` fold named
+  `regions.coverage`/`regions.by_kind.<kind>`, a `derived`/`regions` ref named
   outside `pareto.yaml`/`point.yaml`, or a row naming a finer scope's facts than
   its own file holds
 - an empty cohort directory (rather than a clean pass)
@@ -501,6 +534,11 @@ At submission load (`Submission.from_directory`, which parses every `Point` and
   that Section 5.4 rejects (`null`, a bool, a non-integer, outside `[1, 32]`, or
   not equal to a submitted point's concurrency -- only a missing
   `c_min_override` key derives `C_min` from the points)
+- a run directory whose numeric facts no arithmetic can carry: a non-finite
+  `system_tps`, or a `system_tps`/`concurrency`/`max_supported_concurrency`
+  outside `float` range
+- a `<system>/` directory with no model directories (an empty system cannot hide
+  from system-scoped checks)
 
 At `Finding.collect` (per submitted run):
 
@@ -516,7 +554,9 @@ At `Finding.collect` (per submitted run):
 
 ## 4. Possible keys
 
-Every dotted operand resolves through the scope roots below.
+Every dotted operand resolves through the ref namespaces below: a ref's first
+segment. `submission`, `system`, `pareto` and `point` are the four node scopes;
+`derived`, `ruleset` and `regions` are checker-owned.
 
 - `submission` (one per upload), `system` (one per `results/<system>/`),
   `pareto` (one per `results/<system>/<model>/`), `point` (one per `r<N>`
@@ -535,16 +575,17 @@ Every dotted operand resolves through the scope roots below.
   - `<scope>.accuracy_results.<key>` - `accuracy_results.json`
   - `<scope>.results.<key>` - `results.json` (the results summary rollup)
 - `derived.<name>` - one pareto's named derivations (see `DESIGN.md` for each
-  source formula). The fold is per-pareto, so only `pareto.yaml`/`point.yaml`
-  rows may name it:
+  source formula). They are per-pareto, so only `pareto.yaml`/`point.yaml` rows
+  may name it:
   - `derived.offline_ordering` - Section 5.7.2's pair-of-clauses verdict
   - `derived.point_cap` - Section 5.6's `<=32`
   - `derived.point_count_min` - Section 5.3's minimum count
   - `derived.accuracy_run_count_requirement` - Section 4.3's `N`
   - `derived.out_of_range_points` - Section 5.4's flagged points tuple
-- `ruleset` - the ruleset directory passed with `--ruleset`:
-  - `ruleset.models.<name>.<key>` - model definitions (`models.yaml`)
-  - `ruleset.datasets.<name>.<key>` - dataset definitions (`datasets.yaml`)
+- `ruleset` - the packaged ruleset the cohort's `cohort.yaml` names (a
+  registered round, e.g. `mlperf-inference-v6.1`):
+  - `ruleset.models.<name>.<key>` - model definitions (the round's `models.py`)
+  - `ruleset.datasets.<name>.<key>` - dataset definitions (its `datasets.py`)
 - `regions` - one pareto's Section 5.5 reference-algorithm regions, likewise
   only from `pareto.yaml`/`point.yaml` rows:
   - `regions.coverage` - the `concurrency` interval any valid region covers
@@ -559,43 +600,50 @@ Which names sit under the `<key>` slots is declared in the cohort's
 document -> fields (`point.config.concurrency` is the `config` document's
 `concurrency` under `point`). What a cohort declares follows two rules:
 
-- The name tables draw on the Endpoints Rules' own field tables (Section 8.3 for
-  `point.yaml`, Section 8.2 for `system_desc.json`, Section 4.1/8.1 for
-  `result_summary.json`) at policy `4ba8224dc746` -- `concurrency`, `offline`,
-  `dataset_name`, `model_name`, `warmup.duration_s`, `steady_state.status`,
-  `nodes_used`, `system_tps`, `qps`, and the rest of each table -- while the
-  blocks the rules describe without listing their keys are declared `dict`
-  (`config.runtime_settings`, `config.dataset`, `config.steady_state.window`/
-  `state`/`total`, `result_summary`'s `percentiles`/`isl`/`osl`).
-  `client_config`, `system_power`, `accuracy_results` and `results` are declared
-  open the same way (the benchmark's report writer owns their spelling): under a
-  `dict`, an unknown `<key>` resolves as **absent** (what
-  `exists`/`absent`/`not_null` are for), not an error. `ruleset` keys are open
-  data too -- whatever the `models.yaml`/`datasets.yaml` entry contains
-  (`vocab_size`, `is_drafter`, ...).
+- The name tables draw on the Endpoints Rules' own field tables at policy
+  `4ba8224dc746` - Section 8.3 for `point.yaml`, Section 8.2 for
+  `system_desc.json`, Section 4.1/8.1 for `result_summary.json` - `concurrency`,
+  `offline`, `dataset_name`, `model_name`, `warmup.duration_s`,
+  `steady_state.status`, `nodes_used`, `system_tps`, `qps`, and the rest of each
+  table.
+- Blocks the rules describe without listing their keys are declared `dict`:
+  `config.runtime_settings`, `config.dataset`,
+  `config.steady_state.window`/`state`/`total`, `result_summary`'s
+  `percentiles`/`isl`/`osl`, plus `client_config`, `system_power`,
+  `accuracy_results` and `results` (the benchmark's report writer owns their
+  spelling). Under such a `dict`, an unknown `<key>` resolves as **absent**
+  (what `exists`/`absent`/`not_null` are for), not an error, and `ruleset` keys
+  are open data too - whatever the entry contains (`vocab_size`, `is_drafter`,
+  ...).
 - What a present value must carry is declared the same way and checked at
   collect time (`Finding.collect` refuses before any finding): match its leaf's
   type (`does not match its declared type`), sit in its `allowlist` where one is
   declared (`is not one of`), and a declared block must carry a block
-  (`is no block`). The fence-posts: the parser-minimum trio (`concurrency`,
-  `system_tps`, `max_supported_concurrency`) is code-side and refused at parse
-  time by `Point.from_node` whatever the table says; a `dict` subtree is open
-  and its values stay unchecked; an absent field carries no value to check (its
-  absence reads per "Absent facts"); and a hand-built `Cohort((check, ...))`
-  with no table checks nothing.
+  (`is no block`). The fence-posts:
+  - the parser-minimum trio (`concurrency`, `system_tps`,
+    `max_supported_concurrency`) is code-side: refused at parse time by
+    `Point.from_node` whatever the table says
+  - a `dict` subtree is open, and its values stay unchecked
+  - an absent field carries no value to check (its absence reads per "Absent
+    facts")
+  - a hand-built `Cohort((check, ...))` with no table checks nothing
 
-Rows name only declared facts: a row naming an undeclared or misspelled key is
-refused at cohort load (`names no fact`; a one-edit near-miss adds "did you mean
-'offline'?"), and so is any path below a leaf fact
-(`system_desc.cooling.detail`: `is one leaf fact, nothing deeper`). An upload
-may still carry keys its cohort does not declare -- they are simply not nameable
-by a row. The strict names are what gives "Absent facts" above its meaning: a
-misspelled key dies at cohort load instead of decoding to an absent fact and
-switching a `when`-gated check off by omission. The price is upfront -- a rule
-over a brand-new field first needs that field declared in the cohort's
-`valid_refs.yaml`. Every dotted string must name a scope root or use
-`{"literal": ...}` (`matches` patterns use that form always, dots or not); a
-stray dotted value is refused at load (near-miss heads likewise).
+Rows name only declared facts:
+
+- a row naming an undeclared or misspelled key is refused at cohort load
+  (`names no fact`; a one-edit near-miss adds "did you mean 'offline'?"), and so
+  is any path below a leaf fact (`system_desc.cooling.detail`:
+  `is one leaf fact, nothing deeper`)
+- an upload may still carry keys its cohort does not declare - they are simply
+  not nameable by a row
+- the strict names are what gives "Absent facts" above its meaning: a misspelled
+  key dies at cohort load instead of decoding to an absent fact and switching a
+  `when`-gated check off by omission
+- the price is upfront: a rule over a brand-new field first needs that field
+  declared in the cohort's `valid_refs.yaml`
+- every dotted string must name a ref namespace or use `{"literal": ...}`
+  (`matches` patterns use that form always, dots or not); a stray dotted value
+  is refused at load (near-miss heads likewise)
 
 ## Implementation details
 
