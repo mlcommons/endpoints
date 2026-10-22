@@ -609,3 +609,28 @@ class TestCohortFromDirectory:
         (root / "almost.yaml.bak").write_text(CHECK_ONE)
         with pytest.raises(ValueError, match="almost.yaml.bak"):
             Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_manifest_declares_the_cohorts_ruleset(self, tmp_path):
+        root = write_cohort(tmp_path / "cohort", point=LITERAL_CHECK)
+        (root / "cohort.yaml").write_text("ruleset: mlperf-inference-v6.1\n")
+        assert Cohort.from_directory(root).ruleset == "mlperf-inference-v6.1"
+
+    @pytest.mark.unit
+    def test_a_cohort_without_a_manifest_has_no_ruleset(self, tmp_path):
+        root = write_cohort(tmp_path / "cohort", point=LITERAL_CHECK)
+        assert Cohort.from_directory(root).ruleset is None
+
+    @pytest.mark.unit
+    def test_a_manifest_with_unknown_keys_is_refused(self, tmp_path):
+        root = write_cohort(tmp_path / "cohort", point=LITERAL_CHECK)
+        (root / "cohort.yaml").write_text("ruleset: mlperf-inference-v6.1\npolicy: x\n")
+        with pytest.raises(ValueError, match=r"unexpected \['policy'\]"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_manifest_ruleset_must_be_a_non_empty_string(self, tmp_path):
+        root = write_cohort(tmp_path / "cohort", point=LITERAL_CHECK)
+        (root / "cohort.yaml").write_text("ruleset: [a]\n")
+        with pytest.raises(ValueError, match="non-empty string"):
+            Cohort.from_directory(root)
