@@ -426,8 +426,9 @@ check **passed**:
   hide behind the check it silenced.
 - Any check may be listed in `needs`. If a listed check is at a finer scope,
   **all** of its instances must pass: a pareto-level `pareto_clean` with
-  `needs: [point_accuracy_pass]` runs only if `point_accuracy_pass` passes for
-  every point in that pareto.
+  `needs: [point_accuracy_pass]` runs only if `point_accuracy_pass` passes at
+  every point in that pareto; a point its `when` skipped makes no claim either
+  way.
 - Unknown ids and `needs` cycles are refused at load.
 
 Example of `point.yaml` check below, with both `needs` and an aggregate (the
