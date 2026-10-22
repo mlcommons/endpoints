@@ -793,9 +793,11 @@ class BenchmarkSession:
                 self._publisher.publish(
                     EventRecord(
                         event_type=SampleEventType.COMPLETE,
-                        timestamp_ns=resp.completed_at
-                        if isinstance(resp.completed_at, int)
-                        else now_ns,
+                        # The same arrival stamp as RECV_FIRST/RECV_NON_FIRST.
+                        # resp.completed_at is set at decode, so a result decoded
+                        # in the same transport drain as its chunks would precede
+                        # them (negative TPOT).
+                        timestamp_ns=now_ns,
                         sample_uuid=query_id,
                         conversation_id=conv_id_str,
                         turn=turn_num,
