@@ -57,7 +57,7 @@ from __future__ import annotations
 from enum import Enum
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, ClassVar
 
 import yaml
 from pydantic import (
@@ -245,23 +245,34 @@ class Check(BaseModel):
 class Cohort:
     """Every check a cohort defines: one YAML per scope under one directory.
 
-    `Cohort.from_directory("examples/cohort")` -> that cohort's checks and its
+    `Cohort.from_directory("examples/cohort")` -> that cohort's checks, its
     `valid_refs.yaml` ref table (what its rows may name, and how an omitted
-    fact reads). A hand-built `Cohort((check, ...))` carries no table
-    (`refs is None`): its rows' names are checked only by resolution at run
-    time.
+    fact reads), and the ruleset its `cohort.yaml` manifest names (the
+    packaged ruleset whose data its `ruleset.*` rows read). A hand-built
+    `Cohort((check, ...))` carries no table (`refs is None`) and no ruleset:
+    its rows' names are checked only by resolution at run time.
 
     Args:
         checks (tuple[Check, ...]): The cohort's checks.
         refs (RefTable | None): The `valid_refs.yaml` ref table, or `None` for a
             hand-built cohort. (Default: None)
+        ruleset (str | None): The registered ruleset name the manifest declares,
+            or `None` when there is no manifest. (Default: None)
     """
 
-    __slots__ = ("checks", "refs")
+    MANIFEST_FILENAME: ClassVar[str] = "cohort.yaml"
 
-    def __init__(self, checks: tuple[Check, ...], refs: RefTable | None = None) -> None:
+    __slots__ = ("checks", "refs", "ruleset")
+
+    def __init__(
+        self,
+        checks: tuple[Check, ...],
+        refs: RefTable | None = None,
+        ruleset: str | None = None,
+    ) -> None:
         self.checks = checks
         self.refs = refs
+        self.ruleset = ruleset
 
     @classmethod
     def from_directory(cls, root: Path) -> Cohort:
@@ -269,32 +280,39 @@ class Cohort:
         then each file's checks in key order.
 
         Args:
-            root (Path): The cohort directory: the scope files plus the
-                `valid_refs.yaml` ref table.
+            root (Path): The cohort directory: the scope files, the
+                `valid_refs.yaml` ref table and the optional `cohort.yaml`
+                manifest.
         Returns:
             Cohort: The cohort's checks, every row's names checked against the
-                table.
+                table, and the manifest's ruleset name (`None` without a manifest).
         Raises:
             NotADirectoryError: When `root` is not a directory.
             ValueError: When the directory holds a stray file, the ref table is
                 missing, a scope file is not a mapping of check id to check, a check
-                block declares its own `id` /`scope`, or no checks are found: a load
-                problem, not a report. A duplicate `id` is refused here: which file wins
-                must never be a race.
+                block declares its own `id` /`scope`, the manifest is not a manifest,
+                or no checks are found: a load problem, not a report. A duplicate
+                `id` is refused here: which file wins must never be a race.
         """
         if not root.is_dir():
             raise NotADirectoryError(root)
         stray = sorted(
             {path.name for path in root.iterdir()}
-            - {RefTable.FILENAME, *(f"{scope.value}.yaml" for scope in RuleScopes)}
+            - {
+                RefTable.FILENAME,
+                cls.MANIFEST_FILENAME,
+                *(f"{scope.value}.yaml" for scope in RuleScopes),
+            }
         )
         if stray:
             raise ValueError(
                 f"{root} is not a cohort: unexpected {stray} "
-                f"(only {RefTable.FILENAME} and the scope files system.yaml/"
-                "submission.yaml/pareto.yaml/point.yaml belong here)"
+                f"(only {RefTable.FILENAME}, {cls.MANIFEST_FILENAME} and the "
+                "scope files system.yaml/submission.yaml/pareto.yaml/point.yaml "
+                "belong here)"
             )
         refs = RefTable.from_yaml(root / RefTable.FILENAME)
+        ruleset = cls._read_manifest(root)
         checks: list[Check] = []
         for scope in RuleScopes:
             path = root / f"{scope.value}.yaml"
@@ -335,4 +353,54 @@ class Cohort:
         for check in checks:
             for row in (*check.when, *check.assert_):
                 row.map_refs(partial(_checked_ref, check.scope, table=refs))
-        return cls(tuple(checks), refs)
+        return cls(tuple(checks), refs, ruleset)
+
+    @classmethod
+    def _read_manifest(cls, root: Path) -> str | None:
+        """The ruleset name `root`'s `cohort.yaml` declares, or None without one.
+
+        The manifest is the cohort's metadata: today one key, `ruleset` -- the
+        registered ruleset (`config/ruleset_registry.py`) whose packaged data
+        the cohort's `ruleset.*` rows read. What a cohort's submissions are
+        valid against is the packaged ruleset, never a directory beside it.
+
+        Args:
+            root (Path): The cohort directory.
+        Returns:
+            str | None: The declared ruleset name, `None` when there is no manifest.
+        Raises:
+            ValueError: When the manifest is not a mapping, declares an unknown key,
+                or its `ruleset` is not a non-empty string.
+        """
+        path = root / cls.MANIFEST_FILENAME
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ValueError(
+                f"{cls.MANIFEST_FILENAME} is not a manifest: {exc}"
+            ) from exc
+        try:
+            data = yaml.load(text, Loader=StrictLoader)
+        except yaml.YAMLError as exc:
+            raise ValueError(
+                f"{cls.MANIFEST_FILENAME} is not a manifest: {exc}"
+            ) from exc
+        if not isinstance(data, dict) or not data:
+            raise ValueError(
+                f"{cls.MANIFEST_FILENAME} is not a manifest: expected a mapping"
+            )
+        unknown = sorted(set(data) - {"ruleset"})
+        if unknown:
+            raise ValueError(
+                f"{cls.MANIFEST_FILENAME}: unexpected {unknown} "
+                "(only `ruleset` is defined)"
+            )
+        ruleset = data["ruleset"]
+        if not isinstance(ruleset, str) or not ruleset:
+            raise ValueError(
+                f"{cls.MANIFEST_FILENAME}: `ruleset` must be a non-empty string, "
+                f"got {ruleset!r}"
+            )
+        return ruleset

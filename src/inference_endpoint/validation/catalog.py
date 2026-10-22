@@ -15,20 +15,25 @@
 
 """The ruleset's catalog: model and dataset values as plain dictionaries, nothing more.
 
-`Catalog.from_directory(<catalog-dir>)` reads `models.yaml` and
-`datasets.yaml` once. `catalog.models["gpt-oss-120b"]` is that model's entry as
-written (sizes, flags and values stay raw data, not pseudo-enum classes). A
-check addresses them through the `ruleset` root of `Ref`
-(`ruleset.models.gpt-oss-120b.vocab_size`).
+`Catalog.from_ruleset(name)` is the checker's loader: it derives the mappings
+from the packaged ruleset the cohort names (`config/ruleset_registry.py`,
+e.g. `mlperf-inference-v6.1`), so the checker and the benchmark read one
+source. `Catalog.from_directory(root)` loads a development
+`models.yaml` + `datasets.yaml` pair instead. Values stay raw data, not
+pseudo-enum classes; a check addresses them through the `ruleset` root of
+`Ref` (`ruleset.models.deepseek-r1.dataset.size`).
 """
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from inference_endpoint.config.ruleset_registry import get_ruleset
+from inference_endpoint.config.rulesets.mlcommons.rules import RoundRuleset
 from inference_endpoint.validation.tree import StrictLoader
 
 
@@ -40,6 +45,40 @@ class Catalog:
     def __init__(self, models: dict[str, Any], datasets: dict[str, Any]) -> None:
         self.models = models
         self.datasets = datasets
+
+    @classmethod
+    def from_ruleset(cls, name: str) -> Catalog:
+        """The catalog the registered ruleset `name` carries.
+
+        The checker reads packaged rulesets only: a cohort's manifest names
+        one, and this view exposes its plain data -- one source with the
+        benchmark side. Datasets key on their `description` (the Python
+        `_Dataset` carries no short name); a round with no per-model rules
+        (e.g. an Endpoints seed set) yields empty mappings.
+
+        Args:
+            name (str): A registered ruleset name (`config/ruleset_registry.py`).
+        Returns:
+            Catalog: The ruleset's `models` and `datasets` mappings, values as
+                plain dictionaries.
+        Raises:
+            ValueError: When `name` is not registered, or the registered
+                ruleset is not a round of per-model rules.
+        """
+        try:
+            ruleset = get_ruleset(name)
+        except KeyError as exc:
+            raise ValueError(exc.args[0]) from None
+        if not isinstance(ruleset, RoundRuleset):
+            raise ValueError(
+                f"ruleset {name!r} carries no model rounds: expected a RoundRuleset"
+            )
+        models: dict[str, Any] = {}
+        datasets: dict[str, Any] = {}
+        for model in ruleset.benchmark_rulesets:
+            models[model.name] = asdict(model)
+            datasets[model.dataset.description] = asdict(model.dataset)
+        return cls(models, datasets)
 
     @classmethod
     def from_directory(cls, root: Path) -> Catalog:

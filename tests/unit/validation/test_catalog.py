@@ -23,6 +23,7 @@ subject computes: `Catalog.from_directory` its parsed mappings and
 from pathlib import Path
 
 import pytest
+from inference_endpoint.config.ruleset_registry import get_ruleset
 from inference_endpoint.validation.catalog import Catalog
 from inference_endpoint.validation.refs import Ref
 from inference_endpoint.validation.tree import SubmissionNode
@@ -82,3 +83,29 @@ class TestRulesetRoot:
         (root / "results").mkdir(parents=True)
         scopes = SubmissionNode.from_directory(root).scopes()
         assert "ruleset" not in scopes
+
+
+class TestCatalogFromRuleset:
+    """`Catalog.from_ruleset`: the packaged ruleset's data as plain mappings."""
+
+    @pytest.mark.unit
+    def test_derives_models_and_datasets_from_the_registered_round(self):
+        ruleset = get_ruleset("mlperf-inference-v6.1")
+        first = next(iter(ruleset.benchmark_rulesets))
+        catalog = Catalog.from_ruleset("mlperf-inference-v6.1")
+        assert set(catalog.models) == {
+            model.name for model in ruleset.benchmark_rulesets
+        }
+        assert catalog.models[first.name]["dataset"]["size"] == first.dataset.size
+        assert catalog.datasets[first.dataset.description]["size"] == first.dataset.size
+
+    @pytest.mark.unit
+    def test_an_unknown_ruleset_name_refuses(self):
+        with pytest.raises(ValueError, match="not found in registry"):
+            Catalog.from_ruleset("no-such-ruleset")
+
+    @pytest.mark.unit
+    def test_a_seed_only_ruleset_yields_empty_mappings(self):
+        catalog = Catalog.from_ruleset("mlperf-endpoints-current")
+        assert catalog.models == {}
+        assert catalog.datasets == {}

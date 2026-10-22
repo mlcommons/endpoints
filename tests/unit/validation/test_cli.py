@@ -114,17 +114,32 @@ class TestExitCodes:
         assert "did you mean 'offline'?" in err
 
     @pytest.mark.unit
-    def test_a_malformed_ruleset_catalog_is_refused(self, tmp_path, capsys):
-        ruleset = tmp_path / "ruleset"
-        ruleset.mkdir()
-        (ruleset / "models.yaml").write_text("a: [b\n", encoding="utf-8")
-        (ruleset / "datasets.yaml").write_text("a: {}\n", encoding="utf-8")
+    def test_a_cohort_naming_an_unknown_ruleset_is_refused(self, tmp_path, capsys):
         cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
-        argv = [str(cohort), str(_upload(tmp_path)), "--ruleset", str(ruleset)]
-        assert main(argv) == 2
+        (cohort / "cohort.yaml").write_text(
+            "ruleset: no-such-ruleset\n", encoding="utf-8"
+        )
+        assert main([str(cohort), str(_upload(tmp_path))]) == 2
         err = capsys.readouterr().err
         assert "refused:" in err
-        assert "models.yaml is not a catalog" in err
+        assert "not found in registry" in err
+
+    @pytest.mark.unit
+    def test_a_cohort_pulls_its_ruleset_from_its_manifest(self, tmp_path):
+        check = (
+            "ruleset_row:\n"
+            "  description: The packaged ruleset's models are visible to a row.\n"
+            "  rule: The ruleset's models are the packaged data.\n"
+            "  severity: fail\n"
+            "  assert:\n"
+            "    - left: ruleset.models\n"
+            "      op: exists\n"
+        )
+        cohort = write_cohort(tmp_path / "cohort", point=check)
+        (cohort / "cohort.yaml").write_text(
+            "ruleset: mlperf-inference-v6.1\n", encoding="utf-8"
+        )
+        assert main([str(cohort), str(_upload(tmp_path))]) == 0
 
 
 class TestReportLines:

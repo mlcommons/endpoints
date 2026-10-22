@@ -10,13 +10,14 @@ maintainers and reviewers, not for check authors.
 Twelve modules. Each entry is the role first, then the names you will grep for.
 
 - **`__main__.py`** — the user-facing CLI. `main(argv) -> exit code` (argparse)
-  wires `Cohort.from_directory` + `Submission.from_directory` +
-  `Finding.collect`. `--ruleset DIR` attaches the `Catalog` fold; `--audit`
-  prints holds too. The report marks `OK`/`FAIL`/`WARN`, prints
-  `<id> ran at N instance(s)` per check (`NEVER-RAN <id>` on stderr at zero) and
-  a closing `N finding(s), F failing (B blocking)` summary. Exit codes: `0`
-  everything applicable held or failed only at `warn`; `1` a failing `fail`
-  finding; `2` cohort or submission refused before any check ran.
+  wires `Cohort.from_directory` + `Catalog.from_ruleset` (the ruleset the
+  cohort's `cohort.yaml` names) + `Submission.from_directory` +
+  `Finding.collect`; `--audit` prints holds too. The report marks
+  `OK`/`FAIL`/`WARN`, prints `<id> ran at N instance(s)` per check
+  (`NEVER-RAN <id>` on stderr at zero) and a closing
+  `N finding(s), F failing (B blocking)` summary. Exit codes: `0` everything
+  applicable held or failed only at `warn`; `1` a failing `fail` finding; `2`
+  cohort or submission refused before any check ran.
 
 - **`check.py`** — the cohort side.
 
@@ -32,13 +33,16 @@ Twelve modules. Each entry is the role first, then the names you will grep for.
   - `_checked_ref` runs `_validate_row_ref`, then the cohort ref table's
     `validate_names`/`annotate` — the one place a row's names get checked.
   - `Cohort.from_directory` loads `valid_refs.yaml` first (via
-    `RefTable.from_yaml`), then the four scope files, each an id-keyed mapping.
-    Every row's refs run through `check._checked_ref` via `map_refs`. Refused
-    with `ValueError`: a file outside the five known names, a missing ref table,
-    an in-body `id`/`scope`, a duplicate `id`.
-  - `Cohort(checks, refs)` carries `Cohort.refs` — the `RefTable`, `None` for a
-    hand-built `Cohort((check, ...))`. `Severity` is the `warn`/`fail`
-    wire-enum.
+    `RefTable.from_yaml`), then the four scope files, each an id-keyed mapping;
+    `cohort.yaml`, when present, is read as the manifest: the `ruleset` name it
+    declares. Every row's refs run through `check._checked_ref` via `map_refs`.
+    Refused with `ValueError`: a file outside the known names, a missing ref
+    table, an in-body `id`/`scope`, a duplicate `id`, a manifest that is not a
+    manifest.
+  - `Cohort(checks, refs, ruleset)` carries `Cohort.refs` — the `RefTable`,
+    `None` for a hand-built `Cohort((check, ...))` — and `Cohort.ruleset`, the
+    manifest's registered ruleset name (`None` without a manifest). `Severity`
+    is the `warn`/`fail` wire-enum.
 
 - **`compare.py`** — the row model and the verdict boundary.
 
@@ -132,9 +136,11 @@ Twelve modules. Each entry is the role first, then the names you will grep for.
 - **`sentinels.py`** — the shared `MISSING` sentinel. `value is MISSING` is the
   fact's absence, distinct from a stored null.
 
-- **`catalog.py`** — `Catalog.from_directory` reads the ruleset's
-  `models.yaml`/`datasets.yaml` into plain dicts; `Catalog.scopes()` is the
-  `ruleset` root's payload.
+- **`catalog.py`** — `Catalog.from_ruleset` derives it from the registered round
+  the cohort's manifest names (`models.py`/`datasets.py`);
+  `Catalog.from_directory` reads a development `models.yaml`/`datasets.yaml`
+  pair into the same plain dicts. `Catalog.scopes()` is the `ruleset` root's
+  payload.
 
 - **`submission.py`** — the typed submission side.
 
@@ -231,14 +237,15 @@ flowchart LR
     pres["results/sys/model/r16/results.json"]
     more["… same file shape per further point: r32/, …"]
   end
-  subgraph RS["ruleset/ (option: --ruleset)"]
+  subgraph RS["ruleset data (the round the cohort's cohort.yaml names)"]
     direction TB
-    rmod["models.yaml"]
-    rds["datasets.yaml"]
+    rmod["config/rulesets/mlcommons/models.py"]
+    rds["config/rulesets/mlcommons/datasets.py"]
   end
   subgraph CO["cohort/ (its name = the cohort)"]
     direction TB
     cvr["valid_refs.yaml"]
+    cman["cohort.yaml"]
     csys["system.yaml"]
     csub["submission.yaml"]
     cpar["pareto.yaml"]
@@ -249,8 +256,8 @@ flowchart LR
     TREE["SubmissionNode.from_directory → Submission/System/Pareto/PointNode. Node.read: _read_artifact probes the 7 known names per level"]
     SUB["Submission.from_directory → Submission(tree, paretos). Pareto.from_nodes per results/sys/model/ latches its regions. Point.from_node reads per r<N>/: point.yaml (concurrency, offline), system_desc.json (max_supported_concurrency), result_summary.json (system_tps)"]
   end
-  CAT["Catalog.from_directory → ruleset fold"]
-  COH["Cohort.from_directory → RefTable.from_yaml (valid_refs.yaml first), then Cohort((Check, …), refs). id = key, scope = filename"]
+  CAT["Catalog.from_ruleset → ruleset fold"]
+  COH["Cohort.from_directory → RefTable.from_yaml (valid_refs.yaml first) + cohort.yaml ruleset, then Cohort((Check, …), refs, ruleset). id = key, scope = filename"]
   MAIN["__main__.main (CLI wiring)"]
   RUN["Finding.collect(cohort, submission). _validate_* refuse loud; _GateResolver; Verdict.evaluate"]
   OUT["(Finding, …) → report lines + exit 0 / 1 / 2"]

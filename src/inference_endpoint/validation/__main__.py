@@ -61,7 +61,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Run one cohort's checks against one submission.",
     )
     parser.add_argument(
-        "cohort", type=Path, help="cohort directory (its name names the cohort)"
+        "cohort",
+        type=Path,
+        help="cohort directory (its `cohort.yaml` manifest names its ruleset)",
     )
     parser.add_argument(
         "submission",
@@ -69,21 +71,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="submission root (results/<system>/<model>/r<N>/)",
     )
     parser.add_argument(
-        "--ruleset",
-        type=Path,
-        default=None,
-        help="ruleset directory (models.yaml + datasets.yaml): the `ruleset` fold",
-    )
-    parser.add_argument(
         "--audit", action="store_true", help="print held findings alongside failures"
     )
     args = parser.parse_args(argv)
     try:
         cohort = Cohort.from_directory(args.cohort)
-        submission = Submission.from_directory(
-            args.submission,
-            ruleset=Catalog.from_directory(args.ruleset) if args.ruleset else None,
-        )
+        catalog = Catalog.from_ruleset(cohort.ruleset) if cohort.ruleset else None
+        submission = Submission.from_directory(args.submission, ruleset=catalog)
         findings = Finding.collect(cohort, submission)
     except (OSError, ValueError) as exc:
         print(f"refused: {_escaped(str(exc))}", file=sys.stderr)
