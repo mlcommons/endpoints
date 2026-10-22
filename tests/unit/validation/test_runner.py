@@ -671,7 +671,7 @@ class TestCollectFailsLoud:
             Finding.collect(Cohort((check,)), submission)
 
     @pytest.mark.unit
-    def test_a_cohort_naming_the_ruleset_fold_needs_one(self, tmp_path):
+    def test_a_cohort_naming_the_ruleset_root_needs_one(self, tmp_path):
         check = _check(
             "catalogued", assert_=[{"left": "ruleset.models.gpt", "op": "exists"}]
         )

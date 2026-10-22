@@ -91,8 +91,8 @@ class Finding:
         """One `Finding` per evaluated `assert` row at each applicable node (holds too).
 
         A load-level check first (`_validate_*`: a submission the walk cannot
-        cover, an unreadable artifact, or a fold the cohort names but the tree
-        lacks is an error -- silence must never be the verdict). Then
+        cover, an unreadable artifact, or a checker root the cohort names but
+        the tree lacks is an error -- silence must never be the verdict). Then
         `_collect_candidates` validates `needs` names (unknown -> ValueError)
         and `_GateResolver` resolves each `needs` chain per node. Each
         (check, node) is evaluated exactly once -- the chain first (a disavowed
@@ -106,7 +106,7 @@ class Finding:
         _validate_points(submission)
         _validate_artifacts(submission)
         _validate_declared_values(cohort, submission)
-        _validate_fold_needs(cohort, submission)
+        _validate_ruleset_needs(cohort, submission)
         candidates = _collect_candidates(cohort)
         gate = _GateResolver({check.id: check for check in candidates}, submission)
         findings: list[Finding] = []
@@ -202,8 +202,8 @@ def _validate_declared_values(cohort: Cohort, submission: Submission) -> None:
             raise ValueError(f"{node.dir}: {exc}") from exc
 
 
-def _validate_fold_needs(cohort: Cohort, submission: Submission) -> None:
-    """Fail loud when a cohort names the `ruleset` fold the tree was built without.
+def _validate_ruleset_needs(cohort: Cohort, submission: Submission) -> None:
+    """Fail loud when a cohort names the `ruleset` root the tree was built without.
 
     A forgotten `ruleset=` kwarg must be a load error, not rows resolving
     "missing" on a healthy upload. (`derived`/`regions` are per-pareto and
@@ -440,8 +440,8 @@ def _scopes_rows_view(node: Node, submission: Submission) -> dict[str, Any]:
     """Row-resolvable scope map at `node`: the tree's fields plus the pareto's `derived`.
 
     `derived.<name>` rows address per-pareto named facts (`Pareto.derived()`),
-    so the fold rides in only where a pareto owns the node: nodes above every
-    pareto (a multi-pareto upload's system/submission) carry no `derived`
+    so the mapping is attached only where a pareto owns the node: nodes above
+    every pareto (a multi-pareto upload's system/submission) carry no `derived`
     root, and cohort load refuses rows naming one there.
     """
     scopes: dict[str, Any] = node.scopes()

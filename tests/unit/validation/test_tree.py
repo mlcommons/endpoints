@@ -344,7 +344,7 @@ class TestScopes:
 
 
 class TestRegionsRoot:
-    """`Node.scopes` folds `Regions` into the `regions` root of `Ref`."""
+    """`Node.scopes` exposes `Regions` under the `regions` root of `Ref`."""
 
     @pytest.mark.unit
     def test_regions_root_answers_coverage_lookups(self, tmp_path):
@@ -357,7 +357,7 @@ class TestRegionsRoot:
             True,
             Interval(1, 9012),
         )
-        # The fold's `Interval` values are leaves: `Ref` returns one as-is and
+        # The root's `Interval` values are leaves: `Ref` returns one as-is and
         # never walks its attributes (`margin.lo` would be attribute traversal).
         assert Ref(("regions", "by_kind", "margin")).resolve(scopes) == (
             True,

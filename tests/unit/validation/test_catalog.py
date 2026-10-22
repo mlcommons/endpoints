@@ -17,7 +17,7 @@
 
 Fixtures write tiny catalog YAMLs on demand. Cases assert the values each
 subject computes: `Catalog.from_directory` its parsed mappings and
-`Node.scopes` its `ruleset` fold.
+`Node.scopes` its `ruleset` root.
 """
 
 from pathlib import Path
@@ -62,7 +62,7 @@ class TestCatalogFromDirectory:
 
 
 class TestRulesetRoot:
-    """`Node.scopes` folds the catalog into the `ruleset` root of `Ref`."""
+    """`Node.scopes` exposes the catalog under the `ruleset` root of `Ref`."""
 
     def _scopes(self, tmp_path: Path):
         root = tmp_path / "acme"

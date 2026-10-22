@@ -85,10 +85,10 @@ class Ref:
         "point",
     )
     # `derived` (the derivation registry), `regions` (the region kinds),
-    # `ruleset` (the catalog's own data keys): their names come from the checker,
-    # so `valid_refs.yaml` must not declare them (and no table checks them).
-    FOLD_ROOTS: ClassVar[tuple[str, ...]] = ("derived", "ruleset", "regions")
-    ROOTS: ClassVar[tuple[str, ...]] = (*SCOPE_ROOTS, *FOLD_ROOTS)
+    # `ruleset` (the catalog's own data keys): the checker owns their names, so
+    # `valid_refs.yaml` must not declare them (and no table checks them).
+    CHECKER_ROOTS: ClassVar[tuple[str, ...]] = ("derived", "ruleset", "regions")
+    ROOTS: ClassVar[tuple[str, ...]] = (*SCOPE_ROOTS, *CHECKER_ROOTS)
 
     parts: tuple[str, ...]
     required: bool = False
@@ -126,7 +126,8 @@ class Ref:
             Ref(("point", "bad")).resolve(scopes)  # (True, None): the field exists and is null.
 
         Each step is a mapping key look-up and the resolved value is a leaf, regardless
-        of the value's type (a fold's `Interval` is a value, never walked through).
+        of the value's type (a checker root's `Interval` is a value, never walked
+        through).
 
         Artifact documents are submitter-controlled, and attribute traversal would let
         `{"errors": []}` answer `errors.count` (the builtin method's) as a present fact.
@@ -192,7 +193,7 @@ class _Fact:
                 # `bool` is an `int` in Python, so an int leaf must not accept `true`.
                 return isinstance(value, int) and not isinstance(value, bool)
             case "float":
-                # An `int` folds into `float` (a count-valued metric stays valid).
+                # An `int` is accepted as a `float` (a count-valued metric stays valid).
                 return isinstance(value, int | float) and not isinstance(value, bool)
             case "str":
                 return isinstance(value, str)

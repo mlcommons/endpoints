@@ -134,9 +134,9 @@ class Node:
             (Default: ())
         artifacts (dict[str, tuple[Any, str | None]]): Each `FILE_TO_KEY_MAP`
             artifact present: name -> its parsed `(value, error)` pair. (Default: {})
-        ruleset (Catalog | None): The `ruleset` fold `scopes()` exposes. The root
+        ruleset (Catalog | None): The `ruleset` root `scopes()` exposes. The root
             node holds it when the submission was built with one. (Default: None)
-        regions (Regions | None): The `regions` fold `scopes()` exposes. Each pareto
+        regions (Regions | None): The `regions` root `scopes()` exposes. Each pareto
             node latches its own. (Default: None)
     """
 
@@ -172,7 +172,7 @@ class Node:
                 self.artifacts[name] = (value, error)
 
     def root(self) -> Node:
-        """The tree's root node. It carries the `ruleset` fold (see `regions`)."""
+        """The tree's root node. It carries the `ruleset` root (see `regions`)."""
         node: Node = self
         while node.parent is not None:
             node = node.parent
@@ -212,8 +212,8 @@ class Node:
                 `{"point": {"result_summary": {"n": 1}}, "pareto": {}, "system": {}, "submission": {}}`.
                 Its ancestors contribute their own fields, an artifactless node just
                 `{}`. The `ruleset` root holds `Catalog.scopes()` when the submission
-                was built with one. The `regions` fold rides the nearest ancestor that
-                carries one (each pareto node latches its own, so the fold is
+                was built with one. The `regions` root rides the nearest ancestor that
+                carries one (each pareto node latches its own, so it is
                 per-pareto. Nodes above every pareto resolve no `regions`).
         """
         scopes: dict[str, dict[str, Any]] = {}
@@ -232,18 +232,18 @@ class Node:
         root = self.root()
         if root.ruleset is not None:
             scopes["ruleset"] = root.ruleset.scopes()
-        fold: Node | None = self
-        while fold is not None and fold.regions is None:
-            fold = fold.parent
-        if fold is not None and fold.regions is not None:
+        carrier: Node | None = self
+        while carrier is not None and carrier.regions is None:
+            carrier = carrier.parent
+        if carrier is not None and carrier.regions is not None:
             scopes["regions"] = {
-                "coverage": fold.regions.coverage(),
+                "coverage": carrier.regions.coverage(),
                 "by_kind": {
-                    RegionKind.ULTRA_LOW_CONCURRENCY: fold.regions.low_latency,
-                    RegionKind.LOW_CONCURRENCY: fold.regions.low_concurrency,
-                    RegionKind.MED_CONCURRENCY: fold.regions.med_concurrency,
-                    RegionKind.HIGH_CONCURRENCY: fold.regions.high_concurrency,
-                    RegionKind.MARGIN: fold.regions.margin,
+                    RegionKind.ULTRA_LOW_CONCURRENCY: carrier.regions.low_latency,
+                    RegionKind.LOW_CONCURRENCY: carrier.regions.low_concurrency,
+                    RegionKind.MED_CONCURRENCY: carrier.regions.med_concurrency,
+                    RegionKind.HIGH_CONCURRENCY: carrier.regions.high_concurrency,
+                    RegionKind.MARGIN: carrier.regions.margin,
                 },
             }
         return scopes
@@ -265,9 +265,9 @@ class SubmissionNode(Node, kind=RuleScopes.SUBMISSION):
             root (Path): The upload root. `submission/acme` -> that submission's
                 tree.
             ruleset (Catalog | None): The `ruleset` root of `Ref.resolve`: a
-                `Catalog`, or `None` for no `ruleset` fold. (Default: None)
+                `Catalog`, or `None` for no `ruleset` root. (Default: None)
             regions (Regions | None): The `regions` root of `Ref.resolve`: a
-                `Regions`, or `None` for no `regions` fold. (Default: None)
+                `Regions`, or `None` for no `regions` root. (Default: None)
         Returns:
             Node: The `submission` node, with its `results/<system>/<model>/r<N>`
                 tree walked.

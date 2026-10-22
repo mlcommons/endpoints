@@ -139,7 +139,7 @@ def write_upload(
         paretos (Mapping[tuple[str, str], Sequence[Run]]): The `paretos` keys are
             `(system_name, pareto_name)`. Each value is the pareto's ordered `Run` s,
             written to `results/<system>/<pareto>/<r<N>>/`.
-        ruleset (Catalog | None): The `Catalog` folded into the walk's `ruleset`
+        ruleset (Catalog | None): The `Catalog` the walk exposes as the `ruleset`
             root. (Default: None)
     """
     writing: set[str] = set()
