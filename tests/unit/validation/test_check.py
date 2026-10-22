@@ -431,6 +431,54 @@ class TestCohortRefTable:
         ]
 
     @pytest.mark.unit
+    def test_required_and_default_contradict(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={
+                "point": {
+                    "config": {
+                        "offline": {
+                            "type": "str",
+                            "required": True,
+                            "default": "none",
+                        }
+                    }
+                }
+            },
+            point=LITERAL_CHECK,
+        )
+        with pytest.raises(ValueError, match="`required` and `default` contradict"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_default_must_match_its_declared_type(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={
+                "point": {
+                    "config": {
+                        "warmup": {"duration_s": {"type": "int", "default": "x"}}
+                    }
+                }
+            },
+            point=LITERAL_CHECK,
+        )
+        with pytest.raises(ValueError, match="does not match its type"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_an_allowlist_value_must_match_its_declared_type(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={
+                "point": {"config": {"mood": {"type": "int", "allowlist": ["a", 2]}}}
+            },
+            point=LITERAL_CHECK,
+        )
+        with pytest.raises(ValueError, match="allowlist values"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
     def test_a_custom_table_that_omits_a_field_refuses_rows_naming_it(self, tmp_path):
         # Per-cohort updatability: dropping `config.offline` retires the name,
         # so a row naming it dies at cohort load instead of silently switching
@@ -508,8 +556,9 @@ class TestStubCohort:
     @pytest.mark.unit
     def test_stub_checks_evaluate_against_a_submission(self, tmp_path):
         # End-to-end over a real tree: the range stub holds at every in-band
-        # point and flags r9013 (above the 10% margin); the offline stub reads
-        # the dedicated point's declaration and reports its clause verdict.
+        # fixed-concurrency point and flags r9013 (above the 10% margin); the
+        # dedicated run is exempt (§5.7.2); the offline stub reads the
+        # dedicated point's declaration and reports its clause verdict.
         cohort = Cohort.from_directory(Path("tests/assets/cohorts/stub"))
         submission = write_upload(
             tmp_path / "acme",
@@ -522,16 +571,41 @@ class TestStubCohort:
                 ]
             },
         )
-        findings = Finding.collect(cohort, submission)
+        findings = Finding.collect(cohort, submission).findings
         got = sorted(
             (f.check_id, f.node_directory.name, f.verdict.ok) for f in findings
         )
         assert got == [
             ("concurrency_in_range", "r32", True),
-            ("concurrency_in_range", "r512", True),
             ("concurrency_in_range", "r8192", True),
             ("concurrency_in_range", "r9013", False),
             ("offline_ordering", "r512", False),
+        ]
+
+    @pytest.mark.unit
+    def test_the_range_row_skips_a_dedicated_offline_run(self, tmp_path):
+        # §5.7.2: a dedicated Offline run is not a fixed-concurrency point (its
+        # concurrency is the performance dataset's cardinality), so a
+        # conforming 200000 point draws no range finding against a C_max 8192.
+        cohort = Cohort.from_directory(Path("tests/assets/cohorts/stub"))
+        submission = write_upload(
+            tmp_path / "acme",
+            {
+                ("sys", "model"): [
+                    Run(concurrency=16),
+                    Run(concurrency=8192, system_tps=5400.0),
+                    Run(concurrency=200000, offline="dedicated", system_tps=7200.0),
+                ]
+            },
+        )
+        findings = Finding.collect(cohort, submission).findings
+        got = sorted(
+            (f.check_id, f.node_directory.name, f.verdict.ok) for f in findings
+        )
+        assert got == [
+            ("concurrency_in_range", "r16", True),
+            ("concurrency_in_range", "r8192", True),
+            ("offline_ordering", "r200000", True),
         ]
 
 

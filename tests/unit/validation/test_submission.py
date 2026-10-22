@@ -32,6 +32,7 @@ from inference_endpoint.validation.submission import (
     OFFLINE_TPS_RATIO,
     Pareto,
     Point,
+    Submission,
 )
 from submission_helpers import OMITTED, Run, write_run, write_upload
 
@@ -514,3 +515,75 @@ class TestPointPowerKw:
     @pytest.mark.unit
     def test_golden_row_full_engagement_reduces_to_provisioned(self):
         assert self._point().point_power_kw(152.10, 18, 18) == 152.1
+
+
+class TestNumericGuards:
+    """Upload-controlled numbers no arithmetic can carry are refused at load."""
+
+    @pytest.mark.unit
+    def test_a_non_finite_system_tps_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="needs a finite value"):
+            write_upload(
+                tmp_path / "acme",
+                {SYSTEM: [Run(concurrency=16, system_tps=float("inf"))]},
+            )
+
+    @pytest.mark.unit
+    def test_a_system_tps_outside_float_range_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="outside float range"):
+            write_upload(
+                tmp_path / "acme",
+                {SYSTEM: [Run(concurrency=16, system_tps=10**400)]},
+            )
+
+    @pytest.mark.unit
+    def test_a_c_max_outside_float_range_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="outside float range"):
+            write_upload(
+                tmp_path / "acme",
+                {SYSTEM: [Run(concurrency=16, max_supported_concurrency=10**400)]},
+            )
+
+    @pytest.mark.unit
+    def test_a_concurrency_outside_float_range_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="outside float range"):
+            write_upload(
+                tmp_path / "acme",
+                {SYSTEM: [Run(concurrency=10**400, dir_name="r16")]},
+            )
+
+
+class TestSharedFactsAgreement:
+    """Every point's descriptor is compared by presence and typed value."""
+
+    @pytest.mark.unit
+    def test_an_explicit_null_c_min_override_does_not_agree_with_an_omission(
+        self, tmp_path
+    ):
+        # Run 2's `c_min_override: null` is §5.4's invalid declaration; a
+        # `get`-based comparison once let it read equal to run 1's omission.
+        runs = [Run(concurrency=16), Run(concurrency=8192, c_min_override=None)]
+        with pytest.raises(ValueError, match="must declare the same c_min_override"):
+            write_upload(tmp_path / "acme", {SYSTEM: runs})
+
+    @pytest.mark.unit
+    def test_an_int_and_a_float_c_min_override_do_not_agree(self, tmp_path):
+        runs = [
+            Run(concurrency=16, c_min_override=16),
+            Run(concurrency=32, c_min_override=16.0),
+            Run(concurrency=8192),
+        ]
+        with pytest.raises(ValueError, match="must declare the same c_min_override"):
+            write_upload(tmp_path / "acme", {SYSTEM: runs})
+
+
+class TestEmptySystems:
+    """A system directory with no model directories is refused at load."""
+
+    @pytest.mark.unit
+    def test_a_system_without_model_directories_is_refused(self, tmp_path):
+        root = tmp_path / "acme"
+        write_run(root / "results" / "sys" / "model" / "r16", Run(concurrency=16))
+        (root / "results" / "empty_sys").mkdir(parents=True)
+        with pytest.raises(ValueError, match="has no model directories"):
+            Submission.from_directory(root)
