@@ -15,7 +15,7 @@
 
 """The ruleset's catalog: model and dataset values as plain dictionaries, nothing more.
 
-`Catalog.from_directory("config/rulesets/mlcommons")` reads `models.yaml` and
+`Catalog.from_directory(<catalog-dir>)` reads `models.yaml` and
 `datasets.yaml` once. `catalog.models["gpt-oss-120b"]` is that model's entry as
 written (sizes, flags and values stay raw data, not pseudo-enum classes). A
 check addresses them through the `ruleset` root of `Ref`

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""W5 slice tests: the unified `Interval` grid across every shape it absorbs."""
+"""The unified `Interval` grid across every shape it absorbs."""
 
 import pytest
 from inference_endpoint.validation.ranges import Interval

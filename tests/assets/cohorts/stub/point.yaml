@@ -2,7 +2,7 @@
 # section 5.7.2). Scope comes from the filename (point.yaml) and each check's
 # id is its mapping key.
 #
-# Representative stubs per PR-1's "machinery + stubs" directive. `left` names
+# Representative stubs covering the shapes the checker must carry. `left` names
 # the point's `concurrency` row-field (Endpoints Policy section 8.3's
 # `concurrency`, landed under `point.config` per `FILE_TO_KEY_MAP`) and
 # `right` reads `regions.coverage`-interval (section 5.5's computed region).

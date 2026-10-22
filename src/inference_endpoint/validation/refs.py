@@ -396,9 +396,11 @@ def _entry(name: str, node: Any) -> Any:
       `null` being the absent-state's own value)
     - `warmup: { ... }` -> a block
 
-    The keys `type`/`required`/`default`/`allowlist` are reserved in the mapping
-    form (a rule field literally named `type` needs any sibling key to stay a
-    block: `field: { type: { ... } }` is a block).
+    A mapping is the annotated-leaf form when `type` names one of the valid
+    types and every key is reserved (`type`/`required`/`default`/`allowlist`);
+    anything else is a block of sub-entries, so a rule field literally named
+    `type` stays a block when its value is not a type name:
+    `field: { type: { ... } }` is a block.
 
     Args:
         name (str): The entry's name, for the fault messages.

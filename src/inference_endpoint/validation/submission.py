@@ -421,8 +421,8 @@ class Pareto:
     def derived(self) -> Mapping[str, Any]:
         """Named derivations for `derived.<name>` row refs, as a lazy mapping.
 
-        The charter's boundary rule item 1 ("named derivations on their
-        subject, exposed as fields `Ref` reads"): keys are `offline_ordering`,
+        The boundary rule for derivations ("named derivations on their subject,
+        exposed as fields `Ref` reads"): keys are `offline_ordering`,
         `point_cap`, `point_count_min`, `accuracy_run_count_requirement` and
         `out_of_range_points`, each resolved via its own named method at first
         access and memoized (`DerivedFields`). An unlisted name -> `KeyError`.

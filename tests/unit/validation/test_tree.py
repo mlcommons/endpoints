@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""W2 layer tests: tree walking, artifact loading, and the scopes mapping.
+"""Tree walking, artifact loading, and the scopes mapping.
 
 Fixtures are one small builder (`_tree`) writing tiny artifacts on demand, not
 stored files. Cases assert what each subject computes: `from_directory` the
@@ -398,7 +398,7 @@ class TestLoadBoundaries:
 
 
 class TestNodeIdentity:
-    """Nodes compare by identity; frozen holders stay hashable (B13)."""
+    """Nodes compare by identity; frozen holders stay hashable."""
 
     @pytest.mark.unit
     def test_nodes_compare_by_identity_and_points_stay_hashable(self, tmp_path):

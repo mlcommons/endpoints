@@ -779,7 +779,7 @@ class TestEvaluateAll:
 
 
 class TestHostileValues:
-    """Crafted values refuse loudly instead of comparing quietly (B2/B6)."""
+    """Crafted values refuse loudly instead of comparing quietly."""
 
     @pytest.mark.unit
     def test_matches_subject_over_the_cap_refuses(self):

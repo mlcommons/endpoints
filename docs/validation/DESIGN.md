@@ -169,8 +169,8 @@ Twelve modules. Each entry is the role first, then the names you will grep for.
 `__init_subclass__(name=..., slots=..., needs_found=..., tolerant=...)` and
 dispatches through `Op(name)` — the same shape as `Node`'s kind dispatch. Arity
 per op lives in one place (`Op.slots`); `Compare._check_shape` validates
-`Compare`'s `right`/`lo`/`hi` field-presence against it, so `right: null` stays
-a legal eq-against-null operand (the W1 absent-vs-null grid).
+`Compare`'s `right` field-presence against it, so `right: null` stays a legal
+eq-against-null operand (the absent-vs-stored-null grid).
 
 Two mechanics are worth spelling out:
 
@@ -304,9 +304,10 @@ flowchart LR
    case distinct (README, "Absent facts").
 
 2. **Candidate validation.** `_collect_candidates(cohort)` validates `needs` id
-   references against the cohort, and `_raise_on_needs_cycles` refuses a `needs`
-   cycle outright. Both are load-level mistakes, identical for every submission;
-   the walk below never decides differently by data.
+   references against the cohort and refuses a `needs` cycle outright (the DFS
+   over the candidate map is the cycle check). Both are load-level mistakes,
+   identical for every submission; the walk below never decides differently by
+   data.
 
 3. **Gate resolution.** `_GateResolver` resolves every check's `needs` chain at
    each node into one `_CheckState`:
@@ -392,10 +393,11 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   checker-owned: `derived` names (`DERIVATION_NAMES`), `regions` paths and
   `ruleset` keys. The price: a rule over a brand-new field first needs that
   field declared in the cohort's ref table, and a brand-new root or derivation
-  still needs code. One caveat on the mapping form: `type`/`required`/`default`/
-  `allowlist` are what make `field: { type: ... }` a leaf with policy notes, so
-  a rule field literally named `type` stays a nested block only with a sibling
-  key (`field: { type: { ... } }` is a block).
+  still needs code. One caveat on the mapping form: a mapping is the
+  annotated-leaf form when its `type` value is a type name and every key is
+  reserved (`type`/`required`/`default`/`allowlist`), so `field: { type: int }`
+  is a leaf while `field: { type: { ... } }` is a block (its `type` value is
+  itself a mapping, not a type name).
 
 - **Rows above a pareto cannot aggregate over points.** There is no
   `derived`/`regions` fold above a pareto (both are per-pareto by construction),
