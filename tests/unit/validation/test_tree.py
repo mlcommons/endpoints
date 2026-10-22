@@ -396,6 +396,53 @@ class TestLoadBoundaries:
         with pytest.raises(ValueError, match="tree budget"):
             SubmissionNode.from_directory(root)
 
+    @pytest.mark.unit
+    def test_the_tree_budget_accumulates_across_nodes(self, tmp_path, monkeypatch):
+        # Individually affordable artifacts in separate run directories whose
+        # combined bytes cross the pot: the budget is submission-wide, not
+        # per-node (a fresh pot per node is the regression this pins).
+        root = tmp_path / "acme"
+        for concurrency in (16, 8192):
+            point = root / "results" / "sys" / "model" / f"r{concurrency}"
+            point.mkdir(parents=True)
+            _write(point / "point.yaml", {"concurrency": concurrency})
+        total = sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+        monkeypatch.setattr(
+            "inference_endpoint.validation.tree._MAX_TREE_BYTES", total - 1
+        )
+        with pytest.raises(ValueError, match="tree budget"):
+            SubmissionNode.from_directory(root)
+
+    @pytest.mark.unit
+    def test_the_tree_budget_accepts_an_exact_spend(self, tmp_path, monkeypatch):
+        root = tmp_path / "acme"
+        point = root / "results" / "sys" / "model" / "r16"
+        point.mkdir(parents=True)
+        _write(point / "point.yaml", {"concurrency": 16})
+        total = sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+        monkeypatch.setattr("inference_endpoint.validation.tree._MAX_TREE_BYTES", total)
+        SubmissionNode.from_directory(root)
+
+    @pytest.mark.unit
+    def test_an_oversized_artifact_still_spends_the_tree_budget(
+        self, tmp_path, monkeypatch
+    ):
+        # The size refusal comes after the charge: two oversized artifacts in
+        # one run directory exhaust a small pot even though neither parses.
+        monkeypatch.setattr("inference_endpoint.validation.tree._MAX_ARTIFACT_BYTES", 8)
+        monkeypatch.setattr("inference_endpoint.validation.tree._MAX_TREE_BYTES", 15)
+        root = tmp_path / "acme"
+        point = root / "results" / "sys" / "model" / "r16"
+        point.mkdir(parents=True)
+        (point / "system_desc.json").write_text(
+            '{"max_supported_concurrency": 16}', encoding="utf-8"
+        )
+        (point / "result_summary.json").write_text(
+            '{"system_tps": 5400.0}', encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match="tree budget"):
+            SubmissionNode.from_directory(root)
+
 
 class TestNodeIdentity:
     """Nodes compare by identity; frozen holders stay hashable."""
