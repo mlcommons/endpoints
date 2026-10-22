@@ -16,7 +16,7 @@
 """Condition rows: every check condition is a `Compare` or an `Aggregate`.
 
 A row decodes from YAML and evaluates against the scoped fields of one node (a
-mapping per scope root, e.g. `{"point": ...}`). Operands are literals or `Ref`
+mapping per ref namespace, e.g. `{"point": ...}`). Operands are literals or `Ref`
 dotted references (decode hooks below). Which op does what lives in
 `operations.py` (`Op` subclasses). Which aggregate does what is the
 `Aggregate` subclass family below. `Verdict.evaluate` wraps one row's own
@@ -60,11 +60,11 @@ def _rewrite_refs(row: Any, slots: tuple[str, ...], fn: Callable[[Ref], Ref]) ->
             setattr(row, slot, fn(value))
 
 
-def _near_root_misspelling(head: str) -> str | None:
-    """The scope root one edit from `head`, else None (`submisson` -> `submission`).
+def _near_namespace_misspelling(head: str) -> str | None:
+    """The namespace one edit from `head`, else None (`submisson` -> `submission`).
 
     A dotted operand that would silently decode as a literal raises instead
-    when its head is a near-miss of a root. A direct hit is not a typo and
+    when its head is a near-miss of a namespace. A direct hit is not a typo and
     returns None. The matching itself is `typo_checks.near_match`, shared with
     the ref table's fact names.
 
@@ -72,8 +72,8 @@ def _near_root_misspelling(head: str) -> str | None:
         head (str): The head segment of a dotted operand, e.g. `submisson` in
             `submisson.tps`.
     Returns:
-        str | None: The scope root one edit from `head` (`submission` above), or
-            `None` when `head` misses every other root.
+        str | None: The namespace one edit from `head` (`submission` above), or
+            `None` when `head` misses every other namespace.
     """
     return near_match(head, (root for root in Ref.ROOTS if root != head))
 
@@ -89,14 +89,14 @@ def _decode_operand(value: Any) -> Any:
         _decode_operand("tps")  # "tps"
         _decode_operand(7)  # 7
 
-    `"point.tps"` is a root-prefixed dotted string decoded as `Ref(("point", "tps"))`,
-    and `["ruleset", "models", "llama3.1-8b-v1"]` is a raw-segment list for keys
-    that themselves contain dots (only a non-empty all-strings list headed by a
-    scope root decodes this way: every other list is a literal collection).
-    `{"literal": ...}` is that value verbatim, for a string that would
-    otherwise read as a reference. `"tps"` or `7` is the literal itself. A
-    dotted scalar whose head is one edit from a root raises rather than
-    silently reading as a literal.
+    `"point.tps"` is a dotted string headed by a namespace, decoded as
+    `Ref(("point", "tps"))`, and `["ruleset", "models", "llama3.1-8b-v1"]` is a
+    raw-segment list for keys that themselves contain dots (only a non-empty
+    all-strings list headed by a namespace decodes this way: every other list
+    is a literal collection). `{"literal": ...}` is that value verbatim, for a
+    string that would otherwise read as a reference. `"tps"` or `7` is the
+    literal itself. A dotted scalar whose head is one edit from a namespace
+    raises rather than silently reading as a literal.
 
     Args:
         value (Any): The raw YAML value of one operand slot.
@@ -104,7 +104,7 @@ def _decode_operand(value: Any) -> Any:
         Any: A `Ref`, the literal itself, or `{"literal": ...}`'s value.
     Raises:
         ValueError: When a dotted scalar's or list's head is one edit from a
-            scope root (likely a misspelling), or is dotted with no scope root at all.
+            namespace (likely a misspelling), or is dotted with no namespace at all.
     """
     if isinstance(value, Ref):
         return value
@@ -116,11 +116,11 @@ def _decode_operand(value: Any) -> Any:
         head = value[0]
         if head in Ref.ROOTS:
             return Ref(tuple(value))
-        near = _near_root_misspelling(head)
+        near = _near_namespace_misspelling(head)
         if near is not None:
             raise ValueError(
                 f"{value!r} looks like a misspelled {near!r} reference; "
-                'fix the root or write {"literal": ...} to mean the value'
+                'fix the namespace or write {"literal": ...} to mean the value'
             )
         return value
     if isinstance(value, dict) and set(value) == {"literal"}:
@@ -131,14 +131,14 @@ def _decode_operand(value: Any) -> Any:
             return ref
         head, dot, _ = value.partition(".")
         if dot:
-            near = _near_root_misspelling(head)
+            near = _near_namespace_misspelling(head)
             if near is not None:
                 raise ValueError(
                     f"{value!r} looks like a misspelled {near!r} reference; "
-                    'fix the root or write {"literal": ...} to mean the string'
+                    'fix the namespace or write {"literal": ...} to mean the string'
                 )
             raise ValueError(
-                f"{value!r} is dotted but {head!r} is no scope root; "
+                f"{value!r} is dotted but {head!r} is no ref namespace; "
                 'write {"literal": ...} to mean the value'
             )
         return value
@@ -169,7 +169,7 @@ def _operand(ref: Ref, scopes: Mapping[str, Any]) -> tuple[bool, Any]:
     Args:
         ref (Ref): The operand's reference to resolve.
         scopes (Mapping[str, Any]): The node's scoped fields, one mapping per
-            scope root.
+            ref namespace.
     Returns:
         tuple[bool, Any]: `(found, value)`: a non-`MISSING` `Ref.default` is
             materialized as found when the upload omits the fact.
@@ -242,7 +242,7 @@ class Compare(BaseModel):
     Arity follows the op (`Op.slots` in `operations.py`): `exists`, `absent`
     and `not_null` take `left` alone, every other op takes `right`. An `in`
     row may spell `right` as an inclusive `{"lo": ..., "hi": ...}` range
-    literal; the bounds are literals (a dynamic range names a checker root
+    literal; the bounds are literals (a dynamic range names a checker namespace
     that yields an `Interval`, e.g. `regions.coverage`).
 
     A `right` given at all to a left-only op is a shape error.
@@ -340,7 +340,8 @@ class Compare(BaseModel):
         Only `in` reads this form. Every other mapping (and every other op)
         keeps the ordinary key-set meaning, so `in` over `{"k": 1}` still asks
         whether `left` is one of `k`'s keys. The bounds are literals, never
-        references: a dynamic range names a checker root that yields an `Interval`.
+        references: a dynamic range names a checker namespace that yields an
+        `Interval`.
         """
         right = self.right
         if self.op != "in" or not isinstance(right, Mapping):
@@ -358,7 +359,7 @@ class Compare(BaseModel):
 
         Args:
             scopes (Mapping[str, Any]): The node's scoped fields, one mapping per
-                scope root.
+                ref namespace.
         Returns:
             tuple[bool, str]: `(held, why)`: whether the row holds and, when not,
                 why its operand values fail it.
@@ -556,7 +557,7 @@ class Aggregate(BaseModel):
 
         Args:
             scopes (Mapping[str, Any]): The node's scoped fields, one mapping per
-                scope root.
+                ref namespace.
         Returns:
             tuple[bool, str]: `(held, why)`: whether `aggregate(over) op value`
                 holds and, when not, why.
@@ -711,7 +712,7 @@ class Verdict:
         Args:
             row (Compare | Aggregate): The condition row to evaluate.
             scopes (Mapping[str, Any]): The node's scoped fields, one mapping per
-                scope root.
+                ref namespace.
         Returns:
             Verdict: The row's verdict. `broken` marks evaluation failure rather
                 than false judgment.

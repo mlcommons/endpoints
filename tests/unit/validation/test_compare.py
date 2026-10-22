@@ -93,8 +93,8 @@ class TestFromString:
         assert Ref.from_string(value) == Ref(("point", "result_summary", "tps"))
 
     @pytest.mark.unit
-    def test_unproducible_roots_never_register(self):
-        # A literal: no cohort-params producer exists, so there is no cohort root.
+    def test_unproducible_namespaces_never_register(self):
+        # A literal: no cohort-params producer exists, so `cohort` is no namespace.
         assert Ref.from_string("cohort.metric_tolerance") is None
 
     @pytest.mark.unit
@@ -130,7 +130,7 @@ class TestOperandForms:
             _compare(op="exists", left=value)
 
     @pytest.mark.unit
-    def test_literal_form_forces_a_root_looking_string(self):
+    def test_literal_form_forces_a_namespace_looking_string(self):
         row = _compare(op="eq", left={"literal": "point.tps"}, right="point.tps")
         assert row.left == "point.tps"
         assert isinstance(row.right, Ref)
@@ -138,7 +138,7 @@ class TestOperandForms:
     @pytest.mark.unit
     @pytest.mark.parametrize("value", ["pointish.thing", "llama3.1-8b-v1", "blah.foo"])
     def test_far_dotted_strings_refuse_to_guess(self, value):
-        with pytest.raises(ValueError, match="no scope root"):
+        with pytest.raises(ValueError, match="no ref namespace"):
             _compare(op="eq", left=value, right=value)
 
     @pytest.mark.unit

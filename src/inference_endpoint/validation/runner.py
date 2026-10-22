@@ -99,7 +99,7 @@ class Finding:
         from one that ran and failed.
 
         A load-level check first (`_validate_*`: a submission the walk cannot
-        cover, an unreadable artifact, or a checker root the cohort names but
+        cover, an unreadable artifact, or a checker namespace the cohort names but
         the tree lacks is an error -- silence must never be the verdict). Then
         `_collect_candidates` validates `needs` names (unknown -> ValueError)
         and `_GateResolver` resolves each `needs` chain per node. Each
@@ -256,7 +256,7 @@ def _validate_declared_values(cohort: Cohort, submission: Submission) -> None:
 
 
 def _validate_ruleset_needs(cohort: Cohort, submission: Submission) -> None:
-    """Fail loud when a cohort names the `ruleset` root the tree was built without.
+    """Fail loud when a cohort names the `ruleset` namespace the tree lacks.
 
     A forgotten `ruleset=` kwarg must be a load error, not rows resolving
     "missing" on a healthy upload. (`derived`/`regions` are per-pareto and
@@ -495,7 +495,7 @@ def _scopes_rows_view(node: Node, submission: Submission) -> dict[str, Any]:
     `derived.<name>` rows address per-pareto named facts (`Pareto.derived()`),
     so the mapping is attached only where a pareto owns the node: nodes above
     every pareto (a multi-pareto upload's system/submission) carry no `derived`
-    root, and cohort load refuses rows naming one there.
+    namespace, and cohort load refuses rows naming one there.
     """
     scopes: dict[str, Any] = node.scopes()
     pareto = submission.pareto_at(node)

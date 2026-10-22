@@ -19,7 +19,7 @@
 `hi is None`). `Interval(0, 10, hi_inclusive=False)` is the half-open 0..10.
 A scalar is `Interval(4, 4)`: `x in Interval(4, 4)` is `x == 4`. Used as the
 `in` operator's range target (`operations.py`): an `in` row's
-`{"lo": ..., "hi": ...}` literal, or a checker root's value. Also the concurrency
+`{"lo": ..., "hi": ...}` literal, or a checker namespace's value. Also the concurrency
 regions of `regions.py` (whose `lo`/`hi` are the reference algorithm's
 `start`/`end`) and accuracy score reaches.
 """

@@ -87,7 +87,7 @@ _REGION_PATHS = {("coverage",)} | {("by_kind", kind.value) for kind in RegionKin
 def _validate_row_ref(scope: RuleScopes, ref: Ref) -> None:
     """Refuse a row naming no fact fetchable at `scope`. ValueError says why.
 
-    The `derived`/`regions` roots exist per pareto, so only pareto- and
+    The `derived`/`regions` namespaces exist per pareto, so only pareto- and
     point-scoped rows may name them. A row naming a finer scope than its own
     (`system.yaml` reading `point.` facts) would resolve nowhere at its nodes
     and is refused for the same reason. Field names under a document are
@@ -95,8 +95,8 @@ def _validate_row_ref(scope: RuleScopes, ref: Ref) -> None:
 
     Args:
         scope (RuleScopes): The scope of the check whose row names `ref`.
-        ref (Ref): The row's reference: `parts[0]` is the root, the rest name the
-            fact under it.
+        ref (Ref): The row's reference: `parts[0]` is the namespace, the rest
+            name the fact under it.
     Raises:
         ValueError: When a `derived`/`regions` ref is named above pareto scope, a
             derivation or region fact is unknown, or the named fact resolves only below
@@ -107,7 +107,7 @@ def _validate_row_ref(scope: RuleScopes, ref: Ref) -> None:
         if scope not in (RuleScopes.PARETO, RuleScopes.POINT):
             raise ValueError(
                 f"check scoped {scope.value} cannot name {ref}: `derived` is a "
-                "per-pareto checker root (write the check in pareto.yaml/point.yaml)"
+                "per-pareto checker namespace (write the check in pareto.yaml/point.yaml)"
             )
         if len(ref.parts) != 2 or ref.parts[1] not in DERIVATION_NAMES:
             raise ValueError(f"{ref} names no derivation")
@@ -116,7 +116,7 @@ def _validate_row_ref(scope: RuleScopes, ref: Ref) -> None:
         if scope not in (RuleScopes.PARETO, RuleScopes.POINT):
             raise ValueError(
                 f"check scoped {scope.value} cannot name {ref}: `regions` is a "
-                "per-pareto checker root (write the check in pareto.yaml/point.yaml)"
+                "per-pareto checker namespace (write the check in pareto.yaml/point.yaml)"
             )
         if tuple(ref.parts[1:]) not in _REGION_PATHS:
             raise ValueError(f"{ref} names no region fact")
@@ -137,10 +137,11 @@ def _checked_ref(scope: RuleScopes, ref: Ref, table: RefTable) -> Ref:
     The one place a row's names get checked: `table.validate_names` refuses a
     misspelled or over-deep fact (its "did you mean" hint included) and
     `table.annotate` fills `Ref.required`/`Ref.default`, the two notes the
-    evaluation policy reads. Checker-root refs (`derived`/`regions`/`ruleset`)
-    skip the table: their names are checker-owned and `_validate_row_ref` has
-    already vetted them. One wrong name dies at cohort load rather than
-    silently switching a `when`-gated check off against some submission.
+    evaluation policy reads. Refs whose head is a checker-owned namespace
+    (`derived`/`regions`/`ruleset`) skip the table: their names are checker-owned
+    and `_validate_row_ref` has already vetted them. One wrong name dies at
+    cohort load rather than silently switching a `when`-gated check off against
+    some submission.
 
     Args:
         scope (RuleScopes): The scope of the check whose row names `ref`.
@@ -148,7 +149,7 @@ def _checked_ref(scope: RuleScopes, ref: Ref, table: RefTable) -> Ref:
         table (RefTable): The cohort's `valid_refs.yaml` ref table.
     Returns:
         Ref: `ref` with `required`/`default` filled in from the table. A
-            checker-root ref comes back untouched.
+            checker-namespace ref comes back untouched.
     Raises:
         ValueError: When `_validate_row_ref` or the table refuses the ref: a
             wrong name dies at cohort load, never at run time.

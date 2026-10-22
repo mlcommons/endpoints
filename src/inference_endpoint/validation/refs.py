@@ -39,7 +39,7 @@ Name checking runs in exactly one place (`RefTable.validate_names`, with
 unknown or misspelled fact dies before any submission is touched. What a
 present fact's value must carry is declared the same way (`allowlist` next to
 its `type`) and checked at collect time (`RefTable.validate_values`).
-`derived`/`regions`/`ruleset` roots are checker-owned (the derivation
+`derived`/`regions`/`ruleset` namespaces are checker-owned (the derivation
 registry, the region kinds, the catalog's own data) and are refused in the
 YAML.
 
@@ -77,7 +77,7 @@ class Ref:
             (Default: MISSING)
     """
 
-    # The row language's scope roots: the node scopes a fact tree hangs under.
+    # The row language's scope namespaces: the node scopes a fact tree hangs under.
     SCOPE_ROOTS: ClassVar[tuple[str, ...]] = (
         "submission",
         "system",
@@ -96,19 +96,19 @@ class Ref:
 
     @classmethod
     def from_string(cls, value: str) -> Ref | None:
-        """A `Ref` from a scope-rooted dotted string, else None for a literal.
+        """A `Ref` from a dotted string headed by a namespace, else None for a literal.
 
         Example:
 
             Ref.from_string("point.config.concurrency")  # Ref(("point", "config", "concurrency"))
-            Ref.from_string("config.concurrency")  # None: not a scope root (stays a literal)
+            Ref.from_string("config.concurrency")  # None: no namespace head (stays a literal)
             Ref.from_string("point.")  # None too: nothing behind the dot
             Ref.from_string("point")  # None too: no dot at all
 
         Args:
             value (str): The dotted string to read.
         Returns:
-            Ref | None: The scope-rooted `Ref`, or None for a literal.
+            Ref | None: The namespaced `Ref`, or None for a literal.
         """
         head, dot, rest = value.partition(".")
         if dot and head in cls.ROOTS and rest:
@@ -126,8 +126,8 @@ class Ref:
             Ref(("point", "bad")).resolve(scopes)  # (True, None): the field exists and is null.
 
         Each step is a mapping key look-up and the resolved value is a leaf, regardless
-        of the value's type (a checker root's `Interval` is a value, never walked
-        through).
+        of the value's type (a checker namespace's `Interval` is a value, never
+        walked through).
 
         Artifact documents are submitter-controlled, and attribute traversal would let
         `{"errors": []}` answer `errors.count` (the builtin method's) as a present fact.
@@ -243,8 +243,9 @@ class RefTable:
             RefTable: The ref table the YAML declares.
         Raises:
             ValueError: When the file is missing, when it is no ref table (a parse
-                error, a non-mapping or an empty document), when it names a root outside
-                the node scopes, or when an entry is neither a type name nor a block.
+                error, a non-mapping or an empty document), when it names a namespace
+                outside the node scopes, or when an entry is neither a type name nor a
+                block.
         """
         if not path.is_file():
             raise ValueError(
