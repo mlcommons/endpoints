@@ -155,16 +155,13 @@ point_output_tokens_present:
         right: 0,
       }
 
-point_tpot_percentiles_present:
-  description: The summary carries a TPOT percentile block.
+point_tpot_p90_positive:
+  description: The summary carries a positive P90 time-per-output-token.
   rule: "Endpoints Policy §9.1, Automated Checks; §4.1, Metrics."
-  fix: Re-run with streaming so the summary carries tpot.percentiles.
+  fix: Re-run with streaming so the summary carries a positive tpot.percentiles["90"].
   severity: fail
   assert:
-    - over: point.result_summary.tpot.percentiles
-      aggregate: count
-      op: gt
-      value: 0
+    - { left: point.result_summary.tpot.percentiles.90, op: gt, right: 0 }
 
 point_sample_count_floor:
   description: The run completed at least its dataset's §12 acceptance count.
