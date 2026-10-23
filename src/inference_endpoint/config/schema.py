@@ -378,7 +378,7 @@ class LaneSchedulerConfig(BaseModel):
         description="Lower bound on the dataset copies measured (one super-pass each).",
     )
     coding_conversations_per_slot: float = Field(
-        1.75,
+        2.75,
         gt=0,
         description=(
             "Copies are chosen so each slot runs about this many coding (SWE) "

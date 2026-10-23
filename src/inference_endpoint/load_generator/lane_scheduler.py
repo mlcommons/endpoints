@@ -84,11 +84,12 @@ WORKFLOW = "workflow"
 _DEFAULT_SERVICE_S = 5.0
 # Fewer warm samples than this keep a flat (context-independent) estimate.
 _MIN_WARM_SAMPLES = 30
-# No measured segment is estimated longer than this fraction of the measured
-# phase; longer conversation instances are measured as several segments. The
-# pool order is then uniformly random (the workload mix stays steady), and a
-# segment that starts last still finishes soon after the pool empties.
-_MAX_SEGMENT_FRACTION = 1 / 8
+# Pool items are drawn to start by this fraction of the estimated measured
+# time minus their own length, so an instance whose real length beats its
+# estimate still finishes with the rest. With the measured phase about twice
+# the longest instance, long instances spread over the first part of the run
+# instead of all starting at once.
+_START_MARGIN = 0.9
 
 
 def _context_chars(messages: list[dict[str, Any]]) -> int:
@@ -125,23 +126,14 @@ def lane_copies(
     )
 
 
-def split_points(turn_estimates: list[float], max_len_s: float) -> list[int]:
-    """Cut positions that divide a run of turns into the fewest chunks of about
-    equal estimated length, none longer than ``max_len_s`` (a single turn is
-    never cut). Returns the interior cut indices, ascending."""
-    total = sum(turn_estimates)
-    if max_len_s <= 0 or total <= max_len_s or len(turn_estimates) < 2:
-        return []
-    chunks = min(len(turn_estimates), math.ceil(total / max_len_s))
-    cuts: list[int] = []
-    acc = 0.0
-    for i, est in enumerate(turn_estimates[:-1], start=1):
-        acc += est
-        if acc >= total * (len(cuts) + 1) / chunks:
-            cuts.append(i)
-            if len(cuts) == chunks - 1:
-                break
-    return cuts
+def order_pool(
+    estimates: list[float], horizon_s: float, rng: random.Random
+) -> list[int]:
+    """Random start order in which item ``i`` of estimated length ``L_i`` is
+    drawn to start uniformly in ``[0, max(0, horizon_s - L_i)]``. Returns the
+    item indices sorted by that draw."""
+    keys = [rng.random() * max(0.0, horizon_s - est) for est in estimates]
+    return sorted(range(len(estimates)), key=lambda i: (keys[i], i))
 
 
 class RunKey:
@@ -283,7 +275,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._warm_count = 0
         self._horizon_s = 0.0
         self._converted = 0
-        self._splits = 0
         self._run_started_ns = 0
         self._measure_ns: int | None = None
         self._pool_empty_ns: int | None = None
@@ -508,27 +499,10 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         ]
         estimates = [self._estimate(seg.source, seg.first, seg.stop) for seg in items]
         self._horizon_s = (running_est + sum(estimates)) / self._concurrency
-        max_len = _MAX_SEGMENT_FRACTION * self._horizon_s
-        pool: list[Segment] = []
-        for seg in items:
-            per_turn = [
-                self._estimate(seg.source, c, c + 1) for c in range(seg.first, seg.stop)
-            ]
-            bounds = (
-                [seg.first]
-                + [seg.first + cut for cut in split_points(per_turn, max_len)]
-                + [seg.stop]
-            )
-            if len(bounds) == 2:
-                pool.append(seg)
-                continue
-            self._splits += len(bounds) - 2
-            for first, stop in zip(bounds, bounds[1:], strict=False):
-                pool.append(
-                    self._segment(seg.source, seg.copy, first, stop, measured=True)
-                )
-        rng.shuffle(pool)
-        self._pool = deque(pool)
+        self._pool = deque(
+            items[i]
+            for i in order_pool(estimates, _START_MARGIN * self._horizon_s, rng)
+        )
         self._pool_order = [
             [self._sources[seg.source].source_id, seg.copy, seg.first, seg.stop]
             for seg in self._pool
@@ -537,13 +511,12 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         logger.info(
             "Lane scheduler: measurement started; service = %.3fs + %.3fs per 10k "
             "prompt chars (n=%d warm turns); %d slots measure from their next turn, "
-            "%d segments pooled (%d cuts in long instances), estimated %.0fs",
+            "%d segments pooled, estimated %.0fs",
             self._service_intercept_s,
             self._service_per_char_s * 1e4,
             self._warm_count,
             self._converted,
             len(self._pool),
-            self._splits,
             self._horizon_s,
         )
         # A slot whose conversation ended with its in-flight turn, or that is
@@ -812,7 +785,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             "measured_phase_s": seconds(self._measure_ns, self._halt_ns),
             "tail_after_pool_empty_s": seconds(self._pool_empty_ns, self._halt_ns),
             "slots_measured_from_next_turn": self._converted,
-            "split_segments": self._splits,
             "measured_start_spread_s": (max(starts) - min(starts)) / 1e9
             if starts
             else None,
