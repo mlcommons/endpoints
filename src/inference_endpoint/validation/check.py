@@ -248,32 +248,41 @@ class Cohort:
 
     `Cohort.from_directory("examples/cohort")` -> that cohort's checks, its
     `valid_refs.yaml` ref table (what its rows may name, and how an omitted
-    fact reads), and the ruleset its `cohort.yaml` manifest names (the
-    packaged ruleset whose data its `ruleset.*` rows read). A hand-built
-    `Cohort((check, ...))` carries no table (`refs is None`) and no ruleset:
-    its rows' names are checked only by resolution at run time.
+    fact reads), and its ruleset: the `cohort.yaml` manifest may either name a
+    packaged ruleset (`ruleset: mlperf-inference-v6.1`, resolved through
+    `config/ruleset_registry.py`) or carry its own catalog beside the checks
+    (`ruleset_dir: ruleset`, a directory `Catalog.from_directory` reads). A
+    hand-built `Cohort((check, ...))` carries no table (`refs is None`) and no
+    ruleset: its rows' names are checked only by resolution at run time.
 
     Args:
         checks (tuple[Check, ...]): The cohort's checks.
         refs (RefTable | None): The `valid_refs.yaml` ref table, or `None` for a
             hand-built cohort. (Default: None)
         ruleset (str | None): The registered ruleset name the manifest declares,
-            or `None` when there is no manifest. (Default: None)
+            or `None` when there is no manifest or it declares a directory.
+            (Default: None)
+        ruleset_dir (Path | None): The cohort-bundled catalog directory the
+            manifest declares, relative to the cohort, or `None`.
+            (Default: None)
     """
 
     MANIFEST_FILENAME: ClassVar[str] = "cohort.yaml"
+    RULESET_DIRNAME: ClassVar[str] = "ruleset"
 
-    __slots__ = ("checks", "refs", "ruleset")
+    __slots__ = ("checks", "refs", "ruleset", "ruleset_dir")
 
     def __init__(
         self,
         checks: tuple[Check, ...],
         refs: RefTable | None = None,
         ruleset: str | None = None,
+        ruleset_dir: Path | None = None,
     ) -> None:
         self.checks = checks
         self.refs = refs
         self.ruleset = ruleset
+        self.ruleset_dir = ruleset_dir
 
     @classmethod
     def from_directory(cls, root: Path) -> Cohort:
@@ -305,18 +314,19 @@ class Cohort:
             - {
                 RefTable.FILENAME,
                 cls.MANIFEST_FILENAME,
+                cls.RULESET_DIRNAME,
                 *(f"{scope.value}.yaml" for scope in RuleScopes),
             }
         )
         if stray:
             raise ValueError(
                 f"{root} is not a cohort: unexpected {stray} "
-                f"(only {RefTable.FILENAME}, {cls.MANIFEST_FILENAME} and the "
+                f"(only {RefTable.FILENAME}, {cls.MANIFEST_FILENAME}, the "
                 "scope files system.yaml/submission.yaml/pareto.yaml/point.yaml "
-                "belong here)"
+                f"and the optional {cls.RULESET_DIRNAME}/ catalog belong here)"
             )
         refs = RefTable.from_yaml(root / RefTable.FILENAME)
-        ruleset = cls._read_manifest(root)
+        ruleset, ruleset_dir = cls._read_manifest(root)
         checks: list[Check] = []
         for scope in RuleScopes:
             path = root / f"{scope.value}.yaml"
@@ -357,30 +367,35 @@ class Cohort:
         for check in checks:
             for row in (*check.when, *check.assert_):
                 row.map_refs(partial(_checked_ref, check.scope, table=refs))
-        return cls(tuple(checks), refs, ruleset)
+        return cls(tuple(checks), refs, ruleset, ruleset_dir)
 
     @classmethod
-    def _read_manifest(cls, root: Path) -> str | None:
-        """The ruleset name `root`'s `cohort.yaml` declares, or None without one.
+    def _read_manifest(cls, root: Path) -> tuple[str | None, Path | None]:
+        """What `root`'s `cohort.yaml` declares: a ruleset name and/or a catalog.
 
-        The manifest is the cohort's metadata: today one key, `ruleset` -- the
-        registered ruleset (`config/ruleset_registry.py`) whose packaged data
-        the cohort's `ruleset.*` rows read. What a cohort's submissions are
-        valid against is the packaged ruleset, never a directory beside it.
+        The manifest is the cohort's metadata. `ruleset` names a registered
+        ruleset (`config/ruleset_registry.py`) whose packaged data the cohort's
+        `ruleset.*` rows read; `ruleset_dir` names a directory *under the cohort
+        directory* holding a `models.yaml` + `datasets.yaml` catalog
+        (`Catalog.from_directory`) for a cohort that ships its own. Declaring
+        both is refused: which catalog the rows read must never be ambiguous.
 
         Args:
             root (Path): The cohort directory.
         Returns:
-            str | None: The declared ruleset name, `None` when there is no manifest.
+            tuple[str | None, Path | None]: The declared ruleset name and the
+                resolved catalog directory; `(None, None)` when there is no
+                manifest.
         Raises:
-            ValueError: When the manifest is not a mapping, declares an unknown key,
-                or its `ruleset` is not a non-empty string.
+            ValueError: When the manifest is not a mapping, declares an unknown
+                key, its `ruleset` is not a non-empty string, or its
+                `ruleset_dir` is not a relative path to a directory under `root`.
         """
         path = root / cls.MANIFEST_FILENAME
         try:
             text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return None
+            return None, None
         except (OSError, UnicodeDecodeError) as exc:
             raise ValueError(
                 f"{cls.MANIFEST_FILENAME} is not a manifest: {exc}"
@@ -395,16 +410,41 @@ class Cohort:
             raise ValueError(
                 f"{cls.MANIFEST_FILENAME} is not a manifest: expected a mapping"
             )
-        unknown = sorted(set(data) - {"ruleset"})
+        unknown = sorted(set(data) - {"ruleset", "ruleset_dir"})
         if unknown:
             raise ValueError(
                 f"{cls.MANIFEST_FILENAME}: unexpected {unknown} "
-                "(only `ruleset` is defined)"
+                "(only `ruleset` and `ruleset_dir` are defined)"
             )
-        ruleset = data["ruleset"]
-        if not isinstance(ruleset, str) or not ruleset:
+        ruleset = data.get("ruleset")
+        if ruleset is not None and (not isinstance(ruleset, str) or not ruleset):
             raise ValueError(
                 f"{cls.MANIFEST_FILENAME}: `ruleset` must be a non-empty string, "
                 f"got {ruleset!r}"
             )
-        return ruleset
+        declared_dir = data.get("ruleset_dir")
+        if ruleset is not None and declared_dir is not None:
+            raise ValueError(
+                f"{cls.MANIFEST_FILENAME}: `ruleset` and `ruleset_dir` are "
+                "alternatives; declare one"
+            )
+        if declared_dir is None:
+            return ruleset, None
+        if not isinstance(declared_dir, str) or not declared_dir:
+            raise ValueError(
+                f"{cls.MANIFEST_FILENAME}: `ruleset_dir` must be a non-empty "
+                f"string, got {declared_dir!r}"
+            )
+        relative = Path(declared_dir)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(
+                f"{cls.MANIFEST_FILENAME}: `ruleset_dir` {declared_dir!r} must be "
+                f"a relative path inside the cohort directory"
+            )
+        resolved = root / relative
+        if not resolved.is_dir():
+            raise ValueError(
+                f"{cls.MANIFEST_FILENAME}: `ruleset_dir` {declared_dir!r} is not "
+                f"a directory under {root}"
+            )
+        return None, resolved

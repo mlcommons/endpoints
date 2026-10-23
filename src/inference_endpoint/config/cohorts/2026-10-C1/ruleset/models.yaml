@@ -1,0 +1,165 @@
+# The 2026-10-C1 model catalog: the names §3.2 admits, spelled canonically, with
+# each model's reference checkpoint and the accuracy targets §15 gates against.
+#
+# Sources, in order of authority:
+#   - the admitted names, the accuracy targets and `min_queries`: the submission
+#     checker's `accuracy_targets.py` (mlcommons/endpoints-submission-cli), which
+#     transcribes the policy tables.
+#   - `reference_id` / `reference_sha`: the model-spec draft in
+#     docs/bench_suite_examples (public repo, commit 3bd1d0b1) where a name
+#     matches, marked `reference_source: bench_suite_draft` -- that draft is
+#     unverified, so treat the pins as provisional until the reference
+#     repository publishes them.
+#
+# `accuracy_targets` keys are the metrics the scores are gated on, verbatim from
+# the checker table; `tokens_per_sample` entries are bands (lower AND upper),
+# everything else a lower bound. `min_queries` is the §12 smallest conforming
+# acceptance count for the model's accuracy dataset.
+#
+# `accuracy_datasets` is the tie that gives those targets their subject: which
+# set(s) a model's accuracy phase runs, and the run shape each one needs
+# (`unit_samples` / `num_repeats`). The non-agentic entries come from the
+# internal results checker's non-agentic rules JSON (`non-agentic-rules.json`),
+# which keys the run shape by dataset *per model* -- the same set can need a
+# different shape for a different model, which is why the tie cannot live on the
+# dataset alone. A model whose accuracy sets this round does not declare carries
+# `{}` rather than a guessed link. An agentic model ties each gate to what it
+# reads instead: `agentic_combined` for the inline score, `swe_bench` for the
+# mean-of-N, and the full-run summary field for the OSL band.
+#
+# A tied set may also carry its own `targets`, in the same
+# `metric: { lower | band, factor }` form as the model-level `accuracy_targets`,
+# for models whose reference publishes a per-set threshold beside the cumulative
+# one. `accuracy_targets` stays the cumulative gate (a sample-weighted mean over
+# the model's sets); a set's `targets` gate that set's own score, so a model can
+# carry both:
+#
+#     accuracy_datasets:
+#       some_set:
+#         unit_samples: 30
+#         num_repeats: 8
+#         targets:
+#           exact_match: { lower: <published reference>, factor: 0.99 }
+#
+# Only a published number may go there. A model whose per-set thresholds the
+# reference does not publish omits `targets` (the cumulative gate still
+# applies) rather than guessing one.
+
+llama3_1-8b:
+  name: llama3_1-8b
+  family: llama3
+  reference_id: meta-llama/Llama-3.1-8B-Instruct
+  reference_sha: 0e9e39f249a16976918f6564b8830bc894c89659
+  reference_source: bench_suite_draft
+  accuracy_targets:
+    rouge1: { lower: 38.7792, factor: 0.99 }
+    rouge2: { lower: 15.9075, factor: 0.99 }
+    rougel: { lower: 24.4957, factor: 0.99 }
+    rougelsum: { lower: 35.793, factor: 0.99 }
+    gen_len: { band: [7350879.6, 8984408.4], factor: 0.9 }
+  min_queries: 13368
+  accuracy_datasets: {}
+
+gpt-oss-120b:
+  name: gpt-oss-120b
+  family: gpt-oss
+  reference_id: openai/gpt-oss-120b
+  reference_sha: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
+  reference_source: bench_suite_draft
+  accuracy_targets:
+    exact_match: { lower: 83.13, factor: 0.99 }
+  min_queries: 4395
+  agentic: false
+  accuracy_datasets:
+    # §15's `exact_match` gate is the unit_samples-weighted mean over these
+    # three (the source's `aime25::gptoss`, `gpqa::gptoss`,
+    # `livecodebench::gptoss` entries).
+    aime25: { unit_samples: 30, num_repeats: 8 }
+    gpqa: { unit_samples: 198, num_repeats: 5 }
+    livecodebench: { unit_samples: 1055, num_repeats: 3 }
+    # Per-set `targets` are absent here: the reference publishes the cumulative
+    # `exact_match` reference, not a threshold per set.
+
+deepseek-r1:
+  name: deepseek-r1
+  family: deepseek
+  reference_id: deepseek-ai/DeepSeek-R1-0528
+  reference_sha: 4236a6af538feda4548eca9ab308586007567f52
+  reference_source: bench_suite_draft
+  accuracy_targets:
+    exact_match: { lower: 81.3582, factor: 0.99 }
+  min_queries: 4388
+  accuracy_datasets:
+    # One set: the gate is that single score (`scale: percent` in the source).
+    deepseek_r1_accuracy: { unit_samples: 4388, num_repeats: 1 }
+
+kimi-k3:
+  name: kimi-k3
+  family: kimi
+  reference_source: none
+  accuracy_targets: {}
+  agentic: true
+  agentic_targets:
+    inline: { dataset: agentic_combined, lower: 58.32 }
+    swebench: { dataset: swe_bench, mean_of_n: 4, lower: 93.5 }
+    osl: { field: output_sequence_lengths_full_run, band: [425, 520] }
+
+qwen3_6-35b-a3b:
+  name: qwen3_6-35b-a3b
+  family: qwen3
+  reference_source: none
+  accuracy_targets: {}
+  agentic: true
+  agentic_targets:
+    inline: { dataset: agentic_combined, lower: 55.86 }
+    swebench: { dataset: swe_bench, mean_of_n: 4, lower: 69.0 }
+    osl: { field: output_sequence_lengths_full_run, band: [344, 422] }
+
+deepseek-v4_1-flash:
+  name: deepseek-v4_1-flash
+  family: deepseek
+  reference_source: none
+  accuracy_targets: {}
+  agentic: true
+  agentic_targets:
+    inline: { dataset: agentic_combined, lower: 52.36 }
+    swebench: { dataset: swe_bench, mean_of_n: 4, lower: 96.4 }
+    osl: { field: output_sequence_lengths_full_run, band: [793, 970] }
+
+# Legacy rounds' models: the checker's accuracy table still carries them, so a
+# submission bound to an earlier cohort can be evaluated; they are not §3.2 names
+# for this cohort.
+llama3_1-405b:
+  name: llama3_1-405b
+  family: llama3
+  reference_source: none
+  accuracy_targets:
+    rougel: { lower: 21.6666, factor: 0.99 }
+    exact_match: { lower: 90.1335, factor: 0.99 }
+    tokens_per_sample: { band: [616.212, 753.148], factor: 0.9 }
+  min_queries: 8313
+  accuracy_datasets: {}
+
+llama2-70b:
+  name: llama2-70b
+  family: llama2
+  reference_source: none
+  accuracy_targets:
+    rouge1: { lower: 44.4312, factor: 0.99 }
+    rouge2: { lower: 22.0352, factor: 0.99 }
+    rougel: { lower: 28.6162, factor: 0.99 }
+    tokens_per_sample: { band: [265.005, 323.895], factor: 0.9 }
+  min_queries: 24576
+  accuracy_datasets: {}
+
+mixtral-8x7b:
+  name: mixtral-8x7b
+  family: mixtral
+  reference_source: none
+  accuracy_targets:
+    rouge1: { lower: 45.5989, factor: 0.99 }
+    rouge2: { lower: 23.3526, factor: 0.99 }
+    rougel: { lower: 30.4608, factor: 0.99 }
+    tokens_per_sample: { band: [130.356, 160.49], factor: 0.9 }
+  min_queries: 15000
+  accuracy_datasets: {}

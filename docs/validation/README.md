@@ -37,9 +37,9 @@ Filenames correspond to the scope of the checks:
 Scope files are optional - a missing file indicates there are no checks to run
 for that scope. `valid_refs.yaml` is required: it is the cohort's ref table,
 which every row's names are checked against (see "The cohort's
-`valid_refs.yaml`" below). Only `valid_refs.yaml`, the four scope files and the
-optional `cohort.yaml` manifest belong here; anything else in the directory is
-refused at load.
+`valid_refs.yaml`" below). Only `valid_refs.yaml`, the four scope files, the
+optional `cohort.yaml` manifest and the optional `ruleset/` catalog belong here;
+anything else in the directory is refused at load.
 
 Each scope file contains a list of checks, with the check's ID as its key.
 Example:
