@@ -484,9 +484,21 @@ class Submission:
 
     tree: Node
     paretos: Sequence[Pareto]
+    points: tuple[Point, ...] = field(init=False, repr=False, compare=False)
+    # Pareto node id -> its `Pareto`: the one lookup `pareto_at` needs. `id()`
+    # keys are safe here: nodes compare by identity and the tree outlives this.
+    _by_node: dict[int, Pareto] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "paretos", tuple(self.paretos))
+        object.__setattr__(
+            self,
+            "points",
+            tuple(point for pareto in self.paretos for point in pareto.points),
+        )
+        object.__setattr__(
+            self, "_by_node", {id(pareto.node): pareto for pareto in self.paretos}
+        )
 
     @classmethod
     def from_directory(cls, root: Path, ruleset: Catalog | None = None) -> Submission:
@@ -504,11 +516,6 @@ class Submission:
                 paretos.append(Pareto.from_nodes(pareto_node))
         return cls(tree, paretos)
 
-    @property
-    def points(self) -> tuple[Point, ...]:
-        """Every point of every pareto, in tree order (the runner's walk set)."""
-        return tuple(point for pareto in self.paretos for point in pareto.points)
-
     def pareto_at(self, node: Node) -> Pareto | None:
         """The Pareto `node` belongs to. `None` for nodes above every pareto."""
         probe: Node | None = node
@@ -516,7 +523,7 @@ class Submission:
             probe = probe.parent
         if probe is None:
             return None
-        return next((pareto for pareto in self.paretos if pareto.node is probe), None)
+        return self._by_node.get(id(probe))
 
 
 def _shared_facts(points: Sequence[Point], where: Path) -> Mapping[str, Any]:
