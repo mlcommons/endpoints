@@ -26,6 +26,24 @@
 # `{}` rather than a guessed link. An agentic model ties each gate to what it
 # reads instead: `agentic_combined` for the inline score, `swe_bench` for the
 # mean-of-N, and the full-run summary field for the OSL band.
+#
+# A tied set may also carry its own `targets`, in the same
+# `metric: { lower | band, factor }` form as the model-level `accuracy_targets`,
+# for models whose reference publishes a per-set threshold beside the cumulative
+# one. `accuracy_targets` stays the cumulative gate (a sample-weighted mean over
+# the model's sets); a set's `targets` gate that set's own score, so a model can
+# carry both:
+#
+#     accuracy_datasets:
+#       some_set:
+#         unit_samples: 30
+#         num_repeats: 8
+#         targets:
+#           exact_match: { lower: <published reference>, factor: 0.99 }
+#
+# Only a published number may go there. A model whose per-set thresholds the
+# reference does not publish omits `targets` (the cumulative gate still
+# applies) rather than guessing one.
 
 llama3_1-8b:
   name: llama3_1-8b
@@ -59,6 +77,8 @@ gpt-oss-120b:
     aime25: { unit_samples: 30, num_repeats: 8 }
     gpqa: { unit_samples: 198, num_repeats: 5 }
     livecodebench: { unit_samples: 1055, num_repeats: 3 }
+    # Per-set `targets` are absent here: the reference publishes the cumulative
+    # `exact_match` reference, not a threshold per set.
 
 deepseek-r1:
   name: deepseek-r1
