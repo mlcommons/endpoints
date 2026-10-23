@@ -358,6 +358,34 @@ class TestDeclaredValueChecking:
             )
 
     @pytest.mark.unit
+    def test_a_declaration_judges_a_numeric_equivalent_key(self, tmp_path):
+        # `Ref.resolve` reads a declared `90` from an artifact key `"90.0"`, so
+        # the declaration's own check must read the same key: a value that
+        # escapes this pass is reachable by rows but never type-checked.
+        cohort = _declared_cohort(
+            tmp_path,
+            refs={
+                "point": {
+                    "config": {"warmup": {"percentiles": {"90": {"type": "int"}}}}
+                }
+            },
+            point=PLAIN_CHECK,
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"point\.config\.warmup\.percentiles\.90: 'x' "
+            r"does not match its declared type",
+        ):
+            Finding.collect(
+                cohort,
+                _submission(
+                    tmp_path,
+                    [16],
+                    extras={16: {"warmup": {"percentiles": {"90.0": "x"}}}},
+                ),
+            )
+
+    @pytest.mark.unit
     def test_a_present_leaf_value_must_be_in_its_allowlist(self, tmp_path):
         cohort = _declared_cohort(
             tmp_path,

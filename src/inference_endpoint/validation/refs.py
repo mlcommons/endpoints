@@ -56,6 +56,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
+from decimal import Decimal, InvalidOperation
 from math import isfinite
 from pathlib import Path
 from typing import Any, ClassVar
@@ -93,6 +94,41 @@ def _spelled_number(text: str) -> float | None:
     return number if isfinite(number) else None
 
 
+def _spelled_integer(text: str) -> int | None:
+    """The exact integer `text` spells, or None when it spells none.
+
+    Integrality is decided on the spelling, never on a `float` pass: a
+    fractional spelling that merely rounds to a whole number
+    (`"512.9999999999999999"`) stays refused, and a large exact spelling
+    (`"9007199254740993.0"`) keeps every digit instead of losing one to
+    binary-float rounding.
+
+    Example:
+
+        _spelled_integer("512")  # 512
+        _spelled_integer("512.0")  # 512
+        _spelled_integer("1e3")  # 1000
+        _spelled_integer("512.5")  # None: not integral
+        _spelled_integer("512.9999999999999999")  # None: rounds, not integral
+        _spelled_integer("9007199254740993.0")  # 9007199254740993: exact
+        _spelled_integer("inf")  # None: not finite
+
+    Args:
+        text (str): The spelling to read.
+    Returns:
+        int | None: The integer, or None when `text` spells no finite integral
+            number.
+    """
+    try:
+        spelled = Decimal(text)
+    except InvalidOperation:
+        return None
+    if not spelled.is_finite():
+        return None
+    integral = spelled.to_integral_value()
+    return int(integral) if spelled == integral else None
+
+
 def decode_number(value: Any, type_name: str | None) -> Any:
     """`value` as a declared `type_name` reads it: a numeric string decodes to its number.
 
@@ -105,16 +141,19 @@ def decode_number(value: Any, type_name: str | None) -> Any:
     quoting one, a metrics dumper formatting floats -- that refusing them on
     type alone would refuse a fact the upload does carry. Only `int`/`float`
     declarations decode, and only exact spellings: an `int` takes `"512"` or
-    the integral `"512.0"`, a `float` takes whatever `float` reads as finite
-    (`"12.61"`, `"1e3"`). Units (`"512 kw"`), separators (`"1,000"`) and
-    non-finite spellings (`"inf"`, `"nan"`) stay as they are, for
-    `_Fact.matches` to refuse.
+    the integral `"512.0"` (integrality is read from the spelling, `Decimal`-
+    exact, so a fractional spelling that only rounds is refused), a `float`
+    takes whatever `float` reads as finite (`"12.61"`, `"1e3"`). Units
+    (`"512 kw"`), separators (`"1,000"`) and non-finite spellings (`"inf"`,
+    `"nan"`) stay as they are, for `_Fact.matches` to refuse.
 
     Example:
 
         decode_number("512", "int")  # 512
         decode_number("512.0", "int")  # 512
         decode_number("512.5", "int")  # "512.5": an int leaf takes whole numbers
+        decode_number("9007199254740993.0", "int")  # 9007199254740993: exact
+        decode_number("512.9999999999999999", "int")  # the spelling: not integral
         decode_number("12.61", "float")  # 12.61
         decode_number("512", "str")  # "512": a str leaf means a str
         decode_number(512, "int")  # 512: already a number
@@ -130,14 +169,8 @@ def decode_number(value: Any, type_name: str | None) -> Any:
     if type_name == "float":
         number = _spelled_number(value)
         return value if number is None else number
-    try:
-        return int(value)
-    except ValueError:
-        pass
-    number = _spelled_number(value)
-    if number is None or not number.is_integer():
-        return value
-    return int(number)
+    number = _spelled_integer(value)
+    return value if number is None else number
 
 
 def _key_for(obj: Mapping[str, Any], part: str) -> str | None:
@@ -540,9 +573,12 @@ def _check_values(
             allowlist, or a declared block or `dict` leaf carries no block.
     """
     for name, entry in declared.items():
-        if name not in values:
+        # The same key reading `Ref.resolve` uses: a declared `90` and an
+        # artifact key `"90.0"` name one fact, and the declaration must judge it.
+        key = _key_for(values, name)
+        if key is None:
             continue
-        value = values[name]
+        value = values[key]
         here = [*path, name]
         if isinstance(entry, Mapping):
             if isinstance(value, Mapping):

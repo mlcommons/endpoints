@@ -334,6 +334,7 @@ findings plus one `CheckRun` per check) and runs four phases, then the walk.
    `_validate_declared_values` and `_validate_ruleset_needs` fail loud wherever
    the walk cannot happen: no points, or a point without its node; an artifact
    that failed to parse (a corrupt file must never read as an absent fact and
+   switch checks off); a present value its `valid_refs.yaml` declaration will
    not carry (one per-node `RefTable.validate_values` pass, whose numeric-string
    decodings come back on `Collected.coercions`); or a cohort naming the
    `ruleset` namespace the tree was built without (`derived`/`regions` are
