@@ -1,0 +1,29 @@
+# Per-system checks (`results/<system>/`), every row citing the Endpoints Policy
+# section it enforces (pinned at 4ba8224dc746).
+#
+# The §4.5.2 power descriptor and Appendix E's arithmetic, the per-point node
+# declarations and the tps_utilization reconciliation are listed in
+# ../2026-10-C1.md under "Not yet expressible": they need arithmetic across
+# artifacts (node sets, parallelism, provisioned power) that a comparison row
+# cannot perform. What is checked here is the declaration's presence and its
+# §4.5.2 vocabulary.
+
+system_power_declared:
+  description: The system ships its §4.5.2 power declaration.
+  rule: "Endpoints Policy §4.5.2, Power Measurement; Appendix E. Required for all Standardized submissions, CoP and CoN."
+  fix: Ship results/<system>/system_power.json (Appendix E schema) with the submission.
+  severity: warn
+  assert:
+    - { left: system.system_power.provisioned_power_kw, op: exists }
+
+system_power_method_known:
+  description: The declared power method is one Appendix E defines.
+  rule: "Endpoints Policy §4.5.2, Power Measurement; Appendix E.1."
+  fix: Declare `power_method` as component_sum, published_system or node_scaling.
+  severity: fail
+  when:
+    - { left: system.system_power.power_method, op: exists }
+  assert:
+    - left: system.system_power.power_method
+      op: in
+      right: [component_sum, published_system, node_scaling]
