@@ -244,10 +244,17 @@ class TestFromDirectory:
 
     @pytest.mark.unit
     def test_pareto_at_locates_the_pareto_of_a_node_only(self, tmp_path):
-        submission = write_upload(tmp_path / "acme", {SYSTEM: [Run(concurrency=16)]})
-        pareto = submission.paretos[0]
-        assert submission.pareto_at(pareto.node) is pareto
-        assert submission.pareto_at(pareto.points[0].node) is pareto
+        submission = write_upload(
+            tmp_path / "acme",
+            {
+                ("sys", "modelA"): [Run(concurrency=16)],
+                ("sys", "modelB"): [Run(concurrency=24)],
+            },
+        )
+        first, second = submission.paretos
+        assert submission.pareto_at(first.node) is first
+        assert submission.pareto_at(first.points[0].node) is first
+        assert submission.pareto_at(second.points[0].node) is second
         assert submission.pareto_at(submission.tree) is None
 
     @pytest.mark.unit
