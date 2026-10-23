@@ -347,10 +347,13 @@ class _Fact:
                 return isinstance(value, str)
             case "list":
                 return isinstance(value, list)
-            case _:
+            case "dict":
                 # `dict` never asks here: `_check_values` requires the leaf's own
                 # value to be a mapping, and the values below it stay unchecked.
-                # Any other name here is a missing branch and must fail loud.
+                # The arm is spelled out so every declared type name has one.
+                raise NotImplementedError(f"no value test for {self.type!r}")
+            case _:
+                # Any other name is a missing branch and must fail loud.
                 raise NotImplementedError(f"no value test for {self.type!r}")
 
 

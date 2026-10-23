@@ -537,7 +537,7 @@ class TestDerivedExposure:
     def test_unknown_derivation_is_absent(self, tmp_path):
         derived = _pareto(tmp_path, [Run(concurrency=16)]).derived()
         with pytest.raises(KeyError, match="nope"):
-            derived["nope"]
+            _ = derived["nope"]
 
 
 class TestPointPowerKw:
