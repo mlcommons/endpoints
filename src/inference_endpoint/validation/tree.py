@@ -313,8 +313,14 @@ _BRANCH = {RuleScopes.SYSTEM: RuleScopes.PARETO, RuleScopes.PARETO: RuleScopes.P
 def _walk(parent: Node, kind: RuleScopes, where: Path) -> tuple[Node, ...]:
     """`parent`'s children of `kind` below `where`, each with their own subtree.
 
-    Points are `r<N>` directories. Other kinds take every directory that
-    resolves inside the submission (a symlinked directory out of it is skipped).
+    Points are `r<N>` directories; other kinds take every directory that
+    resolves inside the submission. An entry no kind can take is refused once,
+    naming every one: a directory that is not an `r<N>` point where points are
+    read, a symlinked directory (it would multiply nodes that re-parse shared
+    artifacts and inflate point counts, the YAML alias ban's spirit), a
+    point-named entry that is not a directory, or a directory that resolves
+    outside the upload. Plain files with other names stay ignored: uploads
+    carry them.
 
     Args:
         parent (Node): The node whose children are walked.
@@ -323,29 +329,37 @@ def _walk(parent: Node, kind: RuleScopes, where: Path) -> tuple[Node, ...]:
     Returns:
         tuple[Node, ...]: The children of `kind`, sorted by name, each with their
             own subtree below it.
+    Raises:
+        ValueError: When `where` holds an entry no kind can take.
     """
     children = []
+    unreachable: list[str] = []
     for entry in sorted(
         where.iterdir() if where.is_dir() else [], key=lambda p: p.name
     ):
-        name_in_kind = (
-            kind != RuleScopes.POINT
-            or _POINT_DIR_PATTERN.fullmatch(entry.name) is not None
-        )
-        if (
-            not entry.is_dir()
-            # A symlinked directory multiplies nodes that re-parse shared
-            # artifacts and inflates point counts (the YAML alias ban's spirit).
-            or entry.is_symlink()
-            or not name_in_kind
-            or not _inside(parent.dir, entry)
-        ):
+        point_named = _POINT_DIR_PATTERN.fullmatch(entry.name) is not None
+        if not entry.is_dir():
+            if kind == RuleScopes.POINT and point_named:
+                unreachable.append(f"{entry.name} (a point is a directory)")
+            continue
+        if entry.is_symlink():
+            unreachable.append(f"{entry.name} (a symlinked directory)")
+            continue
+        if kind == RuleScopes.POINT and not point_named:
+            unreachable.append(f"{entry.name} (not an `r<N>` point directory)")
+            continue
+        if not _inside(parent.dir, entry):
+            unreachable.append(f"{entry.name} (resolves outside the upload)")
             continue
         node = Node(kind, entry, parent)
         below = _BRANCH.get(kind)
         if below:
             node.children = _walk(node, below, entry)
         children.append(node)
+    if unreachable:
+        raise ValueError(
+            f"{where} holds entries no check can reach: {', '.join(unreachable)}"
+        )
     return tuple(children)
 
 

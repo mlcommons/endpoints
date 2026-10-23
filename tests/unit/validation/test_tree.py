@@ -61,7 +61,8 @@ def _write(path, value):
 
 
 class TestWalk:
-    """`SubmissionNode.from_directory`: kinds, classes, order and parentage."""
+    """`SubmissionNode.from_directory`: kinds, classes, order, parentage, and the
+    refusal of entries no kind can take."""
 
     @pytest.mark.unit
     def test_walk_shape(self, tmp_path):
@@ -87,34 +88,43 @@ class TestWalk:
         }
 
     @pytest.mark.unit
-    def test_non_r_directory_is_not_a_point(self, tmp_path):
+    def test_a_directory_that_is_not_a_point_is_refused(self, tmp_path):
         _, root = _tree(tmp_path)
         (root / "results" / "sys" / "model" / "notes").mkdir()
-        node = SubmissionNode.from_directory(root)
-        assert [p.dir.name for p in node.children[0].children[0].children] == [
-            "r16",
-            "r8",
-        ]
+        with pytest.raises(
+            ValueError, match=r"no check can reach: notes \(not an `r<N>` point"
+        ):
+            SubmissionNode.from_directory(root)
 
     @pytest.mark.unit
-    def test_symlinked_directory_out_of_the_submission_is_skipped(self, tmp_path):
+    def test_a_point_named_file_is_refused(self, tmp_path):
+        _, root = _tree(tmp_path)
+        (root / "results" / "sys" / "model" / "r32").write_text("{}", encoding="utf-8")
+        with pytest.raises(
+            ValueError, match=r"no check can reach: r32 \(a point is a directory\)"
+        ):
+            SubmissionNode.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_symlinked_directory_is_refused_not_skipped(self, tmp_path):
         _, root = _tree(tmp_path)
         outside = tmp_path / "outside"
         outside.mkdir()
         (root / "results" / "sys" / "model" / "r99").symlink_to(
             outside, target_is_directory=True
         )
-        node = SubmissionNode.from_directory(root)
-        assert "r99" not in [p.dir.name for p in node.children[0].children[0].children]
+        with pytest.raises(
+            ValueError, match=r"no check can reach: r99 \(a symlinked directory\)"
+        ):
+            SubmissionNode.from_directory(root)
 
     @pytest.mark.unit
-    def test_symlinked_directory_inside_the_submission_is_skipped_too(self, tmp_path):
+    def test_a_stray_file_beside_the_points_is_ignored(self, tmp_path):
         _, root = _tree(tmp_path)
-        model = root / "results" / "sys" / "model"
-        (model / "r9").symlink_to(model / "r8", target_is_directory=True)
+        (root / "results" / "sys" / "model" / "notes.txt").write_text(
+            "run notes\n", encoding="utf-8"
+        )
         node = SubmissionNode.from_directory(root)
-        # One real point stays one point: symlinks must not multiply nodes (or
-        # inflate `point_cap`/counts the way a YAML alias would).
         assert [p.dir.name for p in node.children[0].children[0].children] == [
             "r16",
             "r8",
