@@ -251,6 +251,24 @@ class TestFromDirectory:
         assert submission.pareto_at(submission.tree) is None
 
     @pytest.mark.unit
+    def test_the_clients_tps_loads_as_the_required_system_tps(self, tmp_path):
+        submission = write_upload(
+            tmp_path / "acme",
+            {SYSTEM: [Run(system_tps=OMITTED, summary_extra={"tps": 6000.0})]},
+        )
+        assert submission.points[0].system_tps == 6000.0
+
+    @pytest.mark.unit
+    def test_a_null_client_tps_is_still_refused(self, tmp_path):
+        # A run that recorded no OSL writes `tps: null`; the policy metric is
+        # not there to read, so the load still refuses.
+        with pytest.raises(ValueError, match="needs a numeric system_tps"):
+            write_upload(
+                tmp_path / "acme",
+                {SYSTEM: [Run(system_tps=OMITTED, summary_extra={"tps": None})]},
+            )
+
+    @pytest.mark.unit
     def test_a_pareto_without_run_directories_is_refused(self, tmp_path):
         root = tmp_path / "acme"
         (root / "results" / "sys" / "model").mkdir(parents=True)

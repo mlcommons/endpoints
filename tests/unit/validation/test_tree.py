@@ -158,6 +158,24 @@ class TestRead:
         assert point.read("result_summary.json") == ({"n": 1}, None)
 
     @pytest.mark.unit
+    def test_the_clients_tps_surfaces_as_system_tps(self, tmp_path):
+        point = self._point(
+            tmp_path, {"result_summary.json": {"tps": 6000.0, "qps": 12.5}}
+        )
+        value, error = point.read("result_summary.json")
+        assert error is None
+        assert value["system_tps"] == 6000.0
+        assert value["tps"] == 6000.0 and value["qps"] == 12.5
+
+    @pytest.mark.unit
+    def test_an_explicit_system_tps_wins_over_the_client_alias(self, tmp_path):
+        point = self._point(
+            tmp_path, {"result_summary.json": {"system_tps": 1.0, "tps": 999.0}}
+        )
+        value, _ = point.read("result_summary.json")
+        assert value["system_tps"] == 1.0
+
+    @pytest.mark.unit
     def test_absent_artifact_is_missing(self, tmp_path):
         point = self._point(tmp_path)
         value, error = point.read("result_summary.json")

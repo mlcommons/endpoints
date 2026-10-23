@@ -33,7 +33,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Final
 
 import yaml
 
@@ -74,6 +74,36 @@ FILE_TO_KEY_MAP = {
     "accuracy_results.json": "accuracy_results",
     "results.json": "results",
 }
+
+# The run summary's aggregate throughput: the benchmark's report writes the
+# same quantity as `tps` (None on a run that recorded no OSL), while the
+# Endpoints Rules name the metric `system_tps` (§4.1). Which spelling an
+# upload must carry is a policy question with MLCommons; until it lands, the
+# read surfaces both.
+_CLIENT_TPS_KEY: Final = "tps"
+_POLICY_TPS_KEY: Final = "system_tps"
+
+
+def _with_system_tps(value: Any) -> Any:
+    """`value` with the run's aggregate throughput under the policy's name.
+
+    One-way and non-destructive: a document that carries `system_tps` is
+    returned unchanged, one carrying only the client's `tps` gains the policy
+    name beside it (every value stays the document's own), and a non-mapping is
+    left for its own refusal to name.
+
+    Args:
+        value (Any): One `result_summary.json` document, as parsed.
+    Returns:
+        Any: The document, or a copy carrying `system_tps`.
+    """
+    if (
+        not isinstance(value, Mapping)
+        or _POLICY_TPS_KEY in value
+        or _CLIENT_TPS_KEY not in value
+    ):
+        return value
+    return {**value, _POLICY_TPS_KEY: value[_CLIENT_TPS_KEY]}
 
 
 class StrictLoader(yaml.SafeLoader):
@@ -193,6 +223,11 @@ class Node:
     def read(self, name: str) -> tuple[Any, str | None]:
         """(value, error) of the artifact `name` of this node. `MISSING` when absent.
 
+        The run summary is read under the policy's throughput name: the
+        benchmark writes the same aggregate as `tps`, so a summary carrying
+        only that spelling surfaces `system_tps` too (`_with_system_tps`); the
+        parsed document itself stays as written.
+
         Args:
             name (str): The artifact's file name, one of the
                 `FILE_TO_KEY_MAP` keys.
@@ -201,7 +236,10 @@ class Node:
                 Absent -> (MISSING, None). Unparsable or oversized -> (None, "<name>
                 parse error: ...").
         """
-        return self.artifacts.get(name, (MISSING, None))
+        value, error = self.artifacts.get(name, (MISSING, None))
+        if name == "result_summary.json":
+            value = _with_system_tps(value)
+        return value, error
 
     def scopes(self) -> dict[str, dict[str, Any]]:
         """Per-node field mappings that `Ref.resolve` in `compare.py` reads.
