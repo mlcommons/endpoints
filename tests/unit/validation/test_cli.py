@@ -125,6 +125,23 @@ class TestExitCodes:
         assert "not found in registry" in err
 
     @pytest.mark.unit
+    def test_a_missing_cohort_directory_is_named_in_the_refusal(self, tmp_path, capsys):
+        assert main([str(tmp_path / "nope"), str(_upload(tmp_path))]) == 2
+        err = capsys.readouterr().err
+        assert "refused:" in err
+        assert "the cohort directory" in err and "does not exist" in err
+
+    @pytest.mark.unit
+    def test_a_missing_submission_directory_is_named_in_the_refusal(
+        self, tmp_path, capsys
+    ):
+        cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
+        assert main([str(cohort), str(tmp_path / "nope")]) == 2
+        err = capsys.readouterr().err
+        assert "refused:" in err
+        assert "the submission directory" in err and "does not exist" in err
+
+    @pytest.mark.unit
     def test_a_cohort_pulls_its_ruleset_from_its_manifest(self, tmp_path):
         check = (
             "ruleset_row:\n"

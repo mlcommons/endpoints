@@ -272,15 +272,17 @@ class SubmissionNode(Node, kind=RuleScopes.SUBMISSION):
             Node: The `submission` node, with its `results/<system>/<model>/r<N>`
                 tree walked.
         Raises:
-            NotADirectoryError: When `root` is not a directory (a load problem, not
-                a report).
+            NotADirectoryError: When `root` is missing or is not a directory: the
+                message names which and the path (a load problem, not a report).
             ValueError: When `root` is a symlink (artifact reads are
                 fd-anchored and refuse symlinked directories: one clear refusal
                 here instead of per-artifact `ELOOP` parse errors), or when the
                 artifact tree exceeds the submission-wide byte budget.
         """
+        if not root.exists():
+            raise NotADirectoryError(f"the submission directory {root} does not exist")
         if not root.is_dir():
-            raise NotADirectoryError(root)
+            raise NotADirectoryError(f"the submission path {root} is not a directory")
         if root.is_symlink():
             raise ValueError(
                 f"{root} is a symlink: pass the upload's real directory "
