@@ -31,7 +31,14 @@ from inference_endpoint.validation.runner import CheckRun, Finding
 from inference_endpoint.validation.sentinels import MISSING
 from inference_endpoint.validation.submission import Pareto, Point, Submission
 from inference_endpoint.validation.tree import SubmissionNode
-from submission_helpers import STANDARD_REFS, Run, write_cohort, write_run, write_upload
+from submission_helpers import (
+    OMITTED,
+    STANDARD_REFS,
+    Run,
+    write_cohort,
+    write_run,
+    write_upload,
+)
 
 SYSTEM = ("sys", "model")
 
@@ -393,6 +400,23 @@ class TestDeclaredValueChecking:
             ValueError, match=r"point\.result_summary\.percentiles: 17 is no block"
         ):
             Finding.collect(cohort, submission)
+
+    @pytest.mark.unit
+    def test_a_client_shaped_summary_satisfies_a_system_tps_row(self, tmp_path):
+        check = """
+tps_row:
+  description: The run's aggregate throughput is visible to a row.
+  rule: "Upload Rules > Throughput"
+  severity: fail
+  assert: [{left: point.result_summary.system_tps, op: gt, right: 0}]
+"""
+        cohort = _declared_cohort(tmp_path, point=check)
+        submission = write_upload(
+            tmp_path / "acme",
+            {SYSTEM: [Run(system_tps=OMITTED, summary_extra={"tps": 6000.0})]},
+        )
+        findings = Finding.collect(cohort, submission).findings
+        assert [f.verdict.ok for f in findings] == [True]
 
     @pytest.mark.unit
     def test_an_undeclared_key_is_not_checked(self, tmp_path):
