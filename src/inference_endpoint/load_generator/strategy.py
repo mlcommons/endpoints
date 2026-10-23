@@ -53,6 +53,8 @@ class PhaseIssuerProtocol(Protocol):
         data_override: dict[str, Any] | None = None,
         conversation_id: str = "",
         turn: int | None = None,
+        routing_key: str | None = None,
+        tracked: bool = True,
     ) -> str | None:
         """Issue a sample. Returns query_id, or None if the session is stopping.
 
@@ -66,6 +68,8 @@ class PhaseIssuerProtocol(Protocol):
                 for single-turn issues; propagated onto the published EventRecords
                 so downstream consumers can group by conversation.
             turn: Turn number within a conversation (agentic inference), or None.
+            routing_key: Routing-header value; defaults to ``conversation_id``.
+            tracked: False excludes the request from every metric (lane padding).
         """
         ...
 

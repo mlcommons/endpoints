@@ -233,6 +233,8 @@ class PhaseIssuer:
         data_override: dict[str, Any] | None = None,
         conversation_id: str = "",
         turn: int | None = None,
+        routing_key: str | None = None,
+        tracked: bool = True,
     ) -> str | None:
         """Load data, build Query, publish ISSUED, send to endpoint.
 
@@ -243,6 +245,11 @@ class PhaseIssuer:
             data_override: If provided, merged over the loaded sample data.
                 Keys in data_override take precedence. Used by AgenticInferenceStrategy
                 to override pre-baked messages when trajectory salting is enabled.
+            routing_key: Value for the routing headers sent to the server. Defaults
+                to ``conversation_id``; the balanced-lane scheduler passes an opaque
+                key so the server cannot read copy numbers or measured status.
+            tracked: False marks a request that no metric may count (lane warm-up
+                and padding load). Recorded on the ISSUED event only.
 
         Note: load_sample() runs synchronously before the ISSUED timestamp.
         For accurate timing, datasets MUST be pre-loaded into memory.
@@ -254,11 +261,8 @@ class PhaseIssuer:
         data = self._dataset.load_sample(sample_index)
         if data_override is not None:
             data = {**data, **data_override}
-        headers = (
-            dict.fromkeys(self._routing_headers, conversation_id)
-            if conversation_id
-            else {}
-        )
+        route = conversation_id if routing_key is None else routing_key
+        headers = dict.fromkeys(self._routing_headers, route) if route else {}
         query = Query(id=query_id, data=data, headers=headers)
         self.uuid_to_index[query_id] = sample_index
         self.uuid_to_conv_info[query_id] = (conversation_id, turn)
@@ -321,6 +325,7 @@ class PhaseIssuer:
                 sample_uuid=query_id,
                 conversation_id=conversation_id,
                 turn=turn,
+                tracked=msgspec.UNSET if tracked else False,
                 data=prompt_data,
             )
         )

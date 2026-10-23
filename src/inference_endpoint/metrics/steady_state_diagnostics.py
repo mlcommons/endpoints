@@ -518,7 +518,7 @@ def build_trajectory_natl(
                 tracking = False
             elif et == EV_ISSUED:
                 uuid = rec.get("sample_uuid")
-                if tracking and uuid and ts is not None:
+                if tracking and uuid and ts is not None and rec.get("tracked") is not False:
                     issue[uuid] = (rec.get("conversation_id") or "", ts)
             elif et == EV_COMPLETE:
                 iv = issue.pop(rec.get("sample_uuid"), None)
@@ -821,7 +821,7 @@ def build_super_pass_series(
             if ts is None or not uuid:
                 continue
             if et == EV_ISSUED:
-                if not tracking:
+                if not tracking or rec.get("tracked") is False:
                     continue
                 existing = rows.get(uuid)
                 if existing is not None:

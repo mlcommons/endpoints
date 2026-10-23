@@ -165,6 +165,12 @@ class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type:
     sample_uuid: str = ""
     conversation_id: str = ""
     turn: int | None = None
+    # False only on the ISSUED record of a request that is deliberately outside
+    # every measurement (warm-up / padding load from the balanced-lane agentic
+    # scheduler). Unset everywhere else, so existing logs are unchanged. It sits
+    # before ``data`` so readers can classify a line from its first few hundred
+    # bytes without decoding the prompt payload.
+    tracked: bool | msgspec.UnsetType = msgspec.UNSET
     data: OUTPUT_TYPE | PromptData | ErrorData | PhaseData | None = None
     finish_reason: str | msgspec.UnsetType = msgspec.UNSET
     worker_id: int | msgspec.UnsetType = msgspec.UNSET

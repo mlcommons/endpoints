@@ -363,6 +363,73 @@ class SubmissionReference(BaseModel):
         return get_ruleset(self.ruleset)
 
 
+class LaneSchedulerConfig(BaseModel):
+    """Balanced-lane agentic scheduler settings (``scheduler: lanes``).
+
+    The run plan is fixed from the dataset, the concurrency, the seed, a
+    per-run secret key and the per-turn service times measured on the server
+    during calibration. See ``load_generator/lane_scheduler.py``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    min_copies: int = Field(
+        4,
+        gt=0,
+        description="Lower bound on the dataset copies measured (one super-pass each).",
+    )
+    coding_conversations_per_lane: float = Field(
+        2.0,
+        gt=0,
+        description=(
+            "Copies are chosen so each lane holds about this many coding (SWE) "
+            "conversations: copies = max(min_copies, ceil(this x C / coding conversations))."
+        ),
+    )
+    calibration_s: float = Field(
+        180.0,
+        gt=0,
+        description=(
+            "Seconds of warm turns measured for the per-turn service-time estimate, "
+            "counted after every slot's first (cold) request has completed."
+        ),
+    )
+    calibration_skip_s: float = Field(
+        60.0,
+        ge=0,
+        description=(
+            "Extra seconds discarded after the cold requests complete, before "
+            "measuring, so the cold-prefill burst does not inflate the estimate."
+        ),
+    )
+    warmup_min_s: float = Field(
+        120.0,
+        ge=0,
+        description="Shortest unmeasured warm-up per slot (estimated lane time).",
+    )
+    warmup_max_s: float = Field(
+        300.0,
+        ge=0,
+        description=(
+            "Longest unmeasured warm-up per slot. Each slot draws its warm-up from "
+            "the secret key, so the server cannot predict where measurement begins."
+        ),
+    )
+    work_stealing: bool = Field(
+        True,
+        description=(
+            "A slot that finishes its measured lap takes unstarted measured "
+            "conversations from the slots furthest behind."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _warmup_range(self) -> Self:
+        if self.warmup_max_s < self.warmup_min_s:
+            raise ValueError("lanes.warmup_max_s must be >= lanes.warmup_min_s")
+        return self
+
+
 class AgenticInferenceConfig(BaseModel):
     """Agentic inference conversation configuration.
 
@@ -426,6 +493,32 @@ class AgenticInferenceConfig(BaseModel):
             "for accuracy/log coverage."
         ),
     )
+    scheduler: Literal["queue", "lanes"] = Field(
+        "queue",
+        description=(
+            "queue: slots take conversations from one shared start queue (default). "
+            "lanes: balanced-lane plan with exact coverage, a secret per-run key and "
+            "no ramp or tail in the measured window."
+        ),
+    )
+    lanes: LaneSchedulerConfig = Field(
+        default_factory=LaneSchedulerConfig,
+        description="Settings for scheduler: lanes.",
+    )
+
+    @model_validator(mode="after")
+    def _lanes_requirements(self) -> Self:
+        if self.scheduler == "lanes" and not self.enable_salt:
+            raise ValueError(
+                "agentic_inference.scheduler: lanes requires enable_salt: true "
+                "(every lane segment gets its own keyed salt)"
+            )
+        if self.scheduler == "lanes" and self.stop_issuing_on_first_user_complete:
+            raise ValueError(
+                "agentic_inference.stop_issuing_on_first_user_complete does not apply "
+                "to scheduler: lanes"
+            )
+        return self
 
 
 class Dataset(BaseModel):

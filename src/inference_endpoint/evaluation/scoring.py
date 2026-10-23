@@ -849,6 +849,11 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
                     continue
                 if record.turn is None or not record.conversation_id:
                     continue
+                if record.tracked is False:
+                    # Lane warm-up / padding load is not a benchmark turn; its
+                    # COMPLETE carries an unmeasured conversation id and is
+                    # dropped by the expected-key check below.
+                    continue
 
                 conversation_id = record.conversation_id
                 repeat_id = 1

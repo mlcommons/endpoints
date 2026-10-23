@@ -101,6 +101,9 @@ from inference_endpoint.load_generator.agentic_inference_strategy import (
     expected_agentic_sample_count,
 )
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
+from inference_endpoint.load_generator.lane_scheduler import (
+    LaneAgenticInferenceStrategy,
+)
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     EndpointResponseIdleTimeoutError,
@@ -108,6 +111,7 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
+from inference_endpoint.metrics.steady_diagnostics import write_steady_diagnostics
 
 if TYPE_CHECKING:
     from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -778,6 +782,14 @@ def _build_agentic_strategy(
     rng_sample_index = (
         ctx.rt_settings.rng_sample_index if ctx.rt_settings is not None else None
     )
+    if agentic_cfg is not None and agentic_cfg.scheduler == "lanes":
+        return LaneAgenticInferenceStrategy(
+            dataset_metadata=ctx.dataloader.conversation_metadata,
+            agentic_inference_config=agentic_cfg,
+            target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
+            rng_sample_index=rng_sample_index,
+            report_dir=ctx.report_dir,
+        )
     return AgenticInferenceStrategy(
         conversation_manager=ConversationManager(),
         dataset_metadata=ctx.dataloader.conversation_metadata,
@@ -1267,6 +1279,12 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Emit the accuracy results as a focused artifact under accuracy/. Written
     # after the report artifacts so a write failure here can't discard them.
     write_accuracy_results(ctx.report_dir, accuracy_scores)
+
+    # Lane runs always get the steady-state evidence file (coverage, tail,
+    # drift, fairness). Other runs can produce it with
+    # ``python -m inference_endpoint.metrics.steady_diagnostics <report_dir>``.
+    if not aborted and (ctx.report_dir / "lane_plan.json").is_file():
+        write_steady_diagnostics(ctx.report_dir, ctx.tokenizer_name)
 
 
 def run_benchmark(

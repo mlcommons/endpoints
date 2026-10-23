@@ -110,12 +110,16 @@ class TrackedBlock:
     """A single START_PERFORMANCE_TRACKING → (last sample completion) window.
 
     Duration extends to the last tracked sample completion, not to
-    STOP_PERFORMANCE_TRACKING. Empty blocks have duration 0.
+    STOP_PERFORMANCE_TRACKING. Empty blocks have duration 0. When untracked
+    requests (``EventRecord.tracked is False``) are issued before the block's
+    first tracked request, the block starts at that first tracked request.
     """
 
     start_ns: int
     last_complete_ns: int
     completed_samples: int = 0
+    tracked_issued: int = 0
+    awaiting_first_tracked: bool = False
 
     @property
     def duration_ns(self) -> int:
@@ -544,6 +548,20 @@ class MetricsTable:
         if ev == SampleEventType.ISSUED:
             if not self.is_tracking:
                 return
+            block = self.tracked_blocks[-1] if self.tracked_blocks else None
+            if ev_rec.tracked is False:
+                # Lane warm-up / padding load: never a metric sample. If it
+                # opens the block, the window must start at the first request
+                # that is counted, not at the unmeasured warm-up.
+                if block is not None and block.tracked_issued == 0:
+                    block.awaiting_first_tracked = True
+                return
+            if block is not None:
+                if block.awaiting_first_tracked:
+                    block.start_ns = value
+                    block.last_complete_ns = value
+                    block.awaiting_first_tracked = False
+                block.tracked_issued += 1
             row = self._create_row(sample_uuid)
             row.tracked_block_idx = len(self.tracked_blocks) - 1
             if self._loadgen_window_start_ns is None:

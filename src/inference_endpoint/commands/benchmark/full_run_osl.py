@@ -22,6 +22,7 @@ See mlcommons/endpoints#500.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,12 @@ logger = logging.getLogger(__name__)
 # Matched against each line's leading bytes so the 6+ GB of prompt and response
 # payload in a large run is never decoded just to classify the record.
 _COMPLETE_MARKER = b'"event_type":"sample.complete"'
+_ISSUED_MARKER = b'"event_type":"sample.issued"'
+_UNTRACKED_MARKER = b'"tracked":false'
 _PREFIX_BYTES = 256
+# ISSUED lines carry the conversation id before ``tracked``; allow for long ids.
+_ISSUED_PREFIX_BYTES = 1024
+_UUID_RE = re.compile(rb'"sample_uuid":"([^"]+)"')
 # AgenticInferenceInlineScorer's dataset_name; the key its turns live under in
 # sample_idx_map.json.
 
@@ -109,9 +115,19 @@ def compute_full_run_osl(
     n_undecodable = 0
     first_error: str | None = None
     seen_uuids: set[str] = set()
+    # Lane warm-up / padding requests (ISSUED with tracked=false) are load, not
+    # benchmark turns. An ISSUED record always precedes its COMPLETE in the log.
+    untracked_uuids: set[str] = set()
 
     with events_path.open("rb") as events_file:
         for line in events_file:
+            if _ISSUED_MARKER in line[:_PREFIX_BYTES]:
+                head = line[:_ISSUED_PREFIX_BYTES]
+                if _UNTRACKED_MARKER in head:
+                    match = _UUID_RE.search(head)
+                    if match is not None:
+                        untracked_uuids.add(match.group(1).decode())
+                continue
             if _COMPLETE_MARKER not in line[:_PREFIX_BYTES]:
                 continue
             # Decode before the population filter so a corrupt line — which we
@@ -122,7 +138,9 @@ def compute_full_run_osl(
             except msgspec.DecodeError:
                 n_undecodable += 1
                 continue
-            if not _in_population(record, performance_uuids):
+            if record.sample_uuid in untracked_uuids or not _in_population(
+                record, performance_uuids
+            ):
                 continue
             seen_uuids.add(record.sample_uuid)
             if record.data is None:
@@ -153,7 +171,9 @@ def compute_full_run_osl(
     # performance population so a lost record is flagged, not silently averaged
     # away (mlcommons/endpoints#504 review).
     n_missing = (
-        len(set(performance_uuids) - seen_uuids) if performance_uuids is not None else 0
+        len(set(performance_uuids) - seen_uuids - untracked_uuids)
+        if performance_uuids is not None
+        else 0
     )
 
     # Warn once with the aggregate rather than once per turn, so a systematic
