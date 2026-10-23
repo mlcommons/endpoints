@@ -37,7 +37,7 @@ from inference_endpoint.exceptions import InputValidationError
 from inference_endpoint.load_generator.lane_scheduler import (
     LaneAgenticInferenceStrategy,
     lane_copies,
-    order_pool,
+    split_points,
 )
 
 pytestmark = pytest.mark.unit
@@ -305,24 +305,32 @@ def test_measurement_starts_with_every_slot_mid_conversation(tmp_path: Path) -> 
     assert all(not r["tracked"] for r in issuer.records[:first_measured])
 
 
-def test_pool_order_starts_long_items_early_enough_to_finish() -> None:
-    rng = random.Random(3)
-    estimates = [100.0] + [1.0] * 50 + [60.0]
-    order = order_pool(estimates, horizon_s=80.0, rng=rng)
-    assert sorted(order) == list(range(len(estimates)))
-    # Longer than the horizon: must start first.
-    assert order[0] == 0
-    # Draw window [0, horizon - L]: the 60 s item starts within its first 20 s
-    # of a 80 s horizon, i.e. in the first part of the order on average.
-    starts = []
-    for seed in range(200):
-        o = order_pool(estimates, 80.0, random.Random(seed))
-        starts.append(o.index(len(estimates) - 1) / len(o))
-    assert sum(starts) / len(starts) < 0.4
+def test_split_points_bound_every_chunk_and_balance_them() -> None:
+    turns = [1.0] * 90
+    cuts = split_points(turns, max_len_s=40.0)
+    bounds = [0, *cuts, len(turns)]
+    chunks = [sum(turns[a:b]) for a, b in zip(bounds, bounds[1:], strict=False)]
+    assert len(chunks) == 3 and max(chunks) <= 40.0 and min(chunks) >= 29.0
+    # Short enough already, or a single turn: never cut.
+    assert split_points([1.0] * 10, 40.0) == []
+    assert split_points([500.0], 40.0) == []
 
 
-def test_same_key_reproduces_the_pool_order(tmp_path: Path) -> None:
-    estimates = [float(i % 7) for i in range(40)]
-    assert order_pool(estimates, 20.0, random.Random(9)) == order_pool(
-        estimates, 20.0, random.Random(9)
+def test_long_conversations_are_measured_in_parts_without_losing_turns(
+    tmp_path: Path,
+) -> None:
+    """Instances longer than an eighth of the measured phase are split into
+    parts; every turn is still measured exactly once per copy."""
+    # One copy over 8 slots: the measured phase is ~10 turns long, so the
+    # 9-12 turn coding conversations exceed an eighth of it.
+    issuer, plan = _run(
+        tmp_path, concurrency=8, min_copies=1, coding_conversations_per_slot=0.5
     )
+    assert plan["split_segments"] > 0
+    measured = Counter(
+        (_source(r["conv"])[0], _source(r["conv"])[2], r["turn"])
+        for r in issuer.records
+        if r["tracked"]
+    )
+    assert set(measured.values()) == {1}
+    assert len(measured) == plan["measured_turns_expected"]
