@@ -204,9 +204,11 @@ class TestMapRefs:
         assert isinstance(row.right, int) and not isinstance(row.right, bool)
         assert row.operands() == (row.left, 32)
 
+    """`Ref.resolve`: absent and null are different states, keys read by spelling.
 
-class TestResolve:
-    """`Ref.resolve`: absent and null are different states. Resolution is mapping-only."""
+    Resolution is mapping-only: a numeric component may read a key that spells
+    the same number, and a declared `int`/`float` leaf decodes a numeric string.
+    """
 
     @pytest.mark.unit
     def test_found_value(self):
@@ -222,6 +224,40 @@ class TestResolve:
             SCOPES
         )
         assert (found, value) == (True, None)
+
+    @pytest.mark.unit
+    def test_a_numeric_component_reads_a_key_spelling_the_same_number(self):
+        # Percentile blocks are keyed by the writer's spelling (`"90.0"`) while
+        # a row names the percentile (`90`): the canonicalisation the
+        # submission checker applies to percentile keys.
+        scopes = {"point": {"result_summary": {"tpot": {"percentiles": {"90.0": 12}}}}}
+        assert Ref(("point", "result_summary", "tpot", "percentiles", "90")).resolve(
+            scopes
+        ) == (True, 12)
+
+    @pytest.mark.unit
+    def test_an_exact_key_wins_over_an_equivalent_spelling(self):
+        scopes = {
+            "point": {"result_summary": {"tpot": {"percentiles": {"90": 1, "90.0": 2}}}}
+        }
+        assert Ref(("point", "result_summary", "tpot", "percentiles", "90")).resolve(
+            scopes
+        ) == (True, 1)
+
+    @pytest.mark.unit
+    def test_a_declared_numeric_leaf_reads_a_numeric_string(self):
+        ref = Ref(("point", "config", "concurrency"), type="int")
+        assert ref.resolve({"point": {"config": {"concurrency": "512"}}}) == (True, 512)
+
+    @pytest.mark.unit
+    def test_an_undeclared_ref_leaves_a_numeric_string_alone(self):
+        # No declaration, nothing decodes: a checker-owned namespace or a
+        # hand-built row reads the artifact exactly as it is.
+        ref = Ref(("point", "config", "concurrency"))
+        assert ref.resolve({"point": {"config": {"concurrency": "512"}}}) == (
+            True,
+            "512",
+        )
 
     @pytest.mark.unit
     def test_a_lists_builtin_count_never_forges_a_present_fact(self):

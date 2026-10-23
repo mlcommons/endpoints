@@ -318,6 +318,46 @@ class TestDeclaredValueChecking:
         assert [f.verdict.ok for f in findings] == [True]
 
     @pytest.mark.unit
+    def test_a_numeric_string_reads_as_its_number_and_is_reported(self, tmp_path):
+        # A stringified number is no fault: the leaf's declared `int` reads it,
+        # and the run reports the decoding instead of staying silent about it.
+        cohort = _declared_cohort(
+            tmp_path,
+            refs={"point": {"config": {"warmup": {"duration_s": {"type": "int"}}}}},
+            point=PLAIN_CHECK,
+        )
+        collected = Finding.collect(
+            cohort,
+            _submission(tmp_path, [16], extras={16: {"warmup": {"duration_s": "5"}}}),
+        )
+        assert [f.verdict.ok for f in collected.findings] == [True]
+        assert len(collected.coercions) == 1
+        assert collected.coercions[0].endswith(
+            "point.config.warmup.duration_s: '5' read as 5"
+        )
+
+    @pytest.mark.unit
+    def test_a_string_that_spells_no_number_still_refuses(self, tmp_path):
+        # The leniency is spelling, not type: a value no number can carry stays
+        # a refusal, not a silent zero.
+        cohort = _declared_cohort(
+            tmp_path,
+            refs={"point": {"config": {"warmup": {"duration_s": {"type": "int"}}}}},
+            point=PLAIN_CHECK,
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"point\.config\.warmup\.duration_s: '5 s' "
+            r"does not match its declared type",
+        ):
+            Finding.collect(
+                cohort,
+                _submission(
+                    tmp_path, [16], extras={16: {"warmup": {"duration_s": "5 s"}}}
+                ),
+            )
+
+    @pytest.mark.unit
     def test_a_present_leaf_value_must_be_in_its_allowlist(self, tmp_path):
         cohort = _declared_cohort(
             tmp_path,

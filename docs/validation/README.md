@@ -100,6 +100,11 @@ rule/fix), so the session doubles as the audit trail. Checks that did not run
 print `NEVER-RAN <id>: ...` on stderr with their reason: the `when` conditions
 did not hold at that instance, or a check in their `needs` chain did not vouch.
 
+When a declared `int`/`float` value arrives as a numeric string, the run reads
+the number it spells and prints
+`coerced: <dir>: <path>: '<text>' read as <number>` on stderr: a shape note, not
+a finding (see "The cohort's `valid_refs.yaml`").
+
 Exit codes, in plain words:
 
 - `0` - every applicable check held, or the checks that did not hold failed only
@@ -186,6 +191,15 @@ domains out per field: `offline` is Section 8.3's "One of: dedicated, elected,
 absent or `none`", and `region` (five values, `submitters_choice` among them) or
 `division` (`Standardized`/`Serviced`/`RDI`) declare likewise where a cohort
 holds rows to them.
+
+A type name says what a value must carry, and `int`/`float` read a numeric
+string: a leaf declared `int` accepts `512` and the string `"512"` (the integral
+spelling `"512.0"` too), a `float` accepts `12.61` and `"12.61"`. Only exact
+spellings decode - `"512 kw"`, `"1,000"`, `"inf"` and `"nan"` still refuse - and
+only on numeric declarations: `"512"` on a `str` leaf stays a string. Each
+decoding prints a `coerced:` line, so the leniency is visible, never silent. The
+parser-enforced facts (`concurrency`, `max_supported_concurrency`, `system_tps`)
+read the same way: a stringified number is not a mistyped one.
 
 Two limits on what the file may declare:
 
@@ -472,6 +486,11 @@ for `r1024`, but is skipped for `r999999`.
   unless they are non-empty all-strings and namespace-headed (their near-miss
   heads are refused at load too).
 
+- A component that spells a number reads a key spelling the same number:
+  `point.result_summary.tpot.percentiles.90` finds a block keyed `"90.0"` (the
+  canonicalisation the submission checker applies to percentile keys). An exact
+  key always wins over an equivalent spelling.
+
 All three forms in one stub (`point.yaml`):
 
 ```yaml
@@ -528,7 +547,8 @@ At submission load (`Submission.from_directory`, which parses every `Point` and
 - a run directory whose `point.yaml`, `system_desc.json` or
   `result_summary.json` lacks or mistypes a parser-enforced fact (`concurrency`,
   `max_supported_concurrency`, `system_tps`), declares an `offline` value
-  outside `dedicated`/`elected`/`none`, or fails to parse at all
+  outside `dedicated`/`elected`/`none`, or fails to parse at all - a value no
+  number can carry is the mistype: a numeric string reads as its number
 - a pareto shape a derivation cannot judge, each naming its Endpoints Rules §9.1
   row: multiple `offline` declarations, an `elected` point not at C_max, a
   dedicated Offline run without exactly one C_max point, points disagreeing on
@@ -547,7 +567,9 @@ At `Finding.collect` (per submitted run):
 - an unreadable artifact anywhere in the tree -- the same rule for the documents
   only rows read: a corrupt file is never read as an absent fact
 - a present value its `valid_refs.yaml` declaration will not carry
-  (`does not match its declared type`, `is not one of`, `is no block`)
+  (`does not match its declared type`, `is not one of`, `is no block`); a
+  numeric string on a declared `int`/`float` leaf is not one of these - it reads
+  as the number it spells, and the run reports `coerced:`
 - a `when` predicate that cannot be judged (an unjudgeable gate is refused, not
   read as false)
 - a run directory with no carried measurement point, or one shared between two

@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from inference_endpoint.validation.catalog import Catalog
+from inference_endpoint.validation.refs import decode_number
 from inference_endpoint.validation.regions import Regions
 from inference_endpoint.validation.tree import Node, RuleScopes, SubmissionNode
 
@@ -93,11 +94,13 @@ def _mapping_artifact(node: Node, name: str) -> Mapping[str, Any]:
 def _int_fact(source: Mapping[str, Any], name: str, where: str) -> int:
     """`source[name]` as the integer fact `where` documents.
 
-    The value must survive `float()` too: the region algorithm computes in
-    floats, so an integer Python cannot widen would crash a derivation instead
-    of refusing the upload.
+    A numeric string reads as the number it spells (`refs.decode_number`), the
+    same rule the ref table applies to the leaves it declares. The value must
+    survive `float()` too: the region algorithm computes in floats, so an
+    integer Python cannot widen would crash a derivation instead of refusing the
+    upload.
     """
-    value = source.get(name)
+    value = decode_number(source.get(name), "int")
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{where} needs an integer {name}")
     try:
@@ -113,9 +116,11 @@ def _finite_fact(source: Mapping[str, Any], name: str, where: str) -> float:
     `NaN`/`Infinity` decode from `result_summary.json` and a huge integer cannot
     widen to `float`: either would reach a derivation as a number that compares
     quietly (or raises uncaught), so both are refused at load, where the refusal
-    is a report line instead of a crash mid-derivation.
+    is a report line instead of a crash mid-derivation. A numeric string reads
+    as the number it spells (`refs.decode_number`), the rule the ref table
+    applies to the leaves it declares.
     """
-    value = source.get(name)
+    value = decode_number(source.get(name), "float")
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(f"{where} needs a numeric {name}")
     try:

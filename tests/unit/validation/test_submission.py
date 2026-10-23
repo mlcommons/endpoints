@@ -114,7 +114,7 @@ class TestPointFromNode:
             )
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("system_tps", [None, OMITTED, "7.5", True])
+    @pytest.mark.parametrize("system_tps", [None, OMITTED, "nan", True])
     def test_a_result_summary_without_numeric_system_tps_is_refused(
         self, tmp_path, system_tps
     ):
@@ -125,11 +125,29 @@ class TestPointFromNode:
             )
 
     @pytest.mark.unit
-    def test_a_non_integer_concurrency_is_refused(self, tmp_path):
+    def test_a_stringified_system_tps_reads_as_its_number(self, tmp_path):
+        submission = write_upload(
+            tmp_path / "acme",
+            {SYSTEM: [Run(concurrency=16, system_tps="7.5")]},
+        )
+        assert [point.system_tps for point in submission.points] == [7.5]
+
+    @pytest.mark.unit
+    def test_a_stringified_concurrency_reads_as_its_number(self, tmp_path):
+        # Writers stringify numbers: the parser decodes them the way the ref
+        # table reads its declared leaves (`refs.decode_number`).
+        submission = write_upload(
+            tmp_path / "acme",
+            {SYSTEM: [Run(concurrency="16", dir_name="r16")]},
+        )
+        assert [point.concurrency for point in submission.points] == [16]
+
+    @pytest.mark.unit
+    def test_a_concurrency_that_spells_no_number_is_refused(self, tmp_path):
         with pytest.raises(ValueError, match="needs an integer concurrency"):
             write_upload(
                 tmp_path / "acme",
-                {SYSTEM: [Run(concurrency="16", dir_name="r16")]},
+                {SYSTEM: [Run(concurrency="sixteen", dir_name="r16")]},
             )
 
     @pytest.mark.unit

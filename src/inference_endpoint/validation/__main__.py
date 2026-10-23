@@ -100,6 +100,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, OverflowError) as exc:
         print(f"refused: {_escaped(str(exc))}", file=sys.stderr)
         return 2
+    for note in collected.coercions:
+        # How a numeric string was read: a shape note, not a finding.
+        print(_escaped(f"coerced: {note}"), file=sys.stderr)
     failing = [finding for finding in collected.findings if not finding.verdict.ok]
     blocking = [finding for finding in failing if finding.severity is Severity.FAIL]
     for finding in collected.findings if args.audit else failing:

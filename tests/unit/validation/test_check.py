@@ -351,6 +351,42 @@ class TestCohortRefTable:
             assert isinstance(_Fact(type=name).matches(0), bool)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("name", "value", "expected"),
+        [
+            ("int", "512", 512),
+            ("int", "512.0", 512),
+            ("int", " 12 ", 12),
+            ("int", "1e3", 1000),
+            ("int", "512.5", "512.5"),
+            ("int", "512 kw", "512 kw"),
+            ("int", "1,000", "1,000"),
+            ("int", "nan", "nan"),
+            ("int", "inf", "inf"),
+            ("int", "", ""),
+            ("int", 512, 512),
+            ("float", "12.61", 12.61),
+            ("float", "1e3", 1000.0),
+            ("float", "inf", "inf"),
+            ("str", "512", "512"),
+            ("bool", "true", "true"),
+            ("list", "512", "512"),
+        ],
+    )
+    def test_a_numeric_string_decodes_only_for_numeric_declarations(
+        self, name, value, expected
+    ):
+        # A writer that stringifies a number must not cost the submission a
+        # refusal: the declared type decides, and only exact spellings decode.
+        assert _Fact(type=name).coerce(value) == expected
+
+    @pytest.mark.unit
+    def test_a_decoded_number_is_what_matches_then_accepts(self):
+        fact = _Fact(type="int")
+        for text in ("512", "512.0", " 12 ", "1e3"):
+            assert fact.matches(fact.coerce(text))
+
+    @pytest.mark.unit
     def test_a_scalar_where_a_block_or_type_name_belongs_is_refused(self, tmp_path):
         root = write_cohort(tmp_path / "cohort", refs={"point": 5}, point=LITERAL_CHECK)
         with pytest.raises(ValueError, match="expected a type name"):
