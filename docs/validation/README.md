@@ -653,3 +653,10 @@ Rows name only declared facts:
 The loader, tree walk, row operators, region derivation and the check runner are
 documented in [`DESIGN.md`](DESIGN.md) - "what happens under the hood", kept
 strictly separate from this how-to-use page.
+
+`compliance/checker.py` is a different checker in this repo: it validates one
+completed Edge-Agentic (BFCL) run's report directory (the resolved `config.yaml`
+plus scorer output) against the Edge-Agentic ruleset - config lock, the accuracy
+gate, dropped-turn validity. This module checks an assembled Endpoints
+submission against a cohort's declared checks. Both read the policy documents;
+neither imports the other.
