@@ -232,6 +232,20 @@ def test_salts_and_routing_keys_are_keyed_and_opaque(tmp_path: Path) -> None:
     }
     assert not unmeasured & measured
     assert len(salts) == len(set(salts))
+    # The head salt depends only on the copy, so every conversation of a copy
+    # shares the cached system-prompt prefix (the reference salt's shape); the
+    # tail separates instances. A per-instance head made every conversation
+    # re-prefill the shared system prompt and collapsed the prefix-cache hit rate.
+    heads_by_copy: dict[object, set[str]] = {}
+    tail_owner: dict[str, str] = {}
+    for conv, pairs in by_conv.items():
+        source, kind, copy = _source(conv)
+        group = "unmeasured" if kind == "unmeasured" else copy
+        for head, tail in pairs:
+            heads_by_copy.setdefault(group, set()).add(head)
+            assert tail_owner.setdefault(tail, conv) == conv
+    assert all(len(heads) == 1 for heads in heads_by_copy.values())
+    assert len({next(iter(h)) for h in heads_by_copy.values()}) == len(heads_by_copy)
     assert (
         plan["secret_sha256"]
         == hashlib.sha256(bytes.fromhex(plan["secret_hex"])).hexdigest()

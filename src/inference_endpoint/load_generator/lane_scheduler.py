@@ -687,7 +687,9 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         cold = slot.cursor == segment.first
         query_id = self._phase_issuer.issue(
             idx,
-            data_override=self._salted_override(source.source_id, turn, segment.uid),
+            data_override=self._salted_override(
+                source.source_id, turn, segment.copy, segment.uid
+            ),
             conversation_id=segment.logical_id,
             turn=turn,
             routing_key=self._key.digest("route", segment.uid, 16),
@@ -715,7 +717,9 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             self._turn_timeout_s, self._handle_lane_timeout, query_id
         )
 
-    def _salted_override(self, source_id: str, turn: int, uid: str) -> dict[str, Any]:
+    def _salted_override(
+        self, source_id: str, turn: int, copy: int, uid: str
+    ) -> dict[str, Any]:
         messages = self._dataset_metadata.pre_built_messages_by_key.get(
             (source_id, turn)
         )
@@ -728,7 +732,12 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             if message.get("role") == "system" and isinstance(
                 message.get("content"), str
             ):
-                head = self._key.digest("salt-head", uid)
+                # Same shape as the queue scheduler's salt: the head depends only
+                # on the copy, so every conversation of a copy shares the cached
+                # system-prompt prefix (500 workflow conversations share one
+                # ~127k-character prompt). The tail is unique per instance, so
+                # conversation histories never reuse another instance's cache.
+                head = self._key.digest("salt-head", str(copy))
                 tail = self._key.digest("salt-tail", uid)
                 message["content"] = (
                     f"[salt: {head}]\n\n{message['content']}\n\n[salt: {tail}]"
