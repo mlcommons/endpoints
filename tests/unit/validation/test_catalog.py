@@ -57,8 +57,17 @@ class TestCatalogFromDirectory:
 
     @pytest.mark.unit
     def test_missing_directory_is_a_load_error(self, tmp_path):
-        with pytest.raises(NotADirectoryError, match="nope"):
+        with pytest.raises(
+            NotADirectoryError, match="the catalog directory .* does not exist"
+        ):
             Catalog.from_directory(tmp_path / "nope")
+
+    @pytest.mark.unit
+    def test_a_file_where_the_catalog_belongs_is_a_load_error(self, tmp_path):
+        path = tmp_path / "models.yaml"
+        path.write_text("{}\n", encoding="utf-8")
+        with pytest.raises(NotADirectoryError, match="is not a directory"):
+            Catalog.from_directory(path)
 
 
 class TestRulesetRoot:

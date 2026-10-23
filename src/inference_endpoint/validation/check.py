@@ -288,15 +288,18 @@ class Cohort:
             Cohort: The cohort's checks, every row's names checked against the
                 table, and the manifest's ruleset name (`None` without a manifest).
         Raises:
-            NotADirectoryError: When `root` is not a directory.
+            NotADirectoryError: When `root` is missing or is not a directory: the
+                message names which and the path.
             ValueError: When the directory holds a stray file, the ref table is
                 missing, a scope file is not a mapping of check id to check, a check
                 block declares its own `id` /`scope`, the manifest is not a manifest,
                 or no checks are found: a load problem, not a report. A duplicate
                 `id` is refused here: which file wins must never be a race.
         """
+        if not root.exists():
+            raise NotADirectoryError(f"the cohort directory {root} does not exist")
         if not root.is_dir():
-            raise NotADirectoryError(root)
+            raise NotADirectoryError(f"the cohort path {root} is not a directory")
         stray = sorted(
             {path.name for path in root.iterdir()}
             - {

@@ -122,8 +122,17 @@ class TestWalk:
 
     @pytest.mark.unit
     def test_missing_root_is_a_load_error(self, tmp_path):
-        with pytest.raises(NotADirectoryError, match="nope"):
+        with pytest.raises(
+            NotADirectoryError, match="the submission directory .* does not exist"
+        ):
             SubmissionNode.from_directory(tmp_path / "nope")
+
+    @pytest.mark.unit
+    def test_a_file_where_the_upload_belongs_is_a_load_error(self, tmp_path):
+        path = tmp_path / "upload.json"
+        path.write_text("{}\n", encoding="utf-8")
+        with pytest.raises(NotADirectoryError, match="is not a directory"):
+            SubmissionNode.from_directory(path)
 
 
 class TestRead:

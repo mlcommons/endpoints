@@ -89,14 +89,17 @@ class Catalog:
         Returns:
             Catalog: The loaded `models` and `datasets` mappings.
         Raises:
-            NotADirectoryError: When `root` is not a directory.
+            NotADirectoryError: When `root` is missing or is not a directory: the
+                message names which and the path.
             FileNotFoundError: When `models.yaml` or `datasets.yaml` is missing:
                 the ruleset is incomplete without its catalog.
             ValueError: When a document does not parse or is not a mapping: a
                 load error, refused like every other bad cohort input.
         """
+        if not root.exists():
+            raise NotADirectoryError(f"the catalog directory {root} does not exist")
         if not root.is_dir():
-            raise NotADirectoryError(root)
+            raise NotADirectoryError(f"the catalog path {root} is not a directory")
         return cls(
             _load_mapping(root / "models.yaml"),
             _load_mapping(root / "datasets.yaml"),

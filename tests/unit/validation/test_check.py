@@ -664,8 +664,17 @@ class TestCohortFromDirectory:
 
     @pytest.mark.unit
     def test_missing_directory_is_a_load_error(self, tmp_path):
-        with pytest.raises(NotADirectoryError, match="nope"):
+        with pytest.raises(
+            NotADirectoryError, match="the cohort directory .* does not exist"
+        ):
             Cohort.from_directory(tmp_path / "nope")
+
+    @pytest.mark.unit
+    def test_a_file_where_the_cohort_belongs_is_a_load_error(self, tmp_path):
+        path = tmp_path / "cohort.yaml"
+        path.write_text("holds no cohort\n", encoding="utf-8")
+        with pytest.raises(NotADirectoryError, match="is not a directory"):
+            Cohort.from_directory(path)
 
     @pytest.mark.unit
     def test_an_empty_cohort_is_refused_not_a_clean_pass(self, tmp_path):
