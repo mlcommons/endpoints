@@ -37,7 +37,6 @@ point:
     dataset_type: { type: str }
     dataset_link: { type: str }
     link_to_model: { type: str }
-    link_to_model_transformation: { type: str }
     shared_src: { type: str }
     shared_docs: { type: str }
     division: { type: str }
@@ -114,18 +113,22 @@ point:
   accuracy_results: dict
   results: dict
   system_power:
+    system_desc_id: { type: str }
     provisioned_power_kw: { type: float }
-    power_method: { type: str }
-    cooling: dict
-    method: dict
-    value: dict
+    cooling: { type: str }
+    mlc_estimated_power: { type: bool }
     node_sets: { type: list }
+    scale_out: dict
+    computed: dict
+    notes: { type: str }
 
 system:
   system_power:
+    system_desc_id: { type: str }
     provisioned_power_kw: { type: float }
-    power_method: { type: str }
-    cooling: dict
-    method: dict
-    value: dict
+    cooling: { type: str }
+    mlc_estimated_power: { type: bool }
     node_sets: { type: list }
+    scale_out: dict
+    computed: dict
+    notes: { type: str }

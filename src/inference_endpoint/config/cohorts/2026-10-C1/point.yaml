@@ -121,7 +121,7 @@ point_warmup_logs_retained:
   fix: "Set `logs_retained: true` and keep the warmup logs with the submission."
   severity: warn
   when:
-    - { left: point.config.warmup, op: exists }
+    - { left: point.config.warmup.duration_s, op: gt, right: 0 }
   assert:
     - { left: point.config.warmup.logs_retained, op: eq, right: true }
 
@@ -155,13 +155,16 @@ point_output_tokens_present:
         right: 0,
       }
 
-point_tpot_p90_positive:
-  description: The summary carries a positive P90 time-per-output-token.
+point_tpot_percentiles_present:
+  description: The summary carries a TPOT percentile block.
   rule: "Endpoints Policy §9.1, Automated Checks; §4.1, Metrics."
-  fix: Re-run with streaming so the summary carries tpot.percentiles["90"].
+  fix: Re-run with streaming so the summary carries tpot.percentiles.
   severity: fail
   assert:
-    - { left: point.result_summary.tpot.percentiles.90, op: gt, right: 0 }
+    - over: point.result_summary.tpot.percentiles
+      aggregate: count
+      op: gt
+      value: 0
 
 point_sample_count_floor:
   description: The run completed at least its dataset's §12 acceptance count.

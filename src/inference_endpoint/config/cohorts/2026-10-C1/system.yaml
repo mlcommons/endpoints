@@ -16,14 +16,25 @@ system_power_declared:
   assert:
     - { left: system.system_power.provisioned_power_kw, op: exists }
 
-system_power_method_known:
-  description: The declared power method is one Appendix E defines.
+system_power_node_sets_present:
+  description: The power descriptor declares at least one node set (Appendix E.1).
   rule: "Endpoints Policy §4.5.2, Power Measurement; Appendix E.1."
-  fix: Declare `power_method` as component_sum, published_system or node_scaling.
+  fix: Declare each node set's provisioning in system_power.json.
   severity: fail
   when:
-    - { left: system.system_power.power_method, op: exists }
+    - { left: system.system_power.node_sets, op: exists }
   assert:
-    - left: system.system_power.power_method
-      op: in
-      right: [component_sum, published_system, node_scaling]
+    - over: system.system_power.node_sets
+      aggregate: count
+      op: gt
+      value: 0
+
+system_power_not_estimated:
+  description: The reported power is a measured declaration, not an MLC estimate.
+  rule: "Endpoints Policy §4.5.2, Power Measurement; Appendix D."
+  fix: Replace the Appendix-D estimate with the vendor's published figure for the node set.
+  severity: warn
+  when:
+    - { left: system.system_power.mlc_estimated_power, op: exists }
+  assert:
+    - { left: system.system_power.mlc_estimated_power, op: ne, right: true }
