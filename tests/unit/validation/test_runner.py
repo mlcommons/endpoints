@@ -356,8 +356,8 @@ class TestDeclaredValueChecking:
             )
 
     @pytest.mark.unit
-    def test_a_dict_subtree_value_is_never_checked(self, tmp_path):
-        # `percentiles` is an open document: junk at any depth is the
+    def test_a_dict_subtree_keeps_its_junk_unchecked(self, tmp_path):
+        # `percentiles` is an open document: junk below its own value is the
         # submitter's own, unchecked by the table.
         cohort = _declared_cohort(tmp_path, point=PLAIN_CHECK)
         submission = write_upload(
@@ -373,6 +373,26 @@ class TestDeclaredValueChecking:
         )
         findings = Finding.collect(cohort, submission).findings
         assert [f.verdict.ok for f in findings] == [True]
+
+    @pytest.mark.unit
+    def test_a_dict_leaf_whose_own_value_is_no_block_is_refused(self, tmp_path):
+        cohort = _declared_cohort(
+            tmp_path,
+            refs={"point": {"result_summary": {"percentiles": "dict"}}},
+            point=PLAIN_CHECK,
+        )
+        submission = write_upload(
+            tmp_path / "acme",
+            {
+                SYSTEM: [
+                    Run(concurrency=16, summary_extra={"percentiles": 17}),
+                ]
+            },
+        )
+        with pytest.raises(
+            ValueError, match=r"point\.result_summary\.percentiles: 17 is no block"
+        ):
+            Finding.collect(cohort, submission)
 
     @pytest.mark.unit
     def test_an_undeclared_key_is_not_checked(self, tmp_path):

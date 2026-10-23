@@ -145,7 +145,8 @@ Each entry is one of four forms:
 
 - a typed leaf: `field: bool|int|float|str|list` - one leaf fact, nothing deeper
   addressable below it.
-- `field: dict` - an open subtree: any deeper name below it resolves.
+- `field: dict` - an open subtree: any deeper name below it resolves; the leaf's
+  own value must be a block, while its values stay unchecked.
 - the mapping form
   `field: { type: ..., required: ..., default: ..., allowlist: [...] }`
   - `type`: one of `bool`/`dict`/`float`/`int`/`list`/`str`
@@ -624,7 +625,8 @@ document -> fields (`point.config.concurrency` is the `config` document's
   - the parser-minimum trio (`concurrency`, `system_tps`,
     `max_supported_concurrency`) is code-side: refused at parse time by
     `Point.from_node` whatever the table says
-  - a `dict` subtree is open, and its values stay unchecked
+  - a `dict` subtree is open (its own value must be a block) and its values stay
+    unchecked
   - an absent field carries no value to check (its absence reads per "Absent
     facts")
   - a hand-built `Cohort((check, ...))` with no table checks nothing
