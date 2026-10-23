@@ -526,6 +526,9 @@ class TestCompareVerdict:
                 return True
 
             def __getitem__(self, name):
+                # Deliberately not a `LookupError`: `Verdict.evaluate` turns a
+                # ValueError into the fail-loud verdict this test pins, while a
+                # KeyError would escape the verdict and error the run.
                 raise ValueError("derived input missing")
 
             def __iter__(self):
