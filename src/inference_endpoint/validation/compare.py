@@ -585,7 +585,12 @@ class Aggregate(BaseModel):
             )
         )
         if items is None:
-            return False, f"expected {self.over} to be a collection, got {_show(over)}"
+            # A present value that cannot be aggregated refuses (broken), it does
+            # not judge False: as a `when` gate a false verdict reads as "not
+            # applicable" and would switch the check off by omission.
+            raise ValueError(
+                f"expected {self.over} to be a collection, got {_show(over)}"
+            )
         if not items and not self.defines_empty:
             return False, f"expected {self.name} of {self.over}, got no values"
         measured = self.run(items)

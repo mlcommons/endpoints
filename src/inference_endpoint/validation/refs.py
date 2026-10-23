@@ -181,7 +181,11 @@ class _Fact:
 
     @property
     def is_subtree(self) -> bool:
-        """Whether deeper names stay addressable and values go unchecked (`dict`)."""
+        """Whether deeper names stay addressable (`dict`).
+
+        Its own value must still be a block (checked in `_check_values`); the
+        values below it stay unchecked.
+        """
         return self.type == "dict"
 
     def matches(self, value: Any) -> bool:
@@ -200,8 +204,9 @@ class _Fact:
             case "list":
                 return isinstance(value, list)
             case _:
-                # `dict` never asks (its values are unchecked). Any other name
-                # here is a missing branch and must fail loud.
+                # `dict` never asks here: `_check_values` requires the leaf's own
+                # value to be a mapping, and the values below it stay unchecked.
+                # Any other name here is a missing branch and must fail loud.
                 raise NotImplementedError(f"no value test for {self.type!r}")
 
 
@@ -334,17 +339,18 @@ class RefTable:
 
         Every declared leaf below `root` that the upload does carry must match
         its `type` and be in its `allowlist` (where declared). A declared block
-        must carry a block. An absent fact is checked here by nothing (its
-        absence reads per its `required`/`default` notes), and `dict` subtrees
-        stay open and unchecked. Runs per node at collect time
-        (`runner._validate_declared_values`) because the table is cohort data.
+        must carry a block, and so must a `dict` leaf's own value: what stays
+        unchecked is the values below it. An absent fact is checked here by
+        nothing (its absence reads per its `required`/`default` notes). Runs per
+        node at collect time (`runner._validate_declared_values`) because the
+        table is cohort data.
 
         Args:
             root (str): The node scope to check.
             values (Mapping[str, Any]): The node's collected artifact document.
         Raises:
             ValueError: When a present value does not match its declared type or
-                allowlist, or a declared block carries no block.
+                allowlist, or a declared block or `dict` leaf carries no block.
         """
         tree = self._roots.get(root)
         if isinstance(tree, Mapping):
@@ -362,7 +368,7 @@ def _check_values(
         path (list[str]): The scopes walked so far, for the fault's message.
     Raises:
         ValueError: When a present value does not match its declared type or
-            allowlist, or a declared block carries no block.
+            allowlist, or a declared block or `dict` leaf carries no block.
     """
     for name, entry in declared.items():
         if name not in values:
@@ -375,6 +381,10 @@ def _check_values(
                 continue
             raise ValueError(f"{'.'.join(here)}: {value!r} is no block")
         if entry.is_subtree:
+            # The open subtree's own value must still be a block; the values
+            # below it are what the `dict` declaration leaves unchecked.
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{'.'.join(here)}: {value!r} is no block")
             continue
         if not entry.matches(value):
             raise ValueError(

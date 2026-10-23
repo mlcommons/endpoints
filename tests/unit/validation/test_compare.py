@@ -742,12 +742,15 @@ class TestAggregateVerdict:
         assert "missing" in verdict.why and "results" in verdict.why
 
     @pytest.mark.unit
-    def test_non_collection_fails_with_why(self):
+    def test_non_collection_refuses_as_broken(self):
         verdict = Verdict.evaluate(
             _aggregate(over="point.result_summary.tps", name="count", op="ge", value=0),
             SCOPES,
         )
-        assert "collection" in verdict.why
+        assert verdict.broken is True
+        assert verdict.ok is False
+        assert "expected point.result_summary.tps to be a collection" in verdict.why
+        assert "12.5" in verdict.why
 
 
 class TestOpConstruction:
