@@ -143,6 +143,24 @@ class TestPointFromNode:
         assert [point.concurrency for point in submission.points] == [16]
 
     @pytest.mark.unit
+    def test_a_stringified_maximum_is_carried_as_its_number(self, tmp_path):
+        # The pareto shape check and the region bounds read the carried
+        # descriptor, so the decoded maximum has to ride on `Point`.
+        submission = write_upload(
+            tmp_path / "acme",
+            {SYSTEM: [Run(concurrency=16, max_supported_concurrency="8192")]},
+        )
+        assert submission.paretos[0].system_desc["max_supported_concurrency"] == 8192
+
+    @pytest.mark.unit
+    def test_a_stringified_override_is_carried_as_its_number(self, tmp_path):
+        submission = write_upload(
+            tmp_path / "acme",
+            {SYSTEM: [Run(concurrency=16, c_min_override="16")]},
+        )
+        assert submission.paretos[0].system_desc["c_min_override"] == 16
+
+    @pytest.mark.unit
     def test_a_concurrency_that_spells_no_number_is_refused(self, tmp_path):
         with pytest.raises(ValueError, match="needs an integer concurrency"):
             write_upload(

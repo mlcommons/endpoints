@@ -132,6 +132,37 @@ def _finite_fact(source: Mapping[str, Any], name: str, where: str) -> float:
     return converted
 
 
+def _descriptor_facts(system_desc: Mapping[str, Any], where: str) -> Mapping[str, Any]:
+    """`system_desc` with its numeric facts decoded, as `Point` carries it.
+
+    The artifact document itself stays as written (the ref table reads it), but
+    every consumer of the carried descriptor sees numbers: the required maximum
+    is an `int` (the pareto shape check and the region bounds do arithmetic on
+    it), and the optional `c_min_override` decodes where it is spelled as a
+    numeric string. Any other value stays as it is — a present `null` override
+    keeps §5.4's own refusal naming it, rather than this pass restating it.
+
+    Example:
+
+        _descriptor_facts({"max_supported_concurrency": "8192"}, "system_desc.json")
+        # {"max_supported_concurrency": 8192}
+
+    Args:
+        system_desc (Mapping[str, Any]): The run's parsed `system_desc.json`.
+        where (str): The document's path, for the refusal messages.
+    Returns:
+        Mapping[str, Any]: A copy carrying the decoded facts.
+    """
+    carried = dict(system_desc)
+    carried["max_supported_concurrency"] = _int_fact(
+        system_desc, "max_supported_concurrency", where
+    )
+    override = system_desc.get("c_min_override")
+    if isinstance(override, str):
+        carried["c_min_override"] = decode_number(override, "int")
+    return carried
+
+
 @dataclass(frozen=True)
 class Point:
     """One measurement point's named facts (Endpoints Policy §8.3 + §4.1).
@@ -191,9 +222,9 @@ class Point:
                 f"{node.dir}/point.yaml offline must be 'dedicated', 'elected' "
                 f"or null, got {offline!r}"
             )
-        system_desc = _mapping_artifact(node, "system_desc.json")
-        _int_fact(
-            system_desc, "max_supported_concurrency", f"{node.dir}/system_desc.json"
+        system_desc = _descriptor_facts(
+            _mapping_artifact(node, "system_desc.json"),
+            f"{node.dir}/system_desc.json",
         )
         summary = _mapping_artifact(node, "result_summary.json")
         system_tps = _finite_fact(

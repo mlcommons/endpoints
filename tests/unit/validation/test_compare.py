@@ -204,6 +204,8 @@ class TestMapRefs:
         assert isinstance(row.right, int) and not isinstance(row.right, bool)
         assert row.operands() == (row.left, 32)
 
+
+class TestResolve:
     """`Ref.resolve`: absent and null are different states, keys read by spelling.
 
     Resolution is mapping-only: a numeric component may read a key that spells
