@@ -122,16 +122,23 @@ for.
     answers the fact's absence). `validate_names` refuses a path naming no fact
     (`names no fact`, with a one-edit `typo_checks.near_match` hint) or stepping
     below a leaf fact (`is one leaf fact, nothing deeper`); a `dict` open
-    subtree takes any deeper name. `annotate` fills `Ref.required`/`Ref.default`
-    from the leaf it names.
+    subtree takes any deeper name. `annotate` fills
+    `Ref.required`/`Ref.default`/ `Ref.type` from the leaf it names, and
+    `resolve` reads a numeric path component against the key spelling the same
+    number (`_key_for`), so a row naming `…tpot.percentiles.90` finds a block
+    keyed `"90.0"` - the canonicalisation the submission checker applies to
+    percentile keys.
   - `validate_values` checks one node's present values against its scope's
     declaration: `_check_values` walks declared-vs-carried and `_Fact.matches`
     types each leaf (`bool` is not `int`; `float` accepts ints), `allowlist`
-    membership, and "a declared block must carry a block". Absent facts go
-    unchecked; `dict` subtrees stay open (an `allowlist` on a `dict` is refused:
-    nothing to enumerate). The grammar's constants live on their users
-    (`_Fact.VALID_TYPES`); the mapping form's reserved keys derive from
-    `_Fact`'s own fields.
+    membership, and "a declared block must carry a block". A declared
+    `int`/`float` leaf whose value is a numeric string reads as the number it
+    spells (`_Fact.coerce`, exact spellings only) and the pass returns one note
+    per decoding, which `Collected.coercions` carries to the report's `coerced:`
+    lines. Absent facts go unchecked; `dict` subtrees stay open (an `allowlist`
+    on a `dict` is refused: nothing to enumerate). The grammar's constants live
+    on their users (`_Fact.VALID_TYPES`); the mapping form's reserved keys
+    derive from `_Fact`'s own fields.
 
 - **`typo_checks.py`** — the one one-edit name matcher (`near_match`: one
   insert/delete/substitute). It serves both hint paths:
@@ -157,8 +164,10 @@ for.
     `result_summary.json`'s `system_tps` — refusing each missing, mistyped, or
     unrepresentable fact at load (a `NaN`/`Infinity` `system_tps`, or an integer
     no `float` can widen, would otherwise judge quietly or crash a derivation).
-    `Point.point_power_kw` derives `provisioned_power_kw x Y/N` (Section
-    4.5.2/4.5.3, 2dp-rounded-once).
+    A numeric string reads as the number it spells (`refs.decode_number`, the
+    rule the ref table applies to its declared leaves). `Point.point_power_kw`
+    derives `provisioned_power_kw x Y/N` (Section 4.5.2/4.5.3,
+    2dp-rounded-once).
   - `Pareto` (frozen `system_desc` + ordered `points`) is one
     `results/<system>/<model>/` and the unit every policy derivation is per;
     `Pareto.from_nodes` latches that pareto's `regions` root on its tree node.
@@ -325,9 +334,9 @@ findings plus one `CheckRun` per check) and runs four phases, then the walk.
    `_validate_declared_values` and `_validate_ruleset_needs` fail loud wherever
    the walk cannot happen: no points, or a point without its node; an artifact
    that failed to parse (a corrupt file must never read as an absent fact and
-   switch checks off); a present value its `valid_refs.yaml` declaration will
-   not carry (one per-node `RefTable.validate_values` pass); or a cohort naming
-   the `ruleset` namespace the tree was built without (`derived`/`regions` are
+   not carry (one per-node `RefTable.validate_values` pass, whose numeric-string
+   decodings come back on `Collected.coercions`); or a cohort naming the
+   `ruleset` namespace the tree was built without (`derived`/`regions` are
    per-pareto and always present at their nodes). The rule behind all four:
    silence must never be the verdict. A `when` row that failed to evaluate is
    refused loudly for the same reason — `Verdict.broken` separates "judged
@@ -460,6 +469,18 @@ Each formula below is anchored to the Endpoints Policy section it implements.
 - **The strict loader refuses duplicate keys, `<<` merge keys and all YAML
   aliases.** Alias fan-out can re-walk shared subtrees exponentially, and silent
   last-wins keys hide data from the review.
+
+- **A numeric string decodes where a declaration expects a number.** Writers
+  stringify numbers: a hand-edited YAML quotes one, a dumper formats floats
+  (`"90.0"`), and refusing a real value over its quotation marks would fail a
+  conforming submission. A declared `int`/`float` leaf therefore reads exact
+  numeric spellings, and every decoding is reported (`coerced:` on stderr), so
+  the leniency is visible instead of silent. Partial spellings (`"512 kw"`),
+  separators, non-finite text and every non-numeric declaration stay as they
+  were, and nothing decodes without a declaration: an un-annotated `Ref` (a
+  checker-owned namespace, a hand-built row) reads the artifact raw. The
+  parser-enforced facts decode through the same rule, so a stringified
+  `concurrency` is read once and identically by the parser and by the row.
 
 - **`_read_artifact` is fd-anchored.** The node's directory opens
   `O_NOFOLLOW|O_DIRECTORY`, and the artifact opens by name relative to that fd

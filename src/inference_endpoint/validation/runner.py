@@ -113,7 +113,7 @@ class Finding:
         """
         _validate_points(submission)
         _validate_artifacts(submission)
-        _validate_declared_values(cohort, submission)
+        coercions = _validate_declared_values(cohort, submission)
         _validate_ruleset_needs(cohort, submission)
         candidates = _collect_candidates(cohort)
         gate = _GateResolver({check.id: check for check in candidates}, submission)
@@ -134,7 +134,7 @@ class Finding:
             runs[check.id] = CheckRun(
                 ran_at=ran_at, gated_off=gated_off, silenced=silenced
             )
-        return Collected(tuple(findings), runs)
+        return Collected(tuple(findings), runs, coercions)
 
 
 @dataclass(frozen=True)
@@ -166,10 +166,14 @@ class Collected:
             applicable node (holds too).
         runs (Mapping[str, CheckRun]): One record per candidate check (cohort
             order), keyed by check id.
+        coercions (tuple[str, ...]): One `<node directory>: <path>: '<text>'
+            read as <number>` note per declared `int`/`float` value decoded from
+            a numeric string, in node then declaration order.
     """
 
     findings: tuple[Finding, ...]
     runs: Mapping[str, CheckRun]
+    coercions: tuple[str, ...]
 
 
 def _validate_points(submission: Submission) -> None:
@@ -236,23 +240,33 @@ def _validate_artifacts(submission: Submission) -> None:
         raise ValueError("unreadable artifacts: " + "; ".join(broken))
 
 
-def _validate_declared_values(cohort: Cohort, submission: Submission) -> None:
+def _validate_declared_values(
+    cohort: Cohort, submission: Submission
+) -> tuple[str, ...]:
     """Fail loud on a present fact value its declaration will not carry.
 
     One pass per node through `RefTable.validate_values` (type match, allowlist
     membership, declared-block shape): the cohort's `valid_refs.yaml` owns the
     values' contract, so this is a collect-time refusal, never a finding.
+
+    Returns:
+        tuple[str, ...]: One note per declared `int`/`float` value the pass read
+            from a numeric string, each prefixed with the node directory (a
+            multi-pareto upload has many `point.config.…` paths, one per run).
     """
     if cohort.refs is None:
-        return
+        return ()
+    notes: list[str] = []
     for node in _all_nodes(_tree_root(submission)):
         fields = node.scopes().get(node.kind.value, {})
         try:
-            cohort.refs.validate_values(node.kind.value, fields)
+            decoded = cohort.refs.validate_values(node.kind.value, fields)
         except ValueError as exc:
             # The run directory names the offending node: a multi-pareto upload
             # has many `point.config.…` paths, one per run.
             raise ValueError(f"{node.dir}: {exc}") from exc
+        notes.extend(f"{node.dir}: {note}" for note in decoded)
+    return tuple(notes)
 
 
 def _validate_ruleset_needs(cohort: Cohort, submission: Submission) -> None:

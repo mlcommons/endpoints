@@ -39,6 +39,11 @@ Name checking runs in exactly one place (`RefTable.validate_names`, with
 unknown or misspelled fact dies before any submission is touched. What a
 present fact's value must carry is declared the same way (`allowlist` next to
 its `type`) and checked at collect time (`RefTable.validate_values`).
+A declared `int`/`float` leaf also reads a numeric string as the number it
+spells (`decode_number`): writers stringify numbers, and refusing a real value
+its quotation marks helps nobody. Every decoding is reported, never silent. A
+numeric path component reads the key that spells the same number (`_key_for`),
+so `point.result_summary.tpot.percentiles.90` finds a block written `"90.0"`.
 `derived`/`regions`/`ruleset` namespaces are checker-owned (the derivation
 registry, the region kinds, the catalog's own data) and are refused in the
 YAML.
@@ -51,6 +56,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
+from math import isfinite
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -59,6 +65,113 @@ import yaml
 from inference_endpoint.validation.sentinels import MISSING
 from inference_endpoint.validation.tree import StrictLoader
 from inference_endpoint.validation.typo_checks import near_match
+
+# Numeric spellings: a string an artifact carries where a declaration expects a
+# number, and the key spelling a percentile-shaped block was written under.
+_NUMERIC_TYPES: frozenset[str] = frozenset({"int", "float"})
+
+
+def _spelled_number(text: str) -> float | None:
+    """The finite number `text` spells whole, or None when it spells none.
+
+    Example:
+
+        _spelled_number("90.0")  # 90.0
+        _spelled_number("inf")  # None: not a metric
+        _spelled_number("90 pct")  # None: the text spells no single number
+
+    Args:
+        text (str): The spelling to read.
+    Returns:
+        float | None: The number, or None when `float` cannot carry the whole
+            text or the result is not finite.
+    """
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return number if isfinite(number) else None
+
+
+def decode_number(value: Any, type_name: str | None) -> Any:
+    """`value` as a declared `type_name` reads it: a numeric string decodes to its number.
+
+    One rule for every declared numeric fact: the ref table's leaves
+    (`_Fact.coerce`) and the parser-enforced facts `submission.py` reads
+    (`_int_fact`, `_finite_fact`) both decode through here, so a stringified
+    number reads the same wherever it is declared.
+
+    Artifact writers stringify numbers often enough -- a hand-edited YAML
+    quoting one, a metrics dumper formatting floats -- that refusing them on
+    type alone would refuse a fact the upload does carry. Only `int`/`float`
+    declarations decode, and only exact spellings: an `int` takes `"512"` or
+    the integral `"512.0"`, a `float` takes whatever `float` reads as finite
+    (`"12.61"`, `"1e3"`). Units (`"512 kw"`), separators (`"1,000"`) and
+    non-finite spellings (`"inf"`, `"nan"`) stay as they are, for
+    `_Fact.matches` to refuse.
+
+    Example:
+
+        decode_number("512", "int")  # 512
+        decode_number("512.0", "int")  # 512
+        decode_number("512.5", "int")  # "512.5": an int leaf takes whole numbers
+        decode_number("12.61", "float")  # 12.61
+        decode_number("512", "str")  # "512": a str leaf means a str
+        decode_number(512, "int")  # 512: already a number
+
+    Args:
+        value (Any): The artifact value.
+        type_name (str | None): The declared type name, if any.
+    Returns:
+        Any: The decoded number, or `value` unchanged.
+    """
+    if type_name not in _NUMERIC_TYPES or not isinstance(value, str):
+        return value
+    if type_name == "float":
+        number = _spelled_number(value)
+        return value if number is None else number
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    number = _spelled_number(value)
+    if number is None or not number.is_integer():
+        return value
+    return int(number)
+
+
+def _key_for(obj: Mapping[str, Any], part: str) -> str | None:
+    """The key of `obj` that `part` reads: its own spelling, or that number spelled otherwise.
+
+    Percentile and histogram blocks are keyed by whatever spelling their writer
+    produced (`"90.0"`, `"99.9"`), while a row names the percentile (`90`). A
+    part that spells a finite number reads any key spelling the same number,
+    the canonicalisation the submission checker applies to percentile keys.
+    The exact key always wins, and equivalent spellings break by sorted key, so
+    one artifact always reads the same way.
+
+    Example:
+
+        _key_for({"90.0": 12, "99.9": 40}, "90")  # "90.0"
+        _key_for({"90": 12, "90.0": 40}, "90")  # "90": the exact key wins
+        _key_for({"median": 12}, "90")  # None: no such key
+
+    Args:
+        obj (Mapping[str, Any]): The mapping to look the key up in.
+        part (str): The path component naming the key.
+    Returns:
+        str | None: The key to read, or None when `obj` holds none that names it.
+    """
+    if part in obj:
+        return part
+    wanted = _spelled_number(part)
+    if wanted is None:
+        return None
+    for key in sorted(name for name in obj if isinstance(name, str)):
+        spelled = _spelled_number(key)
+        if spelled is not None and spelled == wanted:
+            return key
+    return None
 
 
 @dataclass(frozen=True)
@@ -75,6 +188,11 @@ class Ref:
             (`RefTable.annotate`). `default` (not `MISSING`) is the value an omitted
             fact judges as. An un-annotated Ref (a hand-built row) has neither.
             (Default: MISSING)
+        type (str | None): Filled from the cohort's ref table at cohort load
+            (`RefTable.annotate`): the declared type of the leaf this ref names, which is
+            what a numeric string on it decodes as. An un-annotated Ref (a hand-built
+            row, or a checker-owned namespace) has none, and nothing decodes.
+            (Default: None)
     """
 
     # The row language's scope namespaces: the node scopes a fact tree hangs under.
@@ -93,6 +211,7 @@ class Ref:
     parts: tuple[str, ...]
     required: bool = False
     default: Any = MISSING
+    type: str | None = None
 
     @classmethod
     def from_string(cls, value: str) -> Ref | None:
@@ -125,9 +244,12 @@ class Ref:
             Ref(("point", "nope")).resolve(scopes)  # (False, None): no such field
             Ref(("point", "bad")).resolve(scopes)  # (True, None): the field exists and is null.
 
-        Each step is a mapping key look-up and the resolved value is a leaf, regardless
-        of the value's type (a checker namespace's `Interval` is a value, never
-        walked through).
+        Each step is a mapping key look-up -- a numeric component may read a key
+        that spells the same number (`_key_for`) -- and the resolved value is a
+        leaf, regardless of the value's type (a checker namespace's `Interval`
+        is a value, never walked through). A leaf declared `int`/`float` reads
+        a numeric string as the number it spells (`decode_number`), the same
+        decoding the collect-time pass reports.
 
         Artifact documents are submitter-controlled, and attribute traversal would let
         `{"errors": []}` answer `errors.count` (the builtin method's) as a present fact.
@@ -139,10 +261,13 @@ class Ref:
         """
         obj: Any = scopes
         for part in self.parts:
-            if not isinstance(obj, Mapping) or part not in obj:
+            if not isinstance(obj, Mapping):
                 return False, None
-            obj = obj[part]
-        return True, obj
+            key = _key_for(obj, part)
+            if key is None:
+                return False, None
+            obj = obj[key]
+        return True, decode_number(obj, self.type)
 
     def __str__(self) -> str:
         return ".".join(self.parts)
@@ -187,6 +312,25 @@ class _Fact:
         values below it stay unchecked.
         """
         return self.type == "dict"
+
+    def coerce(self, value: Any) -> Any:
+        """`value` as this leaf's declared type reads it: a numeric string decodes.
+
+        See `decode_number` for the spellings that count. Other declared types
+        decode nothing: `"512"` on a `str` leaf is a string.
+
+        Example:
+
+            _Fact("int").coerce("512")  # 512
+            _Fact("float").coerce(" 12.61 ")  # 12.61
+            _Fact("int").coerce("512 kw")  # "512 kw": `matches` refuses it
+
+        Args:
+            value (Any): The artifact value.
+        Returns:
+            Any: The decoded number, or `value` unchanged.
+        """
+        return decode_number(value, self.type)
 
     def matches(self, value: Any) -> bool:
         """Whether an upload value may carry this leaf, by its declared type."""
@@ -314,16 +458,16 @@ class RefTable:
             )
 
     def annotate(self, ref: Ref) -> Ref:
-        """`ref` with its leaf's `required`/`default` filled from the table.
+        """`ref` with its leaf's `required`/`default`/`type` filled from the table.
 
         Call after `validate_names`: a path naming an open subtree or a block (or a
-        table-free hand-built Ref) carries neither annotation.
+        table-free hand-built Ref) carries none of them.
 
         Args:
             ref (Ref): The row's `Ref`, after `validate_names`.
         Returns:
-            Ref: `ref` with its leaf's `required`/`default` filled, or `ref` itself
-                when it names no leaf.
+            Ref: `ref` with its leaf's `required`/`default`/`type` filled, or
+                `ref` itself when it names no leaf.
         """
         level: Any = self._roots
         for name in ref.parts:
@@ -331,11 +475,16 @@ class RefTable:
                 return ref
             level = level[name]
         if isinstance(level, _Fact):
-            return replace(ref, required=level.required, default=level.default)
+            return replace(
+                ref,
+                required=level.required,
+                default=level.default,
+                type=level.type,
+            )
         return ref
 
-    def validate_values(self, root: str, values: Mapping[str, Any]) -> None:
-        """Refuse a present artifact value its declaration will not carry.
+    def validate_values(self, root: str, values: Mapping[str, Any]) -> tuple[str, ...]:
+        """Refuse a present artifact value its declaration will not carry, reporting decodings.
 
         Every declared leaf below `root` that the upload does carry must match
         its `type` and be in its `allowlist` (where declared). A declared block
@@ -345,27 +494,44 @@ class RefTable:
         node at collect time (`runner._validate_declared_values`) because the
         table is cohort data.
 
+        A declared `int`/`float` leaf whose value is a numeric string is no
+        fault: it reads as the number it spells (`_Fact.coerce`), and the
+        caller gets one note per decoding, so the report can say what was read.
+
         Args:
             root (str): The node scope to check.
             values (Mapping[str, Any]): The node's collected artifact document.
+        Returns:
+            tuple[str, ...]: One `"<path>: '<text>' read as <number>"` note per
+                decoded value, in declaration order.
         Raises:
             ValueError: When a present value does not match its declared type or
                 allowlist, or a declared block or `dict` leaf carries no block.
         """
+        notes: list[str] = []
         tree = self._roots.get(root)
         if isinstance(tree, Mapping):
-            _check_values(tree, values, [root])
+            _check_values(tree, values, [root], notes)
+        return tuple(notes)
 
 
 def _check_values(
-    declared: Mapping[str, Any], values: Mapping[str, Any], path: list[str]
+    declared: Mapping[str, Any],
+    values: Mapping[str, Any],
+    path: list[str],
+    notes: list[str],
 ) -> None:
     """Walk `declared` against one document's `values`. ValueError names the fault.
+
+    A numeric string on a declared `int`/`float` leaf is decoded
+    (`_Fact.coerce`) and one note appended to `notes`; the decoded value is what
+    `matches` and the `allowlist` then judge.
 
     Args:
         declared (Mapping[str, Any]): A declared block of the cohort's ref table.
         values (Mapping[str, Any]): The document to check against it.
         path (list[str]): The scopes walked so far, for the fault's message.
+        notes (list[str]): Appended with one decoding note per decoded value.
     Raises:
         ValueError: When a present value does not match its declared type or
             allowlist, or a declared block or `dict` leaf carries no block.
@@ -377,7 +543,7 @@ def _check_values(
         here = [*path, name]
         if isinstance(entry, Mapping):
             if isinstance(value, Mapping):
-                _check_values(entry, value, here)
+                _check_values(entry, value, here, notes)
                 continue
             raise ValueError(f"{'.'.join(here)}: {value!r} is no block")
         if entry.is_subtree:
@@ -386,12 +552,15 @@ def _check_values(
             if not isinstance(value, Mapping):
                 raise ValueError(f"{'.'.join(here)}: {value!r} is no block")
             continue
-        if not entry.matches(value):
+        decoded = entry.coerce(value)
+        if decoded is not value:
+            notes.append(f"{'.'.join(here)}: {value!r} read as {decoded!r}")
+        if not entry.matches(decoded):
             raise ValueError(
                 f"{'.'.join(here)}: {value!r} does not match its declared type "
                 f"{entry.type!r}"
             )
-        if entry.allowlist is not None and value not in entry.allowlist:
+        if entry.allowlist is not None and decoded not in entry.allowlist:
             raise ValueError(
                 f"{'.'.join(here)}: {value!r} is not one of {entry.allowlist!r}"
             )

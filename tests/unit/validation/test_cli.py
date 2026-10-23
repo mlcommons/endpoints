@@ -196,6 +196,27 @@ class TestReportLines:
         assert "no node was applicable" in err
 
     @pytest.mark.unit
+    def test_a_numeric_string_is_read_as_its_number_and_reported(
+        self, tmp_path, capsys
+    ):
+        # `STANDARD_REFS` declares `warmup.duration_s: int`; this artifact
+        # spells it as a string, so the run reads the number and says so.
+        cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
+        upload = tmp_path / "upload"
+        write_upload(
+            upload,
+            {
+                ("sys", "model"): [
+                    Run(concurrency=16, config_extra={"warmup": {"duration_s": "5"}})
+                ]
+            },
+        )
+        assert main([str(cohort), str(upload)]) == 0
+        err = capsys.readouterr().err
+        assert "coerced: " in err
+        assert "point.config.warmup.duration_s: '5' read as 5" in err
+
+    @pytest.mark.unit
     def test_a_when_only_check_reports_it_ran_at_every_instance(self, tmp_path, capsys):
         check = (
             "when_only:\n"
