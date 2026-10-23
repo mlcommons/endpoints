@@ -94,7 +94,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         cohort = Cohort.from_directory(args.cohort)
-        catalog = Catalog.from_ruleset(cohort.ruleset) if cohort.ruleset else None
+        if cohort.ruleset_dir is not None:
+            catalog = Catalog.from_directory(cohort.ruleset_dir)
+        else:
+            catalog = Catalog.from_ruleset(cohort.ruleset) if cohort.ruleset else None
         submission = Submission.from_directory(args.submission, ruleset=catalog)
         collected = Finding.collect(cohort, submission)
     except (OSError, ValueError, OverflowError) as exc:

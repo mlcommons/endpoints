@@ -37,14 +37,16 @@ for.
   - `Cohort.from_directory` loads `valid_refs.yaml` first (via
     `RefTable.from_yaml`), then the four scope files, each an id-keyed mapping;
     `cohort.yaml`, when present, is read as the manifest: the `ruleset` name it
-    declares. Every row's refs run through `check._checked_ref` via `map_refs`.
-    Refused with `ValueError`: a file outside the known names, a missing ref
-    table, an in-body `id`/`scope`, a duplicate `id`, a manifest that is not a
-    manifest.
-  - `Cohort(checks, refs, ruleset)` carries `Cohort.refs` — the `RefTable`,
-    `None` for a hand-built `Cohort((check, ...))` — and `Cohort.ruleset`, the
-    manifest's registered ruleset name (`None` without a manifest). `Severity`
-    is the `warn`/`fail` wire-enum.
+    declares, or `ruleset_dir` naming a bundled `ruleset/` catalog directory
+    (`Catalog.from_directory`). Every row's refs run through
+    `check._checked_ref` via `map_refs`. Refused with `ValueError`: a file
+    outside the known names, a missing ref table, an in-body `id`/`scope`, a
+    duplicate `id`, a manifest that is not a manifest.
+  - `Cohort(checks, refs, ruleset, ruleset_dir)` carries `Cohort.refs` — the
+    `RefTable`, `None` for a hand-built `Cohort((check, ...))` — plus the
+    manifest's rule source: `Cohort.ruleset` (a registered name) or
+    `Cohort.ruleset_dir` (a resolved catalog directory), each `None` without a
+    manifest. `Severity` is the `warn`/`fail` wire-enum.
 
 - **`compare.py`** — the row model and the verdict boundary.
 

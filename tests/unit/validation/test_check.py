@@ -757,3 +757,38 @@ class TestCohortFromDirectory:
         (root / "cohort.yaml").write_text("ruleset: [a]\n")
         with pytest.raises(ValueError, match="non-empty string"):
             Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_manifest_may_bundle_the_cohorts_catalog(self, tmp_path):
+        root = write_cohort(tmp_path / "cohort", point=LITERAL_CHECK)
+        (root / "cohort.yaml").write_text("ruleset_dir: ruleset\n", encoding="utf-8")
+        catalog = root / "ruleset"
+        catalog.mkdir()
+        (catalog / "models.yaml").write_text("m: {vocab_size: 1}\n", encoding="utf-8")
+        (catalog / "datasets.yaml").write_text("d: {n: 1}\n", encoding="utf-8")
+        cohort = Cohort.from_directory(root)
+        assert cohort.ruleset is None
+        assert cohort.ruleset_dir == catalog
+
+    @pytest.mark.unit
+    def test_a_manifest_cannot_declare_both_rule_sources(self, tmp_path):
+        root = write_cohort(tmp_path / "cohort", point=LITERAL_CHECK)
+        (root / "cohort.yaml").write_text(
+            "ruleset: mlperf-inference-v6.1\nruleset_dir: ruleset\n", encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match="alternatives"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_manifest_ruleset_dir_must_be_a_directory_inside_the_cohort(
+        self, tmp_path
+    ):
+        root = write_cohort(tmp_path / "cohort", point=LITERAL_CHECK)
+        (root / "cohort.yaml").write_text("ruleset_dir: nope\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="is not a directory under"):
+            Cohort.from_directory(root)
+        (root / "cohort.yaml").write_text(
+            "ruleset_dir: ../elsewhere\n", encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match="relative path inside"):
+            Cohort.from_directory(root)
