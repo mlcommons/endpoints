@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Balanced-lane agentic scheduler: plan, coverage, tagging and secrecy."""
+"""Balanced agentic scheduler: coverage, start alignment, ordering, tagging and secrecy."""
 
 from __future__ import annotations
 
@@ -35,13 +35,9 @@ from inference_endpoint.dataset_manager.agentic_inference_dataset import (
 )
 from inference_endpoint.exceptions import InputValidationError
 from inference_endpoint.load_generator.lane_scheduler import (
-    CODING,
-    WORKFLOW,
     LaneAgenticInferenceStrategy,
-    LanePlanner,
-    RunKey,
-    SourceConversation,
     lane_copies,
+    order_pool,
 )
 
 pytestmark = pytest.mark.unit
@@ -141,13 +137,7 @@ class LoopIssuer:
 
 
 def _config(**lanes) -> AgenticInferenceConfig:
-    defaults = {
-        "min_copies": 3,
-        "calibration_s": 0.02,
-        "calibration_skip_s": 0.0,
-        "warmup_min_s": 0.0,
-        "warmup_max_s": 0.0005,
-    }
+    defaults = {"min_copies": 3, "warmup_s": 0.01}
     defaults.update(lanes)
     return AgenticInferenceConfig(
         enable_salt=True, scheduler="lanes", lanes=LaneSchedulerConfig(**defaults)
@@ -297,63 +287,42 @@ def test_lanes_require_salt() -> None:
 def test_copy_rule() -> None:
     cfg = LaneSchedulerConfig()
     assert lane_copies(113, 32, cfg) == 4
-    assert lane_copies(113, 256, cfg) == 5
-    assert lane_copies(113, 768, cfg) == 14
-    assert lane_copies(113, 1024, cfg) == 19
+    assert lane_copies(113, 256, cfg) == 4
+    assert lane_copies(113, 384, cfg) == 6
+    assert lane_copies(113, 768, cfg) == 12
+    assert lane_copies(113, 1024, cfg) == 16
 
 
-def _sources() -> list[SourceConversation]:
-    out = []
-    index = 0
-    for conv_id, n in _DATASET.items():
-        turns = tuple((index + t, t + 1) for t in range(n))
-        index += n
-        out.append(
-            SourceConversation(
-                source_id=conv_id,
-                turns=turns,
-                delays=tuple(
-                    0.5 if conv_id.startswith("sim_") else 0.0 for _ in range(n)
-                ),
-                domain=WORKFLOW if conv_id.startswith("sim_") else CODING,
-            )
-        )
-    return out
+def test_measurement_starts_with_every_slot_mid_conversation(tmp_path: Path) -> None:
+    """All slots switch to measured work at one instant from their next turn,
+    so measurement neither ramps up from cold slots nor staggers by slot."""
+    issuer, plan = _run(tmp_path, concurrency=4)
+    assert plan["slots_measured_from_next_turn"] >= 3
+    # Every slot's first measured request goes out within a couple of turn
+    # latencies of the switch, far less than the measured phase itself.
+    assert plan["measured_start_spread_s"] < 0.25 * plan["measured_phase_s"]
+    first_measured = next(i for i, r in enumerate(issuer.records) if r["tracked"])
+    assert all(not r["tracked"] for r in issuer.records[:first_measured])
 
 
-def test_plan_lanes_are_balanced_and_each_lap_covers_its_lane_once() -> None:
-    sources = _sources()
-    planner = LanePlanner(sources, {CODING: 1.0, WORKFLOW: 1.0}, "t")
-    rng = RunKey(b"k" * 32, 1).rng("plan")
-    lanes = planner.pack(6, 4, rng)
-    loads = [sum(planner.instance_est(s) for s, _k in lane) for lane in lanes]
-    assert max(loads) - min(loads) <= max(
-        planner.instance_est(s) for s in range(len(sources))
+def test_pool_order_starts_long_items_early_enough_to_finish() -> None:
+    rng = random.Random(3)
+    estimates = [100.0] + [1.0] * 50 + [60.0]
+    order = order_pool(estimates, horizon_s=80.0, rng=rng)
+    assert sorted(order) == list(range(len(estimates)))
+    # Longer than the horizon: must start first.
+    assert order[0] == 0
+    # Draw window [0, horizon - L]: the 60 s item starts within its first 20 s
+    # of a 80 s horizon, i.e. in the first part of the order on average.
+    starts = []
+    for seed in range(200):
+        o = order_pool(estimates, 80.0, random.Random(seed))
+        starts.append(o.index(len(estimates) - 1) / len(o))
+    assert sum(starts) / len(starts) < 0.4
+
+
+def test_same_key_reproduces_the_pool_order(tmp_path: Path) -> None:
+    estimates = [float(i % 7) for i in range(40)]
+    assert order_pool(estimates, 20.0, random.Random(9)) == order_pool(
+        estimates, 20.0, random.Random(9)
     )
-    assert sorted(inst for lane in lanes for inst in lane) == sorted(
-        (s, k) for s in range(len(sources)) for k in range(1, 7)
-    )
-    programs = planner.programs(lanes, rng, 1.0, 3.0, measure=True)
-    for program in programs:
-        assert program is not None
-        lap = Counter()
-        for seg in program.measured:
-            for cursor in range(seg.first, seg.stop):
-                lap[(seg.source, seg.copy, cursor)] += 1
-        assert sum(lap.values()) == program.n_turns
-        assert set(lap.values()) == {1}
-        assert all(not seg.measured for seg in program.warmup)
-
-
-def test_same_key_reproduces_the_plan() -> None:
-    sources = _sources()
-    plans = []
-    for _ in range(2):
-        planner = LanePlanner(sources, {CODING: 1.0, WORKFLOW: 1.0}, "t")
-        rng = RunKey(b"s" * 32, 7).rng("plan")
-        lanes = planner.pack(5, 3, rng)
-        programs = planner.programs(lanes, rng, 1.0, 3.0, measure=True)
-        plans.append(
-            [(p.entry_pos, p.lap_pos, tuple(p.lane)) for p in programs if p is not None]
-        )
-    assert plans[0] == plans[1]

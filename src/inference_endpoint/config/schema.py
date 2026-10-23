@@ -364,11 +364,10 @@ class SubmissionReference(BaseModel):
 
 
 class LaneSchedulerConfig(BaseModel):
-    """Balanced-lane agentic scheduler settings (``scheduler: lanes``).
+    """Balanced agentic scheduler settings (``scheduler: lanes``).
 
-    The run plan is fixed from the dataset, the concurrency, the seed, a
-    per-run secret key and the per-turn service times measured on the server
-    during calibration. See ``load_generator/lane_scheduler.py``.
+    Measured work comes from the dataset, the concurrency, the seed and a
+    per-run secret key. See ``load_generator/lane_scheduler.py``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -378,56 +377,23 @@ class LaneSchedulerConfig(BaseModel):
         gt=0,
         description="Lower bound on the dataset copies measured (one super-pass each).",
     )
-    coding_conversations_per_lane: float = Field(
-        2.0,
+    coding_conversations_per_slot: float = Field(
+        1.75,
         gt=0,
         description=(
-            "Copies are chosen so each lane holds about this many coding (SWE) "
+            "Copies are chosen so each slot runs about this many coding (SWE) "
             "conversations: copies = max(min_copies, ceil(this x C / coding conversations))."
         ),
     )
-    calibration_s: float = Field(
+    warmup_s: float = Field(
         180.0,
-        gt=0,
-        description=(
-            "Seconds of warm turns measured for the per-turn service-time estimate, "
-            "counted after every slot's first (cold) request has completed."
-        ),
-    )
-    calibration_skip_s: float = Field(
-        60.0,
         ge=0,
         description=(
-            "Extra seconds discarded after the cold requests complete, before "
-            "measuring, so the cold-prefill burst does not inflate the estimate."
+            "Unmeasured seconds before measurement starts. Every slot enters a random "
+            "conversation at a random turn; warm turns give the service-time estimate "
+            "used to order the measured pool."
         ),
     )
-    warmup_min_s: float = Field(
-        120.0,
-        ge=0,
-        description="Shortest unmeasured warm-up per slot (estimated lane time).",
-    )
-    warmup_max_s: float = Field(
-        300.0,
-        ge=0,
-        description=(
-            "Longest unmeasured warm-up per slot. Each slot draws its warm-up from "
-            "the secret key, so the server cannot predict where measurement begins."
-        ),
-    )
-    work_stealing: bool = Field(
-        True,
-        description=(
-            "A slot that finishes its measured lap takes unstarted measured "
-            "conversations from the slots furthest behind."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _warmup_range(self) -> Self:
-        if self.warmup_max_s < self.warmup_min_s:
-            raise ValueError("lanes.warmup_max_s must be >= lanes.warmup_min_s")
-        return self
 
 
 class AgenticInferenceConfig(BaseModel):

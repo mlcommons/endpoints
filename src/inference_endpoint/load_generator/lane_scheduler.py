@@ -13,39 +13,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Balanced-lane agentic scheduler (``agentic_inference.scheduler: lanes``).
+"""Balanced agentic scheduler (``agentic_inference.scheduler: lanes``).
 
 The queue scheduler hands conversations to slots from one shared start queue.
 Every slot starts at turn 1 at the same moment (a ramp), and the measured
 window closes when the queue runs dry while the longest conversations are
-still running (a tail that is never counted). This scheduler removes both:
+still running (a tail that is never counted). This scheduler removes both and
+measures every dataset turn exactly ``copies`` times:
 
-1. Calibration. All C slots run unmeasured load from a provisional plan. Once
-   every slot's first (cold) request has completed, plus ``calibration_skip_s``,
-   the mean service time of warm turns (issue to completion) is measured for
-   coding and workflow turns separately for ``calibration_s``.
-2. Plan. ``copies`` dataset copies (from a rule, not a user knob) are packed
-   longest-first into C lanes of equal estimated length, where a turn's
-   estimate is its recorded tool delay plus the measured service time of its
-   domain. Each lane is a cycle in a key-shuffled order.
-3. Run. Each slot enters its lane at an evenly spread phase, runs an
-   unmeasured warm-up whose length is drawn from the secret key, measures
-   exactly one lap, and then keeps the load up with unmeasured padding from its
-   own lane until every measured turn has completed. A slot that finishes its
-   lap early steals unstarted measured segments from the slot furthest behind.
+1. Warm-up (unmeasured, ``warmup_s``). Each of the C slots enters a randomly
+   chosen conversation at a random turn, so the server sees the context-length
+   and workload mix of steady state from the first request, and keeps drawing
+   random conversations from turn 1. Warm turns give the per-turn service time
+   of coding and workflow turns.
+2. Measurement start (one clock instant for every slot). Each slot's current
+   conversation becomes measured from its next turn as copy ``k`` of that
+   source; the turns it already ran go back into the measured pool as their
+   own segment. Every other conversation instance (``copies`` per source) is in
+   the pool. Measurement therefore starts with every slot in flight at a random
+   point of a conversation: no ramp.
+3. Run. A slot that finishes a measured segment takes the next one from the
+   shared pool, so no slot idles while measured work is left. The pool order
+   is random (from the secret key) with one constraint: an instance of
+   estimated length ``L`` is drawn to start uniformly in ``[0, T - L]``, where
+   ``T`` is the estimated measured time. Long SWE conversations therefore never
+   start so late that they finish after the rest, while the mix stays close to
+   uniform. Once the pool is empty, idle slots run unmeasured padding so the
+   server keeps C requests in flight until the last measured turn completes.
 
-Every dataset turn is measured exactly ``copies`` times. Unmeasured requests are
-ISSUED with ``tracked=False`` and an ``__unmeasured_<n>`` conversation id, so no
-metric, OSL statistic or accuracy score counts them. Each segment gets its own
-keyed salt and an opaque routing key; the key is generated at run start, never
-configured, and written to ``lane_plan.json`` only after the last request.
+Unmeasured requests are ISSUED with ``tracked=False`` and an
+``__unmeasured_<n>`` conversation id, so no metric, OSL statistic or accuracy
+score counts them. The salt's head depends only on the copy (shared by every
+conversation of that copy, so the common system prompt stays cached, as with
+the queue scheduler's salt); its tail is unique per segment. The key is
+generated at run start, never configured, and written to ``lane_plan.json``
+only after the last request.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import heapq
 import json
 import logging
 import math
@@ -54,7 +62,7 @@ import random
 import re
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -72,10 +80,27 @@ logger = logging.getLogger(__name__)
 _WORKFLOW_CONVERSATION_RE = re.compile(r"^sim_\d+$")
 CODING = "coding"
 WORKFLOW = "workflow"
-# Planning guess for the provisional (calibration) plan only.
-_PROVISIONAL_SERVICE_S = 2.0
-# A domain with fewer warm samples than this falls back to the pooled mean.
-_MIN_DOMAIN_SAMPLES = 30
+# Per-turn service-time estimate before any warm turn has completed.
+_DEFAULT_SERVICE_S = 5.0
+# Fewer warm samples than this keep a flat (context-independent) estimate.
+_MIN_WARM_SAMPLES = 30
+# Pool items are drawn to start by this fraction of the estimated measured
+# time minus their own length, so an instance whose real length beats its
+# estimate still finishes with the rest.
+_START_MARGIN = 0.75
+
+
+def _context_chars(messages: list[dict[str, Any]]) -> int:
+    """Prompt size of one request in characters: every message's text fields."""
+    total = 0
+    for message in messages:
+        for key in ("content", "reasoning_content", "tool_calls"):
+            value = message.get(key)
+            if isinstance(value, str):
+                total += len(value)
+            elif value:
+                total += len(json.dumps(value))
+    return total
 
 
 def conversation_domain(conversation_id: str) -> str:
@@ -86,17 +111,27 @@ def conversation_domain(conversation_id: str) -> str:
 def lane_copies(
     n_coding_conversations: int, concurrency: int, cfg: LaneSchedulerConfig
 ) -> int:
-    """Dataset copies measured: enough that each lane holds about
-    ``coding_conversations_per_lane`` coding conversations, never fewer than
-    ``min_copies``."""
+    """Dataset copies measured: about ``coding_conversations_per_slot`` coding
+    conversations per slot, never fewer than ``min_copies``. Enough measured
+    work that the run is long compared with the longest conversation."""
     if n_coding_conversations == 0:
         return cfg.min_copies
     return max(
         cfg.min_copies,
         math.ceil(
-            cfg.coding_conversations_per_lane * concurrency / n_coding_conversations
+            cfg.coding_conversations_per_slot * concurrency / n_coding_conversations
         ),
     )
+
+
+def order_pool(
+    estimates: list[float], horizon_s: float, rng: random.Random
+) -> list[int]:
+    """Random start order in which item ``i`` of estimated length ``L_i`` is
+    drawn to start uniformly in ``[0, max(0, horizon_s - L_i)]``. Returns the
+    item indices sorted by that draw."""
+    keys = [rng.random() * max(0.0, horizon_s - est) for est in estimates]
+    return sorted(range(len(estimates)), key=lambda i: (keys[i], i))
 
 
 class RunKey:
@@ -137,13 +172,15 @@ class RunKey:
 
 @dataclass(frozen=True, slots=True)
 class SourceConversation:
-    """One dataset conversation as the planner sees it."""
+    """One dataset conversation."""
 
     source_id: str
     # (sample_index, turn) in turn order.
     turns: tuple[tuple[int, int], ...]
     # Tool delay before each turn (0 when tool delay is not injected).
     delays: tuple[float, ...]
+    # Prompt size of each turn in characters (service time grows with it).
+    context_chars: tuple[int, ...]
     domain: str
 
 
@@ -157,201 +194,20 @@ class Segment:
     stop: int
     measured: bool
     uid: str
-    est_s: float
     logical_id: str = ""
-
-
-@dataclass(slots=True)
-class SlotProgram:
-    """One slot's plan: its lane, where it enters, and where its lap starts."""
-
-    lane: list[tuple[int, int]]  # (source index, copy) in cyclic order
-    positions: list[tuple[int, int]]  # flattened (instance index, turn cursor)
-    entry_pos: int
-    lap_pos: int
-    warmup_est_s: float
-    warmup: deque[Segment] = field(default_factory=deque)
-    measured: deque[Segment] = field(default_factory=deque)
-    padding_pos: int = 0
-
-    @property
-    def n_turns(self) -> int:
-        return len(self.positions)
-
-
-class LanePlanner:
-    """Builds slot programs. Pure apart from the RNG it is given."""
-
-    def __init__(
-        self,
-        sources: list[SourceConversation],
-        service_s: dict[str, float],
-        uid_prefix: str,
-    ):
-        self._sources = sources
-        self._service_s = service_s
-        self._uid_prefix = uid_prefix
-        self._uid_counter = 0
-
-    def turn_est(self, source: int, cursor: int) -> float:
-        src = self._sources[source]
-        return src.delays[cursor] + self._service_s[src.domain]
-
-    def instance_est(self, source: int) -> float:
-        src = self._sources[source]
-        return sum(src.delays) + self._service_s[src.domain] * len(src.turns)
-
-    def _uid(self) -> str:
-        self._uid_counter += 1
-        return f"{self._uid_prefix}:{self._uid_counter}"
-
-    def pack(
-        self, copies: int, concurrency: int, rng: random.Random
-    ) -> list[list[tuple[int, int]]]:
-        """Longest-first onto the least-loaded lane, then shuffle each lane."""
-        instances = [
-            (s, k) for k in range(1, copies + 1) for s in range(len(self._sources))
-        ]
-        est = [self.instance_est(s) for s in range(len(self._sources))]
-        instances.sort(key=lambda inst: (-est[inst[0]], inst[0], inst[1]))
-        loads = [(0.0, j) for j in range(concurrency)]
-        lanes: list[list[tuple[int, int]]] = [[] for _ in range(concurrency)]
-        # Ties on load resolve to the lowest lane index.
-        heapq.heapify(loads)
-        for inst in instances:
-            load, j = heapq.heappop(loads)
-            lanes[j].append(inst)
-            heapq.heappush(loads, (load + est[inst[0]], j))
-        for lane in lanes:
-            rng.shuffle(lane)
-        return lanes
-
-    def programs(
-        self,
-        lanes: list[list[tuple[int, int]]],
-        rng: random.Random,
-        warmup_min_s: float,
-        warmup_max_s: float,
-        measure: bool,
-    ) -> list[SlotProgram | None]:
-        """Entry point, warm-up and measured lap for every lane.
-
-        ``measure=False`` builds a provisional plan whose slots only produce
-        unmeasured load (calibration).
-        """
-        phases = [(j + 0.5) / len(lanes) for j in range(len(lanes))]
-        rng.shuffle(phases)
-        programs: list[SlotProgram | None] = []
-        for j, lane in enumerate(lanes):
-            if not lane:
-                programs.append(None)
-                continue
-            positions: list[tuple[int, int]] = []
-            cum: list[float] = []
-            total = 0.0
-            for inst_idx, (source, _copy) in enumerate(lane):
-                for cursor in range(len(self._sources[source].turns)):
-                    positions.append((inst_idx, cursor))
-                    cum.append(total)
-                    total += self.turn_est(source, cursor)
-            warmup = rng.uniform(warmup_min_s, warmup_max_s) if measure else 0.0
-            lap_at = phases[j] * total
-            entry_at = (lap_at - warmup) % total if total > 0 else 0.0
-            lap_pos = _position_at(cum, lap_at)
-            entry_pos = _position_at(cum, entry_at)
-            program = SlotProgram(
-                lane=lane,
-                positions=positions,
-                entry_pos=entry_pos,
-                lap_pos=lap_pos,
-                warmup_est_s=warmup,
-            )
-            n = len(positions)
-            if measure:
-                warm_turns = (lap_pos - entry_pos) % n
-                program.warmup.extend(
-                    self.walk(program, entry_pos, warm_turns, measured=False)
-                )
-                program.measured.extend(self.walk(program, lap_pos, n, measured=True))
-                program.padding_pos = lap_pos
-            else:
-                program.padding_pos = entry_pos
-            programs.append(program)
-        return programs
-
-    def walk(
-        self, program: SlotProgram, start_pos: int, n_turns: int, measured: bool
-    ) -> list[Segment]:
-        """Split ``n_turns`` cyclic lane positions from ``start_pos`` into segments
-        at conversation-instance boundaries and at the lane wrap."""
-        segments: list[Segment] = []
-        n = program.n_turns
-        pos = start_pos
-        remaining = n_turns
-        while remaining > 0:
-            inst_idx, cursor = program.positions[pos]
-            source, copy = program.lane[inst_idx]
-            conv_len = len(self._sources[source].turns)
-            # Turns left in this instance before its end or the lane wrap.
-            span = min(conv_len - cursor, remaining, n - pos)
-            stop = cursor + span
-            segments.append(
-                Segment(
-                    source=source,
-                    copy=copy if measured else 0,
-                    first=cursor,
-                    stop=stop,
-                    measured=measured,
-                    uid=self._uid(),
-                    est_s=sum(self.turn_est(source, c) for c in range(cursor, stop)),
-                )
-            )
-            remaining -= span
-            pos = (pos + span) % n
-        return segments
-
-    def next_padding(self, program: SlotProgram) -> Segment:
-        """The next unmeasured segment of the slot's own lane."""
-        segment = self.walk(program, program.padding_pos, 1, measured=False)[0]
-        # Extend to the end of the instance (walk stops after one turn).
-        inst_idx, cursor = program.positions[program.padding_pos]
-        source, _copy = program.lane[inst_idx]
-        conv_len = len(self._sources[source].turns)
-        stop = min(conv_len, cursor + (program.n_turns - program.padding_pos))
-        segment.stop = stop
-        segment.est_s = sum(self.turn_est(source, c) for c in range(cursor, stop))
-        program.padding_pos = (program.padding_pos + (stop - cursor)) % program.n_turns
-        return segment
-
-
-def _position_at(cum: list[float], at: float) -> int:
-    """Largest index whose cumulative start time is <= ``at``."""
-    lo, hi = 0, len(cum) - 1
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if cum[mid] <= at:
-            lo = mid
-        else:
-            hi = mid - 1
-    return lo
 
 
 @dataclass(slots=True)
 class _Slot:
     index: int
-    program: SlotProgram | None = None
-    phase: str = "calibration"  # calibration -> run
     current: Segment | None = None
     cursor: int = 0
     inflight: str | None = None
     delay_handle: asyncio.TimerHandle | None = None
     first_request_done: bool = False
-    switch_pending: bool = False
-    measured_est_s: float = 0.0  # estimate of unstarted measured segments
-    lap_start_ns: int | None = None
-    lap_end_ns: int | None = None
     measured_turns: int = 0
-    lap_turns_planned: int = 0
+    first_measured_issue_ns: int | None = None
+    last_measured_complete_ns: int | None = None
 
 
 @dataclass(slots=True)
@@ -360,6 +216,7 @@ class _Inflight:
     issue_ns: int
     measured: bool
     domain: str
+    context_chars: int
     cold: bool
     conversation_id: str
     turn: int
@@ -395,27 +252,34 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         seed = rng_sample_index.getrandbits(64) if rng_sample_index is not None else 0
         self._key = run_key if run_key is not None else RunKey.generate(seed)
         self._sources: list[SourceConversation] = []
+        self._source_weights: list[float] = []
         self._slots: list[_Slot] = []
         self._lane_inflight: dict[str, _Inflight] = {}
-        self._planner: LanePlanner | None = None
+        self._pool: deque[Segment] = deque()
+        self._pool_order: list[list[Any]] = []
         self._copies = 0
         self._measured_total = 0
         self._measured_completed = 0
         self._measured_failed = 0
         self._unmeasured_serial = 0
+        self._uid_counter = 0
+        self._measuring = False
         self._halted = False
-        self._calibrating = True
-        self._cold_done_ns: int | None = None
-        self._first_left = 0
-        self._calib_samples: list[tuple[int, str, float]] = []
-        self._service_s: dict[str, float] = {}
-        self._calibration_counts: dict[str, int] = {}
-        self._calibration_window_ns: tuple[int, int] | None = None
-        self._steals: list[dict[str, Any]] = []
+        # Warm (context_chars, service seconds) samples, and the fitted model
+        # service = intercept + slope * context_chars.
+        self._warm_samples: list[tuple[int, float]] = []
+        self._service_intercept_s = _DEFAULT_SERVICE_S
+        self._service_per_char_s = 0.0
+        self._warm_count = 0
+        self._horizon_s = 0.0
+        self._converted = 0
         self._run_started_ns = 0
-        self._plan_ns: int | None = None
+        self._measure_ns: int | None = None
+        self._pool_empty_ns: int | None = None
         self._halt_ns: int | None = None
-        self._lanes_json: list[list[tuple[int, int]]] = []
+        self._entry_rng = self._key.rng("entry")
+        self._padding_rng = self._key.rng("padding")
+        self._measure_timer: asyncio.TimerHandle | None = None
 
     # ------------------------------------------------------------------ setup
 
@@ -436,15 +300,26 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                 else 0.0
                 for _idx, turn in ordered
             )
+            messages_by_key = self._dataset_metadata.pre_built_messages_by_key
+            context_chars = tuple(
+                _context_chars(messages_by_key.get((source_id, turn)) or [])
+                for _idx, turn in ordered
+            )
             self._sources.append(
                 SourceConversation(
                     source_id=source_id,
                     turns=ordered,
                     delays=delays,
+                    context_chars=context_chars,
                     domain=conversation_domain(source_id),
                 )
             )
         self._base_convs = [(s.source_id, list(s.turns)) for s in self._sources]
+        # Steady-state entry: a slot is in a source in proportion to the time
+        # that source takes, at a turn uniform over its turns.
+        self._source_weights = [
+            self._estimate(i, 0, len(s.turns)) for i, s in enumerate(self._sources)
+        ]
 
     def _validate_copies(self) -> None:
         n_coding = sum(1 for s in self._sources if s.domain == CODING)
@@ -458,6 +333,46 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                 f"num_trajectories_to_issue to {expected} or omit it (got {requested})"
             )
         self._measured_total = self._copies * sum(len(s.turns) for s in self._sources)
+
+    def _estimate(self, source: int, first: int, stop: int) -> float:
+        src = self._sources[source]
+        return (
+            sum(src.delays[first:stop])
+            + self._service_intercept_s * (stop - first)
+            + self._service_per_char_s * sum(src.context_chars[first:stop])
+        )
+
+    def _fit_service_model(self) -> None:
+        """Least-squares service = intercept + slope * context_chars over warm
+        turns. Long-context turns cost more; a per-domain mean would make long
+        SWE conversations look short and start them too late."""
+        samples = self._warm_samples
+        self._warm_count = len(samples)
+        if len(samples) < _MIN_WARM_SAMPLES:
+            if samples:
+                self._service_intercept_s = sum(s for _x, s in samples) / len(samples)
+            return
+        n = len(samples)
+        mx = sum(x for x, _s in samples) / n
+        my = sum(s for _x, s in samples) / n
+        sxx = sum((x - mx) ** 2 for x, _s in samples)
+        sxy = sum((x - mx) * (s - my) for x, s in samples)
+        slope = max(0.0, sxy / sxx) if sxx > 0 else 0.0
+        self._service_per_char_s = slope
+        self._service_intercept_s = max(0.0, my - slope * mx)
+
+    def _segment(
+        self, source: int, copy: int, first: int, stop: int, measured: bool
+    ) -> Segment:
+        self._uid_counter += 1
+        return Segment(
+            source=source,
+            copy=copy,
+            first=first,
+            stop=stop,
+            measured=measured,
+            uid=f"seg:{self._uid_counter}",
+        )
 
     # -------------------------------------------------------------- execution
 
@@ -478,37 +393,29 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             {"secret_sha256": self._key.commitment, "seed": self._key.seed},
         )
         logger.info(
-            "Lane scheduler: %d copies over %d lanes; run key commitment sha256=%s",
+            "Lane scheduler: %d copies, %d measured turns over %d slots; "
+            "run key commitment sha256=%s",
             self._copies,
+            self._measured_total,
             self._concurrency,
             self._key.commitment,
         )
-
-        provisional = LanePlanner(
-            self._sources,
-            {CODING: _PROVISIONAL_SERVICE_S, WORKFLOW: _PROVISIONAL_SERVICE_S},
-            "cal",
-        )
-        rng = self._key.rng("calibration-plan")
-        # Same copy count as the real plan, so every slot has load to calibrate with.
-        lanes = provisional.pack(self._copies, self._concurrency, rng)
-        programs = provisional.programs(lanes, rng, 0.0, 0.0, measure=False)
-        self._planner = provisional
-        self._slots = [
-            _Slot(index=j, program=programs[j]) for j in range(self._concurrency)
-        ]
-        self._first_left = sum(1 for p in programs if p is not None)
+        self._slots = [_Slot(index=j) for j in range(self._concurrency)]
         try:
             for slot in self._slots:
-                if slot.program is not None:
-                    self._advance(slot, first=True)
-            if not self._lane_inflight and not self._has_pending_delays():
-                return phase_issuer.issued_count
+                slot.current = self._entry_segment()
+                slot.cursor = self._entry_cursor(slot.current)
+                self._advance(slot, first=True)
+            self._measure_timer = self._loop.call_later(
+                self._cfg.warmup_s, self._start_measurement_safely
+            )
             await self._all_done.wait()
             if self._error is not None:
                 raise self._error
             return phase_issuer.issued_count
         finally:
+            if self._measure_timer is not None:
+                self._measure_timer.cancel()
             for slot in self._slots:
                 if slot.delay_handle is not None:
                     slot.delay_handle.cancel()
@@ -518,64 +425,103 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             self._timeout_handles.clear()
             self._write_plan()
 
-    def _has_pending_delays(self) -> bool:
-        return any(slot.delay_handle is not None for slot in self._slots)
-
-    def _finish_calibration(self, now_ns: int) -> None:
-        assert self._cold_done_ns is not None
-        start = self._cold_done_ns + int(self._cfg.calibration_skip_s * 1e9)
-        end = start + int(self._cfg.calibration_s * 1e9)
-        window = [
-            (d, s) for issue_ns, d, s in self._calib_samples if start <= issue_ns < end
-        ]
-        pooled = [s for _d, s in window]
-        pooled_mean = sum(pooled) / len(pooled) if pooled else _PROVISIONAL_SERVICE_S
-        for domain in (CODING, WORKFLOW):
-            values = [s for d, s in window if d == domain]
-            self._calibration_counts[domain] = len(values)
-            self._service_s[domain] = (
-                sum(values) / len(values)
-                if len(values) >= _MIN_DOMAIN_SAMPLES
-                else pooled_mean
-            )
-        self._calibration_window_ns = (start, end)
-        self._calib_samples.clear()
-        self._calibrating = False
-        self._plan_ns = now_ns
-
-        planner = LanePlanner(self._sources, self._service_s, "run")
-        rng = self._key.rng("plan")
-        lanes = planner.pack(self._copies, self._concurrency, rng)
-        programs = planner.programs(
-            lanes, rng, self._cfg.warmup_min_s, self._cfg.warmup_max_s, measure=True
+    def _entry_segment(self) -> Segment:
+        source = self._entry_rng.choices(
+            range(len(self._sources)), weights=self._source_weights
+        )[0]
+        segment = self._segment(
+            source, 0, 0, len(self._sources[source].turns), measured=False
         )
-        self._planner = planner
-        self._lanes_json = lanes
-        logger.info(
-            "Lane scheduler: measured service time coding=%.3fs (n=%d) workflow=%.3fs (n=%d); plan built",
-            self._service_s[CODING],
-            self._calibration_counts[CODING],
-            self._service_s[WORKFLOW],
-            self._calibration_counts[WORKFLOW],
-        )
+        segment.logical_id = self._logical_id(segment)
+        return segment
+
+    def _entry_cursor(self, segment: Segment) -> int:
+        return self._entry_rng.randrange(segment.stop)
+
+    def _start_measurement_safely(self) -> None:
+        self._measure_timer = None
+        try:
+            self._start_measurement()
+        except Exception as exc:
+            logger.exception("Lane scheduler: could not start measurement")
+            self._error = exc
+            if self._all_done is not None:
+                self._all_done.set()
+
+    def _start_measurement(self) -> None:
+        if self._halted or self._stopping:
+            return
+        now = time.monotonic_ns()
+        self._measure_ns = now
+        self._fit_service_model()
+        self._warm_samples.clear()
+
+        rng = self._key.rng("measure")
+        free = {s: list(range(1, self._copies + 1)) for s in range(len(self._sources))}
+        heads: list[Segment] = []
+        running_est = 0.0
+        # Every slot measures from its next turn: its current conversation
+        # becomes copy k of that source, and the turns it already ran go back
+        # into the pool as their own measured segment.
         for slot in self._slots:
-            program = programs[slot.index]
-            slot.program = program
-            slot.phase = "run"
-            slot.current = None
-            if program is None:
+            segment = slot.current
+            if (
+                segment is None
+                or slot.cursor >= segment.stop
+                or not free[segment.source]
+            ):
+                # Nothing to convert (its conversation ends with the in-flight
+                # turn, or every copy of the source is already taken): drop the
+                # unmeasured conversation so the slot takes measured work next.
+                slot.current = None
                 if slot.delay_handle is not None:
                     slot.delay_handle.cancel()
                     slot.delay_handle = None
                 continue
-            slot.measured_est_s = sum(seg.est_s for seg in program.measured)
-            slot.lap_turns_planned = program.n_turns
-            if slot.inflight is not None:
-                slot.switch_pending = True
-            else:
-                if slot.delay_handle is not None:
-                    slot.delay_handle.cancel()
-                    slot.delay_handle = None
+            copy = free[segment.source].pop(rng.randrange(len(free[segment.source])))
+            remainder = self._segment(
+                segment.source, copy, slot.cursor, segment.stop, measured=True
+            )
+            remainder.logical_id = self._logical_id(remainder)
+            slot.current = remainder
+            running_est += self._estimate(segment.source, slot.cursor, segment.stop)
+            if slot.cursor > 0:
+                heads.append(
+                    self._segment(segment.source, copy, 0, slot.cursor, measured=True)
+                )
+            self._converted += 1
+        items = heads + [
+            self._segment(s, copy, 0, len(self._sources[s].turns), measured=True)
+            for s, copies in free.items()
+            for copy in copies
+        ]
+        estimates = [self._estimate(seg.source, seg.first, seg.stop) for seg in items]
+        self._horizon_s = (running_est + sum(estimates)) / self._concurrency
+        self._pool = deque(
+            items[i]
+            for i in order_pool(estimates, _START_MARGIN * self._horizon_s, rng)
+        )
+        self._pool_order = [
+            [self._sources[seg.source].source_id, seg.copy, seg.first, seg.stop]
+            for seg in self._pool
+        ]
+        self._measuring = True
+        logger.info(
+            "Lane scheduler: measurement started; service = %.3fs + %.3fs per 10k "
+            "prompt chars (n=%d warm turns); %d slots measure from their next turn, "
+            "%d segments pooled, estimated %.0fs",
+            self._service_intercept_s,
+            self._service_per_char_s * 1e4,
+            self._warm_count,
+            self._converted,
+            len(self._pool),
+            self._horizon_s,
+        )
+        # A slot whose conversation ended with its in-flight turn, or that is
+        # waiting out a tool delay before a new unmeasured conversation, starts
+        # measured work now rather than finishing the unmeasured one.
+        for slot in self._slots:
+            if slot.inflight is None and slot.delay_handle is None:
                 self._advance(slot, first=True)
 
     # ------------------------------------------------------------ slot logic
@@ -591,72 +537,26 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._unmeasured_serial += 1
         return f"{source_id}__unmeasured_{self._unmeasured_serial}"
 
-    def _next_segment(self, slot: _Slot) -> Segment:
-        program = slot.program
-        assert program is not None and self._planner is not None
-        if slot.phase == "run":
-            if program.warmup:
-                return program.warmup.popleft()
-            if program.measured:
-                segment = program.measured.popleft()
-                slot.measured_est_s -= segment.est_s
-                return segment
-            if self._cfg.work_stealing and not self._halted:
-                stolen = self._steal_for(slot)
-                if stolen is not None:
-                    return stolen
-        return self._planner.next_padding(program)
-
-    def _remaining_est(self, slot: _Slot) -> float:
-        remaining = slot.measured_est_s
-        segment = slot.current
-        if segment is not None and segment.measured and self._planner is not None:
-            remaining += sum(
-                self._planner.turn_est(segment.source, c)
-                for c in range(slot.cursor, segment.stop)
+    def _next_segment(self) -> Segment:
+        if self._measuring and self._pool:
+            segment = self._pool.popleft()
+            if not self._pool:
+                self._pool_empty_ns = time.monotonic_ns()
+        else:
+            source = self._padding_rng.randrange(len(self._sources))
+            segment = self._segment(
+                source, 0, 0, len(self._sources[source].turns), measured=False
             )
-        return remaining
-
-    def _steal_for(self, thief: _Slot) -> Segment | None:
-        """Take the last unstarted measured segment of the slot furthest behind,
-        when moving it lets that slot finish no later than the thief."""
-        victim: _Slot | None = None
-        victim_remaining = 0.0
-        for slot in self._slots:
-            if slot is thief or slot.program is None or not slot.program.measured:
-                continue
-            remaining = self._remaining_est(slot)
-            if remaining > victim_remaining:
-                victim, victim_remaining = slot, remaining
-        if victim is None:
-            return None
-        assert victim.program is not None
-        candidate = victim.program.measured[-1]
-        if candidate.est_s > victim_remaining - candidate.est_s:
-            return None
-        victim.program.measured.pop()
-        victim.measured_est_s -= candidate.est_s
-        self._steals.append(
-            {
-                "t_ns": time.monotonic_ns(),
-                "thief": thief.index,
-                "victim": victim.index,
-                "source_id": self._sources[candidate.source].source_id,
-                "copy": candidate.copy,
-                "turns": [candidate.first, candidate.stop],
-                "victim_remaining_est_s": round(victim_remaining, 3),
-            }
-        )
-        return candidate
+        segment.logical_id = self._logical_id(segment)
+        return segment
 
     def _advance(self, slot: _Slot, first: bool = False) -> None:
         """Schedule the slot's next turn (after its tool delay)."""
-        if self._halted or self._stopping or slot.program is None:
+        if self._halted or self._stopping:
             return
         segment = slot.current
         if segment is None or slot.cursor >= segment.stop:
-            segment = self._next_segment(slot)
-            segment.logical_id = self._logical_id(segment)
+            segment = self._next_segment()
             slot.current = segment
             slot.cursor = segment.first
         delay = 0.0 if first else self._sources[segment.source].delays[slot.cursor]
@@ -701,13 +601,14 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         now = time.monotonic_ns()
         slot.cursor += 1
         slot.inflight = query_id
-        if segment.measured and slot.lap_start_ns is None:
-            slot.lap_start_ns = now
+        if segment.measured and slot.first_measured_issue_ns is None:
+            slot.first_measured_issue_ns = now
         self._lane_inflight[query_id] = _Inflight(
             slot=slot.index,
             issue_ns=now,
             measured=segment.measured,
             domain=source.domain,
+            context_chars=source.context_chars[slot.cursor - 1],
             cold=cold,
             conversation_id=segment.logical_id,
             turn=turn,
@@ -735,7 +636,7 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                 # Same shape as the queue scheduler's salt: the head depends only
                 # on the copy, so every conversation of a copy shares the cached
                 # system-prompt prefix (500 workflow conversations share one
-                # ~127k-character prompt). The tail is unique per instance, so
+                # ~127k-character prompt). The tail is unique per segment, so
                 # conversation histories never reuse another instance's cache.
                 head = self._key.digest("salt-head", str(copy))
                 tail = self._key.digest("salt-tail", uid)
@@ -791,41 +692,20 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         now = time.monotonic_ns()
         slot = self._slots[info.slot]
         slot.inflight = None
-        if not slot.first_request_done:
-            slot.first_request_done = True
-            self._first_left -= 1
-            if self._first_left == 0 and self._cold_done_ns is None:
-                self._cold_done_ns = now
-        if self._calibrating and not info.cold and not failed:
-            self._calib_samples.append(
-                (info.issue_ns, info.domain, (now - info.issue_ns) / 1e9)
-            )
+        first = not slot.first_request_done
+        slot.first_request_done = True
+        if not self._measuring and not info.cold and not first and not failed:
+            self._warm_samples.append((info.context_chars, (now - info.issue_ns) / 1e9))
         if info.measured:
             self._measured_completed += 1
             slot.measured_turns += 1
-            slot.lap_end_ns = now
+            slot.last_measured_complete_ns = now
             if failed:
                 self._measured_failed += 1
             if self._measured_completed >= self._measured_total:
                 self._halt(now)
         if self._halted or self._stopping:
             self._signal_done_if_idle()
-            return
-        if (
-            self._calibrating
-            and self._cold_done_ns is not None
-            and now
-            >= self._cold_done_ns
-            + int((self._cfg.calibration_skip_s + self._cfg.calibration_s) * 1e9)
-        ):
-            self._finish_calibration(now)
-            if slot.switch_pending or slot.current is None:
-                slot.switch_pending = False
-                self._advance(slot, first=True)
-            return
-        if slot.switch_pending:
-            slot.switch_pending = False
-            self._advance(slot, first=True)
             return
         self._advance(slot)
 
@@ -863,14 +743,21 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         (self._report_dir / name).write_text(json.dumps(payload, indent=2) + "\n")
 
     def plan_metadata(self) -> dict[str, Any]:
-        """Everything needed to rebuild and audit the plan, key included."""
-        lap_starts = [s.lap_start_ns for s in self._slots if s.lap_start_ns is not None]
-        lap_ends = [s.lap_end_ns for s in self._slots if s.lap_end_ns is not None]
-        lap_s = [
-            (s.lap_end_ns - s.lap_start_ns) / 1e9
+        """Everything needed to audit the run, key included."""
+        starts = [
+            s.first_measured_issue_ns
             for s in self._slots
-            if s.lap_start_ns is not None and s.lap_end_ns is not None
+            if s.first_measured_issue_ns is not None
         ]
+        ends = [
+            s.last_measured_complete_ns
+            for s in self._slots
+            if s.last_measured_complete_ns is not None
+        ]
+
+        def seconds(a: int | None, b: int | None) -> float | None:
+            return (b - a) / 1e9 if a is not None and b is not None else None
+
         return {
             "scheduler": "lanes",
             "secret_hex": self._key.secret.hex(),
@@ -882,42 +769,31 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             "measured_turns_completed": self._measured_completed,
             "measured_turns_failed": self._measured_failed,
             "config": self._cfg.model_dump(),
-            "service_s": self._service_s,
-            "calibration_samples": self._calibration_counts,
+            "service_model": {
+                "intercept_s": self._service_intercept_s,
+                "per_10k_chars_s": self._service_per_char_s * 1e4,
+                "warm_samples": self._warm_count,
+            },
             "clock": "time.monotonic_ns, same clock as events.jsonl",
             "run_started_ns": self._run_started_ns,
-            "cold_done_ns": self._cold_done_ns,
-            "calibration_window_ns": list(self._calibration_window_ns)
-            if self._calibration_window_ns
-            else None,
-            "plan_ns": self._plan_ns,
+            "measure_ns": self._measure_ns,
+            "pool_empty_ns": self._pool_empty_ns,
             "halt_ns": self._halt_ns,
-            "lap_start_spread_s": (max(lap_starts) - min(lap_starts)) / 1e9
-            if lap_starts
+            "estimated_measured_s": self._horizon_s,
+            "measured_phase_s": seconds(self._measure_ns, self._halt_ns),
+            "tail_after_pool_empty_s": seconds(self._pool_empty_ns, self._halt_ns),
+            "slots_measured_from_next_turn": self._converted,
+            "measured_start_spread_s": (max(starts) - min(starts)) / 1e9
+            if starts
             else None,
-            "lap_finish_spread_s": (max(lap_ends) - min(lap_ends)) / 1e9
-            if lap_ends
-            else None,
-            "sum_lap_s": sum(lap_s),
-            "steals": self._steals,
+            "measured_finish_spread_s": (max(ends) - min(ends)) / 1e9 if ends else None,
+            "pool_order": self._pool_order,
             "slots": [
                 {
                     "slot": s.index,
-                    "lane": [
-                        [self._sources[src].source_id, copy]
-                        for src, copy in self._lanes_json[s.index]
-                    ]
-                    if self._lanes_json
-                    else [],
-                    "entry_pos": s.program.entry_pos if s.program else None,
-                    "lap_pos": s.program.lap_pos if s.program else None,
-                    "warmup_est_s": round(s.program.warmup_est_s, 3)
-                    if s.program
-                    else None,
-                    "lap_turns_planned": s.lap_turns_planned,
                     "measured_turns": s.measured_turns,
-                    "lap_start_ns": s.lap_start_ns,
-                    "lap_end_ns": s.lap_end_ns,
+                    "first_measured_issue_ns": s.first_measured_issue_ns,
+                    "last_measured_complete_ns": s.last_measured_complete_ns,
                 }
                 for s in self._slots
             ],

@@ -314,25 +314,26 @@ def analyse(
     }
 
     if lane_plan:
-        sum_lap_s = lane_plan.get("sum_lap_s") or 0.0
-        concurrency = lane_plan.get("concurrency") or 0
-        out["throughput"]["lap_tokens_per_s"] = (
-            tokens / (sum_lap_s / concurrency) if sum_lap_s and concurrency else None
+        measured_phase_s = lane_plan.get("measured_phase_s") or 0.0
+        out["throughput"]["measured_phase_tokens_per_s"] = (
+            tokens / measured_phase_s if measured_phase_s else None
         )
         out["lanes"] = {
             key: lane_plan.get(key)
             for key in (
                 "copies",
-                "service_s",
-                "calibration_samples",
-                "lap_start_spread_s",
-                "lap_finish_spread_s",
+                "service_model",
+                "estimated_measured_s",
+                "measured_phase_s",
+                "tail_after_pool_empty_s",
+                "measured_start_spread_s",
+                "measured_finish_spread_s",
+                "slots_measured_from_next_turn",
                 "measured_turns_expected",
                 "measured_turns_completed",
                 "measured_turns_failed",
             )
         }
-        out["lanes"]["steals"] = len(lane_plan.get("steals") or [])
         # Coverage: counted turns per (source, turn) and per (source, copy, turn).
         per_key: dict[tuple[str, int, int], int] = defaultdict(int)
         for r in counted:
