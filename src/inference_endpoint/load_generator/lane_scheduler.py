@@ -84,12 +84,6 @@ WORKFLOW = "workflow"
 _DEFAULT_SERVICE_S = 5.0
 # Fewer warm samples than this keep a flat (context-independent) estimate.
 _MIN_WARM_SAMPLES = 30
-# Pseudo-turns at the global mean that each conversation's speed factor is
-# shrunk toward. Warm-up turns are noisy (cold prefills): on GB300 C768 the
-# warm/measured per-conversation correlation was 0.45 for coding, and 100
-# pseudo-turns minimised the error of the measured per-turn time (1.66 s mean
-# absolute error vs 2.10 s for a flat estimate; 10 pseudo-turns gave 2.43 s).
-_SOURCE_SHRINK_TURNS = 100
 # Pool items are drawn to start by this fraction of the estimated measured
 # time minus their own length, so an instance whose real length beats its
 # estimate still finishes with the rest. With the measured phase about twice
@@ -221,7 +215,6 @@ class _Slot:
 @dataclass(slots=True)
 class _Inflight:
     slot: int
-    source: int
     issue_ns: int
     measured: bool
     domain: str
@@ -288,12 +281,11 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._uid_counter = 0
         self._measuring = False
         self._halted = False
-        # Warm (source, context_chars, service seconds) samples, and the fitted model
+        # Warm (context_chars, service seconds) samples, and the fitted model
         # service = intercept + slope * context_chars.
-        self._warm_samples: list[tuple[int, int, float]] = []
+        self._warm_samples: list[tuple[int, float]] = []
         self._service_intercept_s = _DEFAULT_SERVICE_S
         self._service_per_char_s = 0.0
-        self._source_speed: list[float] = []
         self._warm_count = 0
         self._horizon_s = 0.0
         self._converted = 0
@@ -361,46 +353,30 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
 
     def _estimate(self, source: int, first: int, stop: int) -> float:
         src = self._sources[source]
-        speed = self._source_speed[source] if self._source_speed else 1.0
-        return sum(src.delays[first:stop]) + speed * (
-            self._service_intercept_s * (stop - first)
+        return (
+            sum(src.delays[first:stop])
+            + self._service_intercept_s * (stop - first)
             + self._service_per_char_s * sum(src.context_chars[first:stop])
         )
 
     def _fit_service_model(self) -> None:
         """Least-squares service = intercept + slope * context_chars over warm
-        turns, then a per-conversation speed factor: the ratio of its warm
-        turns' actual to predicted time, shrunk toward 1 by
-        ``_SOURCE_SHRINK_TURNS`` pseudo-turns. Some conversations run much
-        slower per turn than the mean; a global estimate starts them too late."""
+        turns. Long-context turns cost more; a per-domain mean would make long
+        SWE conversations look short and start them too late."""
         samples = self._warm_samples
         self._warm_count = len(samples)
         if len(samples) < _MIN_WARM_SAMPLES:
             if samples:
-                self._service_intercept_s = sum(s for _i, _x, s in samples) / len(
-                    samples
-                )
+                self._service_intercept_s = sum(s for _x, s in samples) / len(samples)
             return
         n = len(samples)
-        mx = sum(x for _i, x, _s in samples) / n
-        my = sum(s for _i, _x, s in samples) / n
-        sxx = sum((x - mx) ** 2 for _i, x, _s in samples)
-        sxy = sum((x - mx) * (s - my) for _i, x, s in samples)
+        mx = sum(x for x, _s in samples) / n
+        my = sum(s for _x, s in samples) / n
+        sxx = sum((x - mx) ** 2 for x, _s in samples)
+        sxy = sum((x - mx) * (s - my) for x, s in samples)
         slope = max(0.0, sxy / sxx) if sxx > 0 else 0.0
         self._service_per_char_s = slope
         self._service_intercept_s = max(0.0, my - slope * mx)
-        mean_pred = self._service_intercept_s + slope * mx
-        if mean_pred <= 0:
-            return
-        actual = [0.0] * len(self._sources)
-        predicted = [0.0] * len(self._sources)
-        for source, x, s in samples:
-            actual[source] += s
-            predicted[source] += self._service_intercept_s + slope * x
-        prior = _SOURCE_SHRINK_TURNS * mean_pred
-        self._source_speed = [
-            (a + prior) / (p + prior) for a, p in zip(actual, predicted, strict=True)
-        ]
 
     def _segment(
         self, source: int, copy: int, first: int, stop: int, measured: bool
@@ -655,7 +631,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             )
         self._lane_inflight[query_id] = _Inflight(
             slot=slot.index,
-            source=segment.source,
             issue_ns=now,
             measured=segment.measured,
             domain=source.domain,
@@ -747,9 +722,7 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         first = not slot.first_request_done
         slot.first_request_done = True
         if not self._measuring and not info.cold and not first and not failed:
-            self._warm_samples.append(
-                (info.source, info.context_chars, (now - info.issue_ns) / 1e9)
-            )
+            self._warm_samples.append((info.context_chars, (now - info.issue_ns) / 1e9))
         if info.measured:
             self._measured_completed += 1
             slot.measured_turns += 1
@@ -828,7 +801,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                 "intercept_s": self._service_intercept_s,
                 "per_10k_chars_s": self._service_per_char_s * 1e4,
                 "warm_samples": self._warm_count,
-                "source_speed": sorted(self._source_speed),
             },
             "clock": "time.monotonic_ns, same clock as events.jsonl",
             "run_started_ns": self._run_started_ns,

@@ -160,32 +160,6 @@ def _run(
     return issuer, json.loads((tmp_path / "lane_plan.json").read_text())
 
 
-def test_slow_conversation_gets_a_longer_estimate(tmp_path: Path) -> None:
-    """Warm turns of one conversation running 3x slower raise its estimate
-    (shrunk toward the mean), so the pool starts it earlier; unsampled
-    conversations keep the global estimate."""
-    strategy = LaneAgenticInferenceStrategy(
-        dataset_metadata=_metadata(_DATASET),
-        agentic_inference_config=_config(),
-        target_concurrency=4,
-        rng_sample_index=random.Random(42),
-        report_dir=tmp_path,
-    )
-    strategy._load_sources()
-    ids = [s.source_id for s in strategy._sources]
-    slow, normal, unsampled = (
-        ids.index("repo__issue-0"),
-        ids.index("repo__issue-1"),
-        ids.index("repo__issue-2"),
-    )
-    strategy._warm_samples = [(slow, 100, 3.0)] * 15 + [(normal, 100, 1.0)] * 45
-    strategy._fit_service_model()
-    turns = 5
-    est = {s: strategy._estimate(s, 0, turns) for s in (slow, normal, unsampled)}
-    assert est[unsampled] == pytest.approx(turns * strategy._service_intercept_s)
-    assert est[normal] < est[unsampled] < est[slow] < 3 * est[normal]
-
-
 def _source(conv: str) -> tuple[str, str, int]:
     match = re.search(r"__(repeat|unmeasured)_(\d+)$", conv)
     return (
