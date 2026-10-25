@@ -22,12 +22,12 @@ conflicts = [
 # CVE floors for transitive deps we don't declare directly. click is pulled in
 # via transformers -> typer; 8.3.2 carries PYSEC-2026-2132 (fixed in 8.3.3).
 # setuptools is pulled in via pbr/torch; 82.0.1 carries PYSEC-2026-3447 (fixed
-# in 83.0.0).
+# in 83.0.0) and 83.0.0 carries GHSA-xmj3-9gf7-h52w (fixed in 84.1.0).
 # fsspec (datasets) and multidict (aiohttp) require fixes for CVE-2026-104851
 # and CVE-2026-104874, respectively.
 constraint-dependencies = [
     "click>=8.3.3",
-    "setuptools>=83.0.0",
+    "setuptools>=84.1.0",
     "fsspec>=2026.6.0",
     "multidict>=6.9.1",
 ]
@@ -138,9 +138,10 @@ dev = [
     # every resolution fork. Because bfcl conflicts with this extra (see
     # [tool.uv].conflicts), these floors force uv to fork filelock/virtualenv:
     # patched here, pinned only inside the bfcl fork. Closes CVE-2025-68146 /
-    # CVE-2026-22701 (filelock) and CVE-2026-22702 (virtualenv).
-    "filelock>=3.20.3",
-    "virtualenv==21.14.9",
+    # CVE-2026-22701 / CVE-2026-112907 / CVE-2026-112913 / CVE-2026-112940
+    # (filelock) and CVE-2026-22702 / CVE-2026-113713 (virtualenv).
+    "filelock>=4.2.1",
+    "virtualenv==21.14.10",
     # pip is pulled in transitively (pip-audit -> pip-api -> pip); force past
     # PYSEC-2026-3721 (fixed in 26.2), which otherwise fails `uv run pip-audit`.
     "pip==26.2",
