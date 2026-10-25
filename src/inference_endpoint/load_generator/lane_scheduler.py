@@ -222,6 +222,20 @@ class _Inflight:
     cold: bool
     conversation_id: str
     turn: int
+    segment_uid: str
+
+
+@dataclass(slots=True)
+class _SegmentTiming:
+    """Measured segment as it actually ran, for auditing the schedule."""
+
+    logical_id: str
+    first: int
+    stop: int
+    estimate_s: float
+    slot: int
+    first_issue_ns: int
+    last_complete_ns: int | None = None
 
 
 class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
@@ -282,6 +296,7 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._entry_rng = self._key.rng("entry")
         self._padding_rng = self._key.rng("padding")
         self._measure_timer: asyncio.TimerHandle | None = None
+        self._segment_timing: dict[str, _SegmentTiming] = {}
 
     # ------------------------------------------------------------------ setup
 
@@ -605,6 +620,15 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         slot.inflight = query_id
         if segment.measured and slot.first_measured_issue_ns is None:
             slot.first_measured_issue_ns = now
+        if segment.measured and segment.uid not in self._segment_timing:
+            self._segment_timing[segment.uid] = _SegmentTiming(
+                logical_id=segment.logical_id,
+                first=segment.first,
+                stop=segment.stop,
+                estimate_s=self._estimate(segment.source, segment.first, segment.stop),
+                slot=slot.index,
+                first_issue_ns=now,
+            )
         self._lane_inflight[query_id] = _Inflight(
             slot=slot.index,
             issue_ns=now,
@@ -614,6 +638,7 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             cold=cold,
             conversation_id=segment.logical_id,
             turn=turn,
+            segment_uid=segment.uid,
         )
         assert self._loop is not None
         self._timeout_handles[query_id] = self._loop.call_later(
@@ -702,6 +727,7 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             self._measured_completed += 1
             slot.measured_turns += 1
             slot.last_measured_complete_ns = now
+            self._segment_timing[info.segment_uid].last_complete_ns = now
             if failed:
                 self._measured_failed += 1
             if self._measured_completed >= self._measured_total:
@@ -790,6 +816,19 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             else None,
             "measured_finish_spread_s": (max(ends) - min(ends)) / 1e9 if ends else None,
             "pool_order": self._pool_order,
+            # Measured segments as run; offsets in seconds from measurement start.
+            "segments": [
+                {
+                    "conversation_id": t.logical_id,
+                    "first_turn": t.first,
+                    "stop_turn": t.stop,
+                    "slot": t.slot,
+                    "estimate_s": t.estimate_s,
+                    "start_s": seconds(self._measure_ns, t.first_issue_ns),
+                    "end_s": seconds(self._measure_ns, t.last_complete_ns),
+                }
+                for t in self._segment_timing.values()
+            ],
             "slots": [
                 {
                     "slot": s.index,

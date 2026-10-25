@@ -307,6 +307,21 @@ def test_measurement_starts_with_every_slot_mid_conversation(tmp_path: Path) -> 
     assert all(not r["tracked"] for r in issuer.records[:first_measured])
 
 
+def test_segment_record_tiles_every_measured_turn(tmp_path: Path) -> None:
+    """The plan's segment list covers each measured turn of each instance
+    exactly once, and every segment ran inside the measured phase."""
+    _issuer, plan = _run(tmp_path, concurrency=4)
+    segments = plan["segments"]
+    covered = Counter()
+    for seg in segments:
+        for turn in range(seg["first_turn"], seg["stop_turn"]):
+            covered[(seg["conversation_id"], turn)] += 1
+    assert set(covered.values()) == {1}
+    assert sum(covered.values()) == plan["measured_turns_expected"]
+    phase = plan["measured_phase_s"]
+    assert all(0 <= s["start_s"] <= s["end_s"] <= phase + 1e-6 for s in segments)
+
+
 def test_pool_order_starts_long_items_early_enough_to_finish() -> None:
     rng = random.Random(3)
     estimates = [100.0] + [1.0] * 50 + [60.0]
