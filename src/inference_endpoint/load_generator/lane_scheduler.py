@@ -84,12 +84,12 @@ WORKFLOW = "workflow"
 _DEFAULT_SERVICE_S = 5.0
 # Fewer warm samples than this keep a flat (context-independent) estimate.
 _MIN_WARM_SAMPLES = 30
-# Pool items are drawn to start by this fraction of the estimated measured
-# time minus their own length, so an instance whose real length beats its
-# estimate still finishes with the rest. With the measured phase about twice
-# the longest instance, long instances spread over the first part of the run
-# instead of all starting at once.
-_START_MARGIN = 0.9
+# A pooled segment is handed out ahead of the random order once the estimated
+# time left before the pool empties (pool work / concurrency) falls to this
+# multiple of its own estimate. Both sides are in estimated seconds, so a
+# run-wide speed error cancels; the margin covers a segment running longer
+# than its estimate (p90 1.66x for segments over 10 min on GB300 C768).
+_DEADLINE_SAFETY = 1.5
 
 
 def _context_chars(messages: list[dict[str, Any]]) -> int:
@@ -126,14 +126,61 @@ def lane_copies(
     )
 
 
-def order_pool(
-    estimates: list[float], horizon_s: float, rng: random.Random
-) -> list[int]:
-    """Random start order in which item ``i`` of estimated length ``L_i`` is
-    drawn to start uniformly in ``[0, max(0, horizon_s - L_i)]``. Returns the
-    item indices sorted by that draw."""
-    keys = [rng.random() * max(0.0, horizon_s - est) for est in estimates]
-    return sorted(range(len(estimates)), key=lambda i: (keys[i], i))
+class MeasuredPool:
+    """Measured segments in a random order, except that a segment whose
+    deadline has come is handed out first, longest first.
+
+    A segment's deadline is when the estimated time left before the pool
+    empties falls to ``_DEADLINE_SAFETY`` times its estimate. Long conversation
+    instances therefore start late enough not to crowd the start of the run,
+    and early enough to finish with the rest."""
+
+    def __init__(
+        self,
+        items: list[Segment],
+        estimates: list[float],
+        concurrency: int,
+        rng: random.Random,
+    ):
+        self._items = items
+        self._estimates = estimates
+        self._concurrency = concurrency
+        order = list(range(len(items)))
+        rng.shuffle(order)
+        self.order: list[int] = order
+        self._queue = deque(order)
+        self._by_length = sorted(range(len(items)), key=lambda i: (-estimates[i], i))
+        self._next_long = 0
+        self._taken = [False] * len(items)
+        self._work = sum(estimates)
+        self._left = len(items)
+        self.forced = 0
+
+    def __len__(self) -> int:
+        return self._left
+
+    def pop(self) -> Segment:
+        taken = self._taken
+        while (
+            self._next_long < len(self._by_length)
+            and taken[self._by_length[self._next_long]]
+        ):
+            self._next_long += 1
+        longest = self._by_length[self._next_long]
+        if (
+            self._estimates[longest] * _DEADLINE_SAFETY
+            >= self._work / self._concurrency
+        ):
+            index = longest
+            self.forced += 1
+        else:
+            while taken[self._queue[0]]:
+                self._queue.popleft()
+            index = self._queue.popleft()
+        taken[index] = True
+        self._work -= self._estimates[index]
+        self._left -= 1
+        return self._items[index]
 
 
 class RunKey:
@@ -271,7 +318,7 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._source_weights: list[float] = []
         self._slots: list[_Slot] = []
         self._lane_inflight: dict[str, _Inflight] = {}
-        self._pool: deque[Segment] = deque()
+        self._pool: MeasuredPool | None = None
         self._pool_order: list[list[Any]] = []
         self._copies = 0
         self._measured_total = 0
@@ -514,13 +561,15 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         ]
         estimates = [self._estimate(seg.source, seg.first, seg.stop) for seg in items]
         self._horizon_s = (running_est + sum(estimates)) / self._concurrency
-        self._pool = deque(
-            items[i]
-            for i in order_pool(estimates, _START_MARGIN * self._horizon_s, rng)
-        )
+        self._pool = MeasuredPool(items, estimates, self._concurrency, rng)
         self._pool_order = [
-            [self._sources[seg.source].source_id, seg.copy, seg.first, seg.stop]
-            for seg in self._pool
+            [
+                self._sources[items[i].source].source_id,
+                items[i].copy,
+                items[i].first,
+                items[i].stop,
+            ]
+            for i in self._pool.order
         ]
         self._measuring = True
         logger.info(
@@ -556,7 +605,7 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
 
     def _next_segment(self) -> Segment:
         if self._measuring and self._pool:
-            segment = self._pool.popleft()
+            segment = self._pool.pop()
             if not self._pool:
                 self._pool_empty_ns = time.monotonic_ns()
         else:
@@ -816,6 +865,8 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             else None,
             "measured_finish_spread_s": (max(ends) - min(ends)) / 1e9 if ends else None,
             "pool_order": self._pool_order,
+            # Segments handed out ahead of the random order at their deadline.
+            "pool_deadline_releases": self._pool.forced if self._pool else 0,
             # Measured segments as run; offsets in seconds from measurement start.
             "segments": [
                 {

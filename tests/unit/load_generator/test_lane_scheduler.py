@@ -36,8 +36,9 @@ from inference_endpoint.dataset_manager.agentic_inference_dataset import (
 from inference_endpoint.exceptions import InputValidationError
 from inference_endpoint.load_generator.lane_scheduler import (
     LaneAgenticInferenceStrategy,
+    MeasuredPool,
+    Segment,
     lane_copies,
-    order_pool,
 )
 
 pytestmark = pytest.mark.unit
@@ -298,8 +299,11 @@ def test_copy_rule() -> None:
 def test_measurement_starts_with_every_slot_mid_conversation(tmp_path: Path) -> None:
     """All slots switch to measured work at one instant from their next turn,
     so measurement neither ramps up from cold slots nor staggers by slot."""
-    issuer, plan = _run(tmp_path, concurrency=4)
-    assert plan["slots_measured_from_next_turn"] >= 3
+    # A slot on its conversation's last turn at the switch has nothing to
+    # convert and takes pool work instead; with 2-4 turn workflow
+    # conversations that is common, so check a clear majority of 32 slots.
+    issuer, plan = _run(tmp_path, concurrency=32)
+    assert plan["slots_measured_from_next_turn"] >= 16
     # Every slot's first measured request goes out within a couple of turn
     # latencies of the switch, far less than the measured phase itself.
     assert plan["measured_start_spread_s"] < 0.25 * plan["measured_phase_s"]
@@ -322,24 +326,47 @@ def test_segment_record_tiles_every_measured_turn(tmp_path: Path) -> None:
     assert all(0 <= s["start_s"] <= s["end_s"] <= phase + 1e-6 for s in segments)
 
 
-def test_pool_order_starts_long_items_early_enough_to_finish() -> None:
-    rng = random.Random(3)
-    estimates = [100.0] + [1.0] * 50 + [60.0]
-    order = order_pool(estimates, horizon_s=80.0, rng=rng)
-    assert sorted(order) == list(range(len(estimates)))
-    # Longer than the horizon: must start first.
-    assert order[0] == 0
-    # Draw window [0, horizon - L]: the 60 s item starts within its first 20 s
-    # of a 80 s horizon, i.e. in the first part of the order on average.
-    starts = []
-    for seed in range(200):
-        o = order_pool(estimates, 80.0, random.Random(seed))
-        starts.append(o.index(len(estimates) - 1) / len(o))
-    assert sum(starts) / len(starts) < 0.4
+def _drain(estimates: list[float], concurrency: int, seed: int) -> list[tuple]:
+    """Pop the pool dry; return (index, estimate, time left before the pop)."""
+    items = [
+        Segment(source=i, copy=1, first=0, stop=1, measured=True, uid=f"seg:{i}")
+        for i in range(len(estimates))
+    ]
+    pool = MeasuredPool(items, estimates, concurrency, random.Random(seed))
+    work = sum(estimates)
+    out = []
+    while pool:
+        seg = pool.pop()
+        out.append((seg.source, estimates[seg.source], work / concurrency))
+        work -= estimates[seg.source]
+    return out
 
 
-def test_same_key_reproduces_the_pool_order(tmp_path: Path) -> None:
+def test_pool_hands_out_long_items_by_their_deadline() -> None:
+    """Every item comes out once, and each long item starts with at least its
+    own length of estimated pool time left, so it finishes with the rest.
+    (The last short items necessarily start with little time left.)"""
+    estimates = [1.0] * 400 + [30.0, 25.0, 20.0, 15.0]
+    for seed in range(20):
+        popped = _drain(estimates, concurrency=10, seed=seed)
+        assert sorted(i for i, _e, _t in popped) == list(range(len(estimates)))
+        assert all(left >= est for _i, est, left in popped if est > 1.0)
+
+
+def test_pool_does_not_front_load_long_items() -> None:
+    """Long items are released at their deadline or their random slot,
+    whichever comes first, not all at the start (longest-first would put
+    them at positions 0-3)."""
+    estimates = [1.0] * 400 + [30.0, 25.0, 20.0, 15.0]
+    positions = []
+    for seed in range(50):
+        popped = _drain(estimates, concurrency=10, seed=seed)
+        positions += [
+            n / len(popped) for n, (i, _e, _t) in enumerate(popped) if i >= 400
+        ]
+    assert sum(positions) / len(positions) > 0.15
+
+
+def test_same_key_reproduces_the_pool_order() -> None:
     estimates = [float(i % 7) for i in range(40)]
-    assert order_pool(estimates, 20.0, random.Random(9)) == order_pool(
-        estimates, 20.0, random.Random(9)
-    )
+    assert _drain(estimates, 4, seed=9) == _drain(estimates, 4, seed=9)
