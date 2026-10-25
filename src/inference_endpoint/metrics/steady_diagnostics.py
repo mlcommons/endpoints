@@ -26,7 +26,8 @@ modes the lane scheduler is meant to remove:
 - ``mix``: coding share of requests in flight, per minute of the window.
 - ``osl``: mean output length of counted vs all requests.
 - ``throughput``: counted output tokens per second over the window, and (lanes)
-  over the per-slot measured time, which is what the server sustained.
+  over the measured phase and over its full-load part (measurement start until
+  the measured pool empties), which excludes the end-of-run tail.
 - ``coverage`` (lanes): how many times each dataset turn was counted.
 - ``fairness`` (lanes): TTFT / TPOT of counted vs uncounted requests completing
   in the same minute. A server that recognises and deprioritises padding shows
@@ -318,6 +319,23 @@ def analyse(
         out["throughput"]["measured_phase_tokens_per_s"] = (
             tokens / measured_phase_s if measured_phase_s else None
         )
+        # Full load: measurement start until the pool empties, while every slot
+        # still has measured work. The rest of the window is the tail, where
+        # slots finish their last measured conversation alongside unmeasured
+        # padding. Same monotonic clock as events.jsonl.
+        start_ns = lane_plan.get("measure_ns")
+        pool_empty_ns = lane_plan.get("pool_empty_ns")
+        if (
+            start_ns is not None
+            and pool_empty_ns is not None
+            and pool_empty_ns > start_ns
+        ):
+            full_load_tokens = sum(
+                r[6] for r in counted if r[6] and start_ns <= r[2] <= pool_empty_ns
+            )
+            full_load_s = (pool_empty_ns - start_ns) / 1e9
+            out["throughput"]["full_load_tokens_per_s"] = full_load_tokens / full_load_s
+            out["throughput"]["full_load_duration_s"] = full_load_s
         out["lanes"] = {
             key: lane_plan.get(key)
             for key in (
