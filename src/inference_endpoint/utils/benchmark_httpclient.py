@@ -363,15 +363,11 @@ class LiveDisplay:
             self.stats.recv_rate_samples.append(recv_rate)
 
         # Build output line
-        line = f"[Stats] Send/s: {send_rate:>9,.0f} | " f"Recv/s: {recv_rate:>9,.0f} | "
+        line = f"[Stats] Send/s: {send_rate:>9,.0f} | Recv/s: {recv_rate:>9,.0f} | "
         if self.streaming:
             sse_rate = recv_rate * self.stats.sse_events_per_response
             line += f"SSE-pkts/s: {sse_rate:>9,.0f} | "
-        line += (
-            f"InFlight: {in_flight:>8,} | "
-            f"Recv: {received:>10,} | "
-            f"Err: {errors:>5,}"
-        )
+        line += f"InFlight: {in_flight:>8,} | Recv: {received:>10,} | Err: {errors:>5,}"
 
         if self.track_memory:
             mem_info = self._get_memory_info()
@@ -926,9 +922,9 @@ def run_sweep(
                 pv["stream_interval"] = stream_interval
 
             label = ", ".join(f"{k}={v}" for k, v in pv.items())
-            print(f"\n{'='*70}")
+            print(f"\n{'=' * 70}")
             print(f"  Sweep {iteration}/{total_iterations}: {label}")
-            print(f"{'='*70}")
+            print(f"{'=' * 70}")
 
             # Restart server when prompt_length or stream_interval changes
             if server and (
@@ -982,11 +978,11 @@ def print_sweep_summary(
         f"{'Outstanding':>11} | {'Stall%':>7} | {'Errors':>8}"
     )
     width = len(header)
-    print(f"\n{'='*width}")
+    print(f"\n{'=' * width}")
     print(f"Sweep Summary: {', '.join(sweep_names)}")
-    print(f"{'='*width}")
+    print(f"{'=' * width}")
     print(header)
-    print(f"{'-'*width}")
+    print(f"{'-' * width}")
     for r in results:
         param_cols = " | ".join(f"{r.param_values[n]:>14,}" for n in sweep_names)
         sse_col = f" | {r.sse_rate:>12,.0f}" if streaming else ""
@@ -995,7 +991,7 @@ def print_sweep_summary(
             f"{r.recv_rate:>12,.0f}{sse_col} | "
             f"{r.outstanding:>11,} | {r.stall_pct:>6.1f}% | {r.error_rate:>7.1f}%"
         )
-    print(f"{'='*width}")
+    print(f"{'=' * width}")
 
 
 # ---------------------------------------------------------------------------

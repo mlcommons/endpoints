@@ -60,9 +60,9 @@ class QueryLatency(Metric):
         if target_qps:
             target_latency_ms = 1000 / target_qps
         else:
-            assert (
-                target_latency_ms is not None
-            ), "Either target_latency_ms or target_qps must be set"
+            assert target_latency_ms is not None, (
+                "Either target_latency_ms or target_qps must be set"
+            )
         super().__init__(target_latency_ms)
 
     def is_valid(self, measurement: float) -> bool:

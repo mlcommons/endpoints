@@ -518,7 +518,12 @@ def build_trajectory_natl(
                 tracking = False
             elif et == EV_ISSUED:
                 uuid = rec.get("sample_uuid")
-                if tracking and uuid and ts is not None and rec.get("tracked") is not False:
+                if (
+                    tracking
+                    and uuid
+                    and ts is not None
+                    and rec.get("tracked") is not False
+                ):
                     issue[uuid] = (rec.get("conversation_id") or "", ts)
             elif et == EV_COMPLETE:
                 iv = issue.pop(rec.get("sample_uuid"), None)

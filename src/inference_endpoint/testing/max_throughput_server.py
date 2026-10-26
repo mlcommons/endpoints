@@ -472,9 +472,9 @@ class MaxThroughputServer:
             curr_bytes = _counter_read(_byte_counter)
             if elapsed > 0:
                 print(
-                    f"[Stats] Req/s: {(curr_req-last_req)/elapsed:>9,.0f} | "
-                    f"QPS: {(curr_resp-last_resp)/elapsed:>9,.0f} | "
-                    f"MB/s: {(curr_bytes-last_bytes)/elapsed/1e6:>8,.1f} | "
+                    f"[Stats] Req/s: {(curr_req - last_req) / elapsed:>9,.0f} | "
+                    f"QPS: {(curr_resp - last_resp) / elapsed:>9,.0f} | "
+                    f"MB/s: {(curr_bytes - last_bytes) / elapsed / 1e6:>8,.1f} | "
                     f"Total: {curr_resp:>10,}",
                     flush=True,
                 )

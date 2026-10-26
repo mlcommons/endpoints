@@ -565,7 +565,7 @@ def create_app(
 ) -> web.Application:
     if config.auth_token and config.allow_unauthenticated:
         raise ValueError(
-            "SWE-bench service cannot set both auth_token and " "allow_unauthenticated"
+            "SWE-bench service cannot set both auth_token and allow_unauthenticated"
         )
     if not config.auth_token and not config.allow_unauthenticated:
         raise ValueError(

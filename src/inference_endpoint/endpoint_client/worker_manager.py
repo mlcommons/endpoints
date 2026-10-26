@@ -77,9 +77,9 @@ class WorkerManager:
             for i in range(self.http_config.num_workers):
                 process = self._spawn_worker(i, connector)
                 self.workers.append(process)
-                assert (
-                    process.pid is not None
-                ), "Worker process should have a PID after spawning"
+                assert process.pid is not None, (
+                    "Worker process should have a PID after spawning"
+                )
                 self.worker_pids[i] = process.pid
 
             # Apply CPU affinity after all workers are started

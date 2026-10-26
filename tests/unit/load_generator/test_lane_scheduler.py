@@ -36,7 +36,10 @@ from inference_endpoint.dataset_manager.agentic_inference_dataset import (
 from inference_endpoint.exceptions import InputValidationError
 from inference_endpoint.load_generator.lane_scheduler import (
     LaneAgenticInferenceStrategy,
+    batch_mean_ci,
+    fit_service,
     lane_passes,
+    turn_sizes,
 )
 
 pytestmark = pytest.mark.unit
@@ -48,19 +51,21 @@ _CONV_RE = re.compile(r"^(.*)__(repeat|unmeasured)_(\d+)$")
 def _metadata(
     conversations: dict[str, int], delays: dict[str, float] | None = None
 ) -> ConversationMetadata:
+    """Each turn's messages extend the previous turn's: the system prompt, then
+    per earlier turn a user message and a recorded reply 40 x turn chars long."""
     samples, messages, delay_map = [], {}, {}
     index = 0
     for conv_id, n_turns in conversations.items():
+        history = [{"role": "system", "content": f"system {conv_id}"}]
         for turn in range(1, n_turns + 1):
             samples.append(
                 ConversationSampleEntry(
                     conversation_id=conv_id, turn=turn, sample_index=index
                 )
             )
-            messages[(conv_id, turn)] = [
-                {"role": "system", "content": f"system {conv_id}"},
-                {"role": "user", "content": f"turn {turn}"},
-            ]
+            history = [*history, {"role": "user", "content": f"turn {turn}"}]
+            messages[(conv_id, turn)] = history
+            history = [*history, {"role": "assistant", "content": "a" * 40 * turn}]
             if delays and conv_id in delays:
                 delay_map[(conv_id, turn)] = delays[conv_id]
             index += 1
@@ -83,10 +88,12 @@ _DATASET_TURNS = sum(_DATASET.values())
 
 
 class LoopIssuer:
-    """Completes every request after ``latency`` seconds on the running loop."""
+    """Completes every request after ``latency`` seconds on the running loop;
+    ``latency`` may be a function of (data_override, seconds since first issue)."""
 
-    def __init__(self, latency: float = 0.0005, fail_every: int = 0):
+    def __init__(self, latency=0.0005, fail_every: int = 0):
         self.latency = latency
+        self.started: float | None = None
         self.fail_every = fail_every
         self.strategy: LaneAgenticInferenceStrategy | None = None
         self.records: list[dict] = []
@@ -123,8 +130,16 @@ class LoopIssuer:
         if self.fail_every and self.issued_count % self.fail_every == 0:
             error = ErrorData(error_type="x", error_message="boom")
         assert self.strategy is not None
-        asyncio.get_running_loop().call_later(
-            self.latency,
+        loop = asyncio.get_running_loop()
+        if self.started is None:
+            self.started = loop.time()
+        latency = (
+            self.latency(data_override, loop.time() - self.started)
+            if callable(self.latency)
+            else self.latency
+        )
+        loop.call_later(
+            latency,
             self.strategy.on_sample_complete,
             QueryResult(id=query_id, error=error),
         )
@@ -320,3 +335,121 @@ def test_rejects_fixed_trajectory_count(tmp_path: Path) -> None:
 def test_lanes_require_salt() -> None:
     with pytest.raises(ValueError, match="enable_salt"):
         AgenticInferenceConfig(scheduler="lanes")
+
+
+def _context_latency(data_override, _elapsed: float) -> float:
+    """Latency grows with the request's context size."""
+    chars = sum(len(m.get("content") or "") for m in data_override["messages"])
+    return 0.0003 + 2e-6 * chars
+
+
+def test_calibrated_entry_fits_then_reseeds_every_slot(tmp_path: Path) -> None:
+    _issuer, plan = _run(
+        tmp_path,
+        issuer=LoopIssuer(latency=_context_latency),
+        entry="calibrated",
+        calibration_s=0.1,
+        warmup_s=0.3,
+    )
+    fit = plan["calibration"]
+    assert "error" not in fit and fit["samples"] >= 30
+    assert fit["mean_turn_s"] > 0
+    # Every slot moved to a calibrated entry before the run ended, and the
+    # window still counts exact passes.
+    assert plan["reseed_pending_at_end"] == 0 and plan["ready_s"] is not None
+    assert plan["measured_turns_completed"] == plan["measured_turns_expected"]
+    assert plan["measured_turns_expected"] == plan["passes"] * _DATASET_TURNS
+
+
+def test_calibration_must_finish_inside_a_fixed_warmup() -> None:
+    with pytest.raises(ValueError, match="calibration_s"):
+        LaneSchedulerConfig(entry="calibrated", calibration_s=200, warmup_s=180)
+
+
+def test_adaptive_warmup_opens_once_steady(tmp_path: Path) -> None:
+    _issuer, plan = _run(
+        tmp_path,
+        issuer=LoopIssuer(latency=0.002),
+        warmup="adaptive",
+        warmup_interval_s=0.05,
+        warmup_band=0.25,
+        warmup_min_s=0.05,
+        warmup_max_s=3.0,
+    )
+    assert plan["warmup_converged"] is True
+    assert plan["warmup_s_actual"] < 3.0
+
+
+def test_adaptive_warmup_gives_up_at_max_while_still_drifting(tmp_path: Path) -> None:
+    """Latency that keeps rising never settles: open at warmup_max_s, flagged."""
+    _issuer, plan = _run(
+        tmp_path,
+        issuer=LoopIssuer(latency=lambda _d, t: 0.002 * (1 + 8 * t)),
+        warmup="adaptive",
+        warmup_interval_s=0.05,
+        warmup_band=0.05,
+        warmup_min_s=0.05,
+        warmup_max_s=0.6,
+    )
+    assert plan["warmup_converged"] is False
+    assert plan["warmup_s_actual"] >= 0.6
+
+
+def test_precision_stop_adds_passes_until_the_target_or_the_cap(tmp_path: Path) -> None:
+    _a, capped = _run(
+        tmp_path / "a",
+        stop="precision",
+        precision_target=1e-9,
+        precision_batch_s=0.01,
+        max_passes=3,
+    )
+    assert capped["passes"] == 3
+    assert [d["extend"] for d in capped["pass_decisions"]] == [True, True, False]
+    assert capped["measured_turns_completed"] == 3 * _DATASET_TURNS
+    _b, met = _run(
+        tmp_path / "b",
+        stop="precision",
+        precision_target=0.5,
+        precision_batch_s=0.01,
+        precision_min_batches=4,
+        max_passes=60,
+    )
+    last = met["pass_decisions"][-1]
+    assert met["passes"] < 60 and last["extend"] is False
+    assert last["ci95_half_width_rel"] <= 0.5 and last["batches"] >= 4
+    # Too few batches never stop the window, however tight the estimate looks.
+    assert all(d["extend"] for d in met["pass_decisions"] if d["batches"] < 4)
+    assert met["measured_turns_expected"] == met["passes"] * _DATASET_TURNS
+
+
+def test_batch_mean_ci() -> None:
+    s = 1_000_000_000
+    flat = [(0, 10.0), (s, 10.0), (2 * s, 10.0)]
+    assert batch_mean_ci(flat, 0, 3 * s, s) == (3, 10.0, 0.0)
+    n, rate, half = batch_mean_ci([(0, 10.0), (s, 20.0)], 0, 2 * s, s)
+    # mean 15, sd 7.07, t(1 df) 12.71: half-width 12.71 * 7.07 / sqrt(2) / 15.
+    assert (n, rate) == (2, 15.0) and half == pytest.approx(4.237, abs=1e-3)
+    assert batch_mean_ci(flat, 0, s, s)[1:] == (None, None)
+
+
+def test_fit_service_recovers_coefficients_and_drops_negative_ones() -> None:
+    rng = random.Random(0)
+    rows = [(rng.uniform(0, 500), rng.uniform(0, 5000)) for _ in range(200)]
+    exact = [(1.0 + 0.01 * o + 0.001 * p, o, p) for o, p in rows]
+    assert fit_service(exact) == pytest.approx((1.0, 0.01, 0.001))
+    # Latency that falls with prefill size is not physical: c is dropped.
+    falling = [(1.0 + 0.01 * o - 0.0001 * p, o, p) for o, p in rows]
+    assert fit_service(falling)[2] == 0.0
+    assert fit_service(exact[:10]) is None
+
+
+def test_turn_sizes_split_new_input_context_and_recorded_reply() -> None:
+    system = {"role": "system", "content": "s" * 100}
+    t1 = [system, {"role": "user", "content": "u" * 10}]
+    t2 = [
+        *t1,
+        {"role": "assistant", "content": "a" * 30},
+        {"role": "user", "content": "v" * 5},
+    ]
+    new, ctx, out = turn_sizes([t1, t2])
+    assert new == (110, 35) and ctx == (110, 145) and out == (30.0, None)

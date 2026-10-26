@@ -125,9 +125,9 @@ class TestTimedIssueStrategyCallAt:
             assert delta_ns > 0, f"Issue {i}: non-monotonic timestamps"
         # Total elapsed should be roughly 9ms (9 delays of 1ms)
         total_ns = timestamps[-1] - timestamps[0]
-        assert (
-            total_ns > 5_000_000
-        ), f"Total elapsed {total_ns}ns too small for 9x1ms delays"
+        assert total_ns > 5_000_000, (
+            f"Total elapsed {total_ns}ns too small for 9x1ms delays"
+        )
 
 
 @pytest.mark.unit

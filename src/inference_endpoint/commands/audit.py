@@ -160,8 +160,7 @@ def _run_phases(
             ctx = setup_benchmark(phase_config, spec.test_mode, audit_run_spec=spec)
             if deadline is not None and time.monotonic() >= deadline:
                 raise ExecutionError(
-                    f"Audit phase '{spec.label}' exhausted run_timeout_s "
-                    "during setup"
+                    f"Audit phase '{spec.label}' exhausted run_timeout_s during setup"
                 )
             if ctx.dataloader is None:
                 raise SetupError(

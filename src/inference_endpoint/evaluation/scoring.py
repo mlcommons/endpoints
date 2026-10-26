@@ -259,12 +259,12 @@ class Scorer(ABC):
 
         # Get ground truths
         order = df["sample_index"].to_numpy()
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
-        assert (
-            self.ground_truth_column in self.dataset.dataframe.columns
-        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
+        assert self.ground_truth_column in self.dataset.dataframe.columns, (
+            f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+        )
         ground_truths = self.dataset.dataframe[self.ground_truth_column].to_numpy()[
             order
         ]
@@ -370,12 +370,12 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         empirical = df["output"].tolist()
 
         order = df["sample_index"].to_numpy().astype(int)
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
-        assert (
-            self.ground_truth_column in self.dataset.dataframe.columns
-        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
+        assert self.ground_truth_column in self.dataset.dataframe.columns, (
+            f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+        )
 
         ground_truths = list(
             self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
@@ -631,9 +631,9 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
             raise TypeError(
                 "AgenticInferenceInlineScorer requires an AgenticInferenceDataset"
             )
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
 
         expected = self._expected_assistant_turns()
         scorable_expected: dict[tuple[str, int], dict[str, Any]] = {}
@@ -766,9 +766,9 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
             Rows ``conv1/user/turn=1`` followed by ``conv1/assistant/turn=2``
             produce ``expected[("conv1", 1)]`` with ``"_assistant_turn": 2``.
         """
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
 
         rows_by_conversation: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for raw_row in self.dataset.dataframe.to_dict("records"):
@@ -1021,9 +1021,9 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
     ):
         # Note: LiveCodeBench doesn't use ground_truth_column the same way
         # but we need to pass something to the parent
-        assert (
-            ground_truth_column is None
-        ), "ground_truth_column should be None for LiveCodeBenchScorer"
+        assert ground_truth_column is None, (
+            "ground_truth_column should be None for LiveCodeBenchScorer"
+        )
         super().__init__(
             dataset_name=dataset_name,
             dataset=dataset,
@@ -1165,9 +1165,9 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
         df = df.apply(self.match_sample_index, axis=1)
 
         # Get question IDs
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
 
         def get_question_id(sample_index: int) -> str:
             assert self.dataset.dataframe is not None
@@ -1387,12 +1387,12 @@ class ShopifyCategoryF1Scorer(Scorer, scorer_id="shopify_category_f1"):
         empirical = df["output"].tolist()
 
         order = df["sample_index"].to_numpy().astype(int)
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
-        assert (
-            self.ground_truth_column in self.dataset.dataframe.columns
-        ), f"Ground truth column {self.ground_truth_column} not found in dataset"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
+        assert self.ground_truth_column in self.dataset.dataframe.columns, (
+            f"Ground truth column {self.ground_truth_column} not found in dataset"
+        )
 
         ground_truths = list(
             self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
@@ -1692,12 +1692,12 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
 
         video_paths: list[str] = df["output"].tolist()
         order = df["sample_index"].to_numpy().astype(int)
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
-        assert (
-            self.ground_truth_column in self.dataset.dataframe.columns
-        ), f"Prompt column {self.ground_truth_column} not found in dataset"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
+        assert self.ground_truth_column in self.dataset.dataframe.columns, (
+            f"Prompt column {self.ground_truth_column} not found in dataset"
+        )
         prompts: list[str] = [
             str(p)
             for p in self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
