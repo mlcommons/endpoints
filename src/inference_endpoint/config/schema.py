@@ -364,35 +364,38 @@ class SubmissionReference(BaseModel):
 
 
 class LaneSchedulerConfig(BaseModel):
-    """Balanced agentic scheduler settings (``scheduler: lanes``).
+    """Stationary agentic scheduler settings (``scheduler: lanes``).
 
-    Measured work comes from the dataset, the concurrency, the seed and a
-    per-run secret key. See ``load_generator/lane_scheduler.py``.
+    Slots start in the steady state; the measured window counts whole dataset
+    passes of issued turns. See ``load_generator/lane_scheduler.py``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    min_copies: int = Field(
-        4,
-        gt=0,
-        description="Lower bound on the dataset copies measured (one super-pass each).",
-    )
-    coding_conversations_per_slot: float = Field(
-        2.75,
-        gt=0,
-        description=(
-            "Copies are chosen so each slot runs about this many coding (SWE) "
-            "conversations: copies = max(min_copies, ceil(this x C / coding conversations))."
-        ),
-    )
     warmup_s: float = Field(
         180.0,
         ge=0,
         description=(
-            "Unmeasured seconds before measurement starts. Every slot enters a random "
-            "conversation at a random turn; warm turns give the service-time estimate "
-            "used to order the measured pool."
+            "Unmeasured seconds before the window opens. Slots enter conversations "
+            "in their steady-state proportions from the first request, so this only "
+            "warms the prefix cache and measures the issue rate that sets the passes."
         ),
+    )
+    window_s: float = Field(
+        1200.0,
+        gt=0,
+        description=(
+            "Target length of the measured window. Passes counted = "
+            "max(min_passes, ceil(window_s / pass time at the warm-up issue rate))."
+        ),
+    )
+    min_passes: int = Field(
+        1, gt=0, description="Lower bound on the dataset passes counted."
+    )
+    passes: int | None = Field(
+        None,
+        gt=0,
+        description="Count exactly this many passes instead of deriving it from window_s.",
     )
 
 

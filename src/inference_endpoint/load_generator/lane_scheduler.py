@@ -13,41 +13,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Balanced agentic scheduler (``agentic_inference.scheduler: lanes``).
+"""Stationary agentic scheduler (``agentic_inference.scheduler: lanes``).
 
-The queue scheduler hands conversations to slots from one shared start queue.
-Every slot starts at turn 1 at the same moment (a ramp), and the measured
-window closes when the queue runs dry while the longest conversations are
-still running (a tail that is never counted). This scheduler removes both and
-measures every dataset turn exactly ``copies`` times:
+The queue scheduler starts every conversation at turn 1 at the same moment (a
+ramp of short prompts that the window counts) and stops counting when its
+start queue runs dry while the longest conversations still run (late
+long-context turns that the window never counts). This scheduler starts the
+system in its steady state and measures a fixed amount of work by issue time:
 
-1. Warm-up (unmeasured, ``warmup_s``). Each of the C slots enters a randomly
-   chosen conversation at a random turn, so the server sees the context-length
-   and workload mix of steady state from the first request, and keeps drawing
-   random conversations from turn 1. Warm turns give the per-turn service time
-   of coding and workflow turns.
-2. Measurement start (one clock instant for every slot). Each slot's current
-   conversation becomes measured from its next turn as copy ``k`` of that
-   source; the turns it already ran go back into the measured pool as their
-   own segment. Every other conversation instance (``copies`` per source) is in
-   the pool. Measurement therefore starts with every slot in flight at a random
-   point of a conversation: no ramp.
-3. Run. A slot that finishes a measured segment takes the next one from the
-   shared pool, so no slot idles while measured work is left. The pool order
-   is random (from the secret key) with one constraint: an instance of
-   estimated length ``L`` is drawn to start uniformly in ``[0, T - L]``, where
-   ``T`` is the estimated measured time. Long SWE conversations therefore never
-   start so late that they finish after the rest, while the mix stays close to
-   uniform. Once the pool is empty, idle slots run unmeasured padding so the
-   server keeps C requests in flight until the last measured turn completes.
+1. Stationary start (unmeasured, ``warmup_s``). Each of the C slots enters a
+   conversation drawn with probability proportional to its estimated length,
+   at a point uniform in time within it (the equilibrium state of a renewal
+   process). The server therefore sees the steady-state mix of conversation
+   types and context lengths from the first request; the warm-up only warms
+   the prefix cache.
+2. Steady load. A slot that finishes a conversation takes the next one from a
+   shuffled deck of the whole dataset (one deck per pass), so the mix stays at
+   its steady value for the whole run. No conversation is preferred by length.
+3. Measured window. From the end of the warm-up, every turn issued is counted
+   until ``passes`` x (dataset turns) have been issued, so the counted samples
+   are a whole number of dataset passes. ``passes`` follows from the warm-up
+   issue rate: enough passes to cover ``window_s``. Later turns are issued
+   unmeasured so the counted turns complete under the same load, and the run
+   stops once every counted turn has completed. Conversations still running
+   at that point are not continued: there is no tail to wait for.
 
-Unmeasured requests are ISSUED with ``tracked=False`` and an
-``__unmeasured_<n>`` conversation id, so no metric, OSL statistic or accuracy
-score counts them. The salt's head depends only on the copy (shared by every
-conversation of that copy, so the common system prompt stays cached, as with
-the queue scheduler's salt); its tail is unique per segment. The key is
-generated at run start, never configured, and written to ``lane_plan.json``
-only after the last request.
+Every turn of the dataset is counted ``passes`` times on average; the exact
+count per turn varies because the window cuts conversations at its edges.
+Counted turns use the conversation id ``<source>__repeat_<n>`` and others
+``<source>__unmeasured_<n>``, where ``n`` numbers conversation instances, so no
+metric, OSL statistic or accuracy score counts unmeasured work. The salt's head
+depends only on the deck (shared by every conversation of a pass, so the common
+system prompt stays cached, as with the queue scheduler's salt); its tail and
+the routing key are unique per instance and never change mid-conversation.
+The key is generated at run start, never configured, and written to
+``lane_plan.json`` only after the last request.
 """
 
 from __future__ import annotations
@@ -60,13 +60,14 @@ import math
 import os
 import random
 import re
+import statistics
 import time
-from collections import deque
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..config.schema import AgenticInferenceConfig, LaneSchedulerConfig
+from ..config.schema import AgenticInferenceConfig
 from ..core.types import QueryResult
 from ..dataset_manager.agentic_inference_dataset import ConversationMetadata
 from ..exceptions import InputValidationError
@@ -80,29 +81,10 @@ logger = logging.getLogger(__name__)
 _WORKFLOW_CONVERSATION_RE = re.compile(r"^sim_\d+$")
 CODING = "coding"
 WORKFLOW = "workflow"
-# Per-turn service-time estimate before any warm turn has completed.
-_DEFAULT_SERVICE_S = 5.0
-# Fewer warm samples than this keep a flat (context-independent) estimate.
-_MIN_WARM_SAMPLES = 30
-# Pool items are drawn to start by this fraction of the estimated measured
-# time minus their own length, so an instance whose real length beats its
-# estimate still finishes with the rest. With the measured phase about twice
-# the longest instance, long instances spread over the first part of the run
-# instead of all starting at once.
-_START_MARGIN = 0.9
-
-
-def _context_chars(messages: list[dict[str, Any]]) -> int:
-    """Prompt size of one request in characters: every message's text fields."""
-    total = 0
-    for message in messages:
-        for key in ("content", "reasoning_content", "tool_calls"):
-            value = message.get(key)
-            if isinstance(value, str):
-                total += len(value)
-            elif value:
-                total += len(json.dumps(value))
-    return total
+# Per-turn service-time prior for the stationary entry weights, before any turn
+# has run. Only the relative weight of service against recorded tool delay
+# matters; GB300 C768 measured 6.3-7.2 s.
+_PRIOR_SERVICE_S = 7.0
 
 
 def conversation_domain(conversation_id: str) -> str:
@@ -110,30 +92,12 @@ def conversation_domain(conversation_id: str) -> str:
     return WORKFLOW if _WORKFLOW_CONVERSATION_RE.match(conversation_id) else CODING
 
 
-def lane_copies(
-    n_coding_conversations: int, concurrency: int, cfg: LaneSchedulerConfig
-) -> int:
-    """Dataset copies measured: about ``coding_conversations_per_slot`` coding
-    conversations per slot, never fewer than ``min_copies``. Enough measured
-    work that the run is long compared with the longest conversation."""
-    if n_coding_conversations == 0:
-        return cfg.min_copies
-    return max(
-        cfg.min_copies,
-        math.ceil(
-            cfg.coding_conversations_per_slot * concurrency / n_coding_conversations
-        ),
-    )
-
-
-def order_pool(
-    estimates: list[float], horizon_s: float, rng: random.Random
-) -> list[int]:
-    """Random start order in which item ``i`` of estimated length ``L_i`` is
-    drawn to start uniformly in ``[0, max(0, horizon_s - L_i)]``. Returns the
-    item indices sorted by that draw."""
-    keys = [rng.random() * max(0.0, horizon_s - est) for est in estimates]
-    return sorted(range(len(estimates)), key=lambda i: (keys[i], i))
+def lane_passes(window_s: float, pass_s: float | None, min_passes: int) -> int:
+    """Dataset passes to count: enough to cover ``window_s`` at ``pass_s`` per
+    pass, never fewer than ``min_passes``. Without a rate, ``min_passes``."""
+    if not pass_s or pass_s <= 0:
+        return min_passes
+    return max(min_passes, math.ceil(window_s / pass_s))
 
 
 class RunKey:
@@ -181,61 +145,34 @@ class SourceConversation:
     turns: tuple[tuple[int, int], ...]
     # Tool delay before each turn (0 when tool delay is not injected).
     delays: tuple[float, ...]
-    # Prompt size of each turn in characters (service time grows with it).
-    context_chars: tuple[int, ...]
     domain: str
 
 
 @dataclass(slots=True)
-class Segment:
-    """A contiguous run of turns ``[first, stop)`` of one conversation instance."""
+class _Instance:
+    """One run of a source conversation on a slot."""
 
     source: int
-    copy: int  # >= 1 for a measured instance, 0 for unmeasured load
-    first: int
-    stop: int
-    measured: bool
+    deck: int  # pass the instance was drawn from; 0 for stationary-entry instances
+    serial: int
     uid: str
-    logical_id: str = ""
 
 
 @dataclass(slots=True)
 class _Slot:
     index: int
-    current: Segment | None = None
+    current: _Instance | None = None
     cursor: int = 0
     inflight: str | None = None
     delay_handle: asyncio.TimerHandle | None = None
-    first_request_done: bool = False
-    measured_turns: int = 0
-    first_measured_issue_ns: int | None = None
-    last_measured_complete_ns: int | None = None
 
 
 @dataclass(slots=True)
 class _Inflight:
     slot: int
-    issue_ns: int
-    measured: bool
-    domain: str
-    context_chars: int
-    cold: bool
+    counted: bool
     conversation_id: str
     turn: int
-    segment_uid: str
-
-
-@dataclass(slots=True)
-class _SegmentTiming:
-    """Measured segment as it actually ran, for auditing the schedule."""
-
-    logical_id: str
-    first: int
-    stop: int
-    estimate_s: float
-    slot: int
-    first_issue_ns: int
-    last_complete_ns: int | None = None
 
 
 class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
@@ -268,35 +205,30 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         seed = rng_sample_index.getrandbits(64) if rng_sample_index is not None else 0
         self._key = run_key if run_key is not None else RunKey.generate(seed)
         self._sources: list[SourceConversation] = []
-        self._source_weights: list[float] = []
+        self._dataset_turns = 0
         self._slots: list[_Slot] = []
         self._lane_inflight: dict[str, _Inflight] = {}
-        self._pool: deque[Segment] = deque()
-        self._pool_order: list[list[Any]] = []
-        self._copies = 0
-        self._measured_total = 0
-        self._measured_completed = 0
-        self._measured_failed = 0
-        self._unmeasured_serial = 0
-        self._uid_counter = 0
+        self._entry_rng = self._key.rng("entry")
+        self._deck_rng = self._key.rng("deck")
+        self._deck: list[int] = []
+        self._deck_index = 0
+        self._serial = 0
         self._measuring = False
+        self._closed = False
         self._halted = False
-        # Warm (context_chars, service seconds) samples, and the fitted model
-        # service = intercept + slope * context_chars.
-        self._warm_samples: list[tuple[int, float]] = []
-        self._service_intercept_s = _DEFAULT_SERVICE_S
-        self._service_per_char_s = 0.0
-        self._warm_count = 0
-        self._horizon_s = 0.0
-        self._converted = 0
+        self._passes = 0
+        self._pass_s: float | None = None
+        self._target = 0
+        self._counted_issued = 0
+        self._counted_completed = 0
+        self._counted_failed = 0
+        self._counted_per_turn: Counter[tuple[int, int]] = Counter()
+        self._warm_completions: list[int] = []
         self._run_started_ns = 0
         self._measure_ns: int | None = None
-        self._pool_empty_ns: int | None = None
+        self._window_end_ns: int | None = None
         self._halt_ns: int | None = None
-        self._entry_rng = self._key.rng("entry")
-        self._padding_rng = self._key.rng("padding")
         self._measure_timer: asyncio.TimerHandle | None = None
-        self._segment_timing: dict[str, _SegmentTiming] = {}
 
     # ------------------------------------------------------------------ setup
 
@@ -317,79 +249,24 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                 else 0.0
                 for _idx, turn in ordered
             )
-            messages_by_key = self._dataset_metadata.pre_built_messages_by_key
-            context_chars = tuple(
-                _context_chars(messages_by_key.get((source_id, turn)) or [])
-                for _idx, turn in ordered
-            )
             self._sources.append(
                 SourceConversation(
                     source_id=source_id,
                     turns=ordered,
                     delays=delays,
-                    context_chars=context_chars,
                     domain=conversation_domain(source_id),
                 )
             )
         self._base_convs = [(s.source_id, list(s.turns)) for s in self._sources]
-        # Steady-state entry: a slot is in a source in proportion to the time
-        # that source takes, at a turn uniform over its turns.
-        self._source_weights = [
-            self._estimate(i, 0, len(s.turns)) for i, s in enumerate(self._sources)
-        ]
+        self._dataset_turns = sum(len(s.turns) for s in self._sources)
 
-    def _validate_copies(self) -> None:
-        n_coding = sum(1 for s in self._sources if s.domain == CODING)
-        self._copies = lane_copies(n_coding, self._concurrency, self._cfg)
-        requested = self._num_trajectories_to_issue
-        expected = self._copies * len(self._sources)
-        if requested is not None and requested != expected:
+    def _validate_config(self) -> None:
+        if self._num_trajectories_to_issue is not None:
             raise InputValidationError(
-                f"scheduler: lanes measures {self._copies} copies at concurrency "
-                f"{self._concurrency} ({expected} trajectories); set "
-                f"num_trajectories_to_issue to {expected} or omit it (got {requested})"
+                "scheduler: lanes counts whole dataset passes chosen from the "
+                "measured issue rate; omit num_trajectories_to_issue "
+                f"(got {self._num_trajectories_to_issue})"
             )
-        self._measured_total = self._copies * sum(len(s.turns) for s in self._sources)
-
-    def _estimate(self, source: int, first: int, stop: int) -> float:
-        src = self._sources[source]
-        return (
-            sum(src.delays[first:stop])
-            + self._service_intercept_s * (stop - first)
-            + self._service_per_char_s * sum(src.context_chars[first:stop])
-        )
-
-    def _fit_service_model(self) -> None:
-        """Least-squares service = intercept + slope * context_chars over warm
-        turns. Long-context turns cost more; a per-domain mean would make long
-        SWE conversations look short and start them too late."""
-        samples = self._warm_samples
-        self._warm_count = len(samples)
-        if len(samples) < _MIN_WARM_SAMPLES:
-            if samples:
-                self._service_intercept_s = sum(s for _x, s in samples) / len(samples)
-            return
-        n = len(samples)
-        mx = sum(x for x, _s in samples) / n
-        my = sum(s for _x, s in samples) / n
-        sxx = sum((x - mx) ** 2 for x, _s in samples)
-        sxy = sum((x - mx) * (s - my) for x, s in samples)
-        slope = max(0.0, sxy / sxx) if sxx > 0 else 0.0
-        self._service_per_char_s = slope
-        self._service_intercept_s = max(0.0, my - slope * mx)
-
-    def _segment(
-        self, source: int, copy: int, first: int, stop: int, measured: bool
-    ) -> Segment:
-        self._uid_counter += 1
-        return Segment(
-            source=source,
-            copy=copy,
-            first=first,
-            stop=stop,
-            measured=measured,
-            uid=f"seg:{self._uid_counter}",
-        )
 
     # -------------------------------------------------------------- execution
 
@@ -404,27 +281,25 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         if not self._sources:
             return phase_issuer.issued_count
         self._validate_salt_system_prompts()
-        self._validate_copies()
+        self._validate_config()
         self._write_json(
             "lane_commitment.json",
             {"secret_sha256": self._key.commitment, "seed": self._key.seed},
         )
         logger.info(
-            "Lane scheduler: %d copies, %d measured turns over %d slots; "
-            "run key commitment sha256=%s",
-            self._copies,
-            self._measured_total,
+            "Lane scheduler: stationary start over %d slots, %d dataset turns per "
+            "pass; run key commitment sha256=%s",
             self._concurrency,
+            self._dataset_turns,
             self._key.commitment,
         )
         self._slots = [_Slot(index=j) for j in range(self._concurrency)]
         try:
             for slot in self._slots:
-                slot.current = self._entry_segment()
-                slot.cursor = self._entry_cursor(slot.current)
-                self._advance(slot, first=True)
+                slot.current, slot.cursor = self._stationary_entry()
+                self._issue(slot)
             self._measure_timer = self._loop.call_later(
-                self._cfg.warmup_s, self._start_measurement_safely
+                self._cfg.warmup_s, self._start_window_safely
             )
             await self._all_done.wait()
             if self._error is not None:
@@ -442,141 +317,85 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             self._timeout_handles.clear()
             self._write_plan()
 
-    def _entry_segment(self) -> Segment:
-        source = self._entry_rng.choices(
-            range(len(self._sources)), weights=self._source_weights
-        )[0]
-        segment = self._segment(
-            source, 0, 0, len(self._sources[source].turns), measured=False
+    def _new_instance(self, source: int, deck: int) -> _Instance:
+        self._serial += 1
+        return _Instance(
+            source=source, deck=deck, serial=self._serial, uid=f"i{self._serial}"
         )
-        segment.logical_id = self._logical_id(segment)
-        return segment
 
-    def _entry_cursor(self, segment: Segment) -> int:
-        return self._entry_rng.randrange(segment.stop)
+    def _stationary_entry(self) -> tuple[_Instance, int]:
+        """A conversation in proportion to its length, at a point uniform in
+        time: turn ``k`` with weight (service + tool delay before it)."""
+        weights = [
+            _PRIOR_SERVICE_S * len(s.turns) + sum(s.delays) for s in self._sources
+        ]
+        source = self._entry_rng.choices(range(len(self._sources)), weights=weights)[0]
+        src = self._sources[source]
+        cursor = self._entry_rng.choices(
+            range(len(src.turns)), weights=[_PRIOR_SERVICE_S + d for d in src.delays]
+        )[0]
+        return self._new_instance(source, deck=0), cursor
 
-    def _start_measurement_safely(self) -> None:
+    def _next_instance(self) -> _Instance:
+        if not self._deck:
+            self._deck_index += 1
+            self._deck = list(range(len(self._sources)))
+            self._deck_rng.shuffle(self._deck)
+        return self._new_instance(self._deck.pop(), deck=self._deck_index)
+
+    def _start_window_safely(self) -> None:
         self._measure_timer = None
         try:
-            self._start_measurement()
+            self._start_window()
         except Exception as exc:
-            logger.exception("Lane scheduler: could not start measurement")
+            logger.exception("Lane scheduler: could not start the measured window")
             self._error = exc
             if self._all_done is not None:
                 self._all_done.set()
 
-    def _start_measurement(self) -> None:
+    def _start_window(self) -> None:
         if self._halted or self._stopping:
             return
         now = time.monotonic_ns()
-        self._measure_ns = now
-        self._fit_service_model()
-        self._warm_samples.clear()
-
-        rng = self._key.rng("measure")
-        free = {s: list(range(1, self._copies + 1)) for s in range(len(self._sources))}
-        heads: list[Segment] = []
-        running_est = 0.0
-        # Every slot measures from its next turn: its current conversation
-        # becomes copy k of that source, and the turns it already ran go back
-        # into the pool as their own measured segment.
-        for slot in self._slots:
-            segment = slot.current
-            if (
-                segment is None
-                or slot.cursor >= segment.stop
-                or not free[segment.source]
-            ):
-                # Nothing to convert (its conversation ends with the in-flight
-                # turn, or every copy of the source is already taken): drop the
-                # unmeasured conversation so the slot takes measured work next.
-                slot.current = None
-                if slot.delay_handle is not None:
-                    slot.delay_handle.cancel()
-                    slot.delay_handle = None
-                continue
-            copy = free[segment.source].pop(rng.randrange(len(free[segment.source])))
-            remainder = self._segment(
-                segment.source, copy, slot.cursor, segment.stop, measured=True
+        # Issue rate over the second half of the warm-up (the first half holds
+        # the cold prefills of the stationary entry).
+        half = now - int(self._cfg.warmup_s * 1e9 / 2)
+        recent = sum(1 for t in self._warm_completions if t >= half)
+        span_s = (now - half) / 1e9
+        if self._cfg.passes is not None:
+            self._passes = self._cfg.passes
+        else:
+            self._pass_s = (
+                self._dataset_turns * span_s / recent if recent and span_s > 0 else None
             )
-            remainder.logical_id = self._logical_id(remainder)
-            slot.current = remainder
-            running_est += self._estimate(segment.source, slot.cursor, segment.stop)
-            if slot.cursor > 0:
-                heads.append(
-                    self._segment(segment.source, copy, 0, slot.cursor, measured=True)
-                )
-            self._converted += 1
-        items = heads + [
-            self._segment(s, copy, 0, len(self._sources[s].turns), measured=True)
-            for s, copies in free.items()
-            for copy in copies
-        ]
-        estimates = [self._estimate(seg.source, seg.first, seg.stop) for seg in items]
-        self._horizon_s = (running_est + sum(estimates)) / self._concurrency
-        self._pool = deque(
-            items[i]
-            for i in order_pool(estimates, _START_MARGIN * self._horizon_s, rng)
-        )
-        self._pool_order = [
-            [self._sources[seg.source].source_id, seg.copy, seg.first, seg.stop]
-            for seg in self._pool
-        ]
+            self._passes = lane_passes(
+                self._cfg.window_s, self._pass_s, self._cfg.min_passes
+            )
+        self._warm_completions.clear()
+        self._target = self._passes * self._dataset_turns
+        self._measure_ns = now
         self._measuring = True
         logger.info(
-            "Lane scheduler: measurement started; service = %.3fs + %.3fs per 10k "
-            "prompt chars (n=%d warm turns); %d slots measure from their next turn, "
-            "%d segments pooled, estimated %.0fs",
-            self._service_intercept_s,
-            self._service_per_char_s * 1e4,
-            self._warm_count,
-            self._converted,
-            len(self._pool),
-            self._horizon_s,
+            "Lane scheduler: window open; %s s per pass from the warm-up, counting "
+            "%d passes (%d turns)",
+            "-" if self._pass_s is None else f"{self._pass_s:.0f}",
+            self._passes,
+            self._target,
         )
-        # A slot whose conversation ended with its in-flight turn, or that is
-        # waiting out a tool delay before a new unmeasured conversation, starts
-        # measured work now rather than finishing the unmeasured one.
-        for slot in self._slots:
-            if slot.inflight is None and slot.delay_handle is None:
-                self._advance(slot, first=True)
 
     # ------------------------------------------------------------ slot logic
 
-    def _logical_id(self, segment: Segment) -> str:
-        source_id = self._sources[segment.source].source_id
-        if segment.measured:
-            return (
-                source_id
-                if segment.copy == 1
-                else f"{source_id}__repeat_{segment.copy}"
-            )
-        self._unmeasured_serial += 1
-        return f"{source_id}__unmeasured_{self._unmeasured_serial}"
-
-    def _next_segment(self) -> Segment:
-        if self._measuring and self._pool:
-            segment = self._pool.popleft()
-            if not self._pool:
-                self._pool_empty_ns = time.monotonic_ns()
-        else:
-            source = self._padding_rng.randrange(len(self._sources))
-            segment = self._segment(
-                source, 0, 0, len(self._sources[source].turns), measured=False
-            )
-        segment.logical_id = self._logical_id(segment)
-        return segment
-
-    def _advance(self, slot: _Slot, first: bool = False) -> None:
-        """Schedule the slot's next turn (after its tool delay)."""
+    def _advance(self, slot: _Slot) -> None:
+        """Schedule the slot's next turn after its tool delay; a finished
+        conversation is replaced by the next one from the deck."""
         if self._halted or self._stopping:
             return
-        segment = slot.current
-        if segment is None or slot.cursor >= segment.stop:
-            segment = self._next_segment()
-            slot.current = segment
-            slot.cursor = segment.first
-        delay = 0.0 if first else self._sources[segment.source].delays[slot.cursor]
+        instance = slot.current
+        if instance is None or slot.cursor >= len(self._sources[instance.source].turns):
+            slot.current = self._next_instance()
+            slot.cursor = 0
+        assert slot.current is not None
+        delay = self._sources[slot.current.source].delays[slot.cursor]
         if delay > 0.0:
             assert self._loop is not None
             slot.delay_handle = self._loop.call_later(delay, self._issue_safely, slot)
@@ -597,48 +416,42 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         if self._halted or self._stopping:
             self._signal_done_if_idle()
             return
-        segment = slot.current
-        assert segment is not None and self._phase_issuer is not None
-        source = self._sources[segment.source]
+        instance = slot.current
+        assert instance is not None and self._phase_issuer is not None
+        source = self._sources[instance.source]
         idx, turn = source.turns[slot.cursor]
-        cold = slot.cursor == segment.first
+        counted = self._measuring and not self._closed
+        conversation_id = f"{source.source_id}__{'repeat' if counted else 'unmeasured'}_{instance.serial}"
         query_id = self._phase_issuer.issue(
             idx,
             data_override=self._salted_override(
-                source.source_id, turn, segment.copy, segment.uid
+                source.source_id, turn, instance.deck, instance.uid
             ),
-            conversation_id=segment.logical_id,
+            conversation_id=conversation_id,
             turn=turn,
-            routing_key=self._key.digest("route", segment.uid, 16),
-            tracked=segment.measured,
+            routing_key=self._key.digest("route", instance.uid, 16),
+            tracked=counted,
         )
         if query_id is None:
             self._request_stop_issuing()
             return
-        now = time.monotonic_ns()
+        if counted:
+            self._counted_issued += 1
+            self._counted_per_turn[(instance.source, slot.cursor)] += 1
+            if self._counted_issued >= self._target:
+                self._closed = True
+                self._window_end_ns = time.monotonic_ns()
+                logger.info(
+                    "Lane scheduler: window closed after %d counted turns",
+                    self._counted_issued,
+                )
         slot.cursor += 1
         slot.inflight = query_id
-        if segment.measured and slot.first_measured_issue_ns is None:
-            slot.first_measured_issue_ns = now
-        if segment.measured and segment.uid not in self._segment_timing:
-            self._segment_timing[segment.uid] = _SegmentTiming(
-                logical_id=segment.logical_id,
-                first=segment.first,
-                stop=segment.stop,
-                estimate_s=self._estimate(segment.source, segment.first, segment.stop),
-                slot=slot.index,
-                first_issue_ns=now,
-            )
         self._lane_inflight[query_id] = _Inflight(
             slot=slot.index,
-            issue_ns=now,
-            measured=segment.measured,
-            domain=source.domain,
-            context_chars=source.context_chars[slot.cursor - 1],
-            cold=cold,
-            conversation_id=segment.logical_id,
+            counted=counted,
+            conversation_id=conversation_id,
             turn=turn,
-            segment_uid=segment.uid,
         )
         assert self._loop is not None
         self._timeout_handles[query_id] = self._loop.call_later(
@@ -646,7 +459,7 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         )
 
     def _salted_override(
-        self, source_id: str, turn: int, copy: int, uid: str
+        self, source_id: str, turn: int, deck: int, uid: str
     ) -> dict[str, Any]:
         messages = self._dataset_metadata.pre_built_messages_by_key.get(
             (source_id, turn)
@@ -661,11 +474,11 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                 message.get("content"), str
             ):
                 # Same shape as the queue scheduler's salt: the head depends only
-                # on the copy, so every conversation of a copy shares the cached
+                # on the deck, so every conversation of a pass shares the cached
                 # system-prompt prefix (500 workflow conversations share one
-                # ~127k-character prompt). The tail is unique per segment, so
+                # ~127k-character prompt). The tail is unique per instance, so
                 # conversation histories never reuse another instance's cache.
-                head = self._key.digest("salt-head", str(copy))
+                head = self._key.digest("salt-head", str(deck))
                 tail = self._key.digest("salt-tail", uid)
                 message["content"] = (
                     f"[salt: {head}]\n\n{message['content']}\n\n[salt: {tail}]"
@@ -719,18 +532,13 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         now = time.monotonic_ns()
         slot = self._slots[info.slot]
         slot.inflight = None
-        first = not slot.first_request_done
-        slot.first_request_done = True
-        if not self._measuring and not info.cold and not first and not failed:
-            self._warm_samples.append((info.context_chars, (now - info.issue_ns) / 1e9))
-        if info.measured:
-            self._measured_completed += 1
-            slot.measured_turns += 1
-            slot.last_measured_complete_ns = now
-            self._segment_timing[info.segment_uid].last_complete_ns = now
+        if not self._measuring:
+            self._warm_completions.append(now)
+        if info.counted:
+            self._counted_completed += 1
             if failed:
-                self._measured_failed += 1
-            if self._measured_completed >= self._measured_total:
+                self._counted_failed += 1
+            if self._closed and self._counted_completed >= self._target:
                 self._halt(now)
         if self._halted or self._stopping:
             self._signal_done_if_idle()
@@ -738,6 +546,7 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._advance(slot)
 
     def _halt(self, now_ns: int) -> None:
+        """Every counted turn has completed: stop issuing and drain."""
         if self._halted:
             return
         self._halted = True
@@ -746,9 +555,8 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             if slot.delay_handle is not None:
                 slot.delay_handle.cancel()
                 slot.delay_handle = None
-        logger.info(
-            "Lane scheduler: all %d measured turns complete", self._measured_total
-        )
+        logger.info("Lane scheduler: all %d counted turns complete", self._target)
+        self._signal_done_if_idle()
 
     def _request_stop_issuing(self) -> None:
         self._stopping = True
@@ -770,74 +578,56 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._report_dir.mkdir(parents=True, exist_ok=True)
         (self._report_dir / name).write_text(json.dumps(payload, indent=2) + "\n")
 
+    def _coverage(self) -> dict[str, Any]:
+        counts = [
+            self._counted_per_turn.get((i, k), 0)
+            for i, s in enumerate(self._sources)
+            for k in range(len(s.turns))
+        ]
+        if not counts:
+            return {}
+        mean = statistics.fmean(counts)
+        return {
+            "dataset_turns": len(counts),
+            "mean_times_counted": mean,
+            "min_times_counted": min(counts),
+            "max_times_counted": max(counts),
+            "cv_times_counted": statistics.pstdev(counts) / mean if mean else None,
+            "turns_never_counted": sum(1 for c in counts if c == 0),
+        }
+
     def plan_metadata(self) -> dict[str, Any]:
         """Everything needed to audit the run, key included."""
-        starts = [
-            s.first_measured_issue_ns
-            for s in self._slots
-            if s.first_measured_issue_ns is not None
-        ]
-        ends = [
-            s.last_measured_complete_ns
-            for s in self._slots
-            if s.last_measured_complete_ns is not None
-        ]
 
         def seconds(a: int | None, b: int | None) -> float | None:
             return (b - a) / 1e9 if a is not None and b is not None else None
 
         return {
             "scheduler": "lanes",
+            "design": "stationary start, fixed counted passes",
             "secret_hex": self._key.secret.hex(),
             "secret_sha256": self._key.commitment,
             "seed": self._key.seed,
             "concurrency": self._concurrency,
-            "copies": self._copies,
-            "measured_turns_expected": self._measured_total,
-            "measured_turns_completed": self._measured_completed,
-            "measured_turns_failed": self._measured_failed,
+            "passes": self._passes,
+            "pass_s_from_warmup": self._pass_s,
+            "measured_turns_expected": self._target,
+            "measured_turns_completed": self._counted_completed,
+            "measured_turns_failed": self._counted_failed,
             "config": self._cfg.model_dump(),
-            "service_model": {
-                "intercept_s": self._service_intercept_s,
-                "per_10k_chars_s": self._service_per_char_s * 1e4,
-                "warm_samples": self._warm_count,
-            },
             "clock": "time.monotonic_ns, same clock as events.jsonl",
             "run_started_ns": self._run_started_ns,
             "measure_ns": self._measure_ns,
-            "pool_empty_ns": self._pool_empty_ns,
+            "window_end_ns": self._window_end_ns,
             "halt_ns": self._halt_ns,
-            "estimated_measured_s": self._horizon_s,
+            # Issue-time span of the counted turns (the throughput denominator)
+            # and the time until the last of them completed.
+            "issue_window_s": seconds(self._measure_ns, self._window_end_ns),
             "measured_phase_s": seconds(self._measure_ns, self._halt_ns),
-            "tail_after_pool_empty_s": seconds(self._pool_empty_ns, self._halt_ns),
-            "slots_measured_from_next_turn": self._converted,
-            "measured_start_spread_s": (max(starts) - min(starts)) / 1e9
-            if starts
-            else None,
-            "measured_finish_spread_s": (max(ends) - min(ends)) / 1e9 if ends else None,
-            "pool_order": self._pool_order,
-            # Measured segments as run; offsets in seconds from measurement start.
-            "segments": [
-                {
-                    "conversation_id": t.logical_id,
-                    "first_turn": t.first,
-                    "stop_turn": t.stop,
-                    "slot": t.slot,
-                    "estimate_s": t.estimate_s,
-                    "start_s": seconds(self._measure_ns, t.first_issue_ns),
-                    "end_s": seconds(self._measure_ns, t.last_complete_ns),
-                }
-                for t in self._segment_timing.values()
-            ],
-            "slots": [
-                {
-                    "slot": s.index,
-                    "measured_turns": s.measured_turns,
-                    "first_measured_issue_ns": s.first_measured_issue_ns,
-                    "last_measured_complete_ns": s.last_measured_complete_ns,
-                }
-                for s in self._slots
-            ],
+            "drain_after_window_s": seconds(self._window_end_ns, self._halt_ns),
+            "decks_drawn": self._deck_index,
+            "conversation_instances": self._serial,
+            "coverage": self._coverage(),
         }
 
     def _write_plan(self) -> None:

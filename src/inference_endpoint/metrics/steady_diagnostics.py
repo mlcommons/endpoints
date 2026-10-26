@@ -26,9 +26,10 @@ modes the lane scheduler is meant to remove:
 - ``mix``: coding share of requests in flight, per minute of the window.
 - ``osl``: mean output length of counted vs all requests.
 - ``throughput``: counted output tokens per second over the window, and (lanes)
-  over the measured phase and over its full-load part (measurement start until
-  the measured pool empties), which excludes the end-of-run tail.
-- ``coverage`` (lanes): how many times each dataset turn was counted.
+  over the measured phase and over the issue window (window open until the
+  last counted turn was issued), which excludes the drain of in-flight turns.
+- ``coverage`` (lanes): how many times each dataset turn was counted (the mean
+  is the number of passes; individual turns vary at the window's edges).
 - ``fairness`` (lanes): TTFT / TPOT of counted vs uncounted requests completing
   in the same minute. A server that recognises and deprioritises padding shows
   up here as a ratio away from 1.
@@ -319,37 +320,25 @@ def analyse(
         out["throughput"]["measured_phase_tokens_per_s"] = (
             tokens / measured_phase_s if measured_phase_s else None
         )
-        # Full load: measurement start until the pool empties, while every slot
-        # still has measured work. The rest of the window is the tail, where
-        # slots finish their last measured conversation alongside unmeasured
-        # padding. Same monotonic clock as events.jsonl.
-        start_ns = lane_plan.get("measure_ns")
-        pool_empty_ns = lane_plan.get("pool_empty_ns")
-        if (
-            start_ns is not None
-            and pool_empty_ns is not None
-            and pool_empty_ns > start_ns
-        ):
-            full_load_tokens = sum(
-                r[6] for r in counted if r[6] and start_ns <= r[2] <= pool_empty_ns
-            )
-            full_load_s = (pool_empty_ns - start_ns) / 1e9
-            out["throughput"]["full_load_tokens_per_s"] = full_load_tokens / full_load_s
-            out["throughput"]["full_load_duration_s"] = full_load_s
+        # Issue window: counted output tokens over the span in which the counted
+        # turns were issued (window open to the last counted issue). Every counted
+        # turn completes, so its tokens are known.
+        issue_window_s = lane_plan.get("issue_window_s")
+        if issue_window_s:
+            out["throughput"]["issue_window_tokens_per_s"] = tokens / issue_window_s
+            out["throughput"]["issue_window_s"] = issue_window_s
         out["lanes"] = {
             key: lane_plan.get(key)
             for key in (
-                "copies",
-                "service_model",
-                "estimated_measured_s",
+                "passes",
+                "pass_s_from_warmup",
+                "issue_window_s",
                 "measured_phase_s",
-                "tail_after_pool_empty_s",
-                "measured_start_spread_s",
-                "measured_finish_spread_s",
-                "slots_measured_from_next_turn",
+                "drain_after_window_s",
                 "measured_turns_expected",
                 "measured_turns_completed",
                 "measured_turns_failed",
+                "coverage",
             )
         }
         # Coverage: counted turns per (source, turn) and per (source, copy, turn).
@@ -367,7 +356,7 @@ def analyse(
             "min_times_counted": min(counts) if counts else 0,
             "max_times_counted": max(counts) if counts else 0,
             "duplicate_instance_turns": sum(1 for n in per_key.values() if n > 1),
-            "expected_times": lane_plan.get("copies"),
+            "expected_mean_times": lane_plan.get("passes"),
         }
         # Fairness: counted vs uncounted completing in the same minute.
         by_bin: dict[int, tuple[list[list[Any]], list[list[Any]]]] = defaultdict(

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Balanced agentic scheduler: coverage, start alignment, ordering, tagging and secrecy."""
+"""Stationary agentic scheduler: window size, entry state, deck order, tagging and secrecy."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import hashlib
 import json
 import random
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import pytest
@@ -36,19 +36,19 @@ from inference_endpoint.dataset_manager.agentic_inference_dataset import (
 from inference_endpoint.exceptions import InputValidationError
 from inference_endpoint.load_generator.lane_scheduler import (
     LaneAgenticInferenceStrategy,
-    lane_copies,
-    order_pool,
+    lane_passes,
 )
 
 pytestmark = pytest.mark.unit
 
 _SALT_RE = re.compile(r"^\[salt: ([0-9a-f]+)\]\n\n.*\n\n\[salt: ([0-9a-f]+)\]$", re.S)
+_CONV_RE = re.compile(r"^(.*)__(repeat|unmeasured)_(\d+)$")
 
 
 def _metadata(
-    conversations: dict[str, int], delay: float = 0.0
+    conversations: dict[str, int], delays: dict[str, float] | None = None
 ) -> ConversationMetadata:
-    samples, messages, delays = [], {}, {}
+    samples, messages, delay_map = [], {}, {}
     index = 0
     for conv_id, n_turns in conversations.items():
         for turn in range(1, n_turns + 1):
@@ -61,8 +61,8 @@ def _metadata(
                 {"role": "system", "content": f"system {conv_id}"},
                 {"role": "user", "content": f"turn {turn}"},
             ]
-            if delay:
-                delays[(conv_id, turn)] = delay
+            if delays and conv_id in delays:
+                delay_map[(conv_id, turn)] = delays[conv_id]
             index += 1
     return ConversationMetadata(
         samples=samples,
@@ -70,7 +70,7 @@ def _metadata(
         max_turns_per_conv=max(conversations.values()),
         client_turns_per_conversation=dict(conversations),
         pre_built_messages_by_key=messages,
-        delay_seconds_by_key=delays,
+        delay_seconds_by_key=delay_map,
     )
 
 
@@ -79,6 +79,7 @@ _DATASET = {
     **{f"repo__issue-{i}": 9 + i for i in range(4)},
     **{f"sim_{i}": 2 + i % 3 for i in range(12)},
 }
+_DATASET_TURNS = sum(_DATASET.values())
 
 
 class LoopIssuer:
@@ -105,10 +106,13 @@ class LoopIssuer:
     ):
         query_id = f"q{self.issued_count}"
         self.issued_count += 1
+        source, kind, serial = _CONV_RE.match(conversation_id).groups()
         self.records.append(
             {
                 "qid": query_id,
-                "conv": conversation_id,
+                "source": source,
+                "kind": kind,
+                "serial": int(serial),
                 "turn": turn,
                 "tracked": tracked,
                 "route": routing_key,
@@ -136,11 +140,26 @@ class LoopIssuer:
         pass
 
 
-def _config(**lanes) -> AgenticInferenceConfig:
-    defaults = {"min_copies": 3, "warmup_s": 0.01}
+def _config(inject_tool_delay: bool = False, **lanes) -> AgenticInferenceConfig:
+    defaults = {"warmup_s": 0.02, "passes": 3}
     defaults.update(lanes)
     return AgenticInferenceConfig(
-        enable_salt=True, scheduler="lanes", lanes=LaneSchedulerConfig(**defaults)
+        enable_salt=True,
+        scheduler="lanes",
+        inject_tool_delay=inject_tool_delay,
+        lanes=LaneSchedulerConfig(**defaults),
+    )
+
+
+def _strategy(
+    tmp_path: Path, concurrency: int, dataset=None, delays=None, **lanes
+) -> LaneAgenticInferenceStrategy:
+    return LaneAgenticInferenceStrategy(
+        dataset_metadata=_metadata(dataset or _DATASET, delays),
+        agentic_inference_config=_config(inject_tool_delay=bool(delays), **lanes),
+        target_concurrency=concurrency,
+        rng_sample_index=random.Random(42),
+        report_dir=tmp_path,
     )
 
 
@@ -148,94 +167,91 @@ def _run(
     tmp_path: Path, concurrency: int = 4, issuer: LoopIssuer | None = None, **lanes
 ) -> tuple[LoopIssuer, dict]:
     issuer = issuer or LoopIssuer()
-    strategy = LaneAgenticInferenceStrategy(
-        dataset_metadata=_metadata(_DATASET),
-        agentic_inference_config=_config(**lanes),
-        target_concurrency=concurrency,
-        rng_sample_index=random.Random(42),
-        report_dir=tmp_path,
-    )
+    strategy = _strategy(tmp_path, concurrency, **lanes)
     issuer.strategy = strategy
     asyncio.run(asyncio.wait_for(strategy.execute(issuer), timeout=60))
     return issuer, json.loads((tmp_path / "lane_plan.json").read_text())
 
 
-def _source(conv: str) -> tuple[str, str, int]:
-    match = re.search(r"__(repeat|unmeasured)_(\d+)$", conv)
-    return (
-        (conv, "repeat", 1)
-        if match is None
-        else (conv[: match.start()], match.group(1), int(match.group(2)))
-    )
-
-
-def test_every_dataset_turn_is_measured_exactly_copies_times(tmp_path: Path) -> None:
+def test_window_counts_whole_passes_issued_in_one_contiguous_stretch(
+    tmp_path: Path,
+) -> None:
     issuer, plan = _run(tmp_path)
-    copies = plan["copies"]
-    measured = Counter()
-    for rec in issuer.records:
-        if rec["tracked"]:
-            source, kind, copy = _source(rec["conv"])
-            assert kind == "repeat"
-            measured[(source, copy, rec["turn"])] += 1
-    expected = {
-        (c, k, t)
-        for c, n in _DATASET.items()
-        for k in range(1, copies + 1)
-        for t in range(1, n + 1)
-    }
-    assert set(measured) == expected
-    assert set(measured.values()) == {1}
-    assert (
-        plan["measured_turns_completed"]
-        == plan["measured_turns_expected"]
-        == len(expected)
+    tracked = [i for i, r in enumerate(issuer.records) if r["tracked"]]
+    assert plan["passes"] == 3
+    assert len(tracked) == 3 * _DATASET_TURNS == plan["measured_turns_expected"]
+    assert plan["measured_turns_completed"] == plan["measured_turns_expected"]
+    # Nothing outside the window counts: once a turn goes out unmeasured after
+    # the window opened, no later turn is counted again.
+    assert all(issuer.records[i]["tracked"] for i in range(tracked[0], tracked[-1] + 1))
+    assert all(
+        r["kind"] == ("repeat" if r["tracked"] else "unmeasured")
+        for r in issuer.records
     )
+    # Each counted turn is one (instance, turn); an instance's counted turns are
+    # consecutive, starting where the window found it.
+    by_instance: dict[int, list[int]] = defaultdict(list)
+    for r in issuer.records:
+        if r["tracked"]:
+            by_instance[r["serial"]].append(r["turn"])
+    for turns in by_instance.values():
+        assert turns == list(range(turns[0], turns[0] + len(turns)))
+    assert plan["coverage"]["mean_times_counted"] == pytest.approx(3)
 
 
-def test_unmeasured_load_is_tagged_and_never_uses_measured_ids(tmp_path: Path) -> None:
-    issuer, _plan = _run(tmp_path)
-    unmeasured = [r for r in issuer.records if not r["tracked"]]
-    assert unmeasured, "calibration and warm-up issue unmeasured load"
-    assert all("__unmeasured_" in r["conv"] for r in unmeasured)
-    assert all("__unmeasured_" not in r["conv"] for r in issuer.records if r["tracked"])
+def test_slots_enter_mid_conversation_in_proportion_to_length(tmp_path: Path) -> None:
+    """The stationary entry picks a conversation by its duration and a turn
+    uniform in time, so slots start spread over every turn position, weighted
+    to long conversations and to turns preceded by long tool delays."""
+    dataset = {"long": 10, "short": 2}
+    strategy = _strategy(tmp_path, 1, dataset=dataset, delays={"short": 63.0})
+    strategy._load_sources()
+    entries = Counter()
+    n = 20000
+    for _ in range(n):
+        instance, cursor = strategy._stationary_entry()
+        entries[(strategy._sources[instance.source].source_id, cursor)] += 1
+    # Weights: long = 10 turns x 7 s = 70; short = 2 x (7 + 63) = 140.
+    long_share = sum(v for (s, _), v in entries.items() if s == "long") / n
+    assert long_share == pytest.approx(70 / 210, abs=0.02)
+    # Uniform in time within "long": every turn equally likely, not just turn 1.
+    long_turns = [entries[("long", k)] for k in range(10)]
+    assert min(long_turns) > 0.7 * max(long_turns)
+
+
+def test_later_conversations_come_from_a_shuffled_deck(tmp_path: Path) -> None:
+    """After entry, every source is drawn once per pass whatever its length:
+    starts per source differ by at most one deck."""
+    issuer, plan = _run(tmp_path, concurrency=4)
+    entry_serials = set(range(1, 5))
+    starts = Counter(
+        r["source"]
+        for r in issuer.records
+        if r["turn"] == 1 and r["serial"] not in entry_serials
+    )
+    assert set(starts) == set(_DATASET)
+    assert max(starts.values()) - min(starts.values()) <= 1
+    assert plan["decks_drawn"] >= 3
 
 
 def test_salts_and_routing_keys_are_keyed_and_opaque(tmp_path: Path) -> None:
     issuer, plan = _run(tmp_path)
-    by_conv: dict[str, set[tuple[str, str]]] = {}
+    by_instance: dict[int, set[tuple[str, str, str]]] = defaultdict(set)
     for rec in issuer.records:
         match = _SALT_RE.match(rec["system"])
         assert match is not None
-        by_conv.setdefault(rec["conv"], set()).add(match.groups())
-        assert len(rec["route"]) == 32 and _source(rec["conv"])[0] not in rec["route"]
-    # A measured instance and its unmeasured duplicates never share a salt.
-    salts = [salt for conv, pairs in by_conv.items() for salt in pairs]
-    unmeasured = {
-        s for conv, pairs in by_conv.items() if "__unmeasured_" in conv for s in pairs
-    }
-    measured = {
-        s
-        for conv, pairs in by_conv.items()
-        if "__unmeasured_" not in conv
-        for s in pairs
-    }
-    assert not unmeasured & measured
-    assert len(salts) == len(set(salts))
-    # The head salt depends only on the copy, so every conversation of a copy
-    # shares the cached system-prompt prefix (the reference salt's shape); the
-    # tail separates instances. A per-instance head made every conversation
-    # re-prefill the shared system prompt and collapsed the prefix-cache hit rate.
-    heads_by_copy: dict[object, set[str]] = {}
-    tail_owner: dict[str, str] = {}
-    for conv, pairs in by_conv.items():
-        source, kind, copy = _source(conv)
-        group = "unmeasured" if kind == "unmeasured" else copy
-        for head, tail in pairs:
-            heads_by_copy.setdefault(group, set()).add(head)
-            assert tail_owner.setdefault(tail, conv) == conv
-    assert all(len(heads) == 1 for heads in heads_by_copy.values())
-    assert len({next(iter(h)) for h in heads_by_copy.values()}) == len(heads_by_copy)
+        by_instance[rec["serial"]].add((*match.groups(), rec["route"]))
+        assert len(rec["route"]) == 32 and rec["source"] not in rec["route"]
+    # One salt and one routing key per instance for its whole life, including
+    # across the window opening, so its prefix cache carries over.
+    assert all(len(v) == 1 for v in by_instance.values())
+    tails = [next(iter(v))[1] for v in by_instance.values()]
+    routes = [next(iter(v))[2] for v in by_instance.values()]
+    assert len(set(tails)) == len(tails) and len(set(routes)) == len(routes)
+    # The head is shared per deck (cached system prompt), so far fewer heads
+    # than instances.
+    heads = {next(iter(v))[0] for v in by_instance.values()}
+    assert len(heads) <= plan["decks_drawn"] + 1 < len(by_instance)
     assert (
         plan["secret_sha256"]
         == hashlib.sha256(bytes.fromhex(plan["secret_hex"])).hexdigest()
@@ -249,7 +265,6 @@ def test_two_runs_draw_different_secret_plans(tmp_path: Path) -> None:
     _a, plan_a = _run(tmp_path / "a")
     _b, plan_b = _run(tmp_path / "b")
     assert plan_a["secret_hex"] != plan_b["secret_hex"]
-    assert plan_a["copies"] == plan_b["copies"]
 
 
 def test_failed_measured_turns_still_complete_the_run(tmp_path: Path) -> None:
@@ -258,14 +273,37 @@ def test_failed_measured_turns_still_complete_the_run(tmp_path: Path) -> None:
     assert plan["measured_turns_failed"] > 0
 
 
-def test_rejects_trajectory_count_that_disagrees_with_the_copy_rule(
-    tmp_path: Path,
-) -> None:
+def test_passes_follow_the_warmup_issue_rate(tmp_path: Path) -> None:
+    """Without a fixed count the window covers about window_s at the rate seen
+    in the warm-up; slower turns mean fewer passes."""
+    fast, plan_fast = _run(tmp_path / "f", passes=None, warmup_s=0.2, window_s=0.5)
+    slow, plan_slow = _run(
+        tmp_path / "s",
+        issuer=LoopIssuer(latency=0.004),
+        passes=None,
+        warmup_s=0.2,
+        window_s=0.5,
+    )
+    assert plan_fast["passes"] > plan_slow["passes"] >= 1
+    for plan in (plan_fast, plan_slow):
+        assert plan["measured_turns_expected"] == plan["passes"] * _DATASET_TURNS
+
+
+def test_pass_rule() -> None:
+    assert lane_passes(1200, 240, 1) == 5
+    assert lane_passes(1200, 241, 1) == 5
+    assert lane_passes(1200, 239, 1) == 6
+    assert lane_passes(1200, 3000, 1) == 1
+    assert lane_passes(1200, 3000, 2) == 2
+    assert lane_passes(1200, None, 3) == 3
+
+
+def test_rejects_fixed_trajectory_count(tmp_path: Path) -> None:
     cfg = AgenticInferenceConfig(
         enable_salt=True,
         scheduler="lanes",
         num_trajectories_to_issue=len(_DATASET),
-        lanes=LaneSchedulerConfig(min_copies=3),
+        lanes=LaneSchedulerConfig(passes=1),
     )
     strategy = LaneAgenticInferenceStrategy(
         dataset_metadata=_metadata(_DATASET),
@@ -275,71 +313,10 @@ def test_rejects_trajectory_count_that_disagrees_with_the_copy_rule(
     )
     issuer = LoopIssuer()
     issuer.strategy = strategy
-    with pytest.raises(InputValidationError, match="measures 3 copies"):
+    with pytest.raises(InputValidationError, match="num_trajectories_to_issue"):
         asyncio.run(strategy.execute(issuer))
 
 
 def test_lanes_require_salt() -> None:
     with pytest.raises(ValueError, match="enable_salt"):
         AgenticInferenceConfig(scheduler="lanes")
-
-
-def test_copy_rule() -> None:
-    # copies = max(min_copies, ceil(per_slot x C / coding conversations))
-    cfg = LaneSchedulerConfig(min_copies=4, coding_conversations_per_slot=2.75)
-    assert lane_copies(113, 32, cfg) == 4  # floor
-    assert lane_copies(113, 164, cfg) == 4  # 3.99 -> 4
-    assert lane_copies(113, 165, cfg) == 5  # 4.02 -> 5
-    assert lane_copies(113, 768, cfg) == 19
-    assert lane_copies(113, 1024, cfg) == 25
-    assert lane_copies(0, 1024, cfg) == 4
-
-
-def test_measurement_starts_with_every_slot_mid_conversation(tmp_path: Path) -> None:
-    """All slots switch to measured work at one instant from their next turn,
-    so measurement neither ramps up from cold slots nor staggers by slot."""
-    issuer, plan = _run(tmp_path, concurrency=4)
-    assert plan["slots_measured_from_next_turn"] >= 3
-    # Every slot's first measured request goes out within a couple of turn
-    # latencies of the switch, far less than the measured phase itself.
-    assert plan["measured_start_spread_s"] < 0.25 * plan["measured_phase_s"]
-    first_measured = next(i for i, r in enumerate(issuer.records) if r["tracked"])
-    assert all(not r["tracked"] for r in issuer.records[:first_measured])
-
-
-def test_segment_record_tiles_every_measured_turn(tmp_path: Path) -> None:
-    """The plan's segment list covers each measured turn of each instance
-    exactly once, and every segment ran inside the measured phase."""
-    _issuer, plan = _run(tmp_path, concurrency=4)
-    segments = plan["segments"]
-    covered = Counter()
-    for seg in segments:
-        for turn in range(seg["first_turn"], seg["stop_turn"]):
-            covered[(seg["conversation_id"], turn)] += 1
-    assert set(covered.values()) == {1}
-    assert sum(covered.values()) == plan["measured_turns_expected"]
-    phase = plan["measured_phase_s"]
-    assert all(0 <= s["start_s"] <= s["end_s"] <= phase + 1e-6 for s in segments)
-
-
-def test_pool_order_starts_long_items_early_enough_to_finish() -> None:
-    rng = random.Random(3)
-    estimates = [100.0] + [1.0] * 50 + [60.0]
-    order = order_pool(estimates, horizon_s=80.0, rng=rng)
-    assert sorted(order) == list(range(len(estimates)))
-    # Longer than the horizon: must start first.
-    assert order[0] == 0
-    # Draw window [0, horizon - L]: the 60 s item starts within its first 20 s
-    # of a 80 s horizon, i.e. in the first part of the order on average.
-    starts = []
-    for seed in range(200):
-        o = order_pool(estimates, 80.0, random.Random(seed))
-        starts.append(o.index(len(estimates) - 1) / len(o))
-    assert sum(starts) / len(starts) < 0.4
-
-
-def test_same_key_reproduces_the_pool_order(tmp_path: Path) -> None:
-    estimates = [float(i % 7) for i in range(40)]
-    assert order_pool(estimates, 20.0, random.Random(9)) == order_pool(
-        estimates, 20.0, random.Random(9)
-    )
