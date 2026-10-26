@@ -38,20 +38,16 @@ system in its steady state and measures a fixed amount of work by issue time:
    stops once every counted turn has completed. Conversations still running
    at that point are not continued: there is no tail to wait for.
 
-Three switches (``lanes.*``; defaults reproduce the behaviour above), so their
+Two switches (``lanes.*``; defaults reproduce the behaviour above), so their
 effect can be measured separately:
 
-- ``entry: calibrated`` replaces the flat per-turn service prior with a fit
-  ``latency = a + b*output + c*prefill`` over the first ``calibration_s`` of
-  completions, then moves each slot to a fresh entry drawn with the fitted
-  weights as its current request completes.
 - ``warmup: adaptive`` opens the window once the per-interval completion rate
   and median latency stop changing, instead of after a fixed ``warmup_s``.
 - ``stop: precision`` adds passes until the batch-means 95% confidence
   interval of throughput is narrower than ``precision_target``.
 
-``lane_plan.json`` records the fit, the warm-up intervals, each pass-boundary
-decision and the interval at close for every run.
+``lane_plan.json`` records the warm-up intervals, each pass-boundary decision
+and the interval at close for every run.
 
 Every turn of the dataset is counted ``passes`` times on average; the exact
 count per turn varies because the window cuts conversations at its edges.
@@ -96,12 +92,11 @@ logger = logging.getLogger(__name__)
 _WORKFLOW_CONVERSATION_RE = re.compile(r"^sim_\d+$")
 CODING = "coding"
 WORKFLOW = "workflow"
-# Per-turn service-time prior for the stationary entry weights (entry: prior).
-# Only the relative weight of service against recorded tool delay matters;
-# GB300 C768 measured 6.3-7.2 s. entry: calibrated replaces it with a fit.
+# Per-turn service-time prior for the stationary entry weights. Only the
+# relative weight of service against recorded tool delay matters; GB300 C768
+# measured 6.3-7.2 s. A per-run fit from warm-up latencies was tried and
+# rejected: the cold-entry prefill burst inflates them (GB300 C768: 39 s).
 _PRIOR_SERVICE_S = 7.0
-# Fewer warm completions than this keep the prior.
-_MIN_FIT_SAMPLES = 30
 # Two-sided 95% Student t quantiles by degrees of freedom (normal beyond 30).
 _T95 = {1: 12.71, 2: 4.30, 3: 3.18, 4: 2.78, 5: 2.57, 6: 2.45, 7: 2.36, 8: 2.31}
 _T95.update({9: 2.26, 10: 2.23, 12: 2.18, 15: 2.13, 20: 2.09, 30: 2.04})
@@ -146,67 +141,6 @@ def batch_mean_ci(
         return int(n), 0.0, None
     half = _t95(n - 1) * statistics.stdev(sums) / math.sqrt(n)
     return int(n), mean / (batch_ns / 1e9), half / mean
-
-
-def fit_service(
-    samples: list[tuple[float, float, float]],
-) -> tuple[float, float, float] | None:
-    """Least squares ``latency = a + b*output + c*prefill`` with non-negative
-    coefficients (a feature whose coefficient comes out negative is dropped and
-    the rest refitted). ``samples`` are (latency_s, output size, prefill size)."""
-    if len(samples) < _MIN_FIT_SAMPLES:
-        return None
-    import numpy as np
-
-    y = np.array([s[0] for s in samples])
-    x = np.array([[1.0, s[1], s[2]] for s in samples])
-    active = [0, 1, 2]
-    while active:
-        coef, *_ = np.linalg.lstsq(x[:, active], y, rcond=None)
-        negative = [f for f, c in zip(active, coef, strict=True) if c < 0]
-        if not negative:
-            out = [0.0, 0.0, 0.0]
-            for f, c in zip(active, coef, strict=True):
-                out[f] = float(c)
-            return out[0], out[1], out[2]
-        active.remove(negative[0])
-    return None
-
-
-def _message_chars(message: dict[str, Any]) -> int:
-    content = message.get("content")
-    size = len(content) if isinstance(content, str) else len(json.dumps(content))
-    if message.get("tool_calls"):
-        size += len(json.dumps(message["tool_calls"]))
-    return size
-
-
-def turn_sizes(
-    messages_by_turn: list[list[dict[str, Any]]],
-) -> tuple[tuple[int, ...], tuple[int, ...], tuple[float | None, ...]]:
-    """Per client turn of one conversation: (new input chars since the
-    previous turn, full context chars, recorded assistant reply chars or None
-    for the last turn). Each turn's messages extend the previous turn's."""
-    new, ctx, out = [], [], []
-    total = 0
-    for k, messages in enumerate(messages_by_turn):
-        prev = len(messages_by_turn[k - 1]) if k else 0
-        added = sum(_message_chars(m) for m in messages[prev:])
-        total += added
-        new.append(added)
-        ctx.append(total)
-        if k + 1 < len(messages_by_turn):
-            reply = messages_by_turn[k + 1][len(messages) :]
-            out.append(
-                float(
-                    sum(
-                        _message_chars(m) for m in reply if m.get("role") == "assistant"
-                    )
-                )
-            )
-        else:
-            out.append(None)
-    return tuple(new), tuple(ctx), tuple(out)
 
 
 class RunKey:
@@ -255,10 +189,6 @@ class SourceConversation:
     # Tool delay before each turn (0 when tool delay is not injected).
     delays: tuple[float, ...]
     domain: str
-    # Filled for entry: calibrated (see turn_sizes); empty otherwise.
-    new_chars: tuple[int, ...] = ()
-    ctx_chars: tuple[int, ...] = ()
-    out_chars: tuple[float | None, ...] = ()
 
 
 @dataclass(slots=True)
@@ -278,7 +208,6 @@ class _Slot:
     cursor: int = 0
     inflight: str | None = None
     delay_handle: asyncio.TimerHandle | None = None
-    cold: bool = False  # next issue is the first turn of a mid-conversation entry
 
 
 @dataclass(slots=True)
@@ -288,10 +217,6 @@ class _Inflight:
     conversation_id: str
     turn: int
     issue_ns: int
-    # Prefill size (full context for a cold entry, else new input) and the
-    # recorded reply size, for the entry: calibrated fit.
-    prefill_chars: float
-    recorded_out: float | None
 
 
 class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
@@ -345,13 +270,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._run_started_ns = 0
         # Warm-up completions: (complete_ns, latency_s).
         self._warm_completions: list[tuple[int, float]] = []
-        # entry: calibrated -- (latency_s, output chars, prefill chars, recorded chars).
-        self._fit_samples: list[tuple[float, float, float, float | None]] = []
-        self._fit: dict[str, Any] | None = None
-        self._entry_weights: tuple[list[float], list[list[float]]] | None = None
-        self._reseed_pending: set[int] = set()
-        self._reseeding = False
-        self._ready_ns: int | None = None  # entry (or reseed) settled
         self._warmup_intervals: list[dict[str, Any]] = []
         self._warmup_converged: bool | None = None
         # Window completions (all requests): (complete_ns, output chars).
@@ -362,7 +280,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._measure_ns: int | None = None
         self._window_end_ns: int | None = None
         self._halt_ns: int | None = None
-        self._measure_timer: asyncio.TimerHandle | None = None
 
     # ------------------------------------------------------------------ setup
 
@@ -389,22 +306,10 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                     turns=ordered,
                     delays=delays,
                     domain=conversation_domain(source_id),
-                    **self._sizes(source_id, ordered),
                 )
             )
         self._base_convs = [(s.source_id, list(s.turns)) for s in self._sources]
         self._dataset_turns = sum(len(s.turns) for s in self._sources)
-
-    def _sizes(
-        self, source_id: str, ordered: tuple[tuple[int, int], ...]
-    ) -> dict[str, tuple[Any, ...]]:
-        if self._cfg.entry != "calibrated":
-            return {}
-        messages = self._dataset_metadata.pre_built_messages_by_key
-        new, ctx, out = turn_sizes(
-            [messages.get((source_id, turn)) or [] for _idx, turn in ordered]
-        )
-        return {"new_chars": new, "ctx_chars": ctx, "out_chars": out}
 
     def _validate_config(self) -> None:
         if self._num_trajectories_to_issue is not None:
@@ -440,14 +345,9 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             self._key.commitment,
         )
         self._slots = [_Slot(index=j) for j in range(self._concurrency)]
-        self._ready_ns = self._run_started_ns
         try:
             for slot in self._slots:
                 self._enter(slot)
-            if self._cfg.entry == "calibrated":
-                self._measure_timer = self._loop.call_later(
-                    self._cfg.calibration_s, self._safely, self._calibrate
-                )
             if self._cfg.warmup == "fixed":
                 self._warmup_timer = self._loop.call_later(
                     self._cfg.warmup_s, self._safely, self._open_after_fixed_warmup
@@ -461,9 +361,8 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                 raise self._error
             return phase_issuer.issued_count
         finally:
-            for timer in (self._measure_timer, self._warmup_timer):
-                if timer is not None:
-                    timer.cancel()
+            if self._warmup_timer is not None:
+                self._warmup_timer.cancel()
             for slot in self._slots:
                 if slot.delay_handle is not None:
                     slot.delay_handle.cancel()
@@ -491,30 +390,18 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
     def _enter(self, slot: _Slot) -> None:
         """Put the slot at a stationary entry point and issue its turn."""
         slot.current, slot.cursor = self._stationary_entry()
-        slot.cold = True
         self._issue(slot)
 
     def _stationary_entry(self) -> tuple[_Instance, int]:
         """A conversation in proportion to its length, at a point uniform in
         time: turn ``k`` with weight (service + tool delay before it)."""
-        if self._entry_weights is not None:
-            conv_weights, turn_weights = self._entry_weights
-        else:
-            conv_weights = [
-                _PRIOR_SERVICE_S * len(s.turns) + sum(s.delays) for s in self._sources
-            ]
-            turn_weights = None
-        source = self._entry_rng.choices(
-            range(len(self._sources)), weights=conv_weights
-        )[0]
+        weights = [
+            _PRIOR_SERVICE_S * len(s.turns) + sum(s.delays) for s in self._sources
+        ]
+        source = self._entry_rng.choices(range(len(self._sources)), weights=weights)[0]
         src = self._sources[source]
         cursor = self._entry_rng.choices(
-            range(len(src.turns)),
-            weights=(
-                turn_weights[source]
-                if turn_weights is not None
-                else [_PRIOR_SERVICE_S + d for d in src.delays]
-            ),
+            range(len(src.turns)), weights=[_PRIOR_SERVICE_S + d for d in src.delays]
         )[0]
         return self._new_instance(source, deck=0), cursor
 
@@ -525,76 +412,12 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             self._deck_rng.shuffle(self._deck)
         return self._new_instance(self._deck.pop(), deck=self._deck_index)
 
-    def _calibrate(self) -> None:
-        """entry: calibrated -- fit service time per turn, then reseed slots."""
-        self._measure_timer = None
-        if self._measuring or self._halted or self._stopping:
-            return
-        samples, self._fit_samples = self._fit_samples, []
-        fit = fit_service([(lat, out, pre) for lat, out, pre, _ in samples])
-        recorded = [(out, rec) for _lat, out, _pre, rec in samples if rec]
-        rec_total = sum(rec for _out, rec in recorded)
-        ratio = sum(out for out, _rec in recorded) / rec_total if rec_total else 1.0
-        self._fit = {"samples": len(samples), "output_ratio": ratio}
-        if fit is None:
-            self._fit["error"] = "too few warm completions; kept the prior"
-            logger.warning(
-                "Lane scheduler: calibration skipped (%d samples)", len(samples)
-            )
-            return
-        a, b, c = fit
-        self._fit.update(intercept_s=a, s_per_output_char=b, s_per_prefill_char=c)
-        known = [o for s in self._sources for o in s.out_chars if o is not None]
-        global_out = statistics.fmean(known) if known else 0.0
-        turn_weights = []
-        for src in self._sources:
-            src_known = [o for o in src.out_chars if o is not None]
-            fill = statistics.fmean(src_known) if src_known else global_out
-            turn_weights.append(
-                [
-                    max(0.0, a + b * ratio * (fill if out is None else out) + c * new)
-                    + delay
-                    for out, new, delay in zip(
-                        src.out_chars, src.new_chars, src.delays, strict=True
-                    )
-                ]
-            )
-        self._entry_weights = ([sum(w) for w in turn_weights], turn_weights)
-        self._fit["mean_turn_s"] = statistics.fmean(
-            w - d
-            for src, ws in zip(self._sources, turn_weights, strict=True)
-            for w, d in zip(ws, src.delays, strict=True)
-        )
-        logger.info("Lane scheduler: calibrated entry %s; reseeding slots", self._fit)
-        self._ready_ns = None
-        self._reseeding = True
-        self._reseed_pending = {slot.index for slot in self._slots}
-        for slot in self._slots:
-            if slot.delay_handle is not None:
-                slot.delay_handle.cancel()
-                slot.delay_handle = None
-                self._reseed(slot)
-
-    def _reseed(self, slot: _Slot) -> None:
-        self._reseed_pending.discard(slot.index)
-        if (
-            self._ready_ns is None
-            and len(self._reseed_pending) <= self._concurrency // 100
-        ):
-            self._ready_ns = time.monotonic_ns()
-        if not self._reseed_pending:
-            self._reseeding = False
-        self._enter(slot)
-
     def _open_after_fixed_warmup(self) -> None:
         self._warmup_timer = None
         now = time.monotonic_ns()
         # Issue rate over the second half of the warm-up (the first half holds
-        # the cold prefills of the stationary entry), and after any reseed.
-        since = now - int(self._cfg.warmup_s * 1e9 / 2)
-        if self._ready_ns is not None:
-            since = max(since, self._ready_ns)
-        self._start_window(since)
+        # the cold prefills of the stationary entry).
+        self._start_window(now - int(self._cfg.warmup_s * 1e9 / 2))
 
     def _warmup_tick(self) -> None:
         """warmup: adaptive -- open once completion rate and median latency
@@ -606,22 +429,19 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         now = time.monotonic_ns()
         interval_ns = int(cfg.warmup_interval_s * 1e9)
         latencies = [lat for t, lat in self._warm_completions if t >= now - interval_ns]
-        settled = self._ready_ns is not None and now - interval_ns >= self._ready_ns
         self._warmup_intervals.append(
             {
                 "t_s": (now - self._run_started_ns) / 1e9,
                 "completions": len(latencies),
                 "median_latency_s": statistics.median(latencies) if latencies else None,
-                "settled": settled,
             }
         )
         k = cfg.warmup_stable_intervals
         recent = self._warmup_intervals[-(k + 1) :]
         stable = (
-            self._ready_ns is not None
-            and (now - self._ready_ns) / 1e9 >= cfg.warmup_min_s
+            (now - self._run_started_ns) / 1e9 >= cfg.warmup_min_s
             and len(recent) == k + 1
-            and all(r["settled"] and r["completions"] for r in recent)
+            and all(r["completions"] for r in recent)
             and all(
                 abs(cur[key] / prev[key] - 1.0) <= cfg.warmup_band
                 for prev, cur in zip(recent, recent[1:], strict=False)
@@ -761,12 +581,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                     self._counted_issued,
                     self._passes,
                 )
-        prefill = recorded = 0.0
-        if source.new_chars:
-            sizes = source.ctx_chars if slot.cold else source.new_chars
-            prefill = float(sizes[slot.cursor])
-            recorded = source.out_chars[slot.cursor]
-        slot.cold = False
         slot.cursor += 1
         slot.inflight = query_id
         self._lane_inflight[query_id] = _Inflight(
@@ -775,8 +589,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             conversation_id=conversation_id,
             turn=turn,
             issue_ns=now,
-            prefill_chars=prefill,
-            recorded_out=recorded,
         )
         assert self._loop is not None
         self._timeout_handles[query_id] = self._loop.call_later(
@@ -872,15 +684,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         else:
             latency_s = (now - info.issue_ns) / 1e9
             self._warm_completions.append((now, latency_s))
-            if (
-                self._cfg.entry == "calibrated"
-                and self._fit is None
-                and not failed
-                and self._sources[0].new_chars
-            ):
-                self._fit_samples.append(
-                    (latency_s, output_chars, info.prefill_chars, info.recorded_out)
-                )
         if info.counted:
             self._counted_completed += 1
             if failed:
@@ -889,9 +692,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                 self._halt(now)
         if self._halted or self._stopping:
             self._signal_done_if_idle()
-            return
-        if slot.index in self._reseed_pending:
-            self._reseed(slot)
             return
         self._advance(slot)
 
@@ -981,9 +781,6 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             "warmup_s_actual": seconds(self._run_started_ns, self._measure_ns),
             "warmup_converged": self._warmup_converged,
             "warmup_intervals": self._warmup_intervals,
-            "calibration": self._fit,
-            "ready_s": seconds(self._run_started_ns, self._ready_ns),
-            "reseed_pending_at_end": len(self._reseed_pending),
             "pass_decisions": self._pass_decisions,
             "precision_at_close": self._precision_at_close,
         }

@@ -397,25 +397,13 @@ class LaneSchedulerConfig(BaseModel):
         gt=0,
         description="Count exactly this many passes instead of deriving it from window_s.",
     )
-    entry: Literal["prior", "calibrated"] = Field(
-        "prior",
-        description=(
-            "prior: entry weights assume a flat per-turn service time. calibrated: "
-            "after calibration_s, fit per-turn service time to output and prefill "
-            "size from warm-up completions, then move every slot to a fresh entry "
-            "drawn with the fitted weights as its current request completes."
-        ),
-    )
-    calibration_s: float = Field(
-        60.0, gt=0, description="Warm-up seconds of completions used for the fit."
-    )
     warmup: Literal["fixed", "adaptive"] = Field(
         "fixed",
         description=(
             "fixed: the window opens after warmup_s. adaptive: it opens once the "
             "per-interval completion rate and median latency stay within "
             "warmup_band of the previous interval for warmup_stable_intervals "
-            "intervals (after warmup_min_s from entry or reseed; at most warmup_max_s)."
+            "intervals (after warmup_min_s; at most warmup_max_s)."
         ),
     )
     warmup_interval_s: float = Field(30.0, gt=0)
@@ -439,16 +427,6 @@ class LaneSchedulerConfig(BaseModel):
         description="Fewest batches a precision stop accepts (batch means need ~10).",
     )
     max_passes: int = Field(20, gt=0)
-
-    @model_validator(mode="after")
-    def _calibration_fits_in_warmup(self) -> Self:
-        if (
-            self.entry == "calibrated"
-            and self.warmup == "fixed"
-            and self.calibration_s >= self.warmup_s
-        ):
-            raise ValueError("lanes.calibration_s must be shorter than lanes.warmup_s")
-        return self
 
 
 class AgenticInferenceConfig(BaseModel):

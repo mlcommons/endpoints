@@ -37,9 +37,7 @@ from inference_endpoint.exceptions import InputValidationError
 from inference_endpoint.load_generator.lane_scheduler import (
     LaneAgenticInferenceStrategy,
     batch_mean_ci,
-    fit_service,
     lane_passes,
-    turn_sizes,
 )
 
 pytestmark = pytest.mark.unit
@@ -337,35 +335,6 @@ def test_lanes_require_salt() -> None:
         AgenticInferenceConfig(scheduler="lanes")
 
 
-def _context_latency(data_override, _elapsed: float) -> float:
-    """Latency grows with the request's context size."""
-    chars = sum(len(m.get("content") or "") for m in data_override["messages"])
-    return 0.0003 + 2e-6 * chars
-
-
-def test_calibrated_entry_fits_then_reseeds_every_slot(tmp_path: Path) -> None:
-    _issuer, plan = _run(
-        tmp_path,
-        issuer=LoopIssuer(latency=_context_latency),
-        entry="calibrated",
-        calibration_s=0.1,
-        warmup_s=0.3,
-    )
-    fit = plan["calibration"]
-    assert "error" not in fit and fit["samples"] >= 30
-    assert fit["mean_turn_s"] > 0
-    # Every slot moved to a calibrated entry before the run ended, and the
-    # window still counts exact passes.
-    assert plan["reseed_pending_at_end"] == 0 and plan["ready_s"] is not None
-    assert plan["measured_turns_completed"] == plan["measured_turns_expected"]
-    assert plan["measured_turns_expected"] == plan["passes"] * _DATASET_TURNS
-
-
-def test_calibration_must_finish_inside_a_fixed_warmup() -> None:
-    with pytest.raises(ValueError, match="calibration_s"):
-        LaneSchedulerConfig(entry="calibrated", calibration_s=200, warmup_s=180)
-
-
 def test_adaptive_warmup_opens_once_steady(tmp_path: Path) -> None:
     _issuer, plan = _run(
         tmp_path,
@@ -430,26 +399,3 @@ def test_batch_mean_ci() -> None:
     # mean 15, sd 7.07, t(1 df) 12.71: half-width 12.71 * 7.07 / sqrt(2) / 15.
     assert (n, rate) == (2, 15.0) and half == pytest.approx(4.237, abs=1e-3)
     assert batch_mean_ci(flat, 0, s, s)[1:] == (None, None)
-
-
-def test_fit_service_recovers_coefficients_and_drops_negative_ones() -> None:
-    rng = random.Random(0)
-    rows = [(rng.uniform(0, 500), rng.uniform(0, 5000)) for _ in range(200)]
-    exact = [(1.0 + 0.01 * o + 0.001 * p, o, p) for o, p in rows]
-    assert fit_service(exact) == pytest.approx((1.0, 0.01, 0.001))
-    # Latency that falls with prefill size is not physical: c is dropped.
-    falling = [(1.0 + 0.01 * o - 0.0001 * p, o, p) for o, p in rows]
-    assert fit_service(falling)[2] == 0.0
-    assert fit_service(exact[:10]) is None
-
-
-def test_turn_sizes_split_new_input_context_and_recorded_reply() -> None:
-    system = {"role": "system", "content": "s" * 100}
-    t1 = [system, {"role": "user", "content": "u" * 10}]
-    t2 = [
-        *t1,
-        {"role": "assistant", "content": "a" * 30},
-        {"role": "user", "content": "v" * 5},
-    ]
-    new, ctx, out = turn_sizes([t1, t2])
-    assert new == (110, 35) and ctx == (110, 145) and out == (30.0, None)
