@@ -151,6 +151,16 @@ All of these run automatically on commit:
 - `prettier` for YAML/JSON/Markdown
 - License header enforcement
 - YAML template validation and regeneration
+- `gitleaks` secret scan of staged changes (rules in `.gitleaks.toml`)
+
+`pre-commit install` also installs a pre-push hook that rescans the commits
+being pushed, so a secret committed with `--no-verify` is still stopped before
+it leaves your machine. If you cloned before this hook existed, rerun
+`uv run pre-commit install`. CI runs the same scan on every branch push and PR
+(`.github/workflows/secret-scan.yml`).
+
+If gitleaks flags something that is not a secret, add its fingerprint (printed
+in the finding) to `.gitleaksignore` with a comment explaining why.
 
 **IMPORTANT: Always run `pre-commit run --all-files` before every commit.**
 Hooks may modify files. If files are modified, stage the changes and commit

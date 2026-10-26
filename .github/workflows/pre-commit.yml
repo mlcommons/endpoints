@@ -23,4 +23,7 @@ jobs:
         run: uv sync --frozen --extra dev
 
       - name: Run pre-commit
+        # gitleaks scans staged changes (none in CI); secret-scan.yml covers CI.
+        env:
+          SKIP: gitleaks
         run: uv run pre-commit run --all-files --show-diff-on-failure

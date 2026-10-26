@@ -37,7 +37,8 @@ pre-commit:
 
   script:
     # Run pre-commit on all files with diff output on failure - exact same command as GitHub
-    - pre-commit run --all-files --show-diff-on-failure # GitHub equivalent: identical command (line 29)
+    # gitleaks scans staged changes (none in CI); GitHub's secret-scan.yml covers CI.
+    - SKIP=gitleaks pre-commit run --all-files --show-diff-on-failure # GitHub equivalent: identical command (line 29)
 
 test:
   stage: test
