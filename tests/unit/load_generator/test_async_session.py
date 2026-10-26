@@ -22,6 +22,7 @@ import random
 import time
 from types import SimpleNamespace
 
+import msgspec
 import pytest
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
@@ -38,6 +39,7 @@ from inference_endpoint.core.types import (
     Query,
     QueryResult,
     StreamChunk,
+    TextModelOutput,
 )
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.load_generator.session import (
@@ -1318,6 +1320,68 @@ class TestBenchmarkSession:
             f"complete at idx {complete_idx}"
         )
 
+    @pytest.mark.parametrize("n_chunks", [1, 3])
+    @pytest.mark.parametrize("failed", [False, True])
+    @pytest.mark.asyncio
+    async def test_batched_stream_events_have_monotonic_timestamps(
+        self, n_chunks: int, failed: bool
+    ):
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+        phases = [PhaseConfig("perf", _make_settings(n_samples=1), FakeDataset(1))]
+
+        async def inject_batch():
+            while not issuer._issued:
+                await asyncio.sleep(0)
+            query = issuer._issued[0]
+            chunks = [
+                StreamChunk(
+                    id=query.id,
+                    response_chunk="token",
+                    metadata={"first_chunk": index == 0},
+                )
+                for index in range(n_chunks)
+            ]
+            terminal = QueryResult(
+                id=query.id,
+                response_output=TextModelOutput(output="token " * n_chunks),
+                error=ErrorData(error_type="server", error_message="failed")
+                if failed
+                else None,
+            )
+            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
+            # A socket drain decodes the whole batch before the session handles it.
+            decoded = [
+                decoder.decode(msgspec.msgpack.encode(message))
+                for message in [*chunks, terminal]
+            ]
+            for message in decoded:
+                issuer.inject_response(message)
+
+        injector = asyncio.create_task(inject_batch())
+        result, _ = await asyncio.wait_for(
+            asyncio.gather(session.run(phases), injector), timeout=5
+        )
+        assert result.perf_results[0].issued_count == 1
+        timestamps = [
+            event.timestamp_ns
+            for event in publisher.events
+            if event.event_type
+            in (
+                SampleEventType.RECV_FIRST,
+                SampleEventType.RECV_NON_FIRST,
+                ErrorEventType.GENERIC,
+                SampleEventType.COMPLETE,
+            )
+        ]
+        assert len(timestamps) == n_chunks + 1 + int(failed)
+        assert timestamps == sorted(timestamps)
+        assert timestamps[-1] >= timestamps[0]
+
     @pytest.mark.asyncio
     async def test_handle_response_stamps_conversation_id_and_turn(self):
         """All event types inherit (conv_id, turn) seeded at issue time; streaming
@@ -1371,10 +1435,8 @@ class TestBenchmarkSession:
         assert [(e.conversation_id, e.turn) for e in complete] == [("conv-9", 5)]
         assert complete[0].finish_reason == "stop"
         assert complete[0].worker_id == 3
-        # QueryResult stamps completed_at itself (force_setattr in __post_init__),
-        # and that stamp outranks the caller's arrival timestamp.
-        assert complete[0].timestamp_ns == ok_resp.completed_at
-        assert complete[0].timestamp_ns != 1_002
+        # All response events use the receiver's timestamp, including completion.
+        assert complete[0].timestamp_ns == 1_002
         assert "q-ok" not in phase_issuer.uuid_to_conv_info
         assert "q-ok" not in phase_issuer.completed_uuids
 
