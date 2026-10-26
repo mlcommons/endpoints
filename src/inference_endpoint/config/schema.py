@@ -397,6 +397,16 @@ class LaneSchedulerConfig(BaseModel):
         gt=0,
         description="Count exactly this many passes instead of deriving it from window_s.",
     )
+    entry: Literal["stationary", "turn1"] = Field(
+        "stationary",
+        description=(
+            "stationary: each slot enters mid-conversation, weighted by dataset "
+            "time (flat per-turn service prior plus recorded tool delay). turn1: "
+            "every slot starts a deck conversation at turn 1, as the queue "
+            "scheduler does; pair with warmup: adaptive so the start transient is "
+            "discarded before counting."
+        ),
+    )
     warmup: Literal["fixed", "adaptive"] = Field(
         "fixed",
         description=(

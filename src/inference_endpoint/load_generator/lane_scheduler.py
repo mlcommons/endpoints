@@ -38,11 +38,14 @@ system in its steady state and measures a fixed amount of work by issue time:
    stops once every counted turn has completed. Conversations still running
    at that point are not continued: there is no tail to wait for.
 
-Two switches (``lanes.*``; defaults reproduce the behaviour above), so their
-effect can be measured separately:
+Switches (``lanes.*``; defaults reproduce the behaviour above), so their effect
+can be measured separately:
 
-- ``warmup: adaptive`` opens the window once the per-interval completion rate
-  and median latency stop changing, instead of after a fixed ``warmup_s``.
+- ``entry: turn1`` starts every slot at turn 1 of a deck conversation, as the
+  queue scheduler does, instead of mid-conversation. Pair it with
+  ``warmup: adaptive`` so the start transient is discarded before counting.
+- ``warmup: adaptive`` opens the window once completion count, median latency
+  and mean request context size stop changing, instead of after ``warmup_s``.
 - ``stop: precision`` adds passes until the batch-means 95% confidence
   interval of throughput is narrower than ``precision_target``.
 
@@ -270,6 +273,9 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._run_started_ns = 0
         # Warm-up completions: (complete_ns, latency_s).
         self._warm_completions: list[tuple[int, float]] = []
+        # Warm-up issues: (issue_ns, context chars of the request).
+        self._warm_issues: list[tuple[int, int]] = []
+        self._context_chars_cache: dict[tuple[str, int], int] = {}
         self._warmup_intervals: list[dict[str, Any]] = []
         self._warmup_converged: bool | None = None
         # Window completions (all requests): (complete_ns, output chars).
@@ -388,8 +394,12 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         )
 
     def _enter(self, slot: _Slot) -> None:
-        """Put the slot at a stationary entry point and issue its turn."""
-        slot.current, slot.cursor = self._stationary_entry()
+        """Start the slot (entry: stationary -- mid-conversation; entry: turn1 --
+        the next deck conversation at turn 1, as the queue scheduler starts)."""
+        if self._cfg.entry == "turn1":
+            slot.current, slot.cursor = self._next_instance(), 0
+        else:
+            slot.current, slot.cursor = self._stationary_entry()
         self._issue(slot)
 
     def _stationary_entry(self) -> tuple[_Instance, int]:
@@ -420,42 +430,68 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         self._start_window(now - int(self._cfg.warmup_s * 1e9 / 2))
 
     def _warmup_tick(self) -> None:
-        """warmup: adaptive -- open once completion rate and median latency
-        have been steady for warmup_stable_intervals intervals."""
+        """warmup: adaptive -- open once completion count, median latency and
+        mean context size of the last warmup_stable_intervals intervals are each
+        within warmup_band of the block of intervals before them. Comparing
+        blocks (not neighbouring intervals) catches slow drifts, such as context
+        size still rising after a turn-1 start."""
         self._warmup_timer = None
         if self._measuring or self._halted or self._stopping:
             return
         cfg = self._cfg
         now = time.monotonic_ns()
         interval_ns = int(cfg.warmup_interval_s * 1e9)
-        latencies = [lat for t, lat in self._warm_completions if t >= now - interval_ns]
+        since = now - interval_ns
+        latencies = [lat for t, lat in self._warm_completions if t >= since]
+        contexts = [chars for t, chars in self._warm_issues if t >= since]
         self._warmup_intervals.append(
             {
                 "t_s": (now - self._run_started_ns) / 1e9,
                 "completions": len(latencies),
                 "median_latency_s": statistics.median(latencies) if latencies else None,
+                "mean_context_chars": statistics.fmean(contexts) if contexts else None,
             }
         )
-        k = cfg.warmup_stable_intervals
-        recent = self._warmup_intervals[-(k + 1) :]
         stable = (
-            (now - self._run_started_ns) / 1e9 >= cfg.warmup_min_s
-            and len(recent) == k + 1
-            and all(r["completions"] for r in recent)
-            and all(
-                abs(cur[key] / prev[key] - 1.0) <= cfg.warmup_band
-                for prev, cur in zip(recent, recent[1:], strict=False)
-                for key in ("completions", "median_latency_s")
-            )
-        )
+            now - self._run_started_ns
+        ) / 1e9 >= cfg.warmup_min_s and self._blocks_agree()
         if stable or (now - self._run_started_ns) / 1e9 >= cfg.warmup_max_s:
             self._warmup_converged = stable
-            self._start_window(now - k * interval_ns)
+            self._start_window(now - cfg.warmup_stable_intervals * interval_ns)
             return
         assert self._loop is not None
         self._warmup_timer = self._loop.call_later(
             cfg.warmup_interval_s, self._safely, self._warmup_tick
         )
+
+    def _blocks_agree(self) -> bool:
+        k = self._cfg.warmup_stable_intervals
+        if len(self._warmup_intervals) < 2 * k:
+            return False
+        last = self._warmup_intervals[-k:]
+        prev = self._warmup_intervals[-2 * k : -k]
+        for key in ("completions", "median_latency_s", "mean_context_chars"):
+            values = [r[key] for r in (*prev, *last)]
+            if any(not v for v in values):
+                return False
+            ratio = statistics.fmean(v for v in values[k:]) / statistics.fmean(
+                values[:k]
+            )
+            if abs(ratio - 1.0) > self._cfg.warmup_band:
+                return False
+        return True
+
+    def _context_chars(self, source_id: str, turn: int) -> int:
+        key = (source_id, turn)
+        cached = self._context_chars_cache.get(key)
+        if cached is None:
+            messages = self._dataset_metadata.pre_built_messages_by_key.get(key) or []
+            cached = sum(
+                len(c) if isinstance(c := m.get("content"), str) else len(json.dumps(c))
+                for m in messages
+            )
+            self._context_chars_cache[key] = cached
+        return cached
 
     def _start_window(self, rate_since_ns: int) -> None:
         if self._halted or self._stopping:
@@ -474,6 +510,7 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
                 self._cfg.window_s, self._pass_s, self._cfg.min_passes
             )
         self._warm_completions.clear()
+        self._warm_issues.clear()
         self._target = self._passes * self._dataset_turns
         self._measure_ns = now
         self._measuring = True
@@ -590,6 +627,8 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
             turn=turn,
             issue_ns=now,
         )
+        if not self._measuring and self._cfg.warmup == "adaptive":
+            self._warm_issues.append((now, self._context_chars(source.source_id, turn)))
         assert self._loop is not None
         self._timeout_handles[query_id] = self._loop.call_later(
             self._turn_timeout_s, self._handle_lane_timeout, query_id

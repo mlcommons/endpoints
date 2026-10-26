@@ -364,6 +364,30 @@ def test_adaptive_warmup_gives_up_at_max_while_still_drifting(tmp_path: Path) ->
     assert plan["warmup_s_actual"] >= 0.6
 
 
+def test_adaptive_warmup_is_not_fooled_by_a_slow_drift(tmp_path: Path) -> None:
+    """Latency rising ~3% per interval passes a neighbouring-interval check at
+    a 5% band, but blocks of 3 intervals differ by ~8%: still not settled."""
+    _issuer, plan = _run(
+        tmp_path,
+        issuer=LoopIssuer(latency=lambda _d, t: 0.002 * (1 + t)),
+        warmup="adaptive",
+        warmup_interval_s=0.05,
+        warmup_band=0.05,
+        warmup_min_s=0.05,
+        warmup_max_s=0.8,
+    )
+    assert plan["warmup_converged"] is False
+
+
+def test_turn1_entry_starts_every_slot_at_turn_one(tmp_path: Path) -> None:
+    issuer, plan = _run(tmp_path, concurrency=4, entry="turn1")
+    first = issuer.records[:4]
+    assert [r["turn"] for r in first] == [1, 1, 1, 1]
+    assert len({r["source"] for r in first}) == 4
+    assert plan["measured_turns_completed"] == plan["measured_turns_expected"]
+    assert plan["measured_turns_expected"] == plan["passes"] * _DATASET_TURNS
+
+
 def test_precision_stop_adds_passes_until_the_target_or_the_cap(tmp_path: Path) -> None:
     _a, capped = _run(
         tmp_path / "a",
