@@ -47,7 +47,9 @@ can be measured separately:
 - ``warmup: adaptive`` opens the window once completion count, median latency
   and mean request context size stop changing, instead of after ``warmup_s``.
 - ``stop: precision`` adds passes until the batch-means 95% confidence
-  interval of throughput is narrower than ``precision_target``.
+  interval of throughput is narrower than ``precision_target``, but never a
+  pass projected to end the window past ``precision_max_window_s``; each pass
+  decision records its ``stop_reason``.
 
 ``lane_plan.json`` records the warm-up intervals, each pass-boundary decision
 and the interval at close for every run.
@@ -79,7 +81,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..config.schema import AgenticInferenceConfig
 from ..core.types import QueryResult
@@ -103,6 +105,9 @@ _PRIOR_SERVICE_S = 7.0
 # Two-sided 95% Student t quantiles by degrees of freedom (normal beyond 30).
 _T95 = {1: 12.71, 2: 4.30, 3: 3.18, 4: 2.78, 5: 2.57, 6: 2.45, 7: 2.36, 8: 2.31}
 _T95.update({9: 2.26, 10: 2.23, 12: 2.18, 15: 2.13, 20: 2.09, 30: 2.04})
+
+# Why a precision stop closed the window, recorded per pass decision.
+StopReason = Literal["target", "max_window", "max_passes"]
 
 
 def conversation_domain(conversation_id: str) -> str:
@@ -533,19 +538,40 @@ class LaneAgenticInferenceStrategy(AgenticInferenceStrategy):
         )
         return {"batches": n, "output_chars_per_s": rate, "ci95_half_width_rel": half}
 
+    def _precision_stop_reason(
+        self, ci: dict[str, Any], now_ns: int
+    ) -> StopReason | None:
+        """Why stop: precision ends the window here; None to count one more pass.
+
+        The next pass is projected at the mean pass time so far, so a window
+        never runs past ``precision_max_window_s`` by more than pass-time noise.
+        """
+        assert self._measure_ns is not None
+        half = ci["ci95_half_width_rel"]
+        if (
+            half is not None
+            and ci["batches"] >= self._cfg.precision_min_batches
+            and half <= self._cfg.precision_target
+        ):
+            return "target"
+        if self._passes >= self._cfg.max_passes:
+            return "max_passes"
+        elapsed_s = (now_ns - self._measure_ns) / 1e9
+        projected_s = elapsed_s * (self._passes + 1) / self._passes
+        if projected_s > self._cfg.precision_max_window_s:
+            return "max_window"
+        return None
+
     def _extend_window(self, now_ns: int) -> bool:
         """At a pass boundary: True to count one more pass (stop: precision)."""
         ci = self._window_ci(now_ns)
-        decision = {"passes": self._passes, **ci}
-        extend = (
-            self._cfg.stop == "precision"
-            and self._passes < self._cfg.max_passes
-            and (
-                ci["ci95_half_width_rel"] is None
-                or ci["batches"] < self._cfg.precision_min_batches
-                or ci["ci95_half_width_rel"] > self._cfg.precision_target
-            )
-        )
+        decision: dict[str, Any] = {"passes": self._passes, **ci}
+        if self._cfg.stop == "precision":
+            reason = self._precision_stop_reason(ci, now_ns)
+            decision["stop_reason"] = reason
+            extend = reason is None
+        else:
+            extend = False
         decision["extend"] = extend
         self._pass_decisions.append(decision)
         if extend:

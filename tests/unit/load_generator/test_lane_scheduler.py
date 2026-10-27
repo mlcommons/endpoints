@@ -415,6 +415,36 @@ def test_precision_stop_adds_passes_until_the_target_or_the_cap(tmp_path: Path) 
     assert met["measured_turns_expected"] == met["passes"] * _DATASET_TURNS
 
 
+def test_precision_stop_ends_before_a_pass_that_would_overrun_the_time_cap(
+    tmp_path: Path,
+) -> None:
+    unreachable = {
+        "stop": "precision",
+        "precision_target": 1e-9,
+        "precision_batch_s": 0.01,
+    }
+    _a, one = _run(tmp_path / "a", **unreachable, max_passes=1)
+    pass_s = one["issue_window_s"]
+    _b, capped = _run(
+        tmp_path / "b",
+        **unreachable,
+        max_passes=60,
+        precision_max_window_s=2.5 * pass_s,
+    )
+    assert capped["passes"] == 2
+    assert [d["stop_reason"] for d in capped["pass_decisions"]] == [None, "max_window"]
+    assert capped["measured_turns_completed"] == 2 * _DATASET_TURNS
+    # The first pass runs even when it alone is longer than the cap.
+    _c, first = _run(
+        tmp_path / "c",
+        **unreachable,
+        max_passes=60,
+        precision_max_window_s=0.1 * pass_s,
+    )
+    assert first["passes"] == 1
+    assert first["pass_decisions"][-1]["stop_reason"] == "max_window"
+
+
 def test_batch_mean_ci() -> None:
     s = 1_000_000_000
     flat = [(0, 10.0), (s, 10.0), (2 * s, 10.0)]

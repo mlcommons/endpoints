@@ -426,7 +426,8 @@ class LaneSchedulerConfig(BaseModel):
         description=(
             "window: passes from window_s. precision: start with min_passes and add "
             "a pass at each pass boundary until the 95% batch-means CI half-width "
-            "of throughput is below precision_target (at most max_passes)."
+            "of throughput is below precision_target, the next pass would end past "
+            "precision_max_window_s, or max_passes is reached, whichever is first."
         ),
     )
     precision_target: float = Field(0.01, gt=0)
@@ -435,6 +436,15 @@ class LaneSchedulerConfig(BaseModel):
         10,
         ge=2,
         description="Fewest batches a precision stop accepts (batch means need ~10).",
+    )
+    precision_max_window_s: float = Field(
+        2400.0,
+        gt=0,
+        description=(
+            "stop: precision adds no pass that would end the counted window past "
+            "this, projected at the mean pass time so far. The first pass always "
+            "runs; the CI at close is reported either way."
+        ),
     )
     max_passes: int = Field(20, gt=0)
 
