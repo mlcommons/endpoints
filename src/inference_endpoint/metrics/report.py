@@ -211,10 +211,9 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
     version: str
     git_sha: str | None
-    # Which channel resolved git_sha, in resolution order: "git" (live checkout),
-    # "baked" (build-info file), "env" (ENDPOINTS_GIT_SHA), or "none". Records how
-    # much to trust the SHA — a clean git/baked SHA is ground truth, an env one an
-    # attestation, a "-dirty" one a warning. See utils/version.resolve_git_sha.
+    # Which channel resolved git_sha: "git" (read from the running checkout),
+    # "env" (ENDPOINTS_GIT_SHA, an attestation by the image or launcher), or
+    # "none". See utils/version.resolve_git_sha.
     git_sha_source: str
     test_started_at: int
     n_samples_issued: int
@@ -534,9 +533,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 f"final snapshot received) — some async metrics may be missing.{newline}"
             )
         fn(f"Version: {self.version}{newline}")
-        # Always emitted (even when unresolved) so a missing SHA is unambiguous —
-        # a blank line could mean capture failed or an old report format; the
-        # explicit "unknown (source: none)" says provenance was attempted.
+        # Always emitted, so an unresolved SHA reads "unknown (source: none)".
         fn(
             f"Git SHA: {self.git_sha or 'unknown'} (source: {self.git_sha_source}){newline}"
         )

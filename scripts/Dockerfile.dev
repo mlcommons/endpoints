@@ -1,7 +1,6 @@
 # Development Dockerfile for the MLPerf Inference Endpoint Benchmarking System
-# From project root (pass GIT_SHA so the client reports its source commit; see the
-# provenance note at the bottom of this file):
-# docker build -f scripts/Dockerfile.dev --build-arg GIT_SHA=$(git rev-parse --short=7 HEAD)$(git diff --quiet HEAD -- || echo -dirty) --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
+# From project root (GIT_SHA is the source commit the report prints; see the end of this file):
+# docker build -f scripts/Dockerfile.dev --build-arg GIT_SHA=$(git rev-parse --short=7 HEAD)$(git diff --quiet HEAD -- src/inference_endpoint pyproject.toml uv.lock examples/09_Wan22_VideoGen_Example/accuracy || echo -dirty) --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
 # docker run -v $(pwd):/mnt/inference-endpoint -it --shm-size=512m inference-endpoint-dev bash
 #
 # VBench (WAN 2.2) accuracy scorer is ON by default (consistent with the DeepSeek-R1
@@ -142,22 +141,13 @@ LABEL org.opencontainers.image.title="inference-endpoint" \
       org.opencontainers.image.description="MLPerf inference endpoint benchmarking client (the inference-endpoint CLI); DeepSeek-R1 and VBench accuracy evaluators are provisioned by default, toggled by PROVISION_DSR1 / PROVISION_VBENCH." \
       org.opencontainers.image.source="https://github.com/mlcommons/endpoints"
 
-# Runtime provenance: expose the source git SHA so `inference-endpoint` prints it
-# in its report. This image COPYs src/ but not .git, so live `git rev-parse` finds
-# no repo; resolve_git_sha() reads ENDPOINTS_GIT_SHA instead. A checkout
-# bind-mounted over it (the `docker run -v` above) resolves via live git first
-# when git in the container can read it; if it can't (a uid mismatch git refuses
-# as dubious ownership, or a git worktree whose .git points outside the mount),
-# this value is reported instead and describes the image, not the mounted code.
-# Kept LAST so the per-commit SHA (changes every build) doesn't invalidate the
-# cached dependency and provisioning layers above. Pass it at build time; the
-# -dirty suffix matters because src/ is COPYed from the working tree as-is:
-#   docker build ... --build-arg GIT_SHA=$(git rev-parse --short=7 HEAD)$(git diff --quiet HEAD -- || echo -dirty)
-# Default is empty (NOT "unknown"): resolve_git_sha validates the value, so an
-# empty/omitted arg falls through to source=none rather than recording a bogus
-# "unknown" as an env attestation.
-# push_docker_image.sh passes GIT_SHA automatically and also stamps image-level
-# provenance (the OCI image.revision annotation / :<sha> tag) on the pushed
-# manifest, so the LABEL above carries no revision.
+# Runtime provenance. This image COPYs src/ without .git, so the report prints
+# this value (source: env). A git checkout bind-mounted over the workdir (the
+# `docker run -v` above) reports live git instead, or no SHA if git can't read
+# it: this value describes the image, not the mounted code. Mount the whole
+# checkout: code mounted without .git (a tarball, or src/ alone) is reported
+# with this value. Declared last so a new SHA doesn't invalidate the cached
+# layers above; empty or non-hex values are ignored. push_docker_image.sh passes
+# it and tags the image with the same SHA.
 ARG GIT_SHA=
 ENV ENDPOINTS_GIT_SHA=${GIT_SHA}

@@ -108,6 +108,7 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
+from inference_endpoint.utils.version import get_version_info
 
 if TYPE_CHECKING:
     from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -471,6 +472,15 @@ def setup_benchmark(
     ``audit_run_spec``, when set, overrides the issue count and sample order
     for a compliance-audit phase (see ``commands/audit.py:run_audit``).
     """
+    # Pins source provenance for the process before any work runs; every report
+    # (main run and audit phases) records this value.
+    version_info = get_version_info()
+    logger.info(
+        "Endpoints %s, git SHA %s (source: %s)",
+        version_info["version"],
+        version_info["git_sha"] or "unknown",
+        version_info["git_sha_source"],
+    )
     # Accuracy-only runs force single-stream (1 worker / 1 connection) for
     # deterministic sample ordering. Bake it into the config here — before CPU
     # affinity, report_dir/config.yaml persistence, and RuntimeSettings — so the
