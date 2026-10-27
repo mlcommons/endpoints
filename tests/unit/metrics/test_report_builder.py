@@ -648,22 +648,25 @@ class TestReportDisplayAndSerialize:
         output = "\n".join(lines)
         assert "Test started at" not in output
 
-    def test_display_always_prints_git_sha_line_with_source(self):
-        """The Git SHA line is emitted unconditionally, showing 'unknown' + source."""
-        report = make_report(git_sha=None, git_sha_source="none")
+    @pytest.mark.parametrize(
+        ("git_sha", "source", "line"),
+        [
+            (None, "none", "Git SHA: unknown (source: none)"),
+            ("abc1234-dirty", "git", "Git SHA: abc1234-dirty (source: git)"),
+        ],
+        ids=["unresolved", "resolved"],
+    )
+    def test_display_always_prints_git_sha_line_with_source(
+        self, git_sha, source, line
+    ):
+        report = msgspec.structs.replace(
+            _build_report(_make_registry(n_samples=5)),
+            git_sha=git_sha,
+            git_sha_source=source,
+        )
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
-        output = "\n".join(lines)
-        assert "Git SHA: unknown" in output
-        assert "source: none" in output
-
-    def test_display_prints_git_sha_with_source_when_present(self):
-        """A resolved SHA renders with its provenance source annotated."""
-        report = make_report(git_sha="abc1234-dirty", git_sha_source="git")
-        lines: list[str] = []
-        report.display(fn=lines.append, summary_only=True)
-        output = "\n".join(lines)
-        assert "Git SHA: abc1234-dirty (source: git)" in output
+        assert line in lines
 
     def test_display_warns_when_incomplete(self):
         """Reports with ``complete=False`` surface a WARNING in display()."""

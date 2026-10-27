@@ -39,9 +39,9 @@ benchmarking tool that lives here for convenience but does import from other
 
 `logging.py` and `dataset_utils.py` stay lightweight and broadly reusable.
 `version.py` is also small, but it intentionally imports
-`inference_endpoint.__version__` and resolves a build SHA through a fallback
-chain — a live `git` query of its own checkout, a baked `_build_info.py`, then
-the `ENDPOINTS_GIT_SHA` env var — to report build metadata.
+`inference_endpoint.__version__` and resolves the source SHA to report build
+metadata: a live `git` query of its own checkout, or, only outside a git
+checkout, the `ENDPOINTS_GIT_SHA` env var. It is resolved once per process.
 `benchmark_httpclient.py` is exempt entirely: it is a standalone tool, not a
 reusable helper.
 
@@ -60,8 +60,9 @@ uv run python -m inference_endpoint.utils.benchmark_httpclient --endpoint URL --
 
 ## Integration Points
 
-| Consumer            | Usage                                                                                                  |
-| ------------------- | ------------------------------------------------------------------------------------------------------ |
-| `main.py`           | Calls `setup_logging()` at startup                                                                     |
-| `commands/info.py`  | Imports `__version__` for the `info` command                                                           |
-| `metrics/report.py` | `Report.from_snapshot` calls `get_version_info()` to record `git_sha` / `git_sha_source` in the report |
+| Consumer                        | Usage                                                                                                  |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `main.py`                       | Calls `setup_logging()` at startup                                                                     |
+| `commands/info.py`              | Imports `__version__` for the `info` command                                                           |
+| `commands/benchmark/execute.py` | `setup_benchmark` calls `get_version_info()` first, pinning provenance before the run                  |
+| `metrics/report.py`             | `Report.from_snapshot` calls `get_version_info()` to record `git_sha` / `git_sha_source` in the report |
