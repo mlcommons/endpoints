@@ -94,6 +94,7 @@ single object that `display()` and `to_json()` render.
 class Report(msgspec.Struct, frozen=True):
     version: str
     git_sha: str | None
+    git_sha_source: str  # which channel resolved git_sha: git | env | none
     test_started_at: int
     n_samples_issued: int
     n_samples_completed: int

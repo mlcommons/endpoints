@@ -40,6 +40,9 @@
 #   PROVISION_VBENCH passthrough build-arg   (default: Dockerfile default = 1)
 #   IMAGE_DESCRIPTION  GHCR package-page description (default: "endpoints client image (ref <ref>, commit <sha>)")
 #   GHCR_USER/GHCR_TOKEN  optional registry login (fallback: GITHUB_ACTOR/GITHUB_TOKEN)
+#
+# Always passes --build-arg GIT_SHA=<short sha>[-dirty], which the image reports
+# at runtime as its source commit.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -153,7 +156,7 @@ else
     ENDPOINTS_REF="$ORIGINAL_REF"
 fi
 
-SHORT_SHA="$(git rev-parse --short HEAD)"
+SHORT_SHA="$(git rev-parse --short=7 HEAD)"
 # Docker tags allow only [A-Za-z0-9_.-], must not start with '.' or '-', and cap at
 # 128 chars. Map every other char (e.g. '/', '+', '~', '#') to '-' so a legitimate
 # git ref name can't yield an invalid tag that fails `-t` only after the whole build.
@@ -213,6 +216,14 @@ BUILD_ARGS=()
 [[ "$NO_CACHE" == "1" ]] && BUILD_ARGS+=(--no-cache)
 [[ -n "${PROVISION_DSR1:-}" ]] && BUILD_ARGS+=(--build-arg "PROVISION_DSR1=${PROVISION_DSR1}")
 [[ -n "${PROVISION_VBENCH:-}" ]] && BUILD_ARGS+=(--build-arg "PROVISION_VBENCH=${PROVISION_VBENCH}")
+# Source SHA the image reports at runtime (Dockerfile ARG GIT_SHA -> ENV
+# ENDPOINTS_GIT_SHA): the :$SHORT_SHA tag, formatted like live git's
+# (--short=7). The -dirty check uses the runtime check's scope
+# (utils/version._DIRTY_PATHSPEC); it is reachable only via --allow-dirty /
+# --no-push, since a clean :SHA is otherwise required above.
+GIT_SHA_VALUE="$SHORT_SHA"
+git diff --quiet HEAD -- src/inference_endpoint pyproject.toml uv.lock examples/09_Wan22_VideoGen_Example/accuracy || GIT_SHA_VALUE="${GIT_SHA_VALUE}-dirty"
+BUILD_ARGS+=(--build-arg "GIT_SHA=${GIT_SHA_VALUE}")
 
 # Don't attach SLSA provenance attestations. buildx adds them by default on --push,
 # which surfaces a spurious `unknown/unknown` entry on the GHCR package page and
