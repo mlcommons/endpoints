@@ -19,12 +19,16 @@ Core type definitions for the MLPerf Inference Endpoint Benchmarking System.
 This module defines the basic data structures used throughout the system.
 """
 
+import logging
+import reprlib
 import time
 import uuid
 from enum import Enum
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import msgspec
+
+logger = logging.getLogger(__name__)
 
 
 class APIType(str, Enum):
@@ -52,6 +56,43 @@ class APIType(str, Enum):
                 return "v1/videos/generations"
             case _:
                 raise ValueError(f"Invalid API type: {self}")
+
+
+class TokenCountSource(str, Enum):
+    """The basis a token count is measured on.
+
+    - SERVER: the endpoint's per-request ``usage``
+    - CLIENT: the local tokenizer
+
+    A run has one primary basis, whose series and report keys keep their base
+    name; ``other`` names the sibling basis, whose keys are suffixed (see
+    ``basis_key``).
+    """
+
+    SERVER = "server"
+    CLIENT = "client"
+
+    @property
+    def other(self) -> "TokenCountSource":
+        """The opposite basis."""
+        if self is TokenCountSource.SERVER:
+            return TokenCountSource.CLIENT
+        return TokenCountSource.SERVER
+
+
+def basis_key(base: str, basis: TokenCountSource, *, primary: TokenCountSource) -> str:
+    """Name ``base`` on ``basis``: unchanged on the primary basis, else suffixed.
+
+    Setup, registration and report time only; never call this per sample.
+    """
+    return base if basis is primary else f"{base}_{basis.value}"
+
+
+# Bounds of the HDR histogram behind every token-count series. A count above
+# ``TOKEN_HDR_HIGH`` cannot be recorded, so it is also the largest well-formed
+# count (see ``well_formed_count``).
+TOKEN_HDR_LOW: Final[int] = 1
+TOKEN_HDR_HIGH: Final[int] = 10_000_000  # 10M tokens
 
 
 class QueryStatus(Enum):
@@ -388,8 +429,8 @@ class Query(
         instead of {"id": ..., "data": ..., ...}). Provides ~6-50% size reduction and
         ~6-29% ser/des speedup for ZMQ transport depending on payload size.
 
-        omit_defaults=True: Fields with default values are omitted during encoding,
-        further reducing message size for queries with empty headers.
+        omit_defaults=True: Has no effect together with array_like=True, which always
+        encodes every field; kept for intent only.
     """
 
     id: str = msgspec.field(default_factory=lambda: str(uuid.uuid4()))
@@ -437,8 +478,9 @@ class QueryResult(
         gc=False: Safe because metadata contains only scalar key-value pairs.
         Do NOT store cyclic references in metadata or response_output fields.
 
-        omit_defaults=True: Fields with static defaults (ie. those NOT using default_factory)
-        are omitted if value equals default.
+        omit_defaults=True: Has no effect together with array_like=True, which always
+        encodes every field; kept for intent only. Do NOT add fields: carry extra
+        per-response data (e.g. server token counts) in metadata.
 
         array_like=True: Encodes as array instead of object (e.g. ["id", "chunk", false, {}]
         instead of {"id": ..., "response_chunk": ..., ...}). Reduces payload size.
@@ -477,6 +519,86 @@ class QueryResult(
             return "<EMPTY>"
 
 
+# ``QueryResult.metadata`` keys carrying the server's per-request token usage.
+PROMPT_TOKENS_KEY: Final = "prompt_tokens"
+COMPLETION_TOKENS_KEY: Final = "completion_tokens"
+
+
+def well_formed_count(value: object) -> int | None:
+    """Return ``value`` if it is a usable token count, else ``None``.
+
+    Only an exact ``int`` in ``[0, TOKEN_HDR_HIGH]`` qualifies: ``bool`` (an
+    ``int`` subclass), floats, strings, negatives and out-of-range counts do not.
+    """
+    # Exact type check: ``isinstance`` would accept ``bool``.
+    if type(value) is int and 0 <= value <= TOKEN_HDR_HIGH:  # noqa: E721
+        return value
+    return None
+
+
+# A malformed ``usage`` comes from the endpoint, so it recurs on every response:
+# warn on the first one only, once per process (each HTTP worker is its own
+# process), never per frame.
+_malformed_usage_warned = False
+
+
+def _warn_malformed_usage(what: str, value: object) -> None:
+    global _malformed_usage_warned
+    if _malformed_usage_warned:
+        return
+    _malformed_usage_warned = True
+    logger.warning(
+        "Ignoring malformed server usage %s: %s (type '%s'); token counts must be "
+        "ints in [0, %d]. Further malformed usage values are not logged.",
+        what,
+        reprlib.repr(value),
+        type(value).__name__,
+        TOKEN_HDR_HIGH,
+    )
+
+
+def server_usage_count(value: object, key: str) -> int | None:
+    """``well_formed_count`` for a count the server reported under ``key``.
+
+    A non-null value that is not well formed triggers the once-per-process
+    malformed-usage warning; null (absent) does not.
+    """
+    count = well_formed_count(value)
+    if count is None and value is not None:
+        _warn_malformed_usage(f"'{key}'", value)
+    return count
+
+
+def server_usage_counts(usage: object) -> tuple[int | None, int | None]:
+    """Read ``(prompt_tokens, completion_tokens)`` from a JSON ``usage`` object.
+
+    Each count goes through ``server_usage_count``. A non-null ``usage`` that is
+    not a ``dict`` yields ``(None, None)`` and triggers the once-per-process
+    malformed-usage warning.
+    """
+    if usage is None:
+        return None, None
+    if not isinstance(usage, dict):
+        _warn_malformed_usage("object", usage)
+        return None, None
+    return (
+        server_usage_count(usage.get(PROMPT_TOKENS_KEY), PROMPT_TOKENS_KEY),
+        server_usage_count(usage.get(COMPLETION_TOKENS_KEY), COMPLETION_TOKENS_KEY),
+    )
+
+
+def put_server_usage(
+    metadata: dict[str, Any],
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+) -> None:
+    """Write each non-``None`` count into ``metadata`` under its usage key."""
+    if prompt_tokens is not None:
+        metadata[PROMPT_TOKENS_KEY] = prompt_tokens
+    if completion_tokens is not None:
+        metadata[COMPLETION_TOKENS_KEY] = completion_tokens
+
+
 class StreamChunk(
     msgspec.Struct,
     tag="stream_chunk",
@@ -504,8 +626,9 @@ class StreamChunk(
         gc=False: Safe because metadata contains only scalar key-value pairs.
         Do NOT store cyclic references in metadata field.
 
-        omit_defaults=True: Fields with static defaults (ie. those NOT using default_factory)
-        are omitted if value equals default.
+        omit_defaults=True: Has no effect together with array_like=True, which always
+        encodes every field; kept for intent only. Do NOT add fields: carry extra
+        data in metadata.
 
         array_like=True: Encodes as array instead of object (e.g. ["id", "chunk", {}]
         instead of {"id": ..., "response_chunk": ..., ...}). Reduces payload size.
