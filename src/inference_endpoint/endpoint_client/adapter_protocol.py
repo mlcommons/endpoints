@@ -69,12 +69,16 @@ class HttpRequestAdapter(ABC):
 
     @classmethod
     @abstractmethod
-    def encode_query(cls, query: Query) -> bytes:
+    def encode_query(cls, query: Query, *, include_usage: bool) -> bytes:
         """
         Encode a Query to bytes for HTTP transmission.
 
         Args:
             query: Input query with prompt and parameters
+            include_usage: The run's ``stream_include_usage`` setting. Adapters
+                whose API has ``stream_options`` ask for the final usage frame
+                on streaming requests with at most one choice; the others
+                accept and ignore it.
 
         Returns:
             Encoded request bytes ready for HTTP POST
@@ -102,11 +106,19 @@ class HttpRequestAdapter(ABC):
         """
         Decode SSE message and return adapter-specific chunk object.
 
+        The OpenAI adapters (chat and completions) return
+        ``SSEChoice | SSEMessage | None``: the first ``SSEChoice`` for a frame
+        without ``usage`` (the common case), ``None`` for a frame with neither
+        usage nor choices, and the whole ``SSEMessage`` for a frame that
+        carries usage. A malformed ``usage`` value never fails the decode;
+        counts are validated when the accumulator captures them.
+
         Args:
             json_bytes: Raw JSON bytes from SSE stream
 
         Returns:
-            Adapter-specific chunk object passed to accumulator.add_chunk()
+            Adapter-specific chunk object passed to accumulator.add_chunk(),
+            or None for a frame with nothing to accumulate
         """
         raise NotImplementedError("decode_sse_message not implemented")
 
@@ -114,9 +126,11 @@ class HttpRequestAdapter(ABC):
     def parse_sse_chunk(cls, buffer: bytes, end_pos: int) -> list[Any]:
         """Parse SSE chunk and extract all chunk objects.
 
-        Extracts JSON documents from SSE stream and decodes them to chunk objects.
-        Filters None returns from decode_sse_message and skips frames that fail
-        to decode (e.g. role-only or finish_reason-only frames).
+        Extracts JSON documents from SSE stream and decodes each to a chunk
+        object. Filters None returns from decode_sse_message. A frame that fails
+        to decode is skipped on its own, so later frames in the same read (e.g.
+        a trailing usage frame) are still returned. At most one warning is
+        logged per call, after all frames are processed.
 
         Args:
             buffer: Byte buffer containing SSE data
@@ -127,12 +141,20 @@ class HttpRequestAdapter(ABC):
         """
         json_docs = cls.SSE_DATA_PATTERN.findall(buffer[:end_pos])
         parsed: list[Any] = []
-        # Note: if one frame is malformed, remaining frames are skipped
-        try:
-            for json_doc in json_docs:
+        n_bad = 0
+        first_exc_name = ""
+        for json_doc in json_docs:
+            try:
                 content = cls.decode_sse_message(json_doc)
-                if content is not None:
-                    parsed.append(content)
-        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-            logger.warning("skipping malformed SSE batch (%s)", type(exc).__name__)
+            except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+                if not n_bad:
+                    first_exc_name = type(exc).__name__
+                n_bad += 1
+                continue
+            if content is not None:
+                parsed.append(content)
+        if n_bad:
+            logger.warning(
+                "skipping %d malformed SSE frame(s) (%s)", n_bad, first_exc_name
+            )
         return parsed

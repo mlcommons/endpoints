@@ -17,11 +17,17 @@
 
 from typing import Any
 
-from inference_endpoint.core.types import QueryResult, StreamChunk, TextModelOutput
+from inference_endpoint.core.types import (
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+    put_server_usage,
+    server_usage_counts,
+)
 from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
-from inference_endpoint.openai.types import SSEChoice, SSEDelta
+from inference_endpoint.openai.types import SSEChoice, SSEDelta, SSEMessage
 
 
 class OpenAISSEAccumulator(SSEAccumulatorProtocol):
@@ -32,14 +38,48 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         self.reasoning_chunks: list[str] = []
         self.tool_call_chunks: list[tuple[dict[str, Any], ...]] = []
         self._finish_reason: str | None = None
+        self._prompt_tokens: int | None = None
+        self._completion_tokens: int | None = None
+        # Usage sums the tokens of every choice while only the first choice of
+        # each frame is accumulated, so a stream whose usage-bearing frame holds
+        # several choices reports no counts.
+        self._multi_choice = False
 
         self._first_delta: SSEDelta | None = None
         self.first_chunk_sent = False
         self.query_id = query_id
         self.stream_all_chunks = stream_all_chunks
 
-    def add_chunk(self, choice: SSEChoice | None) -> StreamChunk | None:
-        if not isinstance(choice, SSEChoice):
+    def _take_message(self, msg: SSEMessage) -> SSEChoice | None:
+        """Record a usage-bearing frame's usage and choice count.
+
+        Returns the frame's first choice to accumulate, or ``None``.
+        """
+        if msg.usage is not None:
+            prompt_tokens, completion_tokens = server_usage_counts(msg.usage)
+            # Per-field merge: a later frame with a null, missing or malformed
+            # count (e.g. a proxy ending with "usage": {}) must not erase a
+            # count seen earlier.
+            if prompt_tokens is not None:
+                self._prompt_tokens = prompt_tokens
+            if completion_tokens is not None:
+                self._completion_tokens = completion_tokens
+        choices = msg.choices
+        if not choices:
+            return None
+        if len(choices) > 1:
+            self._multi_choice = True
+        return choices[0]
+
+    def add_chunk(self, chunk: SSEChoice | SSEMessage | None) -> StreamChunk | None:
+        if isinstance(chunk, SSEChoice):
+            choice = chunk
+        elif isinstance(chunk, SSEMessage):
+            message_choice = self._take_message(chunk)
+            if message_choice is None:
+                return None
+            choice = message_choice
+        else:
             return None
 
         if choice.finish_reason:
@@ -76,7 +116,7 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         if content is not None and (
             self.stream_all_chunks or not self.first_chunk_sent
         ):
-            chunk = StreamChunk(
+            stream_chunk = StreamChunk(
                 id=self.query_id,
                 response_chunk=content,
                 metadata={
@@ -84,7 +124,7 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
                 },
             )
             self.first_chunk_sent = True
-            return chunk
+            return stream_chunk
         else:
             return None
 
@@ -112,6 +152,8 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         }
         if self._finish_reason:
             metadata["finish_reason"] = self._finish_reason
+        if not self._multi_choice:
+            put_server_usage(metadata, self._prompt_tokens, self._completion_tokens)
         _content, _reasoning, merged_tool_calls = text_output.as_message_parts()
         if merged_tool_calls:
             metadata["tool_calls"] = list(merged_tool_calls)

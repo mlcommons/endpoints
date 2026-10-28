@@ -13,9 +13,63 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 
+import pandas as pd
 import pytest
+from inference_endpoint.config.schema import APIType, ModelParams, StreamingMode
+from inference_endpoint.core.types import Query
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.predefined.random import RandomDataset
+from inference_endpoint.dataset_manager.transforms import ColumnFilter
+from inference_endpoint.openai.openai_msgspec_adapter import OpenAIMsgspecAdapter
+
+_STREAMING = ModelParams(name="m", streaming=StreamingMode.ON)
+
+
+def _plain_sample() -> dict:
+    # A preset ColumnFilter that keeps the column replaces the adapter's filter.
+    ds = Dataset(
+        pd.DataFrame([{"prompt": "hi", "include_usage": True}]),
+        transforms=[
+            ColumnFilter(
+                required_columns=["prompt"], optional_columns=["include_usage"]
+            )
+        ],
+    )
+    ds.load(api_type=APIType.OPENAI, model_params=_STREAMING)
+    return ds.load_sample(0)
+
+
+def _agentic_sample() -> dict:
+    row = {
+        "conversation_id": "c1",
+        "turn": 1,
+        "role": "user",
+        "content": "hi",
+        "stream": True,
+        "include_usage": True,
+    }
+    ds = AgenticInferenceDataset(pd.DataFrame([row]))
+    ds.load(api_type=APIType.OPENAI, model_params=_STREAMING)
+    return ds.load_sample(0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "load", [_plain_sample, _agentic_sample], ids=["dataset", "agentic"]
+)
+def test_dataset_column_named_include_usage_passes_through(load):
+    sample = load()
+    assert sample["include_usage"] is True
+    # The run setting, not the column, decides whether usage is requested.
+    body = json.loads(
+        OpenAIMsgspecAdapter.encode_query(Query(data=sample), include_usage=False)
+    )
+    assert "stream_options" not in body and "include_usage" not in body
 
 
 @pytest.mark.unit

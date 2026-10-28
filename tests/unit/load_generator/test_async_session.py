@@ -21,7 +21,9 @@ import asyncio
 import random
 import time
 from types import SimpleNamespace
+from typing import Any
 
+import msgspec
 import pytest
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
@@ -32,12 +34,14 @@ from inference_endpoint.core.record import (
     SessionEventType,
 )
 from inference_endpoint.core.types import (
+    TOKEN_HDR_HIGH,
     ErrorData,
     PhaseData,
     PhaseType,
     Query,
     QueryResult,
     StreamChunk,
+    put_server_usage,
 )
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.load_generator.session import (
@@ -1754,6 +1758,32 @@ class TestBenchmarkSessionHandleResponse:
 
         assert publisher.events == []
         assert phase_issuer.inflight == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "counts,expected",
+        [
+            ((11, 3), (11, 3)),
+            ((None, None), (msgspec.UNSET, msgspec.UNSET)),
+            ((None, 3), (msgspec.UNSET, 3)),
+            ((11, None), (11, msgspec.UNSET)),
+            ((0, 0), (0, 0)),
+            ((TOKEN_HDR_HIGH, TOKEN_HDR_HIGH), (TOKEN_HDR_HIGH, TOKEN_HDR_HIGH)),
+        ],
+        ids=["ints", "missing", "prompt_missing", "completion_missing", "zero", "max"],
+    )
+    async def test_session_lifts_the_counts_put_server_usage_wrote(
+        self, counts, expected
+    ):
+        metadata: dict[str, Any] = {}
+        put_server_usage(metadata, *counts)
+        publisher = FakePublisher()
+        session = BenchmarkSession(FakeIssuer(), publisher, asyncio.get_running_loop())
+        session._handle_response(
+            QueryResult(id="q", response_output="ab", metadata=metadata), 1_000
+        )
+        (complete,) = publisher.events_of_type(SampleEventType.COMPLETE)
+        assert (complete.prompt_tokens, complete.completion_tokens) == expected
 
 
 class NoopStrategy:

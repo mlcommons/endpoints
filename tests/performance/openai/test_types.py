@@ -36,7 +36,6 @@ from inference_endpoint.openai.types import (
     ChatCompletionResponse,
     ChatCompletionResponseMessage,
     ChatMessage,
-    CompletionUsage,
     SSEChoice,
     SSEDelta,
     SSEMessage,
@@ -98,11 +97,7 @@ def make_chat_response(text: str) -> ChatCompletionResponse:
                 finish_reason="stop",
             )
         ],
-        usage=CompletionUsage(
-            prompt_tokens=10,
-            completion_tokens=20,
-            total_tokens=30,
-        ),
+        usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
         system_fingerprint="fp_test",
     )
 
