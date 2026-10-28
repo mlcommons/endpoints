@@ -231,7 +231,7 @@ class BFCLExecutionBridge:
             model_responses_bfcl = []
             for tc in tool_calls:
                 name = tc["name"]
-                if allowed_names and name not in allowed_names:
+                if name not in allowed_names:
                     logger.warning(
                         "Dropping tool call to undeclared function %r for %s turn "
                         "%d (not in the entry's tool list); refusing to execute an "

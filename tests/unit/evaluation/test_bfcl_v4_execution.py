@@ -40,7 +40,7 @@ def _state(entry_id="multi_turn_base_0", max_steps=25):
         current_step=0,
         current_turn_results=[],
         messages=[],
-        tools=[],
+        tools=[{"type": "function", "function": {"name": "f"}}],
         force_terminated=False,
         completed=False,
         model_results_per_turn=[],
@@ -112,14 +112,18 @@ def test_process_response_no_tool_calls_advances_turn():
 
 
 @pytest.mark.unit
-def test_process_response_drops_undeclared_tool_name():
+@pytest.mark.parametrize(
+    "tools",
+    [[{"type": "function", "function": {"name": "f"}}], [], [{"type": "function"}]],
+)
+def test_process_response_drops_undeclared_tool_name(tools):
     """A tool call to a name the entry never declared must not reach bfcl-eval's
     executor (guards against injection like __import__('os').system)."""
     executed = []
     bridge = _make_bridge()
     state = _state()
     state.entry.num_turns = 1
-    state.tools = [{"type": "function", "function": {"name": "f"}}]
+    state.tools = tools
     with (
         patch.object(ex, "convert_to_function_call", lambda calls: list(calls)),
         patch.object(ex, "is_empty_execute_response", lambda d: len(d) == 0),
