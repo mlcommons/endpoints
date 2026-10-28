@@ -67,10 +67,13 @@ class TestMetricsPublisher:
                 calls.append(True)
                 return SessionState.LIVE, 0
 
+            inner_mock = MagicMock()
+            publisher._publisher = inner_mock
             publisher.start(
                 registry,
                 publish_interval_s=0.01,
                 get_runtime_state=get_runtime_state,
+                session_started_ns=42,
             )
             assert publisher._tick_task is not None
             assert not publisher._tick_task.done()
@@ -78,12 +81,15 @@ class TestMetricsPublisher:
             # Let at least one tick run.
             await asyncio.sleep(0.05)
             assert len(calls) >= 1
+            assert inner_mock.publish.call_args.args[0].session_started_ns == 42
         finally:
             publisher.close()
 
+    @pytest.mark.parametrize("started", [False, True])
+    @pytest.mark.parametrize("interrupted", [False, True])
     @pytest.mark.asyncio
     async def test_publish_final_writes_json_atomically(
-        self, tmp_path: Path, zmq_ctx_scope: ManagedZMQContext
+        self, tmp_path: Path, zmq_ctx_scope: ManagedZMQContext, started, interrupted
     ):
         loop = asyncio.get_event_loop()
         target = tmp_path / "final_snapshot.json"
@@ -99,7 +105,16 @@ class TestMetricsPublisher:
             registry.register_counter("c")
             registry.increment("c", 5)
 
-            await publisher.publish_final(registry, n_pending_tasks=0)
+            if started:
+                publisher.start(
+                    registry,
+                    publish_interval_s=1,
+                    get_runtime_state=lambda: (SessionState.LIVE, 0),
+                    session_started_ns=42,
+                )
+            await publisher.publish_final(
+                registry, n_pending_tasks=0, interrupted=interrupted
+            )
 
             # The .tmp file MUST NOT exist after the rename.
             tmp_target = target.with_suffix(target.suffix + ".tmp")
@@ -107,8 +122,12 @@ class TestMetricsPublisher:
             assert target.exists(), "final snapshot should be on disk"
 
             decoded = json.loads(target.read_bytes())
-            assert decoded["state"] == SessionState.COMPLETE.value
+            expected_state = (
+                SessionState.INTERRUPTED if interrupted else SessionState.COMPLETE
+            )
+            assert decoded["state"] == expected_state.value
             assert decoded["n_pending_tasks"] == 0
+            assert decoded["session_started_ns"] == (42 if started else None)
         finally:
             publisher.close()
 

@@ -429,7 +429,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         return cls(
             version=str(version_info.get("version", "unknown")),
             git_sha=version_info.get("git_sha"),
-            test_started_at=0,  # TODO: surface session_started_ns via snapshot
+            test_started_at=snap.get("session_started_ns") or 0,
             n_samples_issued=n_issued,
             n_samples_completed=n_completed,
             n_samples_failed=n_failed,

@@ -426,6 +426,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                                     self._session_state,
                                     self.pending_tokens,
                                 ),
+                                session_started_ns=self._session_start_ns,
                             )
                             if (
                                 self._token_queue is not None

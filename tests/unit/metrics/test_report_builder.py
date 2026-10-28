@@ -383,6 +383,19 @@ class TestFromSnapshot:
 
 @pytest.mark.unit
 class TestReportDisplayAndSerialize:
+    @pytest.mark.parametrize(
+        "start", [{}, {"session_started_ns": None}, {"session_started_ns": 42}]
+    )
+    def test_start_time_from_snapshot(self, start):
+        snap = snapshot_to_dict(
+            _make_registry().build_snapshot(
+                state=SessionState.COMPLETE, n_pending_tasks=0
+            )
+        )
+        snap.update(start)
+        report = Report.from_snapshot(snap)
+        assert report.test_started_at == (start.get("session_started_ns") or 0)
+
     def test_display_summary(self):
         registry = _make_registry(n_samples=10)
         report = _build_report(registry)

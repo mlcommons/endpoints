@@ -741,10 +741,11 @@ class TestEdgeCases:
     async def test_session_started_stores_timestamp(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, _ = make_aggregator(ctx, loop, "agg_started_ts")
+            agg, _, publisher = make_aggregator(ctx, loop, "agg_started_ts")
             try:
                 await agg.process([session_event(SessionEventType.STARTED, ts=42)])
                 assert agg._table.session_started_ns == 42
+                assert publisher.start.call_args.kwargs["session_started_ns"] == 42
             finally:
                 agg.close()
 

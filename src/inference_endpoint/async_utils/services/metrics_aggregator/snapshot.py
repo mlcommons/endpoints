@@ -171,6 +171,7 @@ class MetricsSnapshot(
                           ``metrics/steady_state_diagnostics.py``. Present only
                           on the terminal snapshot when collection was enabled
                           and the series describe the run.
+        session_started_ns: Monotonic session start; None before STARTED.
 
     ``array_like=True`` makes field order the wire format. Append fields only.
     """
@@ -181,6 +182,7 @@ class MetricsSnapshot(
     n_pending_tasks: int
     metrics: list[MetricStat]
     steady_state: SteadyState | None = None
+    session_started_ns: int | None = None
 
 
 # 4-byte topic to match TOPIC_FRAME_SIZE-prefix protocol used by the
@@ -249,6 +251,7 @@ def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
     return {
         "counter": snap.counter,
         "timestamp_ns": snap.timestamp_ns,
+        "session_started_ns": snap.session_started_ns,
         "state": snap.state.value,
         "n_pending_tasks": snap.n_pending_tasks,
         "metrics": [_metric_to_dict(m) for m in snap.metrics],
