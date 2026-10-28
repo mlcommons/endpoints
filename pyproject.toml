@@ -30,6 +30,7 @@ constraint-dependencies = [
     "setuptools>=84.1.0",
     "fsspec>=2026.6.0",
     "multidict>=6.9.1",
+    "msgpack>=1.2.3",
 ]
 
 [tool.uv.build-backend]
