@@ -23,15 +23,72 @@ instead of using pytest fixtures with factory patterns.
 import hashlib
 import json
 import random
+import re
 import string
 import uuid
 from pathlib import Path
+from typing import Any
 
+import msgspec
 import zmq
+from inference_endpoint.config.schema import Settings
 from inference_endpoint.core.types import (
+    TOKEN_HDR_HIGH,
     Query,
+    TextModelOutput,
 )
 from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.metrics.report import OtherBasisMetrics, Report
+from inference_endpoint.metrics.token_count_basis import ServerUsage
+
+# The token-count basis a run uses when none is configured. Basis-dependent tests
+# take it from here instead of pinning a literal.
+DEFAULT_SOURCE = Settings.model_fields["token_count_source"].default
+
+# One table pins the usable-server-usage rule for every consumer:
+# (id, prompt_tokens, completion_tokens, output, expected classification).
+SERVER_USAGE_CASES: list[tuple[str, object, object, TextModelOutput, ServerUsage]] = [
+    ("usable", 10, 5, TextModelOutput(output="hi"), ServerUsage.USABLE),
+    (
+        "missing_both",
+        msgspec.UNSET,
+        msgspec.UNSET,
+        TextModelOutput(output="hi"),
+        ServerUsage.MISSING,
+    ),
+    (
+        "missing_prompt",
+        msgspec.UNSET,
+        5,
+        TextModelOutput(output="hi"),
+        ServerUsage.MISSING,
+    ),
+    ("zero_beside_output", 10, 0, TextModelOutput(output="hi"), ServerUsage.MISSING),
+    ("true_zero", 10, 0, TextModelOutput(output=""), ServerUsage.TRUE_ZERO),
+    ("zero_prompt", 0, 5, TextModelOutput(output="hi"), ServerUsage.MISSING),
+    ("negative", 10, -1, TextModelOutput(output="hi"), ServerUsage.MISSING),
+    ("bool", True, 5, TextModelOutput(output="hi"), ServerUsage.MISSING),
+    (
+        "above_bound",
+        10,
+        TOKEN_HDR_HIGH + 1,
+        TextModelOutput(output="hi"),
+        ServerUsage.MISSING,
+    ),
+    ("float", 10.0, 5, TextModelOutput(output="hi"), ServerUsage.MISSING),
+]
+
+# The cases an event log can carry. It stores counts as integers, so a bool or
+# float count reaches a post-run reader as an undecodable line, not a usage case.
+LOGGED_SERVER_USAGE_CASES = [
+    case
+    for case in SERVER_USAGE_CASES
+    if all(
+        value is msgspec.UNSET
+        or (isinstance(value, int) and not isinstance(value, bool))
+        for value in case[1:3]
+    )
+]
 
 
 def write_large_prompt_dataset(directory: Path, n_samples: int) -> Path:
@@ -187,3 +244,46 @@ def get_test_socket_path(tmp_path: Path, test_name: str, suffix: str = "") -> st
         len(socket_path) <= zmq.IPC_PATH_MAX_LEN
     ), "socket path is too long for ZMQ IPC"
     return socket_path
+
+
+def parse_sse_frames(body: bytes) -> list[dict[str, Any] | bytes]:
+    """Parse SSE ``data:`` frames from a raw or decoded streaming body.
+
+    JSON frames decode to dicts and the ``[DONE]`` sentinel stays ``b"[DONE]"``.
+    HTTP chunk-size lines are ignored, so this accepts raw chunked bytes as well
+    as bodies already decoded by an HTTP client.
+    """
+    return [
+        m if m == b"[DONE]" else json.loads(m)
+        for m in re.findall(rb"data: (\{[^\n]+\}|\[DONE\])", body)
+    ]
+
+
+_BASE_REPORT: dict[str, Any] = {
+    "version": "t",
+    "git_sha": None,
+    "test_started_at": 0,
+    "n_samples_issued": 10,
+    "n_samples_completed": 10,
+    "n_samples_failed": 0,
+    "duration_ns": 1,
+    "state": "complete",
+    "complete": True,
+    "ttft": {},
+    "tpot": {},
+    "latency": {},
+    "input_sequence_lengths": {},
+    "output_sequence_lengths": {},
+    "token_count_source": DEFAULT_SOURCE,
+    "other_basis": OtherBasisMetrics(
+        input_sequence_lengths=None,
+        output_sequence_lengths=None,
+        tpot=None,
+        tps=None,
+    ),
+}
+
+
+def make_report(**over: Any) -> Report:
+    """A complete 10-sample ``Report`` with ``over`` applied to its fields."""
+    return Report(**(_BASE_REPORT | over))
