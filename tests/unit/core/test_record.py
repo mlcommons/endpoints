@@ -314,3 +314,58 @@ class TestEventRecordCodecOnDecodeError:
         # silently swallow decode-path bugs.
         with pytest.raises(ValueError, match="not a decode error"):
             _codec.on_decode_error(b"", ValueError("not a decode error"))
+
+
+@pytest.mark.unit
+class TestEventRecordServerTokenCounts:
+    _JSON_ENC = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+    _JSON_DEC = msgspec.json.Decoder(EventRecord, dec_hook=EventType.decode_hook)
+    # A COMPLETE line in the archived shape, without the count fields.
+    _ARCHIVED_LINE = (
+        b'{"event_type":"sample.complete","timestamp_ns":123,"sample_uuid":"u",'
+        b'"conversation_id":"","turn":null,"data":["TextModelOutput","ab",null,null],'
+        b'"finish_reason":"stop","worker_id":2}'
+    )
+    _KW = {
+        "event_type": SampleEventType.COMPLETE,
+        "timestamp_ns": 123,
+        "sample_uuid": "u",
+        "data": TextModelOutput(output="ab"),
+        "finish_reason": "stop",
+        "worker_id": 2,
+    }
+
+    def test_counts_default_to_unset(self):
+        r = EventRecord(event_type=SampleEventType.COMPLETE)
+        assert r.prompt_tokens is msgspec.UNSET
+        assert r.completion_tokens is msgspec.UNSET
+
+    def test_record_without_counts_encodes_byte_identical_to_archived_line(self):
+        assert self._JSON_ENC.encode(EventRecord(**self._KW)) == self._ARCHIVED_LINE
+        _, payload = _codec.encode(EventRecord(**self._KW))
+        assert list(msgspec.msgpack.decode(payload)) == [
+            "event_type",
+            "timestamp_ns",
+            "sample_uuid",
+            "conversation_id",
+            "turn",
+            "data",
+            "finish_reason",
+            "worker_id",
+        ]
+
+    def test_counts_round_trip_and_append_after_worker_id(self):
+        record = EventRecord(**self._KW, prompt_tokens=5, completion_tokens=7)
+        line = self._JSON_ENC.encode(record)
+        assert (
+            line
+            == self._ARCHIVED_LINE[:-1] + b',"prompt_tokens":5,"completion_tokens":7}'
+        )
+        for d in (self._JSON_DEC.decode(line), _codec.decode(_codec.encode(record)[1])):
+            assert (d.prompt_tokens, d.completion_tokens) == (5, 7)
+
+    def test_archived_line_decodes_with_unset_counts(self):
+        d = self._JSON_DEC.decode(self._ARCHIVED_LINE)
+        assert (d.finish_reason, d.worker_id) == ("stop", 2)
+        assert d.prompt_tokens is msgspec.UNSET
+        assert d.completion_tokens is msgspec.UNSET
