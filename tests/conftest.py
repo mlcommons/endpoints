@@ -90,6 +90,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "(useful in containers where cpu_affinity is restricted)"
         ),
     )
+    group.addoption(
+        "--roofline-no-stream-include-usage",
+        action="store_true",
+        default=False,
+        help=(
+            "Pass --no-stream-include-usage to the roofline benchmark client, "
+            "so streaming requests do not ask for the usage frame "
+            "(default: the client asks)"
+        ),
+    )
 
 
 @pytest.fixture
