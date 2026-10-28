@@ -57,7 +57,10 @@ from inference_endpoint.commands.benchmark.accuracy import (
     write_accuracy_results,
 )
 from inference_endpoint.commands.benchmark.full_run_osl import full_run_osl_for_report
-from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
+from inference_endpoint.commands.benchmark.pipeline import (
+    MetricsPipeline,
+    resolve_token_count_source,
+)
 from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
     write_profiling_section,
@@ -80,7 +83,7 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
-from inference_endpoint.core.types import PhaseType, QueryResult
+from inference_endpoint.core.types import PhaseType, QueryResult, TokenCountSource
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -108,6 +111,7 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
+from inference_endpoint.openai.types import requests_multiple_choices
 
 if TYPE_CHECKING:
     from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -191,6 +195,7 @@ class BenchmarkContext:
     dataloader: Dataset | None
     rt_settings: RuntimeSettings | None
     total_samples: int
+    token_count_source: TokenCountSource
     eval_configs: list[AccuracyConfiguration] = field(default_factory=list)
     affinity_plan: AffinityPlan | None = None
 
@@ -253,9 +258,6 @@ def _check_tokenizer_exists(model_name: str) -> bool:
         return True
     except Exception as e:
         logger.warning(f"Could not verify tokenizer for {model_name}: {e}")
-        logger.warning(
-            "Continuing without tokenizer (ISL/OSL/TPOT metrics will be unavailable)"
-        )
         return False
 
 
@@ -299,6 +301,58 @@ def _validate_accuracy_config_for_scorer(
             f"Dataset '{dataset_name}' uses scorer '{scorer_cls.SCORER_ID}'; "
             "accuracy_config.num_repeats must be 1 because the scorer runs "
             "externally once per benchmark."
+        )
+
+
+def _issued_datasets(
+    config: BenchmarkConfig,
+    dataloader: Dataset | None,
+    eval_configs: list[AccuracyConfiguration],
+) -> list[tuple[str, Dataset]]:
+    """Each distinct dataset whose rows are sent to the endpoint, with its name."""
+    issued: list[tuple[str, Dataset]] = []
+    if dataloader is not None:
+        perf_name = next(
+            (d.name for d in config.datasets if d.type == DatasetType.PERFORMANCE),
+            "performance",
+        )
+        issued.append((perf_name, dataloader))
+    for ec in eval_configs:
+        # The performance dataset's inline scorer reuses the loader above, and
+        # an external scorer never sends its rows to the endpoint.
+        if ec.dataset is not dataloader and not ec.scorer.SKIP_ENDPOINT_PHASE:
+            issued.append((ec.dataset_name, ec.dataset))
+    return issued
+
+
+def _check_multi_choice_rows(
+    datasets: list[tuple[str, Dataset]], *, token_count_source: TokenCountSource
+) -> None:
+    """Reject (server basis) or count and warn about (client basis) ``n > 1`` rows.
+
+    Server usage sums the tokens of all ``n`` choices, but only ``choices[0]``
+    is measured, so those rows have no usable server counts.
+    """
+    n_rows = 0
+    for name, dataset in datasets:
+        for index, row in enumerate(dataset.data or ()):
+            n = row.get("n")
+            if not requests_multiple_choices(n):
+                continue
+            if token_count_source is TokenCountSource.SERVER:
+                raise SetupError(
+                    f"Dataset '{name}': sample {index} sets n={n}. "
+                    "Server token usage sums all n choices but only choices[0] is "
+                    "measured; remove 'n' or set --token-count-source client "
+                    "(YAML: settings.token_count_source: client)."
+                )
+            n_rows += 1
+    if n_rows:
+        logger.warning(
+            "%d sample(s) set n > 1: server token usage sums all n choices but "
+            "only choices[0] is measured, so they get no server-reported "
+            "(*_server) token counts",
+            n_rows,
         )
 
 
@@ -525,6 +579,21 @@ def setup_benchmark(
         tokenizer_name = tokenizer_override
     else:
         tokenizer_name = model_name if _check_tokenizer_exists(model_name) else None
+    token_count_source = resolve_token_count_source(config)
+    if tokenizer_name is None:
+        if token_count_source is TokenCountSource.CLIENT:
+            logger.warning(
+                "No tokenizer: ISL/OSL/TPOT are unavailable while the client "
+                "basis is primary; the *_server ISL/OSL/TPOT blocks are "
+                "reported when the server returns usage. Set --tokenizer "
+                "(model_params.tokenizer_name) or --token-count-source server "
+                "(settings.token_count_source)"
+            )
+        else:
+            logger.warning(
+                "No tokenizer: the *_client ISL/OSL/TPOT blocks are unavailable; "
+                "ISL/OSL/TPOT use server-reported usage"
+            )
 
     # Streaming
     logger.info(
@@ -534,6 +603,10 @@ def setup_benchmark(
 
     # Datasets
     dataloader, eval_configs = _load_datasets(config, report_dir, test_mode)
+    _check_multi_choice_rows(
+        _issued_datasets(config, dataloader, eval_configs),
+        token_count_source=token_count_source,
+    )
 
     rt_settings: RuntimeSettings | None = None
     total_samples = 0
@@ -602,6 +675,7 @@ def setup_benchmark(
         total_samples=total_samples,
         eval_configs=eval_configs,
         affinity_plan=affinity_plan,
+        token_count_source=token_count_source,
     )
 
 
@@ -853,6 +927,7 @@ async def _run_benchmark_async(
         event_log_dir=event_log_dir,
         metrics_output_dir=metrics_output_dir,
         loop=loop,
+        token_count_source=ctx.token_count_source,
     )
     report: Report | None = None
     profiler: ProfileController
@@ -1229,7 +1304,11 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         if aborted:
             logger.warning("Run aborted — skipping accuracy scoring on partial data")
         else:
-            full_run_osl = full_run_osl_for_report(ctx.report_dir, ctx.tokenizer_name)
+            full_run_osl = full_run_osl_for_report(
+                ctx.report_dir,
+                ctx.tokenizer_name,
+                token_count_source=ctx.token_count_source,
+            )
             accuracy_scores = score_accuracy(ctx, result)
     except KeyboardInterrupt:
         if report is not None:
@@ -1266,7 +1345,9 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
 
     # Emit the accuracy results as a focused artifact under accuracy/. Written
     # after the report artifacts so a write failure here can't discard them.
-    write_accuracy_results(ctx.report_dir, accuracy_scores)
+    write_accuracy_results(
+        ctx.report_dir, accuracy_scores, token_count_source=ctx.token_count_source
+    )
 
 
 def run_benchmark(
@@ -1319,14 +1400,8 @@ def run_benchmark(
                 )
             if bench.report is None:
                 raise ExecutionError("Benchmark produced no usable metrics report")
-            if not (report := bench.report).complete:
-                if report.state == "complete" and report.n_samples_dropped == 0:
-                    raise ExecutionError("Metrics tokenization did not finish")
-                raise ExecutionError(
-                    "Benchmark report is incomplete "
-                    f"(state={report.state}, "
-                    f"n_samples_dropped={report.n_samples_dropped})"
-                )
+            if not bench.report.complete:
+                raise ExecutionError(bench.report.incomplete_reason())
         except KeyboardInterrupt:
             # Salvage results (finally), then propagate to main.py -> exit 130.
             logger.warning("Benchmark interrupted by user")

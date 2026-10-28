@@ -46,6 +46,8 @@ from inference_endpoint.config.schema import (
 )
 from inference_endpoint.exceptions import ExecutionError, SetupError
 
+from tests.test_helpers import make_report
+
 # ---------------------------------------------------------------------------
 # verify_output_caching — pure function, no I/O
 # ---------------------------------------------------------------------------
@@ -482,13 +484,66 @@ class TestRunAuditGuards:
         config = self._audit_config()
         incomplete = MagicMock()
         incomplete.complete = False
+        incomplete.state = "complete"
+        incomplete.incomplete_reason.return_value = (
+            "Metrics tokenization did not finish"
+        )
         bench = MagicMock()
         bench.run_timed_out = False
         bench.report = incomplete
         self._patch_phase(monkeypatch, num_samples=100, bench=bench)
 
-        with pytest.raises(ExecutionError, match="did not complete cleanly"):
+        with pytest.raises(
+            ExecutionError,
+            match=r"did not complete cleanly \(Metrics tokenization did not finish\)",
+        ):
             run_audit(config, tmp_path)
+
+    @staticmethod
+    def _missing_usage_bench(**over) -> MagicMock:
+        bench = MagicMock()
+        bench.run_timed_out = False
+        bench.report = make_report(
+            complete=False,
+            n_samples_issued=4,
+            n_samples_completed=4,
+            token_count_source="server",
+            n_samples_missing_usage=4,
+            n_samples_missing_usage_empty_output=4,
+            **over,
+        )
+        return bench
+
+    @pytest.mark.unit
+    def test_refuses_missing_usage_phase_with_the_usage_message(
+        self, tmp_path, monkeypatch
+    ):
+        config = self._audit_config()
+        bench = self._missing_usage_bench()
+        self._patch_phase(monkeypatch, num_samples=100, bench=bench)
+
+        with pytest.raises(
+            ExecutionError,
+            match=r"did not complete cleanly \(4 of 4 successful tracked samples "
+            r"returned no server token usage; 4 had empty output",
+        ):
+            run_audit(config, tmp_path)
+
+    @pytest.mark.unit
+    def test_interrupted_missing_usage_phase_raises_keyboard_interrupt(
+        self, tmp_path, monkeypatch
+    ):
+        """An interrupt outranks missing usage: the phase exits as interrupted
+        and the usage message is never surfaced."""
+        config = self._audit_config()
+        bench = self._missing_usage_bench(state="interrupted")
+        self._patch_phase(monkeypatch, num_samples=100, bench=bench)
+
+        with pytest.raises(
+            KeyboardInterrupt, match=r"Audit phase '.*' interrupted"
+        ) as e:
+            run_audit(config, tmp_path)
+        assert "token usage" not in str(e.value)
 
     @pytest.mark.unit
     def test_interrupted_phase_raises_keyboard_interrupt(self, tmp_path, monkeypatch):
