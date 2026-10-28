@@ -18,8 +18,12 @@
 from pathlib import Path
 
 import pytest
-from inference_endpoint.config.schema import BenchmarkConfig, LoadPatternType
+from inference_endpoint.config.schema import (
+    BenchmarkConfig,
+    LoadPatternType,
+)
 from inference_endpoint.config.schema import TestType as BenchmarkTestType
+from inference_endpoint.core.types import TokenCountSource
 from inference_endpoint.exceptions import CLIError
 from pydantic import ValidationError
 
@@ -122,6 +126,28 @@ endpoint_config:
         config = BenchmarkConfig.from_yaml_file(config_file)
 
         assert config.settings.metrics_isl is False
+
+    @pytest.mark.unit
+    def test_load_token_count_source_server(self, tmp_path):
+        config_file = tmp_path / "token_count_source_server.yaml"
+        config_file.write_text(
+            """
+type: offline
+model_params:
+  name: test-model
+datasets:
+  - path: test.jsonl
+settings:
+  token_count_source: server
+endpoint_config:
+  endpoints:
+    - http://localhost:8000
+"""
+        )
+
+        config = BenchmarkConfig.from_yaml_file(config_file)
+
+        assert config.settings.token_count_source is TokenCountSource.SERVER
 
     def test_load_nonexistent_file(self):
         """Test error when file doesn't exist."""
