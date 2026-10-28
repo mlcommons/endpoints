@@ -15,6 +15,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
     MessageInput,
     TextInput,
     extract_tokenization_input,
+    has_countable_output,
 )
 from inference_endpoint.core.types import TextModelOutput
 
@@ -71,3 +72,34 @@ def test_empty_output_is_excluded() -> None:
     it as 0 would drag min/avg down on both the window and the full run.
     """
     assert extract_tokenization_input(TextModelOutput(output="")) is None
+
+
+_TOOL_CALL = {
+    "id": "call_1",
+    "type": "function",
+    "function": {"name": "bash", "arguments": "{}"},
+}
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        pytest.param(TextModelOutput(output=""), id="empty-str"),
+        pytest.param(TextModelOutput(output="a"), id="str"),
+        pytest.param(TextModelOutput(output=("", "")), id="empty-chunks"),
+        pytest.param(TextModelOutput(output=("", "x")), id="late-chunk"),
+        pytest.param(
+            TextModelOutput(output="", reasoning=("",)), id="empty-reasoning-chunk"
+        ),
+        pytest.param(
+            TextModelOutput(output="", tool_calls=(_TOOL_CALL,)), id="tool-calls"
+        ),
+        pytest.param(
+            TextModelOutput(output="", reasoning="thinking"), id="reasoning-only"
+        ),
+    ],
+)
+def test_has_countable_output_matches_the_osl_rule(output: TextModelOutput) -> None:
+    assert has_countable_output(output) == (
+        extract_tokenization_input(output) is not None
+    )

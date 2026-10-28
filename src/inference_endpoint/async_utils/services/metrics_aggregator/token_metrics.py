@@ -147,7 +147,8 @@ def load_reference_tokenizer(tokenizer_name: str) -> Any:
     ``trust_remote_code`` is required for tokenizers that ship custom code (e.g.
     DeepSeek-R1). The single construction point shared by the perf-window
     tokenizer, the sharded length-counting workers, and finalize-side accuracy
-    OSL, so every OSL number in a run comes from the same tokenizer.
+    OSL, so every client-basis OSL number in a run (unsuffixed when the client
+    basis is primary, ``*_client`` otherwise) comes from the same tokenizer.
     """
     return AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
 
