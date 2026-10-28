@@ -197,6 +197,7 @@ def _accuracy(run_dir: Path) -> None:
                 "total_samples": FLOOR,
             }
         ],
+        token_count_source=DEFAULT_SOURCE,
     )
     written = run_dir / "accuracy" / "accuracy_results.json"
     written.replace(run_dir / "accuracy_results.json")

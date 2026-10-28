@@ -20,15 +20,18 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import msgspec.json
 import pytest
 from inference_endpoint.commands.benchmark.accuracy import (
     AccuracyConfiguration,
+    PhaseServerOsl,
     _accuracy_uuid_bound,
     _phase_osl_stats,
     _phase_response_counts,
+    _phase_server_osl_stats,
     score_accuracy,
     write_accuracy_results,
 )
@@ -39,12 +42,20 @@ from inference_endpoint.config.schema import (
     ModelParams,
     ScorerMethod,
 )
+from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
+from inference_endpoint.core.types import TextModelOutput, TokenCountSource, basis_key
+from inference_endpoint.evaluation import scoring as evaluation_scoring
+from inference_endpoint.evaluation.scoring import Scorer
+from inference_endpoint.metrics.token_count_basis import ServerUsage
+
+from tests.test_helpers import LOGGED_SERVER_USAGE_CASES
 
 # The module that defines score_accuracy (commands.benchmark.accuracy), resolved
 # via __module__ so the tests monkeypatch its module-level load_reference_backend
 # and score_accuracy picks up the patched one — without importing the module under
 # both the ``from ... import`` and ``import ...`` styles.
 scoring_mod = sys.modules[score_accuracy.__module__]
+CLIENT, SERVER = TokenCountSource.CLIENT, TokenCountSource.SERVER
 
 
 class _FakeDataset:
@@ -97,70 +108,45 @@ class _FakeBreakdownScorer(_FakeScorer):
 
 
 class _FakeOSLScorer(_FakeScorer):
-    """Scorer exposing the get_raw_outputs()/sample_index_map the OSL path reads."""
+    """Scorer exposing the iter_complete_outputs()/sample_index_map the OSL
+    path reads."""
+
+    # Two completed samples: outputs of 2 and 4 "tokens" (words).
+    SAMPLE_INDEX_MAP = {"u1": 0, "u2": 1}
+    # (uuid, response text, server completion_tokens when the usage is usable)
+    OUTPUTS: list[tuple[str, str, int | None]] = [
+        ("u1", "a b", None),
+        ("u2", "a b c d", None),
+        ("other", "not in this phase", None),
+    ]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Two completed samples: outputs of 2 and 4 "tokens" (words).
-        self.sample_index_map = {"u1": 0, "u2": 1}
+        self.sample_index_map = dict(self.SAMPLE_INDEX_MAP)
 
-    def get_raw_outputs(self, wanted_uuids=None):
-        import pandas as pd
-
-        return pd.DataFrame(
-            [
-                {"sample_uuid": "u1", "output": "a b"},
-                {"sample_uuid": "u2", "output": "a b c d"},
-                {"sample_uuid": "other", "output": "not in this phase"},
-            ]
-        )
+    def iter_complete_outputs(self, uuids):
+        yield from self.OUTPUTS
 
 
 class _EmptyOSLScorer(_FakeOSLScorer):
     """Every completion empty (all requests failed): OSL yields None."""
 
-    def get_raw_outputs(self, wanted_uuids=None):
-        import pandas as pd
-
-        return pd.DataFrame(
-            [
-                {"sample_uuid": "u1", "output": ""},
-                {"sample_uuid": "u2", "output": ""},
-            ]
-        )
+    OUTPUTS = [("u1", "", None), ("u2", "", None)]
 
 
 class _MixedOSLScorer(_FakeOSLScorer):
     """One scored, one empty (COMPLETE, blank), one missing (no COMPLETE)."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.sample_index_map = {"u1": 0, "u2": 1, "u3": 2}
-
-    def get_raw_outputs(self, wanted_uuids=None):
-        import pandas as pd
-
-        return pd.DataFrame(
-            [
-                {"sample_uuid": "u1", "output": "x y"},  # scored
-                {"sample_uuid": "u2", "output": ""},  # empty
-                # u3 has no COMPLETE row -> missing
-            ]
-        )
+    SAMPLE_INDEX_MAP = {"u1": 0, "u2": 1, "u3": 2}
+    # u3 has no COMPLETE event -> missing
+    OUTPUTS = [("u1", "x y", None), ("u2", "", None)]
 
 
 class _AllMissingScorer(_FakeOSLScorer):
-    """No COMPLETE rows for this phase: get_raw_outputs returns an empty but
-    columned frame, as the real scorer does when the bound filters everything."""
+    """No COMPLETE event for this phase, as when the bound filters everything."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.sample_index_map = {"u1": 0, "u2": 1, "u3": 2}
-
-    def get_raw_outputs(self, wanted_uuids=None):
-        import pandas as pd
-
-        return pd.DataFrame([], columns=["sample_uuid", "output"])
+    SAMPLE_INDEX_MAP = {"u1": 0, "u2": 1, "u3": 2}
+    OUTPUTS = []
 
 
 def _cfg(name: str, n: int, score: float, tmp, scorer=_FakeScorer, repeats: int = 1):
@@ -188,15 +174,72 @@ def _ctx(
     tokenizer_name=None,
     report_dir=None,
     test_mode: config_schema.TestMode = config_schema.TestMode.ACC,
+    token_count_source: TokenCountSource = TokenCountSource.CLIENT,
 ):
-    # tokenizer_name None => OSL is skipped (fake scorers have no get_raw_outputs).
+    # tokenizer_name None => client OSL is skipped (and _FakeScorer has no
+    # iter_complete_outputs, so its entries carry no OSL block at all).
     # report_dir None => the uuid bound falls back to an unbounded read (no map).
     return SimpleNamespace(
         eval_configs=cfgs,
         tokenizer_name=tokenizer_name,
         report_dir=report_dir,
         test_mode=test_mode,
+        token_count_source=token_count_source,
     )
+
+
+class _ServerOSLScorer(_FakeOSLScorer):
+    """u1 scored with usage, u2 scored without usage, u3 empty with usage."""
+
+    SAMPLE_INDEX_MAP = {"u1": 0, "u2": 1, "u3": 2}
+    OUTPUTS = [("u1", "a b", 3), ("u2", "a b c d", None), ("u3", "", 1), ("x", "y", 9)]
+
+
+class _EventsScorer(_FakeScorer):
+    """Reads its phase's outputs from events.jsonl through the real reader."""
+
+    _iter_complete_records = Scorer._iter_complete_records
+    iter_complete_outputs = Scorer.iter_complete_outputs
+
+    def __init__(self, name, dataset, report_dir, **kwargs):
+        super().__init__(name, dataset, report_dir, **kwargs)
+        self.report_dir = report_dir
+        idx_map = msgspec.json.decode((report_dir / "sample_idx_map.json").read_bytes())
+        self.sample_index_map = idx_map[name]
+
+
+_EVENT_ENCODER = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+
+
+def _complete(uuid: str, text: str, prompt=msgspec.UNSET, completion=msgspec.UNSET):
+    return EventRecord(
+        event_type=SampleEventType.COMPLETE,
+        sample_uuid=uuid,
+        data=TextModelOutput(output=text),
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+    )
+
+
+def _write_run(report_dir: Path, phases: dict[str, list[EventRecord]]) -> list[bytes]:
+    """Write sample_idx_map.json and events.jsonl, an ISSUED line before each
+    COMPLETE; return the COMPLETE lines."""
+    idx_map = {
+        name: {r.sample_uuid: i for i, r in enumerate(records)}
+        for name, records in phases.items()
+    }
+    (report_dir / "sample_idx_map.json").write_bytes(msgspec.json.encode(idx_map))
+    complete_lines = []
+    with (report_dir / "events.jsonl").open("wb") as f:
+        for records in phases.values():
+            for record in records:
+                issued = EventRecord(
+                    event_type=SampleEventType.ISSUED, sample_uuid=record.sample_uuid
+                )
+                f.write(_EVENT_ENCODER.encode(issued) + b"\n")
+                complete_lines.append(_EVENT_ENCODER.encode(record) + b"\n")
+                f.write(complete_lines[-1])
+    return complete_lines
 
 
 class _WordBackend:
@@ -204,6 +247,25 @@ class _WordBackend:
 
     def encode_batch(self, texts, add_special_tokens=False):
         return [SimpleNamespace(ids=t.split()) for t in texts]
+
+
+class _RaisingBackend:
+    """Stand-in tokenizers backend that fails on every batch."""
+
+    def encode_batch(self, texts, add_special_tokens=False):
+        raise RuntimeError("tokenizer blew up")
+
+
+class _CountingDecoder:
+    """Wraps the events decoder and records every line it decodes."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.lines: list[bytes] = []
+
+    def decode(self, line):
+        self.lines.append(line)
+        return self._inner.decode(line)
 
 
 _RESULT = SimpleNamespace(perf_results=[], phase_results=[])
@@ -326,7 +388,8 @@ class TestScoreAccuracy:
 
     def test_no_osl_without_tokenizer(self, tmp_path):
         # tokenizer_name None (the default) => no output_sequence_lengths attached,
-        # and the OSL path is never entered (fake scorers have no get_raw_outputs).
+        # and the OSL path stops at the read (_FakeScorer has no
+        # iter_complete_outputs).
         cfg = _cfg("aime25::gptoss", 30, 0.8, tmp_path)
         entry = _by_name(score_accuracy(_ctx([cfg]), _RESULT))["aime25::gptoss"]
         assert "output_sequence_lengths" not in entry
@@ -362,14 +425,14 @@ class TestScoreAccuracy:
         ]
         assert "output_sequence_lengths" not in entry
 
-    def test_osl_dropped_when_get_raw_outputs_raises(self, tmp_path, monkeypatch):
-        """A read/tokenize failure only drops OSL — scoring still succeeds."""
+    def test_osl_dropped_when_events_read_raises(self, tmp_path, monkeypatch):
+        """A read failure only drops OSL — scoring still succeeds."""
         monkeypatch.setattr(
             scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
 
         class _RaisingScorer(_FakeOSLScorer):
-            def get_raw_outputs(self, wanted_uuids=None):
+            def iter_complete_outputs(self, uuids):
                 raise RuntimeError("events.jsonl unreadable")
 
         cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_RaisingScorer)
@@ -480,9 +543,9 @@ class TestScoreAccuracy:
         assert entry["response_counts"]["scored"] == 2
         assert entry["score"] == pytest.approx(0.8)
 
-    def test_uuid_bound_passed_to_get_raw_outputs(self, tmp_path, monkeypatch):
+    def test_uuid_bound_passed_to_events_read(self, tmp_path, monkeypatch):
         """End-to-end: score_accuracy computes the accuracy uuid bound from
-        sample_idx_map.json and passes it into get_raw_outputs."""
+        sample_idx_map.json and passes it into iter_complete_outputs."""
         monkeypatch.setattr(
             scoring_mod, "load_reference_backend", lambda name: _WordBackend()
         )
@@ -492,9 +555,9 @@ class TestScoreAccuracy:
         captured: dict = {}
 
         class _CaptureScorer(_FakeOSLScorer):
-            def get_raw_outputs(self, wanted_uuids=None):
-                captured["wanted"] = wanted_uuids
-                return super().get_raw_outputs(wanted_uuids)
+            def iter_complete_outputs(self, uuids):
+                captured["wanted"] = uuids
+                return super().iter_complete_outputs(uuids)
 
         cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_CaptureScorer)
         score_accuracy(_ctx([cfg], tokenizer_name="fake", report_dir=tmp_path), _RESULT)
@@ -507,14 +570,205 @@ class TestScoreAccuracy:
         captured: dict = {}
 
         class _CaptureScorer(_FakeOSLScorer):
-            def get_raw_outputs(self, wanted_uuids=None):
-                captured["wanted"] = wanted_uuids
-                return super().get_raw_outputs(wanted_uuids)
+            def iter_complete_outputs(self, uuids):
+                captured["wanted"] = uuids
+                return super().iter_complete_outputs(uuids)
 
         cfg = _cfg("swe_bench", 1, 0.8, tmp_path, scorer=_CaptureScorer)
         score_accuracy(_ctx([cfg], report_dir=tmp_path), _RESULT)
 
         assert captured["wanted"] == set()
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    def test_accuracy_keys_follow_rule(self, tmp_path, monkeypatch, primary):
+        """Each basis's block and sample count take the base name on the
+        primary basis and the suffixed name on the other; missing usage is
+        basis-independent and marks the server block partial only when the
+        server basis is the other one."""
+        monkeypatch.setattr(
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
+        )
+        cfg = _cfg("ds", 3, 0.8, tmp_path, scorer=_ServerOSLScorer)
+
+        entry = _by_name(
+            score_accuracy(
+                _ctx([cfg], tokenizer_name="fake", token_count_source=primary),
+                _RESULT,
+            )
+        )["ds"]
+
+        def key(base: str, basis: TokenCountSource) -> str:
+            return basis_key(base, basis, primary=primary)
+
+        assert entry["response_counts"] == {
+            "issued": 3,
+            "scored": 2,
+            "empty": 1,
+            "missing": 0,
+        }
+        # Per basis: (total tokens, samples counted) over the scored samples.
+        for basis, (total, n_samples) in {CLIENT: (6, 2), SERVER: (3, 1)}.items():
+            assert entry[key("output_sequence_lengths", basis)]["total"] == total
+            assert entry[key("n_osl_samples", basis)] == n_samples
+        assert entry["n_missing_usage"] == 1
+        server_block = entry[key("output_sequence_lengths", SERVER)]
+        assert ("partial" in server_block) is (primary is CLIENT)
+        assert "partial" not in entry[key("output_sequence_lengths", CLIENT)]
+        assert isinstance(entry["osl_tokenize_s"], float)
+        assert not [k for k in entry if k.endswith(f"_{primary.value}")]
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    def test_server_osl_needs_no_tokenizer(self, tmp_path, primary):
+        cfg = _cfg("ds", 3, 0.8, tmp_path, scorer=_ServerOSLScorer)
+
+        entry = _by_name(
+            score_accuracy(_ctx([cfg], token_count_source=primary), _RESULT)
+        )["ds"]
+
+        def key(base: str, basis: TokenCountSource) -> str:
+            return basis_key(base, basis, primary=primary)
+
+        assert entry[key("output_sequence_lengths", SERVER)]["avg"] == 3.0
+        assert key("output_sequence_lengths", CLIENT) not in entry
+        assert "osl_tokenize_s" not in entry
+        assert (
+            entry[key("n_osl_samples", SERVER)],
+            entry[key("n_osl_samples", CLIENT)],
+            entry["n_missing_usage"],
+        ) == (1, 0, 1)
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    def test_accuracy_tokenizer_failure_keeps_server_block(
+        self, tmp_path, monkeypatch, caplog, primary
+    ):
+        monkeypatch.setattr(
+            scoring_mod, "load_reference_backend", lambda name: _RaisingBackend()
+        )
+        cfg = _cfg("ds", 3, 0.8, tmp_path, scorer=_ServerOSLScorer)
+
+        with caplog.at_level("WARNING"):
+            entry = _by_name(
+                score_accuracy(
+                    _ctx([cfg], tokenizer_name="fake", token_count_source=primary),
+                    _RESULT,
+                )
+            )["ds"]
+
+        def key(base: str, basis: TokenCountSource) -> str:
+            return basis_key(base, basis, primary=primary)
+
+        assert entry[key("output_sequence_lengths", SERVER)]["total"] == 3
+        assert key("output_sequence_lengths", CLIENT) not in entry
+        assert "osl_tokenize_s" not in entry
+        assert entry["response_counts"]["scored"] == 2
+        assert (
+            entry[key("n_osl_samples", SERVER)],
+            entry[key("n_osl_samples", CLIENT)],
+            entry["n_missing_usage"],
+        ) == (1, 0, 1)
+        assert "tokenizer blew up" in caplog.text
+
+    def test_accuracy_single_pass_over_events(self, tmp_path, monkeypatch):
+        """Two accuracy phases share one read of events.jsonl, which decodes
+        each COMPLETE line once and no other line."""
+        monkeypatch.setattr(
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
+        )
+        complete_lines = _write_run(
+            tmp_path,
+            {
+                "ds1": [_complete("u1", "a b", 1, 2), _complete("u2", "c")],
+                "ds2": [_complete("u3", "d e f", 1, 3)],
+            },
+        )
+        decoder = _CountingDecoder(evaluation_scoring._EVENT_DECODER)
+        monkeypatch.setattr(evaluation_scoring, "_EVENT_DECODER", decoder)
+        cfgs = [
+            _cfg("ds1", 2, 0.5, tmp_path, scorer=_EventsScorer),
+            _cfg("ds2", 1, 0.5, tmp_path, scorer=_EventsScorer),
+        ]
+
+        by = _by_name(
+            score_accuracy(
+                _ctx(cfgs, tokenizer_name="fake", report_dir=tmp_path), _RESULT
+            )
+        )
+
+        assert sorted(decoder.lines) == sorted(complete_lines)
+        assert by["ds1"]["output_sequence_lengths"]["total"] == 3
+        assert by["ds2"]["output_sequence_lengths"]["total"] == 3
+        assert (by["ds1"]["n_missing_usage"], by["ds2"]["n_missing_usage"]) == (1, 0)
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    @pytest.mark.parametrize(
+        ("prompt", "completion", "output", "expected"),
+        [pytest.param(*case[1:], id=case[0]) for case in LOGGED_SERVER_USAGE_CASES],
+    )
+    def test_accuracy_missing_usage_matches_rule(
+        self, tmp_path, primary, prompt, completion, output, expected
+    ):
+        """Accuracy OSL counts each scored sample's usage by the shared rule."""
+        record = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            sample_uuid="u1",
+            data=output,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+        )
+        _write_run(tmp_path, {"ds": [record]})
+        cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_EventsScorer)
+
+        entry = _by_name(
+            score_accuracy(
+                _ctx([cfg], report_dir=tmp_path, token_count_source=primary), _RESULT
+            )
+        )["ds"]
+
+        server_key = basis_key("output_sequence_lengths", SERVER, primary=primary)
+        assert entry["n_missing_usage"] == int(expected is ServerUsage.MISSING)
+        assert (server_key in entry) is (expected is ServerUsage.USABLE)
+
+    def test_accuracy_unsuffixed_entry_identical_with_and_without_usage_keys(
+        self, tmp_path, monkeypatch
+    ):
+        """On the client basis, server usage only adds keys: the shared keys
+        hold the same values whether or not the log carries usage."""
+        monkeypatch.setattr(
+            scoring_mod, "load_reference_backend", lambda name: _WordBackend()
+        )
+        with_usage = [
+            _complete("u1", "a b", 1, 2),
+            _complete("u2", "c d e"),
+            _complete("u3", "", 1, 0),
+            _complete("u4", "f", 1, 0),
+        ]
+        without_usage = [_complete(r.sample_uuid, str(r.data)) for r in with_usage]
+        entries = []
+        for name, records in (("with", with_usage), ("without", without_usage)):
+            run = tmp_path / name
+            run.mkdir()
+            _write_run(run, {"ds": records})
+            cfg = _cfg("ds", 4, 0.5, run, scorer=_EventsScorer)
+            ctx = _ctx([cfg], tokenizer_name="fake", report_dir=run)
+            entries.append(_by_name(score_accuracy(ctx, _RESULT))["ds"])
+
+        shared = ("response_counts", "output_sequence_lengths")
+        assert {k: entries[0][k] for k in shared} == {k: entries[1][k] for k in shared}
+        assert entries[0]["output_sequence_lengths"]["total"] == 6
+
+
+@pytest.mark.unit
+def test_phase_server_osl_counts_scored_samples_with_usable_usage():
+    """Each scored sample counts its usable completion_tokens or is missing
+    usage; an empty sample is outside the scored population."""
+    phase = _phase_server_osl_stats(
+        ["a", "b", "c", "d"],
+        {"a": "x y", "b": "z", "c": "", "d": "w"},
+        {"b": 4, "c": 2},
+    )
+    assert isinstance(phase, PhaseServerOsl)
+    assert phase.block is not None and phase.block["total"] == 4
+    assert (phase.n_counted, phase.n_missing_usage) == (1, 2)
 
 
 @pytest.mark.unit
@@ -697,7 +951,7 @@ def test_write_accuracy_results_keeps_stable_average_accuracy_key(tmp_path):
         {"dataset_name": "aime", "score": 0.9, "unit_samples": 30},
         {"dataset_name": "lcb", "score": 0.6, "unit_samples": 1000},
     ]
-    write_accuracy_results(tmp_path, scores)
+    write_accuracy_results(tmp_path, scores, token_count_source=TokenCountSource.SERVER)
     data = msgspec.json.decode(
         (tmp_path / "accuracy" / "accuracy_results.json").read_bytes()
     )
@@ -705,3 +959,15 @@ def test_write_accuracy_results_keeps_stable_average_accuracy_key(tmp_path):
     assert "samples_weighted_average_accuracy" not in data
     expected = (0.9 * 30 + 0.6 * 1000) / (30 + 1000)
     assert data["average_accuracy"] == pytest.approx(expected)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", list(TokenCountSource))
+def test_write_accuracy_results_labels_the_token_basis(tmp_path, source):
+    scores = [{"dataset_name": "ds", "score": 0.5, "unit_samples": 2}]
+    write_accuracy_results(tmp_path, scores, token_count_source=source)
+    data = msgspec.json.decode(
+        (tmp_path / "accuracy" / "accuracy_results.json").read_bytes()
+    )
+    assert data["token_count_source"] == source.value
+    assert data["accuracy_scores"] == scores
