@@ -9,13 +9,24 @@ by tests/unit/metrics/test_steady_state_diagnostics.py.
 
 For each performance-tracked sample it computes:
   - ttft_ns = recv_first.ts - issued.ts
-  - tpot_ns = (complete.ts - recv_first.ts) / tokens(text_after_first_chunk)
+  - tpot_ns = (complete.ts - recv_first.ts) / tokens after the first chunk
 
-Token counts use plain tokenization of ``text_after_first_chunk``. The live
-metrics aggregator uses the chat-template path for reasoning and tool-call
-outputs. For reasoning models, absolute TPOT can differ from the run report.
-CoV and trend tests are scale-invariant, so the steady/drift verdict is the
-same.
+The TPOT denominator follows a token-count basis. By default it is the run's
+primary basis, read by ``token_count_source_for_run`` from the event log's
+directory; ``--token-count-source`` replays on either basis:
+
+  - server: ``completion_tokens - 1`` from the COMPLETE line's usage, by the
+    live aggregator's rule (``classify_server_usage``, then LoadGen's
+    formula). Samples without usable usage, with ``completion_tokens <= 1``
+    or a non-positive window get no TPOT. No tokenizer is needed.
+  - client: plain tokenization of ``text_after_first_chunk``. The live
+    metrics aggregator uses the chat-template path for reasoning and
+    tool-call outputs, so for reasoning models absolute TPOT can differ from
+    the run report. CoV and trend tests are scale-invariant, so the
+    steady/drift verdict is the same.
+
+The JSON verdict key follows the basis naming rule: ``steady_state`` on the
+run's primary basis, ``steady_state_<basis>`` on the other.
 
 Samples are grouped by issue order into super-passes. ``--superpass-size`` sets
 the samples per bucket. By default it is the dataset size. Each metric and
@@ -42,13 +53,16 @@ comes from prefill, dataset ISL skew, and queueing, not from decode instability.
 p99 and end-to-end latency are also diagnostic. Latency variation tracks the
 OSL mix.
 
-usage (auto-detects the tokenizer and workload profile from config.yaml, and
-the super-pass size from the phase_start event; see MODEL_REGISTRY + PROFILES):
+usage (auto-detects the token-count basis from result_summary.json or
+config.yaml, the tokenizer for client-basis runs and the workload profile from
+config.yaml, and the super-pass size from the phase_start event; see
+MODEL_REGISTRY + PROFILES):
   python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>       # 0 flags
   python -m inference_endpoint.metrics.steady_state_diagnostics <events.jsonl> \
       --model kimi-k3                                                          # 1 flag
-Every derived setting has an explicit override (--tokenizer, --dataset-size,
---superpass-size, --profile, --cov-bounds, --warmup, --json, ...).
+Every derived setting has an explicit override (--token-count-source,
+--tokenizer, --dataset-size, --superpass-size, --profile, --cov-bounds,
+--warmup, --json, ...).
 """
 
 from __future__ import annotations
@@ -61,14 +75,34 @@ import sys
 from array import array
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from statistics import NormalDist, median, pstdev
-from typing import Final, Literal, NamedTuple, TypedDict
+from typing import Final, Literal, NamedTuple
 
 import msgspec
 import yaml
 from transformers import AutoTokenizer
 
-from inference_endpoint.core.types import PhaseData, PhaseType
+from inference_endpoint.core.record import (
+    EventLogFormatError,
+    EventRecord,
+    EventType,
+    is_complete_line,
+)
+from inference_endpoint.core.types import (
+    PhaseData,
+    PhaseType,
+    TextModelOutput,
+    TokenCountSource,
+    basis_key,
+)
+from inference_endpoint.metrics.token_count_basis import (
+    TOKEN_COUNT_SOURCE_METAVAR,
+    RunBasisError,
+    ServerUsage,
+    read_server_usage,
+    replay_basis,
+)
 
 # --------------------------------------------------------------------------- #
 # Event wire constants (mirror core/record.py category.value topics)
@@ -457,35 +491,89 @@ def superpass_size_from_events(events_path: str) -> int | None:
 
 
 # --------------------------------------------------------------------------- #
+# COMPLETE records
+# --------------------------------------------------------------------------- #
+# A COMPLETE line carries the output and server usage a replay counts tokens
+# from, so it is decoded as the typed record the JSONL writer encoded. The
+# replays find these lines with ``is_complete_line`` and read every other event
+# as an untyped JSON object, so the log must be in the writer's compact JSON
+# form.
+_EVENT_DECODER = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+_JSON_DECODER = msgspec.json.Decoder()
+
+
+def _non_compact_complete(events_path: str) -> EventLogFormatError:
+    """The error for a COMPLETE line ``is_complete_line`` cannot find."""
+    return EventLogFormatError(
+        f"{events_path}: a sample.complete line is not in the JSONL writer's "
+        "compact form; re-encode the log with separators=(',', ':')"
+    )
+
+
+def _decode_complete(line: bytes) -> EventRecord | None:
+    """The COMPLETE record on ``line``; None when the line does not decode."""
+    try:
+        return _EVENT_DECODER.decode(line)
+    except (msgspec.DecodeError, NotImplementedError):
+        # A truncated or corrupt line (e.g. the last line of a killed run).
+        # EventType.decode_hook raises NotImplementedError for a non-string
+        # event_type, which msgspec does not wrap.
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # NATL (agentic per-trajectory throughput) -- EXPERIMENTAL, see the CLI warning
 # --------------------------------------------------------------------------- #
-def full_output_text(data: object) -> str:
-    """Return all generated text for a turn, for OSL counting."""
-    if not isinstance(data, list):
-        return ""
+def full_output_text(output: TextModelOutput) -> str:
+    """Return all generated text for a turn, for OSL counting.
+
+    Reasoning, then output, then the tool calls as logged (JSON).
+    """
     parts: list[str] = []
-    reasoning = data[2] if len(data) > 2 else None
-    output = data[1] if len(data) > 1 else ""
-    if reasoning:
-        parts.extend(reasoning if isinstance(reasoning, list) else [reasoning])
-    if output:
-        parts.extend(output if isinstance(output, list) else [output])
-    tool_calls = data[3] if len(data) > 3 else None
-    if tool_calls:
-        parts.append(json.dumps(tool_calls))
-    return "".join(str(p) for p in parts)
+    for text in (output.reasoning, output.output):
+        if isinstance(text, tuple):
+            parts.extend(text)
+        elif text:
+            parts.append(text)
+    if output.tool_calls:
+        parts.append(json.dumps(output.tool_calls))
+    return "".join(parts)
+
+
+class ReplayTrajectory(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """:func:`build_trajectory_natl` result.
+
+    ``pairs`` are ``(last_complete_ns, natl)`` sorted by completion time.
+    ``n_missing_usage`` and ``n_undecodable`` are counted as in
+    :class:`ReplaySeries`; a turn without usable usage adds no tokens.
+    """
+
+    pairs: list[tuple[int, float]]
+    n_missing_usage: int | None
+    n_undecodable: int
 
 
 def build_trajectory_natl(
     events_path: str,
-    count_tokens: Callable[[list[str]], list[int]],
+    count_tokens: Callable[[list[str]], list[int]] | None,
     flush_size: int = 512,
-) -> list[tuple[int, float]]:
+    *,
+    basis: TokenCountSource,
+) -> ReplayTrajectory:
     """Compute per-trajectory NATL values sorted by completion time.
 
     NATL is sum(output tokens) / sum(e2e latency seconds), grouped by
-    ``conversation_id``. Each returned pair is ``(last_complete_ns, natl)``.
+    ``conversation_id``.
+
+    Output tokens per turn follow ``basis``, the basis replayed on: the usable
+    server ``completion_tokens`` (``read_server_usage``; no tokenizer), or
+    ``count_tokens`` over the turn's full output text.
     """
+    server_basis = basis is TokenCountSource.SERVER
+    if not server_basis and count_tokens is None:
+        raise ValueError("count_tokens is required for a client-basis replay")
+    n_missing_usage = 0
+    n_undecodable = 0
     issue: dict[str, tuple[str, int]] = {}
     conv_lat_s: dict[str, float] = {}
     conv_tokens: dict[str, int] = {}
@@ -495,20 +583,50 @@ def build_trajectory_natl(
     tracking = False
 
     def flush() -> None:
-        if b_text:
+        if b_text and count_tokens is not None:
             for conv, cnt in zip(b_conv, count_tokens(b_text), strict=True):
                 conv_tokens[conv] = conv_tokens.get(conv, 0) + cnt
         b_conv.clear()
         b_text.clear()
 
-    with open(events_path) as f:
+    with open(events_path, "rb") as f:
         for line in f:
-            line = line.strip()
-            if not line:
+            if is_complete_line(line):
+                record = _decode_complete(line)
+                if record is None:
+                    n_undecodable += 1
+                    continue
+                iv = issue.pop(record.sample_uuid, None)
+                if iv is None:
+                    continue
+                ts = record.timestamp_ns
+                conv, its = iv
+                conv_lat_s[conv] = conv_lat_s.get(conv, 0.0) + (ts - its) / 1e9
+                conv_end_ns[conv] = max(conv_end_ns.get(conv, 0), ts)
+                output = record.data
+                if not isinstance(output, TextModelOutput):
+                    continue  # errors and agentic timeouts complete without output
+                if server_basis:
+                    usage, n = read_server_usage(
+                        record.prompt_tokens, record.completion_tokens, output
+                    )
+                    if usage is ServerUsage.MISSING:
+                        n_missing_usage += 1
+                    if n is not None:
+                        conv_tokens[conv] = conv_tokens.get(conv, 0) + n
+                    continue
+                text = full_output_text(output)
+                if text:
+                    b_conv.append(conv)
+                    b_text.append(text)
+                    if len(b_text) >= flush_size:
+                        flush()
                 continue
             try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
+                rec = _JSON_DECODER.decode(line)
+            except msgspec.DecodeError:
+                # Skip a truncated or partial line (e.g. the last line of a
+                # killed run); an undecodable COMPLETE line is counted above.
                 continue
             et = rec.get("event_type")
             ts = rec.get("timestamp_ns")
@@ -521,18 +639,7 @@ def build_trajectory_natl(
                 if tracking and uuid and ts is not None:
                     issue[uuid] = (rec.get("conversation_id") or "", ts)
             elif et == EV_COMPLETE:
-                iv = issue.pop(rec.get("sample_uuid"), None)
-                if iv is None or ts is None:
-                    continue
-                conv, its = iv
-                conv_lat_s[conv] = conv_lat_s.get(conv, 0.0) + (ts - its) / 1e9
-                conv_end_ns[conv] = max(conv_end_ns.get(conv, 0), ts)
-                text = full_output_text(rec.get("data"))
-                if text:
-                    b_conv.append(conv)
-                    b_text.append(text)
-                    if len(b_text) >= flush_size:
-                        flush()
+                raise _non_compact_complete(events_path)
     flush()
     pairs = [
         (conv_end_ns[c], conv_tokens[c] / conv_lat_s[c])
@@ -540,7 +647,11 @@ def build_trajectory_natl(
         if conv_lat_s[c] > 0 and conv_tokens.get(c, 0) > 0
     ]
     pairs.sort(key=lambda p: p[0])
-    return pairs
+    return ReplayTrajectory(
+        pairs=pairs,
+        n_missing_usage=n_missing_usage if server_basis else None,
+        n_undecodable=n_undecodable,
+    )
 
 
 def build_natl_result(
@@ -581,29 +692,23 @@ def build_natl_result(
 
 
 # --------------------------------------------------------------------------- #
-# TextModelOutput.text_after_first_chunk for the parsed JSON array
+# TextModelOutput.text_after_first_chunk without the tool calls
 # --------------------------------------------------------------------------- #
-def text_after_first_chunk(data: object) -> str:
+def text_after_first_chunk(output: TextModelOutput) -> str:
     """Return output text after the first streamed chunk.
 
-    This text is tokenized for the TPOT denominator. ``data`` is the COMPLETE
-    event payload: ``[tag, output, reasoning?, tool_calls?]``.
-
-    ``output`` and ``reasoning`` are each either a string for non-streaming
-    output or a list of streamed chunks. The logic mirrors
+    This text is tokenized for the TPOT denominator. ``output`` and
+    ``reasoning`` are each either a string for non-streaming output or a tuple
+    of streamed chunks. The logic mirrors
     ``TextModelOutput.text_after_first_chunk`` in core/types.py.
     """
-    if not isinstance(data, list) or not data:
-        return ""
-    output = data[1] if len(data) > 1 else ""
-    reasoning = data[2] if len(data) > 2 else None
     parts: list[str] = []
-    if isinstance(reasoning, list):
-        parts.extend(reasoning[1:])
-    if isinstance(output, list):
-        parts.extend(output[1:])
-    elif isinstance(output, str) and isinstance(reasoning, list) and reasoning:
-        parts.append(output)
+    if isinstance(output.reasoning, tuple):
+        parts.extend(output.reasoning[1:])
+    if isinstance(output.output, tuple):
+        parts.extend(output.output[1:])
+    elif isinstance(output.reasoning, tuple) and output.reasoning:
+        parts.append(output.output)
     # Tool-call reconstruction is intentionally omitted: tool-call samples use a
     # chat-template tokenization path this diagnostic does not replicate.
     return "".join(parts)
@@ -764,16 +869,41 @@ class SuperPassCollector:
         sp.out_tokens += token_count
 
 
+class ReplaySeries(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """:func:`build_super_pass_series` result.
+
+    ``n_missing_usage`` counts tracked ``TextModelOutput`` completions without
+    usable server usage on a server-basis replay (no TPOT, never tokenized). It
+    is None on a client-basis replay, which never reads usage.
+    ``n_undecodable`` counts COMPLETE lines that do not decode as an
+    ``EventRecord``; their samples are missing from the series.
+    """
+
+    super_passes: list[SuperPassRollup]
+    n_missing_usage: int | None
+    n_undecodable: int
+
+
 def build_super_pass_series(
     events_path: str,
     superpass_size: int,
-    count_tokens: Callable[[list[str]], list[int]],
+    count_tokens: Callable[[list[str]], list[int]] | None,
     flush_size: int = TOKENIZE_BATCH_SIZE,
-) -> list[SuperPassRollup]:
+    *,
+    basis: TokenCountSource,
+) -> ReplaySeries:
     """Replay an ``events.jsonl`` through a :class:`SuperPassCollector`.
 
-    ``count_tokens`` maps a text batch to token counts. It is injected so tests
-    can avoid a real tokenizer and callers can swap tokenizers.
+    ``basis`` is the basis replayed on, that of the TPOT token counts:
+
+    - SERVER: TPOT is ``(complete - recv_first) / (completion_tokens - 1)``
+      from the COMPLETE line's usage, with the live aggregator's rule and
+      guards (usable usage by ``read_server_usage``, streamed,
+      ``completion_tokens > 1``, positive window). ``count_tokens`` may be
+      None.
+    - CLIENT: ``count_tokens`` maps a text batch to token counts. It is
+      injected so tests can avoid a real tokenizer and callers can swap
+      tokenizers.
 
     ``flush_size`` caps buffered output texts before tokenizer flush. Lower
     values bound peak memory for long reasoning outputs at the cost of smaller
@@ -781,6 +911,11 @@ def build_super_pass_series(
     """
     if superpass_size <= 0:
         raise ValueError("superpass_size must be positive")
+    server_basis = basis is TokenCountSource.SERVER
+    if not server_basis and count_tokens is None:
+        raise ValueError("count_tokens is required for a client-basis replay")
+    n_missing_usage = 0
+    n_undecodable = 0
     collector = SuperPassCollector(superpass_size)
     # The parse keeps its own in-flight rows: it has no MetricsTable to hang the
     # super-pass index off, which is where the live producer stores it.
@@ -792,7 +927,7 @@ def build_super_pass_series(
     batch_texts: list[str] = []
 
     def flush_tpot() -> None:
-        if batch_texts:
+        if batch_texts and count_tokens is not None:
             counts = count_tokens(batch_texts)
             for (superpass_index, delta), cnt in zip(pending, counts, strict=True):
                 if cnt > 0:
@@ -800,14 +935,46 @@ def build_super_pass_series(
         pending.clear()
         batch_texts.clear()
 
-    with open(events_path) as f:
+    with open(events_path, "rb") as f:
         for line in f:
-            line = line.strip()
-            if not line:
+            if is_complete_line(line):
+                record = _decode_complete(line)
+                if record is None:
+                    n_undecodable += 1
+                    continue
+                row = rows.pop(record.sample_uuid, None)
+                if row is None:
+                    continue
+                delta = collector.on_complete(
+                    row.superpass_index,
+                    row.issue_ns,
+                    row.recv_first_ns,
+                    record.timestamp_ns,
+                )
+                output = record.data
+                if not isinstance(output, TextModelOutput):
+                    continue  # errors and agentic timeouts complete without output
+                if server_basis:
+                    usage, n = read_server_usage(
+                        record.prompt_tokens, record.completion_tokens, output
+                    )
+                    if usage is ServerUsage.MISSING:
+                        n_missing_usage += 1
+                    if n is not None and n > 1 and delta is not None and delta > 0:
+                        collector.add_tpot(row.superpass_index, delta / (n - 1), n - 1)
+                    continue
+                if delta is None:
+                    continue
+                text = text_after_first_chunk(output)
+                if text:
+                    pending.append((row.superpass_index, delta))
+                    batch_texts.append(text)
+                    if len(batch_texts) >= flush_size:
+                        flush_tpot()
                 continue
             try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
+                rec = _JSON_DECODER.decode(line)
+            except msgspec.DecodeError:
                 continue  # skip a truncated/partial line (e.g. last line of a killed run)
             et = rec.get("event_type")
             if et == EV_START_TRACKING:
@@ -846,22 +1013,13 @@ def build_super_pass_series(
                     if row.recv_first_ns is None:
                         row.recv_first_ns = ts
             elif et == EV_COMPLETE:
-                row = rows.pop(uuid, None)
-                if row is None:
-                    continue
-                delta = collector.on_complete(
-                    row.superpass_index, row.issue_ns, row.recv_first_ns, ts
-                )
-                if delta is None:
-                    continue
-                text = text_after_first_chunk(rec.get("data"))
-                if text:
-                    pending.append((row.superpass_index, delta))
-                    batch_texts.append(text)
-                    if len(batch_texts) >= flush_size:
-                        flush_tpot()
+                raise _non_compact_complete(events_path)
     flush_tpot()
-    return collector.series()
+    return ReplaySeries(
+        super_passes=collector.series(),
+        n_missing_usage=n_missing_usage if server_basis else None,
+        n_undecodable=n_undecodable,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1843,15 +2001,42 @@ def compute_steady_state_metrics(
 # --------------------------------------------------------------------------- #
 # Top-level orchestration
 # --------------------------------------------------------------------------- #
-class DiagnosticsResult(TypedDict):
+class DiagnosticsResult(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     """Standalone CLI result: the verdict plus debug tables.
 
     Benchmark runs produce only ``steady_state``. The CLI also includes
     ``drift``, a whole-run trend scan used to explain ``found: false`` verdicts.
+    The token-count labels sit beside the verdict, not inside it, so the block
+    stays comparable with a run's ``result_summary.json``.
     """
 
+    basis: TokenCountSource  # basis the TPOT series was replayed on
+    primary: TokenCountSource  # the run's basis, which keeps the verdict's name
+    # Server basis: tracked TextModelOutput completions without usable usage
+    # (no TPOT, never tokenized). None on the client basis, which never reads it.
+    n_missing_usage: int | None
+    # COMPLETE lines that did not decode; their samples are not in the series.
+    n_undecodable: int
     steady_state: SteadyState
     drift: dict[str, dict[str, Verdict]]  # metric key -> algorithm -> verdict
+
+    def to_json(self) -> bytes:
+        """The CLI's JSON blob; the verdict key follows ``basis_key``.
+
+        The replayed basis is written as ``token_count_source``, and
+        ``n_undecodable`` only when a line was skipped.
+        """
+        verdict_key = basis_key("steady_state", self.basis, primary=self.primary)
+        # msgspec encodes the Struct tree and validates its shape.
+        blob: dict[str, object] = {
+            "token_count_source": self.basis,
+            "n_missing_usage": self.n_missing_usage,
+        }
+        if self.n_undecodable:
+            blob["n_undecodable"] = self.n_undecodable
+        blob[verdict_key] = self.steady_state
+        blob["drift"] = self.drift
+        return msgspec.json.format(msgspec.json.encode(blob))
 
 
 def _drift_verdicts(trajectory: Sequence[float]) -> dict[str, Verdict]:
@@ -1861,7 +2046,7 @@ def _drift_verdicts(trajectory: Sequence[float]) -> dict[str, Verdict]:
 def run(
     events_path: str,
     superpass_size: int,
-    count_tokens: Callable[[list[str]], list[int]],
+    count_tokens: Callable[[list[str]], list[int]] | None,
     warmup: int | str = "auto",
     cov_bounds: Sequence[float] = DEFAULT_COV_BOUNDS,
     trend_gate: str = "mk_hamed_rao",
@@ -1869,14 +2054,24 @@ def run(
     warmup_band: float = 0.05,
     warmup_driver: str = "tpot_p50",
     enforce_min_duration: bool = True,
+    *,
+    basis: TokenCountSource,
+    primary: TokenCountSource,
 ) -> DiagnosticsResult:
     """Reconstruct the series from an event log, then analyse and diagnose it.
 
-    ``superpass_size`` is a count of samples.
+    ``superpass_size`` is a count of samples. ``basis`` is the basis TPOT is
+    replayed on (see :func:`build_super_pass_series`; on the server basis
+    ``count_tokens`` may be None) and ``primary`` is the run's own basis.
     """
-    series = build_super_pass_series(
-        events_path, superpass_size, count_tokens, tokenize_batch_size
+    replay = build_super_pass_series(
+        events_path,
+        superpass_size,
+        count_tokens,
+        tokenize_batch_size,
+        basis=basis,
     )
+    series = replay.super_passes
     ss = compute_steady_state_metrics(
         series,
         superpass_size=superpass_size,
@@ -1888,15 +2083,19 @@ def run(
         enforce_min_duration=enforce_min_duration,
     )
     post = series[ss.warmup :]
-    return {
-        "steady_state": ss,
-        "drift": {
+    return DiagnosticsResult(
+        basis=basis,
+        primary=primary,
+        n_missing_usage=replay.n_missing_usage,
+        n_undecodable=replay.n_undecodable,
+        steady_state=ss,
+        drift={
             m.key: _drift_verdicts(
                 super_pass_percentile_series(post, m.source_attr, m.percentile)
             )
             for m in TRACKED_METRICS
         },
-    }
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1993,8 +2192,9 @@ def _render_cov_table(
 
 
 def render_text(result: DiagnosticsResult, cov_bounds: Sequence[float]) -> str:
-    ss = result["steady_state"]
+    ss = result.steady_state
     lines = [
+        f"token basis: {result.basis.value}",
         f"super-passes: {ss.n_super_passes} "
         f"(size {ss.superpass_size}, warmup {ss.warmup})",
         "",
@@ -2019,7 +2219,7 @@ def render_text(result: DiagnosticsResult, cov_bounds: Sequence[float]) -> str:
     algos = list(ALGORITHMS)
     lines.append(f"  {'metric':<12} " + "  ".join(f"{a:>16}" for a in algos))
     for m in TRACKED_METRICS:
-        whole = result["drift"][m.key]
+        whole = result.drift[m.key]
         cells = "  ".join(f"{_VERDICT_GLYPH[whole[a]]:>16}" for a in algos)
         lines.append(f"  {m.key:<12} {cells}")
     return "\n".join(lines)
@@ -2071,9 +2271,11 @@ def _agentic_warning() -> str:
 
 
 def render_natl(r: dict) -> str:
+    """Render a :func:`build_natl_result` dict labelled with ``token_count_source``."""
     d = r["distribution"]
     return "\n".join(
         [
+            f"token basis: {r['token_count_source']}",
             "=== NATL (agentic per-trajectory throughput) ===",
             f"  trajectories: {r['n_trajectories']}  (super-pass = "
             f"{r['superpass_trajectories']} trajectories -> {r['n_super_passes']} "
@@ -2087,6 +2289,26 @@ def render_natl(r: dict) -> str:
     )
 
 
+def _warn_missing_usage(n_missing_usage: int | None) -> None:
+    if n_missing_usage:
+        print(
+            f"WARNING: {n_missing_usage} tracked samples returned no server token "
+            "usage; they add latency but no tokens, so NATL and system TPS are "
+            "understated for the affected trajectories and super-passes",
+            file=sys.stderr,
+        )
+
+
+def _warn_undecodable(n_undecodable: int) -> None:
+    if n_undecodable:
+        print(
+            f"WARNING: {n_undecodable} sample.complete lines could not be decoded "
+            "and were skipped; their samples are missing from the replay "
+            "(truncated or corrupt log?)",
+            file=sys.stderr,
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("target", help="run directory OR path to events.jsonl")
@@ -2096,7 +2318,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="model name (auto-detected from config if omitted)",
     )
     ap.add_argument(
-        "--tokenizer", default=None, help="HF tokenizer id/dir (overrides the registry)"
+        "--token-count-source",
+        type=TokenCountSource,
+        default=None,
+        metavar=TOKEN_COUNT_SOURCE_METAVAR,
+        help="token-count basis for TPOT/NATL (default: the run's own, from "
+        "performance/result_summary.json or config.yaml beside the event log). "
+        "server replays completion_tokens and needs no tokenizer",
+    )
+    ap.add_argument(
+        "--tokenizer",
+        default=None,
+        help="HF tokenizer id/dir for client-basis runs (overrides the registry)",
     )
     ap.add_argument(
         "--trust-remote-code",
@@ -2147,20 +2380,35 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     events, cfg_path = find_run_files(args.target)
     cfg = read_run_config(cfg_path)
-
-    # tokenizer: explicit flag > model registry > config tokenizer path
-    model = args.model or cfg["model"]
-    reg = resolve_tokenizer(model) if model else None
-    if args.tokenizer:
-        tokenizer, trust = args.tokenizer, args.trust_remote_code
-    elif reg is not None:
-        tokenizer, trust = reg
-    elif model and "/" in model:
-        tokenizer, trust = model, args.trust_remote_code
-    else:
-        ap.error(
-            "could not resolve a tokenizer; pass --model (a known model) or --tokenizer"
+    try:
+        primary, basis = replay_basis(
+            Path(events).parent, override=args.token_count_source
         )
+    except RunBasisError as exc:
+        ap.error(str(exc))
+    if primary is None:
+        # The run's basis is unreadable; the one the user chose stands in.
+        primary = basis
+    print(f"[token basis: {basis.value}]", file=sys.stderr)
+
+    # Server-basis replays read completion_tokens, so they resolve no tokenizer.
+    tokenizer: str | None = None
+    trust = False
+    if basis is TokenCountSource.CLIENT:
+        # tokenizer: explicit flag > model registry > config tokenizer path
+        model = args.model or cfg["model"]
+        reg = resolve_tokenizer(model) if model else None
+        if args.tokenizer:
+            tokenizer, trust = args.tokenizer, args.trust_remote_code
+        elif reg is not None:
+            tokenizer, trust = reg
+        elif model and "/" in model:
+            tokenizer, trust = model, args.trust_remote_code
+        else:
+            ap.error(
+                "could not resolve a tokenizer; pass --model (a known model) or "
+                "--tokenizer"
+            )
 
     profile = (
         PROFILES[args.profile]
@@ -2178,12 +2426,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     cov_bounds = args.cov_bounds or list(profile.cov_bounds)
     warmup_driver = args.warmup_driver or profile.warmup_driver
     flush = args.tokenize_batch_size or profile.tokenize_batch_size
-    count_tokens = _make_token_counter(tokenizer, trust)
+    count_tokens = (
+        _make_token_counter(tokenizer, trust) if tokenizer is not None else None
+    )
 
     if profile.metric == "natl":
         sp_traj = args.superpass_size or profile.superpass_size or 32
-        pairs = build_trajectory_natl(events, count_tokens, flush)
-        natl = build_natl_result(pairs, sp_traj, tuple(cov_bounds))
+        try:
+            trajectory = build_trajectory_natl(events, count_tokens, flush, basis=basis)
+        except EventLogFormatError as exc:
+            ap.error(str(exc))
+        natl: dict = {
+            "token_count_source": basis.value,
+            "n_missing_usage": trajectory.n_missing_usage,
+        }
+        if trajectory.n_undecodable:
+            natl["n_undecodable"] = trajectory.n_undecodable
+        natl.update(build_natl_result(trajectory.pairs, sp_traj, tuple(cov_bounds)))
+        _warn_missing_usage(trajectory.n_missing_usage)
+        _warn_undecodable(trajectory.n_undecodable)
         print(render_natl(natl))
         if args.json_out:
             with open(args.json_out, "w") as fh:
@@ -2201,23 +2462,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             "could not resolve dataset/super-pass size; the log carries no "
             "performance session.phase_start, so pass --superpass-size"
         )
-    result = run(
-        events,
-        superpass_size=int(size),
-        count_tokens=count_tokens,
-        warmup=args.warmup,
-        cov_bounds=cov_bounds,
-        trend_gate=args.trend_gate,
-        tokenize_batch_size=flush,
-        warmup_band=args.warmup_band,
-        warmup_driver=warmup_driver,
-        enforce_min_duration=args.enforce_min_duration,
-    )
+    try:
+        result = run(
+            events,
+            superpass_size=int(size),
+            count_tokens=count_tokens,
+            warmup=args.warmup,
+            cov_bounds=cov_bounds,
+            trend_gate=args.trend_gate,
+            tokenize_batch_size=flush,
+            warmup_band=args.warmup_band,
+            warmup_driver=warmup_driver,
+            enforce_min_duration=args.enforce_min_duration,
+            basis=basis,
+            primary=primary,
+        )
+    except EventLogFormatError as exc:
+        ap.error(str(exc))
+    _warn_missing_usage(result.n_missing_usage)
+    _warn_undecodable(result.n_undecodable)
     print(render_text(result, cov_bounds))
     if args.json_out:
-        # msgspec encodes the Struct tree and validates its shape.
         with open(args.json_out, "wb") as fh:
-            fh.write(msgspec.json.format(msgspec.json.encode(result)))
+            fh.write(result.to_json())
         print(f"\nwrote {args.json_out}", file=sys.stderr)
     return 0
 

@@ -125,8 +125,9 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         the prose is chatter. Plain-text responses (no tool calls, e.g.
         hallucination refusals) fall back to the full string.
 
-        OSL / response accounting read the base ``get_raw_outputs()`` instead, so
-        they count the full generated text rather than this normalized form.
+        OSL / response accounting read the base ``iter_complete_outputs()``
+        instead, so they count the full generated text rather than this
+        normalized form.
         """
         outputs: list[dict[str, str]] = []
         for sample_uuid, data in self._iter_complete():

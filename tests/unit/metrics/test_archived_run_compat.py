@@ -19,6 +19,7 @@ import msgspec
 import pytest
 from inference_endpoint.commands.benchmark.full_run_osl import full_run_osl_for_report
 from inference_endpoint.core.record import EventRecord, EventType
+from inference_endpoint.core.types import TokenCountSource
 from inference_endpoint.metrics import steady_state_diagnostics as ssd
 from inference_endpoint.metrics.report import Report
 
@@ -93,6 +94,8 @@ def test_report_from_archived_snapshot_reproduces_archived_summary():
         _json(_RUN_DIR / "metrics/final_snapshot.json"),
         run_config=summary["run_config"],
         use_legacy_loadgen_qps_metrics=False,  # concurrency run
+        # Archived runs counted every token with the client tokenizer.
+        token_count_source=TokenCountSource.CLIENT,
     )
     rebuilt = json.loads(report.to_json())
     for field in _SUMMARY_FIELDS:
@@ -116,7 +119,9 @@ def test_report_from_archived_snapshot_reproduces_archived_summary():
 
 
 def test_full_run_osl_recomputes_archived_block():
-    block = full_run_osl_for_report(_RUN_DIR, str(_CHAR_TOKENIZER_DIR))
+    block = full_run_osl_for_report(
+        _RUN_DIR, str(_CHAR_TOKENIZER_DIR), token_count_source=TokenCountSource.CLIENT
+    )
     archived = _json(_SUMMARY)["output_sequence_lengths_full_run"]
     assert block is not None
     for key in (
@@ -138,7 +143,9 @@ def test_full_run_osl_recomputes_archived_block():
 def test_steady_state_replay_rebuilds_archived_series():
     size = ssd.superpass_size_from_events(str(_EVENTS))
     assert size == 5
-    series = ssd.build_super_pass_series(str(_EVENTS), size, _char_counts)
+    series = ssd.build_super_pass_series(
+        str(_EVENTS), size, _char_counts, basis=TokenCountSource.CLIENT
+    ).super_passes
     assert [
         (sp.n_issued, len(sp.ttft_ns), len(sp.tpot_ns), len(sp.latency_ns))
         for sp in series
@@ -166,7 +173,11 @@ def test_steady_state_cli_replays_archived_verdict(tmp_path):
 
 def test_early_stopping_script_reproduces_archived_estimates(tmp_path):
     es = _load_es_script()
-    series = es.compute_series(str(_EVENTS), count_tokens=_char_counts)
+    series = es.compute_series(
+        str(_EVENTS),
+        count_tokens=_char_counts,
+        basis=TokenCountSource.CLIENT,
+    )
     assert {k: len(v) for k, v in series.items()} == {
         "ttft_ns": 12,
         "tpot_ns": 12,
