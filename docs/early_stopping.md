@@ -148,6 +148,13 @@ cold-path work at run end.
 the metric's definition site, so a new latency metric opts in where it is
 declared; counters / ISL / OSL simply don't set it.
 
+`tpot_ns` is the headline TPOT, so it is on the run's primary token-count basis:
+with a server primary it is the server TPOT,
+`(complete - first chunk) / (completion_tokens - 1)`, and with a client primary
+(`--token-count-source client`) it is the tokenizer TPOT. The other basis's TPOT
+that the run records beside it, `tpot_ns_<basis>`, is not a tail-latency series:
+it gets no estimate map.
+
 ## Config (YAML)
 
 ```yaml
@@ -181,7 +188,33 @@ map (all `null`) rather than silently looking feature-off. The rich
 per-percentile detail (empirical value, n, `min_queries`, discard count) is
 INFO-logged by the aggregator at run end and reproducible offline via
 `scripts/early_stopping_estimate_from_events.py`. The text report renders the
-map per metric (one line per percentile; `N/A` = insufficient samples).
+map per metric (one line per percentile; `N/A` = insufficient samples). The
+`tpot` map is on the primary basis recorded as `token_count_source`.
+
+## Offline recomputation
+
+`scripts/early_stopping_estimate_from_events.py <events.jsonl>` rebuilds the
+TTFT / TPOT / latency series from a run's event log and applies the same math.
+It uses the run's primary token-count basis for TPOT, read by
+`token_count_source_for_run` from the top-level `token_count_source` in the file
+given with `--summary` or, without `--summary`, in the
+`performance/result_summary.json` beside the event log, else from the run's
+`config.yaml`; a run that records neither, as in archived runs, means `client`.
+A `--summary` path that does not exist fails before the log is replayed.
+
+- `server` runs: TPOT is `(complete - first chunk) / (completion_tokens - 1)`
+  from each COMPLETE record, the aggregator's rule. Samples with
+  `completion_tokens <= 1` or a non-positive window are skipped, tool-call
+  samples are included, and no tokenizer is needed. A tracked sample without
+  usage is counted as missing (warned on stderr), never tokenized.
+- `client` runs: TPOT needs `--tokenizer` and skips tool-call samples.
+
+The script prints the basis it used (`token basis:`). `--token-count-source`
+overrides the recorded basis. When the override differs from the run's primary
+basis (the one `--summary` records, or without `--summary` the one recorded
+beside the event log), the script refuses `--json` (the augmented summary would
+carry TPOT maps on a basis it is not labelled with) and skips the TPOT in-band
+cross-check; the TTFT and latency cross-checks still run.
 
 ## Explicitly out of scope
 

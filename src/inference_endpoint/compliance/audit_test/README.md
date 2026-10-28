@@ -85,9 +85,9 @@ Both conditions must hold:
 1. Each phase completed at least `requested * (1 - threshold)` of its queries.
 2. `audit_qps < ref_qps * (1 + threshold)`.
 
-A phase that does not complete cleanly (metrics drain timeout or interrupt)
-aborts the audit with an error — partial data never produces a valid/invalid
-result.
+A phase that does not complete cleanly (a client-mode metrics drain timeout, a
+server-mode sample that returned no token usage, or an interrupt) aborts the
+audit with an error — partial data never produces a valid/invalid result.
 
 Each audit subrun gets its own `run_timeout_s`. Response and metrics drains use
 their usual nested budgets; interrupted cleanup uses

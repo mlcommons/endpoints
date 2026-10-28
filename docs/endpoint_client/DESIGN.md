@@ -93,6 +93,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     warmup_connections: int = -1        # -1 = auto (50% of max_connections)
     max_connections: int = -1           # -1 = bound by ephemeral port limit
     stream_all_chunks: bool = False     # expose every SSE chunk (perf cost)
+    stream_include_usage: bool = True   # ask streaming OpenAI requests for the usage frame
     cpu_affinity: AffinityPlan | None = None
 ```
 

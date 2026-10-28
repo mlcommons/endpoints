@@ -93,7 +93,7 @@ Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
 | **Endpoint Client**                 | `src/inference_endpoint/endpoint_client/`                                                                                                                                      | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | **Dataset Manager**                 | `src/inference_endpoint/dataset_manager/`                                                                                                                                      | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | **Metrics Aggregator**              | `src/inference_endpoint/async_utils/services/metrics_aggregator/`                                                                                                              | Subprocess. Subscribes to events, aggregates per-sample metrics into a `MetricsRegistry` (counters + HDR-histogram series + raw values), publishes `MetricsSnapshot` over IPC PUB at a configurable cadence (`SessionState`: `INITIALIZE` → `LIVE` → `DRAINING` → {`COMPLETE` \| `INTERRUPTED`}). Final snapshot is atomically written to `final_snapshot.json` as the **primary** Report source; the terminal pub/sub frame is a TUI "run finished" signal only.                                                                                                                                                                                                                                                                                                                                                                                                         |
-| **Report**                          | `src/inference_endpoint/metrics/report.py`                                                                                                                                     | `Report.from_snapshot(dict)` builds reports from the dict form (`snapshot_to_dict`). Reads `final_snapshot.json` directly via `json.loads` (no Struct decode). Sets `complete = (state == "complete" and n_pending_tasks == 0)` and renders an explicit warning for `INTERRUPTED` runs. Keeps the steady-window verdict on `Report.steady_state` and includes it in `to_json` (unlike `accuracy`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **Report**                          | `src/inference_endpoint/metrics/report.py`                                                                                                                                     | `Report.from_snapshot(dict, token_count_source=)` builds reports from the dict form (`snapshot_to_dict`). Reads `final_snapshot.json` directly via `json.loads` (no Struct decode). `complete` depends on the token-count source: server needs `state == "complete"`, valid accounting, no dropped samples and `n_samples_missing_usage == 0`; client needs `n_pending_tasks == 0` instead of the usage check. Headline ISL/OSL/TPOT/TPS are on the primary basis (`token_count_source`); the other basis sits beside them in `_<basis>`-suffixed blocks (`Report.other_basis`) and `osl_paired`. Renders an explicit warning for `INTERRUPTED` runs. Keeps the steady-window verdict on `Report.steady_state` and includes it in `to_json` (unlike `accuracy`).                                                                                                          |
 | **Config**                          | `src/inference_endpoint/config/`, `endpoint_client/config.py`                                                                                                                  | Pydantic-based YAML schema (`schema.py`) — the declared user surface, distinct from the resolved `runtime_settings.py`; `Timeouts` (`config/schema.py` — all give-up deadlines in one frozen model at `settings.timeouts`, incl. the whole-run `run_timeout_s` watchdog; the workload duration `runtime.max_issue_duration_ms` stays on `settings.runtime`; client worker-lifecycle timeouts stay on `settings.client`), `HTTPClientConfig` (single Pydantic model for CLI/YAML/runtime), `RuntimeSettings`                                                                                                                                                                                                                                                                                                                                                               |
 | **CLI**                             | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py`                                                                                                                  | cyclopts-based, auto-generated from `schema.py` and `HTTPClientConfig` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Async Utils**                     | `src/inference_endpoint/async_utils/`                                                                                                                                          | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, generic `MessageCodec[T]`-parametrized pub/sub, event publisher                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -141,9 +141,14 @@ working in this layer:
   abnormal pipeline teardown). The aggregator **ignores SIGINT**: a terminal ^C
   reaches the whole foreground group, and the parent's ENDED path is
   authoritative. Drain timeout is detected by consumers as
-  `state == COMPLETE and n_pending_tasks > 0` — `run_benchmark` fails the run on
-  it (artifacts written with `complete: false`, then non-zero exit); interrupted
-  runs are detected as `state == INTERRUPTED` directly.
+  `state == COMPLETE and n_pending_tasks > 0`. `n_pending_tasks` counts the
+  client-basis tokenizer work. With a client primary `run_benchmark` fails the
+  run on it (artifacts written with `complete: false`, then non-zero exit). With
+  a server primary a drain timeout leaves the run passing and marks the
+  client-basis blocks partial (`Report.client_token_tasks_pending`, a logged
+  warning); there a tracked sample without server usage fails the run instead
+  (see **Token count source**). Interrupted runs are detected as
+  `state == INTERRUPTED` directly.
 - **Final delivery is dual-path with separated concerns**: `publish_final`
   atomically writes `final_snapshot.json`
   (`tmp + fsync(file) + rename + fsync(parent_dir)`) — this is the **primary**
@@ -171,6 +176,62 @@ working in this layer:
   `metrics/early_stopping.py`; post-hoc recomputation from any run's
   `events.jsonl` via `scripts/early_stopping_estimate_from_events.py`. See
   docs/early_stopping.md.
+- **Token count source**: a run has one primary basis, `server` (the endpoint's
+  per-request `usage`) or `client` (the local tokenizer). The primary basis
+  keeps the base names (the headline `isl`, `osl` and `tpot_ns` series; the
+  `tpot`, `input_sequence_lengths`, ... report keys) and feeds TPS and the
+  early-stopping and steady-state inputs. The other basis is recorded beside it
+  under a `_<basis>` suffix from `basis_key(base, basis, *, primary)`
+  (`core/types.py`): `isl_server`, `osl_server`, `tpot_ns_server` beside a
+  client primary, `isl_client`, `osl_client`, `tpot_ns_client` beside a server
+  primary. `session.py` lifts
+  `QueryResult.metadata["prompt_tokens"/"completion_tokens"]` onto
+  `EventRecord.prompt_tokens`/`completion_tokens` on COMPLETE (`UNSET` when
+  absent, as in archived logs). The server trigger in `metrics_table.py`
+  (`ServerUsageTrigger`) classifies the usage once per COMPLETE
+  (`classify_server_usage`) and records synchronously with no tokenizer, so it
+  adds nothing to `n_pending_tasks`. Server TPOT is
+  `(complete − first chunk) / (completion_tokens − 1)`, LoadGen's rule. No
+  server series records a value below 1: server OSL skips 0, and server TPOT
+  skips `completion_tokens <= 1` and non-positive windows.
+
+  The tokenizer triggers record into the client-basis series whenever a
+  tokenizer is configured (`--no-metrics-isl` drops ISL on both bases; only the
+  primary basis's TPOT is a tail-latency series). The `osl_paired_samples`,
+  `osl_paired_client_tokens` and `osl_paired_server_tokens` counters total both
+  OSLs over the samples counted on both bases (`Report.osl_paired`). On either
+  primary a tracked, successful sample whose COMPLETE carries no usable usage
+  (no usage, or 0 `completion_tokens` beside non-empty output) increments
+  `tracked_samples_missing_usage` (and
+  `tracked_samples_missing_usage_empty_output` when it has no usage and empty
+  output). The post-run counts (full-run OSL, accuracy OSL, the standalone
+  replays) apply the same rule. With a server primary any such sample makes
+  `Report.complete` false, and `run_benchmark` raises `ExecutionError` (exit 4)
+  with the cause-aware message of `Report.incomplete_reason()`; with a client
+  primary it only marks the server-basis blocks partial.
+
+  `--token-count-source {server,client}` (`settings.token_count_source`,
+  `TokenCountSource` in `core/types.py`) is resolved once by
+  `commands/benchmark/pipeline.py:resolve_token_count_source`, the only reader
+  of the setting; api_type `videogen` resolves to `client`. The result lives on
+  `BenchmarkContext.token_count_source`, goes to the aggregator as
+  `--token-count-source`, and is recorded as the top-level `token_count_source`
+  of `result_summary.json` and `accuracy/accuracy_results.json`. Asking for
+  usage is a run setting, `settings.client.stream_include_usage` (on by default;
+  `--no-stream-include-usage` opts out), passed to every adapter as
+  `encode_query(query, *, include_usage=)`; the OpenAI adapters send
+  `stream_options: {"include_usage": true}` only on streaming requests with at
+  most one choice. A server primary rejects the opt-out on a streaming OpenAI
+  run and fails setup on a row with `n > 1` (a client primary logs a warning
+  instead). Standalone post-run tools (the steady-state replay CLI and the
+  early-stopping script) take the primary from
+  `metrics/token_count_basis.py:token_count_source_for_run(run_dir, *, summary_path=None)`:
+  the top-level `token_count_source` of the summary (`summary_path`, by default
+  `performance/result_summary.json` under `run_dir`), else `config.yaml`; a run
+  that records neither (archived runs) means `client`. Both go through
+  `replay_basis(run_dir, *, override, summary_path=None)`, which pairs that
+  primary with the basis to replay on (`--token-count-source` when given).
+
 - **Steady-state detection (opt-in, off by default)**: Enable with
   `settings.steady_state.enabled` / `--steady-state`. The parent resolves a
   workload profile (`commands/benchmark/pipeline.py:steady_state_profile`) and
@@ -179,37 +240,45 @@ working in this layer:
 
   The aggregator feeds a `SuperPassCollector`
   (`metrics/steady_state_diagnostics.py`) from the sample events it already
-  routes. It reuses `TpotTrigger`'s token counts, so nothing is tokenized twice.
-  Per-sample series are `array("d")`, ~34 bytes/sample. Bucket size arrives on
-  `PHASE_START` (`PhaseData.num_turns`) and is latched while the series is
-  empty.
+  routes. It reuses the headline TPOT token counts, so nothing is tokenized
+  twice: in server mode it is fed by `ServerUsageTrigger` with count
+  `completion_tokens − 1`, in client mode by `TpotTrigger`. Per-sample series
+  are `array("d")`, ~34 bytes/sample. Bucket size arrives on `PHASE_START`
+  (`PhaseData.num_turns`) and is latched while the series is empty.
 
   The collector holds no per-sample state. The super-pass index lives on
-  `SampleRow.sp_index`; the standalone parse keeps its own `_PendingRow` because
-  it has no table. This avoids holding the same in-flight sample in two uuid
-  maps.
+  `SampleRow.superpass_index`; the standalone parse keeps its own `_PendingRow`
+  because it has no table. This avoids holding the same in-flight sample in two
+  uuid maps.
 
   Two ordering rules preserve the index. First, the router reads the row
   **before** `table.set_field`, because COMPLETE drops it from the table and
   RECV_FIRST overwrites `recv_first_ns`. That overwrite is how a retry's second
-  first-chunk is told apart. Second, `TpotTrigger` reads `row.sp_index` **at
-  fire time** and carries the int in the recorder closure. The count arrives at
-  the drain flush, long after the row is gone.
+  first-chunk is told apart. Second, the client-mode `TpotTrigger` reads
+  `row.superpass_index` **at fire time** and carries the int in the recorder
+  closure. The count arrives at the drain flush, long after the row is gone.
+  `ServerUsageTrigger` has no such lag: it runs inside `set_field(COMPLETE)`
+  while the row is still in the table, reads `row.superpass_index` directly and
+  feeds the collector synchronously.
 
   `ISSUED` is also gated on `table.is_tracking`, because `set_field` returns
   early outside the window without dropping the row. The verdict is computed
   after token drain. It rides `MetricsSnapshot.steady_state` into the single
   `final_snapshot.json` write, then onto `Report.steady_state`.
 
-  The series describes only a run with terminal state `COMPLETE` and
-  `n_pending_tasks == 0`. This path is best-effort: no failure in steady-state
-  detection can fail a run.
+  The series describes only a run with terminal state `COMPLETE` whose TPOT and
+  OSL counts are whole. In server mode the verdict is withheld when any tracked
+  sample lacks usage (`tracked_samples_missing_usage > 0`); a pending client
+  tokenizer drain does not withhold it, since those counts never feed the
+  series. In client mode it is withheld on `n_pending_tasks > 0`. This path is
+  best-effort: no failure in steady-state detection can fail a run.
 
   Eligibility is read from `Profile.supported`; offline and agentic are `False`,
   and an unclassified load pattern resolves to no profile. This keeps the
   parent's gate and the child's profile selection in sync. The gate also
-  requires streaming, because without `TpotTrigger` every verdict would be
-  `found: false`; a resolved tokenizer; and a non-accuracy-only run.
+  requires streaming, because without a TPOT trigger every verdict would be
+  `found: false`; a resolved tokenizer **or** server token-count mode (server
+  TPOT needs none); and a non-accuracy-only run.
 
   Agentic is refused twice: by load-pattern name in the parent gate and by
   `Profile.supported` in the aggregator. Agentic runs do not get a steady-state
@@ -313,8 +382,9 @@ docs/compliance_audit_plan.md ("Run ordering"). `run_audit`:
 2. Runs each `AuditRunSpec` phase (from `AuditTest.plan_runs`) back-to-back
    under its own `<report_dir>/<label>/` subdir via
    `setup_benchmark`/`run_benchmark_async`. A phase whose `Report.complete` is
-   `False` (drain timeout / interrupt) aborts with `ExecutionError` — no result
-   on partial data.
+   `False` (client-mode drain timeout, interrupt, or missing server usage; the
+   error carries `Report.incomplete_reason()`) aborts with `ExecutionError` — no
+   result on partial data.
 3. Calls `AuditTest.verify(...)` and atomically writes `audit_result.json`
    (durable record) then `verify_<TEST>.txt` (validator marker).
 
@@ -342,7 +412,8 @@ src/inference_endpoint/
 │   │   ├── profiling.py       # Profiler-trigger protocol (vLLM /start_profile,/stop_profile) + ProfileController (URL derivation + start/stop/payload lifecycle)
 │   │   ├── watchdog.py        # Perf issue cap, whole-run deadline, and process-wide SIGINT policy
 │   │   ├── accuracy.py        # AccuracyConfiguration + per-dataset scoring (_score_accuracy, OSL/response-count rollups, write_accuracy_results)
-│   │   └── pipeline.py        # MetricsPipeline: ZMQ + metrics-aggregator/event-logger lifecycle, snapshot→Report, and steady-state eligibility gate
+│   │   ├── full_run_osl.py    # Agentic full-run OSL over every completed turn in events.jsonl: the primary basis's block with the other basis's `_<basis>` keys beside it
+│   │   └── pipeline.py        # MetricsPipeline: ZMQ + metrics-aggregator/event-logger lifecycle, snapshot→Report, steady-state eligibility gate, and token-count-source resolver
 │   ├── audit.py               # run_audit() — compliance audit orchestrator (phases → verify → result)
 │   ├── probe.py               # ProbeConfig + execute_probe()
 │   ├── info.py                # execute_info()
@@ -356,8 +427,8 @@ src/inference_endpoint/
 │       ├── output_caching_test.py  # OutputCachingAudit (MLPerf TEST04): caching detection (reference vs fixed-sample QPS)
 │       └── README.md           # TEST04 output-caching audit usage (WAN 2.2 example)
 ├── core/
-│   ├── types.py               # APIType, Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
-│   └── record.py              # EventRecord — transport record used by event logger and ZMQ transport
+│   ├── types.py               # APIType, TokenCountSource + basis_key/usage helpers, Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
+│   └── record.py              # EventRecord — transport record used by event logger and ZMQ transport; is_complete_line (the compact COMPLETE-line filter of full-run OSL, the scorer and the steady-state replays) + EventLogFormatError
 ├── load_generator/
 │   ├── session.py             # BenchmarkSession, PhaseIssuer, PhaseConfig, PhaseResult, SessionResult
 │   ├── strategy.py            # TimedIssueStrategy, BurstStrategy, ConcurrencyStrategy, LoadStrategy
@@ -383,13 +454,14 @@ src/inference_endpoint/
 │   ├── services/
 │   │   ├── event_logger/      # EventLoggerService: writes EventRecords to JSONL/SQLite
 │   │   └── metrics_aggregator/  # MetricsAggregatorService: subscribes to events, publishes MetricsSnapshot
-│   │       ├── __main__.py     # Subprocess entry: --metrics-socket, --metrics-output-dir, --publish-interval, --hdr-sig-figs, --n-histogram-buckets
-│   │       ├── aggregator.py   # MetricsAggregatorService (event router); SessionState lifecycle; tracked_samples_failed
+│   │       ├── __main__.py     # Subprocess entry: --metrics-socket, --metrics-output-dir, --publish-interval, --hdr-sig-figs, --n-histogram-buckets, --token-count-source
+│   │       ├── aggregator.py   # MetricsAggregatorService (event router); SessionState lifecycle; tracked_samples_failed; TOKEN_SERIES + series_names (each basis's token-series names)
 │   │       ├── snapshot.py     # MetricsSnapshot wire schema + SessionState enum + msgpack codec
 │   │       ├── registry.py     # MetricsRegistry, CounterSampler, SeriesSampler (HDR + raw array.array + cheap rollups)
 │   │       ├── publisher.py    # MetricsPublisher (tick task + atomic disk fallback)
 │   │       ├── subscriber.py   # MetricsSnapshotSubscriber (latest + COMPLETE snapshot capture)
-│   │       ├── metrics_table.py # In-flight sample rows + trigger dispatch (TTFT/TPOT/ISL/OSL)
+│   │       ├── metrics_table.py # In-flight sample rows + trigger dispatch (TTFT/TPOT/ISL/OSL; tokenizer and server-usage triggers); MetricCounterKey/MetricSeriesKey, BasisSeriesNames
+│   │       ├── tokenization.py  # extract_tokenization_input (what a tokenizer counts in an output) + has_countable_output (the output-emptiness rule of the usage rule)
 │   │       └── token_metrics.py # BatchTokenizer (live thread lane + drain-only sharded pool) + TokenBatchQueue (defer-to-flush buffer, owns the live flush loop) for ISL/OSL/TPOT
 │   └── transport/             # ZMQ-based IPC transport layer
 │       ├── protocol.py        # Transport protocols + TransportConfig + MessageCodec[T]
@@ -404,6 +476,7 @@ src/inference_endpoint/
 │   ├── metric.py              # Metric types (Throughput, etc.)
 │   ├── early_stopping.py      # MLPerf LoadGen early-stopping percentile estimates (pure math; see docs/early_stopping.md)
 │   ├── results_plots.py       # Standardized run-artifact plots (matplotlib-guarded); CLI: scripts/plot_results.py
+│   ├── token_count_basis.py   # Usage rule (classify_server_usage, read_server_usage), effective basis, run's basis from its summary or config.yaml (token_count_source_for_run, ARCHIVED_RUN_BASIS), replay basis with an override (replay_basis, TOKEN_COUNT_SOURCE_METAVAR), missing-usage message
 │   └── steady_state_diagnostics.py  # SuperPassCollector (live + replay), compute_steady_state_metrics, and standalone CLI; see docs/steady_state_diagnostics.md
 ├── config/
 │   ├── schema.py              # Declared YAML/CLI surface (pydantic): settings incl. Timeouts, workload (model_params/datasets), roots + audit: block
@@ -435,6 +508,7 @@ src/inference_endpoint/
 ├── testing/
 │   ├── echo_server.py         # Local echo server for testing
 │   ├── max_throughput_server.py # Max throughput test server
+│   ├── variable_throughput_server.py # Variable-length, rate-limited test server (lognormal OSL/TTFT/TPOT)
 │   └── docker_server.py       # Docker-based server management
 └── utils/
     ├── logging.py             # Logging setup
@@ -491,7 +565,10 @@ details.
 ### Data Types & Serialization
 
 - **Core types** (`Query`, `QueryResult`, `StreamChunk`): `msgspec.Struct` with
-  `frozen=True`, `array_like=True`, `gc=False`, `omit_defaults=True`
+  `frozen=True`, `array_like=True`, `gc=False`, `omit_defaults=True`.
+  `omit_defaults` has no effect with `array_like=True` (every field is always
+  encoded), so never add fields to these structs; server token counts ride
+  `QueryResult.metadata`.
 - **Streaming response boundary**: Entry zero of each streamed `TextModelOutput`
   field represents the same first meaningful delta. Fields that start later need
   an empty first entry (`""` for text, `()` for tool-call batches). TPOT drops
@@ -527,16 +604,38 @@ the marker — it's not a valid argument.
 **Key fixtures** (defined in `tests/conftest.py`):
 
 - `mock_http_echo_server` — real HTTP echo server on dynamic port
+- `mock_http_echo_server_factory(handler=None, *, report_usage=True)` — echo
+  server with an optional custom handler; `report_usage=False` models a server
+  that reports no token usage
+- `recording_echo_server_factory` (`tests/integration/commands/conftest.py`) —
+  echo server that records every request body
 - `mock_http_oracle_server` — dataset-driven response server
+- `usage_warning_unlatched` — resets the once-per-process malformed-usage
+  warning latch in `core/types.py` and returns `caplog` capturing it
 - `dummy_dataset` — in-memory test dataset
 - `hf_squad_dataset` — HuggingFace squad dataset
 - `max_throughput_runtime_settings`, `poisson_runtime_settings`,
   `concurrency_runtime_settings` — preset configs
 
+**Test helpers** (`tests/test_helpers.py`): `parse_sse_frames` (SSE `data:`
+frames from raw, chunked or decoded bytes), `make_report` (a complete `Report`
+with field overrides) and `DEFAULT_SOURCE` (the schema's primary basis; tests
+that depend on the basis parametrize over `TokenCountSource` or use
+`DEFAULT_SOURCE` and `DEFAULT_SOURCE.other`, and only `test_schema.py` pins the
+literal default). Stub-server usage contract tests: the echo server in
+`tests/unit/testing/test_echo_server_usage.py`, the max- and variable-throughput
+servers in `tests/unit/testing/test_stub_servers.py` (the variable one also over
+a socket in `tests/integration/test_variable_server_usage.py`).
+
 **Test data**: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples),
 `tests/assets/datasets/squad_pruned/`, `tests/assets/tokenizers/char` +
 `char_chat` (hermetic char-level tokenizers; `char_chat` adds a minimal chat
-template for the structured tokenization paths)
+template for the structured tokenization paths) + `char_chat_bare_reasoning`
+(renders reasoning without inline markers, so inline and structured forms of one
+response tokenize differently: the mlcommons/endpoints#540 paired fixture),
+`tests/assets/archived_runs/echo_char_streaming` (a frozen client-basis run
+whose records carry no `usage`, guarded unedited by
+`tests/unit/metrics/test_archived_run_compat.py`)
 
 **Performance suites** (`tests/performance/`, CI-skipped, run on demand): CLI
 roofline + low-QPS correctness against the built-in stub servers, and a
@@ -748,7 +847,9 @@ these during code review of AI-assisted PRs.
 - **Confusing hot-path vs. cold-path**: AI tends to treat all code uniformly.
   Code in `load_generator/`, `endpoint_client/worker.py`, and
   `async_utils/transport/` is latency-critical. Pydantic validation, excessive
-  logging, or try/except blocks in these paths will degrade throughput.
+  logging, or exception-raising control flow and handler work in these paths
+  will degrade throughput. A `try` that does not raise is free on Python 3.11+
+  (see docs/ENDPOINT_CLIENT.md §9.3).
 
 ### Serialization & Types
 
