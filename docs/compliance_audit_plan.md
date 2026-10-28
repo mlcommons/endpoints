@@ -419,12 +419,13 @@ The generic loop never names a specific test:
    In particular a phase's `setup_benchmark` can raise `InputValidationError`
    (e.g. `DatasetValidationError` for an unsaltable warmup dataset); it
    propagates verbatim rather than being recast as `ExecutionError`. A phase
-   that returns but whose `Report.complete` is `False` (metrics drain timed out,
-   or the run was interrupted → partial stats) is likewise rejected with
-   `ExecutionError` — a result is never certified on partial data. Errors
-   propagate to the standard CLI handler (`main.py`), which maps
-   `InputValidationError` → exit `2`, `SetupError` → exit `3`, and
-   `ExecutionError` → exit `4`.
+   that returns but whose `Report.complete` is `False` (a client-mode metrics
+   drain timed out, a server-mode sample returned no token usage, or the run was
+   interrupted → partial stats) is likewise rejected with `ExecutionError`,
+   whose message carries the cause from `Report.incomplete_reason()` — a result
+   is never certified on partial data. Errors propagate to the standard CLI
+   handler (`main.py`), which maps `InputValidationError` → exit `2`,
+   `SetupError` → exit `3`, and `ExecutionError` → exit `4`.
 5. `result = test.verify(runs, cfg)`
 6. Atomically write the result (`tmp → fsync → rename → fsync(parent)`).
 7. Return the typed `AuditResult`. Because `run_benchmark` currently returns
