@@ -76,3 +76,18 @@ def extract_tokenization_input(
     if text:
         return TextInput(text)
     return None
+
+
+def has_countable_output(output: TextModelOutput) -> bool:
+    """Whether ``extract_tokenization_input(output)`` is not ``None``.
+
+    Applies the same rule without building the input: it never joins the
+    output, and it stops at the first non-empty streamed chunk. Truthy tool
+    calls count without being parsed, so a malformed payload is countable.
+    """
+    if output.reasoning or output.tool_calls:
+        return True
+    text = output.output
+    if isinstance(text, str):
+        return bool(text)
+    return isinstance(text, tuple) and any(text)

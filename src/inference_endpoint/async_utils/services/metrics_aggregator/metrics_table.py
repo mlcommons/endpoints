@@ -32,9 +32,15 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
     TokenIdsInput,
     TokenizationInput,
     extract_tokenization_input,
+    has_countable_output,
 )
 from inference_endpoint.core.record import SampleEventType, SessionEventType
-from inference_endpoint.core.types import PromptData, TextModelOutput
+from inference_endpoint.core.types import PromptData, TextModelOutput, TokenCountSource
+from inference_endpoint.metrics.token_count_basis import (
+    ServerUsage,
+    classify_server_usage,
+    missing_usage_message,
+)
 
 if TYPE_CHECKING:
     from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
@@ -64,7 +70,11 @@ class SampleField(str, Enum):
 
 
 class MetricSeriesKey(str, Enum):
-    """Series metric keys written by triggers to the registry."""
+    """Series metric keys written by triggers to the registry.
+
+    ``ISL``, ``OSL`` and ``TPOT_NS`` are base names: each token-count basis
+    records them under ``basis_key`` (unsuffixed on the primary basis).
+    """
 
     ISL = "isl"
     OSL = "osl"
@@ -72,6 +82,66 @@ class MetricSeriesKey(str, Enum):
     TTFT_NS = "ttft_ns"
     CHUNK_DELTA_NS = "chunk_delta_ns"
     TPOT_NS = "tpot_ns"
+
+
+class MetricCounterKey(str, Enum):
+    """Counter metric keys tracked by the aggregator.
+
+    Total counters include all samples (warmup + tracked).
+    Tracked counters only include samples within performance tracking windows.
+    """
+
+    TOTAL_SAMPLES_ISSUED = "total_samples_issued"
+    TOTAL_SAMPLES_COMPLETED = "total_samples_completed"
+    TOTAL_SAMPLES_FAILED = "total_samples_failed"
+    TRACKED_SAMPLES_ISSUED = "tracked_samples_issued"
+    TRACKED_SAMPLES_COMPLETED = "tracked_samples_completed"
+    # Failed samples that were within a performance-tracking window.
+    # Counted at ERROR-event time; correctness depends on
+    # session.py:_handle_response emitting ERROR before COMPLETE so the
+    # tracked row still exists when the aggregator sees the ERROR.
+    TRACKED_SAMPLES_FAILED = "tracked_samples_failed"
+    TRACKED_FINISH_REASON_STOP = "tracked_finish_reason_stop"
+    TRACKED_FINISH_REASON_LENGTH = "tracked_finish_reason_length"
+    TRACKED_FINISH_REASON_TOOL_CALLS = "tracked_finish_reason_tool_calls"
+    TRACKED_FINISH_REASON_CONTENT_FILTER = "tracked_finish_reason_content_filter"
+    TRACKED_FINISH_REASON_FUNCTION_CALL = "tracked_finish_reason_function_call"
+    TRACKED_FINISH_REASON_OTHER = "tracked_finish_reason_other"
+    TRACKED_DURATION_NS = "tracked_duration_ns"
+    # Legacy MLPerf LoadGen Server "completed" window (final_query_all_samples_done_time).
+    LEGACY_LOADGEN_WINDOW_DURATION_NS = "legacy_loadgen_window_duration_ns"
+    # Total wall-clock duration since session start. Updated on every event as
+    # max(current, event_timestamp - session_start). Stored as a counter
+    # rather than computed from (now - start) at read time because
+    # time.monotonic_ns() has a process-local epoch — a reader in another
+    # process would get a meaningless value.
+    TOTAL_DURATION_NS = "total_duration_ns"
+    # Tracked successful samples whose COMPLETE carried no usable server usage
+    # (``ServerUsage.MISSING``), whatever the primary basis, and the subset
+    # whose output was empty (in-band error frames, cut streams).
+    TRACKED_SAMPLES_MISSING_USAGE = "tracked_samples_missing_usage"
+    TRACKED_SAMPLES_MISSING_USAGE_EMPTY_OUTPUT = (
+        "tracked_samples_missing_usage_empty_output"
+    )
+    # Samples with both a tokenizer OSL and usable server usage, and the two
+    # token totals over exactly those samples.
+    OSL_PAIRED_SAMPLES = "osl_paired_samples"
+    OSL_PAIRED_CLIENT_TOKENS = "osl_paired_client_tokens"
+    OSL_PAIRED_SERVER_TOKENS = "osl_paired_server_tokens"
+
+
+class BasisSeriesNames(msgspec.Struct, frozen=True, kw_only=True):  # type: ignore[call-arg]
+    """The series one token-count basis records into, named at registration.
+
+    ``None`` for a series the run does not record: ``isl`` without ISL
+    collection, ``tpot_ns`` without streaming. Field names must equal the
+    ``MetricSeriesKey`` values in ``TOKEN_SERIES``: the aggregator builds and
+    reads this struct by ``spec.key.value``.
+    """
+
+    osl: str
+    isl: str | None = None
+    tpot_ns: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -316,8 +386,10 @@ class IslTrigger(TokenTrigger):
         self,
         registry: MetricsRegistry,
         queue: TokenBatchQueue | None,
+        *,
+        metric_name: str,
     ):
-        super().__init__(MetricSeriesKey.ISL, registry, queue)
+        super().__init__(metric_name, registry, queue)
 
     def _extract_tokenization_input(self, ev_rec, row, pre_change):
         if not isinstance(ev_rec.data, PromptData):
@@ -344,14 +416,39 @@ class OslTrigger(TokenTrigger):
     chat template renders all structured fields, including ordinary content.
     Otherwise, non-empty output content uses ``TextInput``. ``TextModelOutput``
     does not carry server token IDs, so OSL has no token-ID/text precedence.
+
+    A sample whose COMPLETE carries usable server usage
+    (``ServerUsage.USABLE``) also adds its tokenizer count and the server
+    ``completion_tokens`` to the ``osl_paired_*`` counters, so both totals
+    cover exactly the same samples. Usage is classified here only for outputs
+    sent to the tokenizer queue, so a run without a tokenizer never does it.
     """
 
     def __init__(
         self,
         registry: MetricsRegistry,
         queue: TokenBatchQueue | None,
+        *,
+        metric_name: str,
     ):
-        super().__init__(MetricSeriesKey.OSL, registry, queue)
+        super().__init__(metric_name, registry, queue)
+
+    def _make_recorder(self, ev_rec, row, pre_change):
+        server_count = ev_rec.completion_tokens
+        usage = classify_server_usage(ev_rec.prompt_tokens, server_count, ev_rec.data)
+        if usage is not ServerUsage.USABLE:
+            return super()._make_recorder(ev_rec, row, pre_change)
+        registry, name = self.registry, self.metric_name
+
+        def record(count: int) -> None:
+            registry.record(name, count)
+            registry.increment(MetricCounterKey.OSL_PAIRED_SAMPLES.value)
+            registry.increment(MetricCounterKey.OSL_PAIRED_CLIENT_TOKENS.value, count)
+            registry.increment(
+                MetricCounterKey.OSL_PAIRED_SERVER_TOKENS.value, server_count
+            )
+
+        return record
 
     def _extract_tokenization_input(self, ev_rec, row, pre_change):
         if not isinstance(ev_rec.data, TextModelOutput):
@@ -374,10 +471,12 @@ class TpotTrigger(TokenTrigger):
         self,
         registry: MetricsRegistry,
         queue: TokenBatchQueue | None,
-        collector: SuperPassCollector | None = None,
+        *,
+        metric_name: str,
+        collector: SuperPassCollector | None,
     ):
         super().__init__(
-            MetricSeriesKey.TPOT_NS,
+            metric_name,
             registry,
             queue,
             requires=(SampleField.RECV_FIRST_NS,),
@@ -421,6 +520,127 @@ class TpotTrigger(TokenTrigger):
             return None
         recv_first_ns = pre_change[SampleField.RECV_FIRST_NS]
         return (ev_rec.timestamp_ns - recv_first_ns) / token_count
+
+
+# ---------------------------------------------------------------------------
+# Server-usage trigger (sync)
+# ---------------------------------------------------------------------------
+
+
+class ServerUsageTrigger(EmitTrigger):
+    """Server-basis ISL, OSL and TPOT from the usage on the COMPLETE record.
+
+    One ``classify_server_usage`` call per successful sample decides all
+    three, so the server series always cover the same samples:
+
+    - ``USABLE``: records ``prompt_tokens`` as ISL, ``completion_tokens`` as
+      OSL and, when streaming, TPOT by LoadGen's rule
+      ``(complete_ns - recv_first_ns) / (completion_tokens - 1)``: the first
+      visible chunk is excluded from both the window and the count. TPOT is
+      skipped without a first chunk, for ``completion_tokens <= 1`` and for a
+      non-positive window.
+    - ``TRUE_ZERO``: records nothing; no server-basis series records an empty
+      completion, and client OSL and TPOT also skip empty output.
+    - ``MISSING``: counts the sample in ``tracked_samples_missing_usage`` (and
+      ``..._empty_output`` when its output is empty) and logs the first miss
+      of the run: a WARNING when the server basis is primary, else INFO.
+
+    Errors and agentic timeouts complete with ``data=None`` and are skipped.
+    Usage exists only on COMPLETE, and no tokenizer is involved, so nothing
+    here adds to ``n_pending_tasks``.
+
+    The TPOT window can be non-positive because the two ends are stamped in
+    different places: COMPLETE carries ``QueryResult.completed_at``, set when
+    the transport decodes the response, while RECV_FIRST carries the time the
+    session dequeues the chunk. A short stream decoded in one transport drain
+    can therefore "complete" before its first chunk.
+
+    It fires inside ``set_field(COMPLETE)`` while the row is still in the
+    table, so it reads ``row.superpass_index`` directly and feeds ``collector``
+    (given only when the server basis is primary) synchronously, with the
+    post-first-chunk count ``completion_tokens - 1``.
+    """
+
+    def __init__(
+        self,
+        registry: MetricsRegistry,
+        *,
+        names: BasisSeriesNames,
+        collector: SuperPassCollector | None,
+        primary: TokenCountSource,
+    ):
+        super().__init__(names.osl, registry, requires=(SampleField.RECV_FIRST_NS,))
+        self._isl = names.isl
+        self._tpot = names.tpot_ns
+        self._collector = collector
+        self._primary = primary
+        self._miss_logged = False
+
+    def fire(self, ev_rec, row, pre_change):
+        output = ev_rec.data
+        if not isinstance(output, TextModelOutput):
+            return
+        prompt, completion = ev_rec.prompt_tokens, ev_rec.completion_tokens
+        usage = classify_server_usage(prompt, completion, output)
+        if usage is not ServerUsage.USABLE:
+            if usage is ServerUsage.MISSING:
+                self._count_missing(ev_rec, output)
+            return
+        registry = self.registry
+        if self._isl is not None:
+            registry.record(self._isl, prompt)
+        registry.record(self.metric_name, completion)
+        if self._tpot is None or completion <= 1:
+            return
+        recv_first_ns = pre_change[SampleField.RECV_FIRST_NS]
+        if recv_first_ns is None:
+            return
+        delta = ev_rec.timestamp_ns - recv_first_ns
+        if delta <= 0:
+            return
+        value = delta / (completion - 1)
+        registry.record(self._tpot, value)
+        if self._collector is not None and row.superpass_index >= 0:
+            self._collector.add_tpot(row.superpass_index, value, completion - 1)
+
+    def _count_missing(self, ev_rec: EventRecord, output: TextModelOutput) -> None:
+        """Count a sample without usable usage; log the run's first one.
+
+        An empty output is counted on its own: in-band error frames and cut
+        streams look like that, and client counting would hide them rather
+        than fix them.
+        """
+        registry = self.registry
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_MISSING_USAGE.value)
+        empty_output = not has_countable_output(output)
+        if empty_output:
+            registry.increment(
+                MetricCounterKey.TRACKED_SAMPLES_MISSING_USAGE_EMPTY_OUTPUT.value
+            )
+        if self._miss_logged:
+            return
+        # Once per run, so a long run shows the problem early without logging
+        # per sample. The aggregator counts this sample's completion after its
+        # triggers fire, hence the + 1.
+        self._miss_logged = True
+        n_succeeded = (
+            registry.counter_value(MetricCounterKey.TRACKED_SAMPLES_COMPLETED.value)
+            - registry.counter_value(MetricCounterKey.TRACKED_SAMPLES_FAILED.value)
+            + 1
+        )
+        logger.log(
+            (
+                logging.WARNING
+                if self._primary is TokenCountSource.SERVER
+                else logging.INFO
+            ),
+            "Tracked sample %s completed without usable server token usage: %s. "
+            "Later misses are only counted (tracked_samples_missing_usage).",
+            ev_rec.sample_uuid,
+            missing_usage_message(
+                1, int(empty_output), int(n_succeeded), primary=self._primary
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

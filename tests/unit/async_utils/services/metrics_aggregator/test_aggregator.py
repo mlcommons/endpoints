@@ -26,13 +26,23 @@ I/O).
 from __future__ import annotations
 
 import asyncio
+import logging
 
+import msgspec
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
-    MetricCounterKey,
+    MetricsAggregatorService,
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+    MetricCounterKey,
     MetricSeriesKey,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
+    MetricsRegistry,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
+    SeriesStat,
+    SessionState,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.record import (
@@ -41,10 +51,27 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import ErrorData, PromptData, TextModelOutput
+from inference_endpoint.core.types import (
+    ErrorData,
+    PhaseData,
+    PhaseType,
+    PromptData,
+    TextModelOutput,
+    TokenCountSource,
+    basis_key,
+)
+from inference_endpoint.metrics.early_stopping import EarlyStoppingSpec
+from inference_endpoint.metrics.token_count_basis import (
+    ServerUsage,
+    missing_usage_message,
+)
+
+from tests.test_helpers import DEFAULT_SOURCE, SERVER_USAGE_CASES
 
 from .conftest import (
     MockBatchTokenizer,
+    aggregator_scope,
+    complete_event,
     make_aggregator,
     sample_event,
     session_event,
@@ -54,6 +81,16 @@ from .conftest import (
     streaming_text,
     text_output,
 )
+
+CLIENT, SERVER = TokenCountSource.CLIENT, TokenCountSource.SERVER
+
+
+def _name(
+    key: MetricSeriesKey, basis: TokenCountSource, *, primary: TokenCountSource
+) -> str:
+    """``key``'s series name on ``basis`` in a run whose primary is ``primary``."""
+    return basis_key(key.value, basis, primary=primary)
+
 
 # ---------------------------------------------------------------------------
 # Performance tracking window
@@ -66,7 +103,9 @@ class TestTrackingWindow:
     async def test_not_tracked_before_start(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_not_tracked_before")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_not_tracked_before", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -95,7 +134,9 @@ class TestTrackingWindow:
     async def test_tracked_after_start(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, _ = make_aggregator(ctx, loop, "agg_tracked_after_start")
+            agg, _, _ = make_aggregator(
+                ctx, loop, "agg_tracked_after_start", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -113,7 +154,12 @@ class TestTrackingWindow:
     async def test_not_tracked_after_stop(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, _ = make_aggregator(ctx, loop, "agg_not_tracked_after_stop")
+            agg, _, _ = make_aggregator(
+                ctx,
+                loop,
+                "agg_not_tracked_after_stop",
+                token_count_source=DEFAULT_SOURCE,
+            )
             try:
                 await agg.process(
                     [
@@ -135,7 +181,9 @@ class TestTrackingWindow:
         """A sample issued during tracking completes normally after STOP."""
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_inflight_after_stop")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_inflight_after_stop", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -169,7 +217,9 @@ class TestTrackingWindow:
         """START -> STOP -> START creates a second tracking window."""
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_restart_tracking")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_restart_tracking", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -208,7 +258,9 @@ class TestTrackingWindow:
         """Tracked blocks extend to last sample completion."""
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, _ = make_aggregator(ctx, loop, "agg_tracked_block_dur")
+            agg, _, _ = make_aggregator(
+                ctx, loop, "agg_tracked_block_dur", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -246,7 +298,9 @@ class TestTimingMetrics:
     async def test_ttft_and_sample_latency(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_ttft_latency")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_ttft_latency", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -277,7 +331,9 @@ class TestTimingMetrics:
     async def test_chunk_deltas(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_chunk_deltas")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_chunk_deltas", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -309,13 +365,17 @@ class TestTimingMetrics:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_non_streaming_latency_only(self, tmp_path):
+    async def test_non_streaming_latency_only(self, tmp_path, primary):
         """Non-streaming: emits sample_latency_ns + OSL, no TTFT/chunk_delta/TPOT."""
         loop = asyncio.get_event_loop()
         tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_non_streaming", tokenizer=tokenizer
+                ctx,
+                loop,
+                "agg_non_streaming",
+                tokenizer=tokenizer,
+                token_count_source=primary,
             )
             try:
                 await agg.process(
@@ -341,7 +401,12 @@ class TestTimingMetrics:
                     == 2000
                 )
                 # OSL = token_count("hello world") = 2
-                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 2
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.OSL, CLIENT, primary=primary)
+                    )
+                    == 2
+                )
                 assert (
                     snapshot_series_count(registry, MetricSeriesKey.TTFT_NS.value) == 0
                 )
@@ -351,9 +416,9 @@ class TestTimingMetrics:
                     )
                     == 0
                 )
-                assert (
-                    snapshot_series_count(registry, MetricSeriesKey.TPOT_NS.value) == 0
-                )
+                for basis in TokenCountSource:
+                    tpot = _name(MetricSeriesKey.TPOT_NS, basis, primary=primary)
+                    assert snapshot_series_count(registry, tpot) == 0
             finally:
                 agg.close()
 
@@ -362,7 +427,9 @@ class TestTimingMetrics:
         """RECV_NON_FIRST without prior RECV_FIRST: no chunk_delta emitted."""
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_chunk_delta_no_recv")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_chunk_delta_no_recv", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -387,11 +454,13 @@ class TestTimingMetrics:
 @pytest.mark.unit
 class TestIsl:
     @pytest.mark.asyncio
-    async def test_issued_with_token_ids_emits_isl_directly(self, tmp_path):
+    async def test_issued_with_token_ids_emits_isl_directly(self, tmp_path, primary):
         """SGLang path: PromptData with token_ids emits ISL = len(token_ids)."""
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_isl_token_ids")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_isl_token_ids", token_count_source=primary
+            )
             try:
                 await agg.process(
                     [
@@ -406,15 +475,25 @@ class TestIsl:
                         ),
                     ]
                 )
-                assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 5
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.ISL, CLIENT, primary=primary)
+                    )
+                    == 5
+                )
+                # Server ISL exists only on COMPLETE.
+                server_isl = _name(MetricSeriesKey.ISL, SERVER, primary=primary)
+                assert snapshot_series_count(registry, server_isl) == 0
             finally:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_issued_without_data_no_isl(self, tmp_path):
+    async def test_issued_without_data_no_isl(self, tmp_path, primary):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_isl_no_data")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_isl_no_data", token_count_source=primary
+            )
             try:
                 await agg.process(
                     [
@@ -424,13 +503,18 @@ class TestIsl:
                         sample_event(SampleEventType.ISSUED, "s1", ts=1000),
                     ]
                 )
-                assert snapshot_series_count(registry, MetricSeriesKey.ISL.value) == 0
+                for basis in TokenCountSource:
+                    isl = _name(MetricSeriesKey.ISL, basis, primary=primary)
+                    assert snapshot_series_count(registry, isl) == 0
             finally:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_disabled_isl_skips_prompt_tokenization_keeps_osl(self, tmp_path):
-        """enable_isl=False: no ISL series, no prompt enqueued; OSL/TPOT intact."""
+    async def test_disabled_isl_skips_prompt_tokenization_keeps_osl(
+        self, tmp_path, primary
+    ):
+        """enable_isl=False: no ISL series on either basis, no prompt enqueued;
+        OSL/TPOT intact."""
         loop = asyncio.get_event_loop()
         messages = (
             {"role": "system", "content": "follow instructions"},
@@ -441,6 +525,7 @@ class TestIsl:
                 ctx,
                 loop,
                 "agg_isl_disabled",
+                token_count_source=primary,
                 tokenizer=MockBatchTokenizer(),
                 enable_isl=False,
             )
@@ -458,7 +543,9 @@ class TestIsl:
                         ),
                     ]
                 )
-                assert not registry.has_series(MetricSeriesKey.ISL.value)
+                for basis in TokenCountSource:
+                    isl = _name(MetricSeriesKey.ISL, basis, primary=primary)
+                    assert not registry.has_series(isl)
                 assert agg.pending_tokens == 0
 
                 await agg.process(
@@ -473,9 +560,14 @@ class TestIsl:
                         session_event(SessionEventType.ENDED, ts=5000),
                     ]
                 )
-                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 3
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.OSL, CLIENT, primary=primary)
+                    )
+                    == 3
+                )
                 assert snapshot_series_total(
-                    registry, MetricSeriesKey.TPOT_NS.value
+                    registry, _name(MetricSeriesKey.TPOT_NS, CLIENT, primary=primary)
                 ) == pytest.approx(1500.0)
             finally:
                 agg.close()
@@ -492,7 +584,9 @@ class TestEdgeCases:
     async def test_untracked_sample_events_ignored(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_untracked_ignored")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_untracked_ignored", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -529,7 +623,9 @@ class TestEdgeCases:
         """
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, _ = make_aggregator(ctx, loop, "agg_dup_started")
+            agg, _, _ = make_aggregator(
+                ctx, loop, "agg_dup_started", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 with caplog.at_level("ERROR"):
                     await agg.process(
@@ -556,7 +652,9 @@ class TestEdgeCases:
     async def test_complete_removes_row(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, _ = make_aggregator(ctx, loop, "agg_complete_removes")
+            agg, _, _ = make_aggregator(
+                ctx, loop, "agg_complete_removes", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -577,7 +675,9 @@ class TestEdgeCases:
         """ENDED triggers ``publish_final`` and ``close`` on the publisher."""
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, publisher = make_aggregator(ctx, loop, "agg_ended_publish_final")
+            agg, _, publisher = make_aggregator(
+                ctx, loop, "agg_ended_publish_final", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -601,7 +701,9 @@ class TestEdgeCases:
         must never produce a COMPLETE final snapshot."""
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, publisher = make_aggregator(ctx, loop, "agg_interrupted_marker")
+            agg, _, publisher = make_aggregator(
+                ctx, loop, "agg_interrupted_marker", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -619,7 +721,9 @@ class TestEdgeCases:
     async def test_events_after_ended_are_dropped(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_events_after_ended")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_events_after_ended", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -643,7 +747,9 @@ class TestEdgeCases:
     async def test_empty_sample_uuid_ignored(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, _ = make_aggregator(ctx, loop, "agg_empty_uuid")
+            agg, _, _ = make_aggregator(
+                ctx, loop, "agg_empty_uuid", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -661,7 +767,9 @@ class TestEdgeCases:
     async def test_multiple_samples_independent(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_multi_independent")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_multi_independent", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -710,7 +818,9 @@ class TestEdgeCases:
         """
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_error_total")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_error_total", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -741,7 +851,9 @@ class TestEdgeCases:
     async def test_session_started_stores_timestamp(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, _ = make_aggregator(ctx, loop, "agg_started_ts")
+            agg, _, _ = make_aggregator(
+                ctx, loop, "agg_started_ts", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process([session_event(SessionEventType.STARTED, ts=42)])
                 assert agg._table.session_started_ns == 42
@@ -753,7 +865,9 @@ class TestEdgeCases:
         """Two sequential process() calls maintain state correctly."""
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_multi_batch")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_multi_batch", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -790,7 +904,9 @@ class TestEdgeCases:
         """ENDED in a later batch still triggers finalize."""
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, publisher = make_aggregator(ctx, loop, "agg_ended_second_batch")
+            agg, _, publisher = make_aggregator(
+                ctx, loop, "agg_ended_second_batch", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process([session_event(SessionEventType.STARTED, ts=0)])
                 publisher.publish_final.assert_not_awaited()
@@ -818,7 +934,9 @@ class TestLoadgenWindowAggregation:
         """
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_loadgen_window")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_loadgen_window", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -858,7 +976,9 @@ class TestCounterAccounting:
         """
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_total_vs_tracked")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_total_vs_tracked", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -887,7 +1007,9 @@ class TestCounterAccounting:
     async def test_finish_reason_counters_bucket_unknown_values(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, registry, _ = make_aggregator(ctx, loop, "agg_finish_reasons")
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_finish_reasons", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(
                     [
@@ -926,13 +1048,17 @@ class TestCounterAccounting:
 @pytest.mark.unit
 class TestAsyncTriggers:
     @pytest.mark.asyncio
-    async def test_isl_text_path_async(self, tmp_path):
+    async def test_isl_text_path_async(self, tmp_path, primary):
         """ISL with text prompt triggers async tokenization."""
         loop = asyncio.get_event_loop()
         tokenizer = MockBatchTokenizer(delay=0.01)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_isl_text_async", tokenizer=tokenizer
+                ctx,
+                loop,
+                "agg_isl_text_async",
+                tokenizer=tokenizer,
+                token_count_source=primary,
             )
             try:
                 await agg.process(
@@ -950,12 +1076,19 @@ class TestAsyncTriggers:
                 )
                 # ISL task is in-flight; drain it
                 await agg._token_queue.drain_all()
-                assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 4
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.ISL, CLIENT, primary=primary)
+                    )
+                    == 4
+                )
             finally:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_isl_structured_prompt_includes_reasoning_and_tools(self, tmp_path):
+    async def test_isl_structured_prompt_includes_reasoning_and_tools(
+        self, tmp_path, primary
+    ):
         loop = asyncio.get_event_loop()
         tokenizer = MockBatchTokenizer()
         messages = (
@@ -971,7 +1104,11 @@ class TestAsyncTriggers:
         tools = ({"function": {"name": "lookup"}},)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_isl_structured", tokenizer=tokenizer
+                ctx,
+                loop,
+                "agg_isl_structured",
+                tokenizer=tokenizer,
+                token_count_source=primary,
             )
             try:
                 await agg.process(
@@ -988,19 +1125,33 @@ class TestAsyncTriggers:
                     ]
                 )
                 await agg._token_queue.drain_all()
-                assert snapshot_series_count(registry, MetricSeriesKey.ISL.value) == 1
-                assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) > 5
+                assert (
+                    snapshot_series_count(
+                        registry, _name(MetricSeriesKey.ISL, CLIENT, primary=primary)
+                    )
+                    == 1
+                )
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.ISL, CLIENT, primary=primary)
+                    )
+                    > 5
+                )
             finally:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_osl_emitted_on_complete(self, tmp_path):
+    async def test_osl_emitted_on_complete(self, tmp_path, primary):
         """OSL is emitted via async tokenization when COMPLETE carries text."""
         loop = asyncio.get_event_loop()
         tokenizer = MockBatchTokenizer(delay=0.01)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_osl_complete", tokenizer=tokenizer
+                ctx,
+                loop,
+                "agg_osl_complete",
+                tokenizer=tokenizer,
+                token_count_source=primary,
             )
             try:
                 await agg.process(
@@ -1026,18 +1177,27 @@ class TestAsyncTriggers:
                     == 4000
                 )
                 # OSL = 4 tokens
-                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 4
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.OSL, CLIENT, primary=primary)
+                    )
+                    == 4
+                )
             finally:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_tpot_emitted_for_streaming(self, tmp_path):
+    async def test_tpot_emitted_for_streaming(self, tmp_path, primary):
         """TPOT is emitted for streaming responses using text_after_first_chunk."""
         loop = asyncio.get_event_loop()
         tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_tpot_streaming", tokenizer=tokenizer
+                ctx,
+                loop,
+                "agg_tpot_streaming",
+                tokenizer=tokenizer,
+                token_count_source=primary,
             )
             try:
                 await agg.process(
@@ -1058,22 +1218,31 @@ class TestAsyncTriggers:
                 )
                 await agg._token_queue.drain_all()
                 # OSL = "hello world foo" = 3 tokens
-                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 3
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.OSL, CLIENT, primary=primary)
+                    )
+                    == 3
+                )
                 # tpot = (5000 - 2000) / token_count("world foo") = 3000 / 2 = 1500
                 assert snapshot_series_total(
-                    registry, MetricSeriesKey.TPOT_NS.value
+                    registry, _name(MetricSeriesKey.TPOT_NS, CLIENT, primary=primary)
                 ) == pytest.approx(1500.0)
             finally:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_tpot_skipped_when_single_chunk(self, tmp_path):
+    async def test_tpot_skipped_when_single_chunk(self, tmp_path, primary):
         """TPOT is not emitted when there are no tokens after the first chunk."""
         loop = asyncio.get_event_loop()
         tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_tpot_single_chunk", tokenizer=tokenizer
+                ctx,
+                loop,
+                "agg_tpot_single_chunk",
+                tokenizer=tokenizer,
+                token_count_source=primary,
             )
             try:
                 await agg.process(
@@ -1093,15 +1262,24 @@ class TestAsyncTriggers:
                     ]
                 )
                 await agg._token_queue.drain_all()
-                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 1
                 assert (
-                    snapshot_series_count(registry, MetricSeriesKey.TPOT_NS.value) == 0
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.OSL, CLIENT, primary=primary)
+                    )
+                    == 1
+                )
+                assert (
+                    snapshot_series_count(
+                        registry,
+                        _name(MetricSeriesKey.TPOT_NS, CLIENT, primary=primary),
+                    )
+                    == 0
                 )
             finally:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_tpot_not_emitted_without_streaming_flag(self, tmp_path):
+    async def test_tpot_not_emitted_without_streaming_flag(self, tmp_path, primary):
         """When ``streaming=False``, TPOT/TTFT/chunk_delta series are NOT
         registered at all — the aggregator's snapshot has no entry for them.
         """
@@ -1114,6 +1292,7 @@ class TestAsyncTriggers:
                 "agg_tpot_no_streaming",
                 tokenizer=tokenizer,
                 streaming=False,
+                token_count_source=primary,
             )
             try:
                 await agg.process(
@@ -1139,22 +1318,33 @@ class TestAsyncTriggers:
                     )
                     == 4000
                 )
-                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 3
-                # The streaming-only series are unregistered.
-                assert not registry.has_series(MetricSeriesKey.TPOT_NS.value)
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.OSL, CLIENT, primary=primary)
+                    )
+                    == 3
+                )
+                # The streaming-only series are unregistered, on both bases.
+                for basis in TokenCountSource:
+                    tpot = _name(MetricSeriesKey.TPOT_NS, basis, primary=primary)
+                    assert not registry.has_series(tpot)
                 assert not registry.has_series(MetricSeriesKey.TTFT_NS.value)
                 assert not registry.has_series(MetricSeriesKey.CHUNK_DELTA_NS.value)
             finally:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_tpot_non_streaming_output_skipped(self, tmp_path):
+    async def test_tpot_non_streaming_output_skipped(self, tmp_path, primary):
         """TPOT is not emitted for non-streaming (str) TextModelOutput."""
         loop = asyncio.get_event_loop()
         tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_tpot_str_output", tokenizer=tokenizer
+                ctx,
+                loop,
+                "agg_tpot_str_output",
+                tokenizer=tokenizer,
+                token_count_source=primary,
             )
             try:
                 await agg.process(
@@ -1174,9 +1364,18 @@ class TestAsyncTriggers:
                     ]
                 )
                 await agg._token_queue.drain_all()
-                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 3
                 assert (
-                    snapshot_series_count(registry, MetricSeriesKey.TPOT_NS.value) == 0
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.OSL, CLIENT, primary=primary)
+                    )
+                    == 3
+                )
+                assert (
+                    snapshot_series_count(
+                        registry,
+                        _name(MetricSeriesKey.TPOT_NS, CLIENT, primary=primary),
+                    )
+                    == 0
                 )
             finally:
                 agg.close()
@@ -1190,6 +1389,7 @@ class TestAsyncTriggers:
                 ctx,
                 loop,
                 "agg_live_arm",
+                token_count_source=DEFAULT_SOURCE,
                 tokenizer=MockBatchTokenizer(),
                 live_flush_interval_s=0.01,
             )
@@ -1205,13 +1405,17 @@ class TestAsyncTriggers:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_flush_records_buffered_tokenizations(self, tmp_path):
+    async def test_flush_records_buffered_tokenizations(self, tmp_path, primary):
         """fire() buffers tokenization; flush() tokenizes the batch and records."""
         loop = asyncio.get_event_loop()
         tokenizer = MockBatchTokenizer()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_flush_records", tokenizer=tokenizer
+                ctx,
+                loop,
+                "agg_flush_records",
+                tokenizer=tokenizer,
+                token_count_source=primary,
             )
             try:
                 await agg.process(
@@ -1233,18 +1437,27 @@ class TestAsyncTriggers:
 
                 await agg._token_queue.drain_all()
                 assert agg._token_queue.pending == 0
-                assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 5
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.ISL, CLIENT, primary=primary)
+                    )
+                    == 5
+                )
             finally:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_shutdown_flushes_buffered_tokenizations(self, tmp_path):
+    async def test_shutdown_flushes_buffered_tokenizations(self, tmp_path, primary):
         """ENDED flushes buffered tokenizations before finalizing."""
         loop = asyncio.get_event_loop()
         tokenizer = MockBatchTokenizer(delay=0.02)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, publisher = make_aggregator(
-                ctx, loop, "agg_shutdown_drain", tokenizer=tokenizer
+                ctx,
+                loop,
+                "agg_shutdown_drain",
+                tokenizer=tokenizer,
+                token_count_source=primary,
             )
             try:
                 await agg.process(
@@ -1262,7 +1475,12 @@ class TestAsyncTriggers:
                     ]
                 )
                 # After ENDED, flush_remaining ran inside process() — ISL emitted.
-                assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 3
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.ISL, CLIENT, primary=primary)
+                    )
+                    == 3
+                )
                 publisher.publish_final.assert_awaited_once()
             finally:
                 agg.close()
@@ -1283,7 +1501,11 @@ class TestAsyncTriggers:
 
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, _, publisher = make_aggregator(
-                ctx, loop, "agg_drain_failure", tokenizer=FailingBatchTokenizer()
+                ctx,
+                loop,
+                "agg_drain_failure",
+                token_count_source=DEFAULT_SOURCE,
+                tokenizer=FailingBatchTokenizer(),
             )
             try:
                 await agg.process(
@@ -1331,6 +1553,7 @@ class TestAsyncTriggers:
                 ctx,
                 loop,
                 "agg_drain_timeout",
+                token_count_source=DEFAULT_SOURCE,
                 tokenizer=BlockingBatchTokenizer(),
             )
             agg._drain_timeout_s = 0.05
@@ -1364,13 +1587,17 @@ class TestAsyncTriggers:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_tpot_osl_for_tool_call_complete(self, tmp_path):
+    async def test_tpot_osl_for_tool_call_complete(self, tmp_path, primary):
         """OSL and TPOT use message-path tokenization when COMPLETE carries tool_calls."""
         loop = asyncio.get_event_loop()
         tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_tpot_osl_tool_call", tokenizer=tokenizer
+                ctx,
+                loop,
+                "agg_tpot_osl_tool_call",
+                tokenizer=tokenizer,
+                token_count_source=primary,
             )
             try:
                 tool_call = {
@@ -1397,10 +1624,377 @@ class TestAsyncTriggers:
                 )
                 await agg._token_queue.drain_all()
                 # OSL = token_count("ok" + tool_calls_json) = 2
-                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 2
+                assert (
+                    snapshot_series_total(
+                        registry, _name(MetricSeriesKey.OSL, CLIENT, primary=primary)
+                    )
+                    == 2
+                )
                 # tpot = (5000 - 2000) / token_count(tool_calls_json) = 3000 / 1 = 3000
                 assert snapshot_series_total(
-                    registry, MetricSeriesKey.TPOT_NS.value
+                    registry, _name(MetricSeriesKey.TPOT_NS, CLIENT, primary=primary)
                 ) == pytest.approx(3000.0)
             finally:
                 agg.close()
+
+
+# ---------------------------------------------------------------------------
+# Token-count bases: primary series unsuffixed, the other basis suffixed
+# ---------------------------------------------------------------------------
+
+_START = session_event(SessionEventType.START_PERFORMANCE_TRACKING, ts=0)
+_TOKEN_KEYS = (MetricSeriesKey.ISL, MetricSeriesKey.OSL, MetricSeriesKey.TPOT_NS)
+# One streamed sample: ISSUED 1000, first chunk 2000, COMPLETE 5000. Its output
+# is 7 whitespace tokens, 6 after the first chunk, beside server usage 10 / 5.
+_BOTH_BASES_SAMPLE = [
+    sample_event(
+        SampleEventType.ISSUED, "s1", ts=1000, data=PromptData(text="w w w w")
+    ),
+    sample_event(SampleEventType.RECV_FIRST, "s1", ts=2000),
+    complete_event(
+        "s1",
+        5000,
+        streaming_text("a", " b c d e f g"),
+        prompt_tokens=10,
+        completion_tokens=5,
+    ),
+]
+# TPOT of _BOTH_BASES_SAMPLE: 3000 ns over 6 tokenized tokens, and over
+# completion_tokens - 1 = 4 server tokens.
+_TPOT_BY_BASIS = {CLIENT: 500.0, SERVER: 750.0}
+_CASES = [pytest.param(*case[1:], id=case[0]) for case in SERVER_USAGE_CASES]
+
+
+@pytest.mark.unit
+class TestTokenCountBases:
+    @pytest.mark.asyncio
+    async def test_series_registered_primary_unsuffixed_then_other(
+        self, tmp_path, primary
+    ):
+        with aggregator_scope(tmp_path, "agg_order", token_count_source=primary) as (
+            _,
+            reg,
+            _,
+        ):
+            snap = reg.build_snapshot(state=SessionState.LIVE, n_pending_tasks=0)
+        names = [m.name for m in snap.metrics if isinstance(m, SeriesStat)]
+        assert names == [
+            "sample_latency_ns",
+            "isl",
+            "osl",
+            "ttft_ns",
+            "chunk_delta_ns",
+            "tpot_ns",
+            *(_name(key, primary.other, primary=primary) for key in _TOKEN_KEYS),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_no_metrics_isl_drops_isl_on_both_bases(
+        self, tmp_path, primary, streaming
+    ):
+        with aggregator_scope(
+            tmp_path,
+            "agg_no_isl",
+            token_count_source=primary,
+            tokenizer=MockBatchTokenizer(),
+            enable_isl=False,
+            streaming=streaming,
+        ) as (agg, reg, _):
+            await agg.process([_START, *_BOTH_BASES_SAMPLE])
+            # Only the output was enqueued; the prompt never was.
+            assert agg.pending_tokens == (2 if streaming else 1)
+            for basis in TokenCountSource:
+                assert not reg.has_series(
+                    _name(MetricSeriesKey.ISL, basis, primary=primary)
+                )
+                assert reg.has_series(
+                    _name(MetricSeriesKey.OSL, basis, primary=primary)
+                )
+                tpot = _name(MetricSeriesKey.TPOT_NS, basis, primary=primary)
+                assert reg.has_series(tpot) is streaming
+
+    @pytest.mark.asyncio
+    async def test_each_basis_records_its_own_counts(self, tmp_path, primary):
+        with aggregator_scope(
+            tmp_path,
+            "agg_bases",
+            token_count_source=primary,
+            tokenizer=MockBatchTokenizer(),
+        ) as (agg, reg, _):
+            await agg.process([_START, *_BOTH_BASES_SAMPLE])
+            await agg.token_queue.drain_all()
+            totals = {
+                (key, basis): snapshot_series_total(
+                    reg, _name(key, basis, primary=primary)
+                )
+                for key in _TOKEN_KEYS
+                for basis in TokenCountSource
+            }
+        assert totals == {
+            (MetricSeriesKey.ISL, CLIENT): 4,
+            (MetricSeriesKey.ISL, SERVER): 10,
+            (MetricSeriesKey.OSL, CLIENT): 7,
+            (MetricSeriesKey.OSL, SERVER): 5,
+            (MetricSeriesKey.TPOT_NS, CLIENT): _TPOT_BY_BASIS[CLIENT],
+            (MetricSeriesKey.TPOT_NS, SERVER): _TPOT_BY_BASIS[SERVER],
+        }
+
+    @pytest.mark.asyncio
+    async def test_server_basis_needs_no_tokenizer(self, tmp_path, primary):
+        with aggregator_scope(tmp_path, "agg_srv", token_count_source=primary) as (
+            agg,
+            reg,
+            _,
+        ):
+            await agg.process(
+                [
+                    sample_event(SampleEventType.ISSUED, "late", ts=1),  # untracked
+                    _START,
+                    *(
+                        sample_event(SampleEventType.ISSUED, u, ts=10)
+                        for u in ("s1", "s2", "err")
+                    ),
+                    complete_event(
+                        "s1",
+                        50,
+                        text_output("x y"),
+                        prompt_tokens=7,
+                        completion_tokens=5,
+                    ),
+                    # A true zero: nothing is recorded on either basis.
+                    complete_event(
+                        "s2", 50, text_output(""), prompt_tokens=3, completion_tokens=0
+                    ),
+                    complete_event(
+                        "err", 50, None, prompt_tokens=4, completion_tokens=4
+                    ),
+                    complete_event(
+                        "late",
+                        50,
+                        text_output("q"),
+                        prompt_tokens=50,
+                        completion_tokens=50,
+                    ),
+                ]
+            )
+            isl = _name(MetricSeriesKey.ISL, SERVER, primary=primary)
+            osl = _name(MetricSeriesKey.OSL, SERVER, primary=primary)
+            assert (
+                snapshot_series_count(reg, isl),
+                snapshot_series_total(reg, isl),
+            ) == (
+                1,
+                7,
+            )
+            assert (
+                snapshot_series_count(reg, osl),
+                snapshot_series_total(reg, osl),
+            ) == (
+                1,
+                5,
+            )
+            assert agg.pending_tokens == 0
+            assert snapshot_counters(reg)["tracked_samples_missing_usage"] == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("prompt", "completion", "output", "expected"), _CASES)
+    async def test_missing_usage_counted_for_both_primaries(
+        self, tmp_path, primary, prompt, completion, output, expected
+    ):
+        with aggregator_scope(tmp_path, "agg_miss", token_count_source=primary) as (
+            agg,
+            reg,
+            _,
+        ):
+            await agg.process(
+                [
+                    _START,
+                    sample_event(SampleEventType.ISSUED, "s1", ts=10),
+                    sample_event(SampleEventType.ISSUED, "err", ts=10),
+                    complete_event(
+                        "s1",
+                        20,
+                        output,
+                        prompt_tokens=prompt,
+                        completion_tokens=completion,
+                    ),
+                    # An error completes without data or usage: never missing.
+                    complete_event("err", 20, None),
+                ]
+            )
+            c = snapshot_counters(reg)
+            recorded = {
+                key: snapshot_series_count(reg, _name(key, SERVER, primary=primary))
+                for key in (MetricSeriesKey.ISL, MetricSeriesKey.OSL)
+            }
+        assert c["tracked_samples_missing_usage"] == (expected is ServerUsage.MISSING)
+        assert c["tracked_samples_missing_usage_empty_output"] == 0
+        # Server ISL and OSL cover exactly the usable samples.
+        usable = int(expected is ServerUsage.USABLE)
+        assert recorded == {MetricSeriesKey.ISL: usable, MetricSeriesKey.OSL: usable}
+
+    @pytest.mark.asyncio
+    async def test_first_miss_logged_once_at_the_primary_level(
+        self, tmp_path, primary, caplog
+    ):
+        events = [sample_event(SampleEventType.ISSUED, "untracked", ts=1), _START]
+        events += [
+            sample_event(SampleEventType.ISSUED, u, ts=10)
+            for u in ("ok", "a", "b", "c", "err")
+        ]
+        events += [
+            complete_event("untracked", 20, text_output("x")),
+            complete_event(
+                "ok", 20, text_output("w"), prompt_tokens=1, completion_tokens=1
+            ),
+            complete_event("a", 20, text_output("x y")),
+            complete_event("b", 20, text_output("")),  # empty output
+            complete_event("c", 20, text_output("z"), prompt_tokens=3),  # one UNSET
+            complete_event("err", 20, None),  # error: excluded
+        ]
+        with (
+            caplog.at_level(logging.INFO),
+            aggregator_scope(tmp_path, "agg_miss_log", token_count_source=primary) as (
+                agg,
+                reg,
+                _,
+            ),
+        ):
+            await agg.process(events)
+            c = snapshot_counters(reg)
+        assert c["tracked_samples_missing_usage"] == 3
+        assert c["tracked_samples_missing_usage_empty_output"] == 1
+        # "a" is the first miss and the second successful tracked sample.
+        message = missing_usage_message(1, 0, 2, primary=primary)
+        level = logging.WARNING if primary is SERVER else logging.INFO
+        logged = [
+            r.levelno
+            for r in caplog.records
+            if "returned no server token usage" in r.getMessage()
+        ]
+        assert logged == [level]
+        assert any(message in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_paired_osl_counts_only_usable_samples(self, tmp_path, primary):
+        events = [_START]
+        for case_id, prompt, completion, output, _ in SERVER_USAGE_CASES:
+            events += [
+                sample_event(SampleEventType.ISSUED, case_id, ts=10),
+                complete_event(
+                    case_id,
+                    20,
+                    output,
+                    prompt_tokens=prompt,
+                    completion_tokens=completion,
+                ),
+            ]
+        usable = [case for case in SERVER_USAGE_CASES if case[4] is ServerUsage.USABLE]
+        with aggregator_scope(
+            tmp_path,
+            "agg_pair",
+            token_count_source=primary,
+            tokenizer=MockBatchTokenizer(),
+        ) as (agg, reg, _):
+            await agg.process(events)
+            # The client OSL recorder runs at the token-queue flush.
+            assert snapshot_counters(reg)["osl_paired_samples"] == 0
+            await agg.token_queue.drain_all()
+            c = snapshot_counters(reg)
+        assert (
+            c["osl_paired_samples"],
+            c["osl_paired_client_tokens"],
+            c["osl_paired_server_tokens"],
+        ) == (
+            len(usable),
+            sum(len(str(case[3]).split()) for case in usable),
+            sum(case[2] for case in usable),
+        )
+
+    @pytest.mark.asyncio
+    async def test_early_stopping_and_steady_state_attach_to_primary_tpot_only(
+        self, tmp_path, primary
+    ):
+        reg = MetricsRegistry(early_stopping=EarlyStoppingSpec())
+        phase = EventRecord(
+            event_type=SessionEventType.PHASE_START,
+            timestamp_ns=0,
+            data=PhaseData(
+                phase_type=PhaseType.PERFORMANCE, drain_after=True, num_turns=1
+            ),
+        )
+        with aggregator_scope(
+            tmp_path,
+            "agg_primary_tpot",
+            token_count_source=primary,
+            tokenizer=MockBatchTokenizer(),
+            steady_state_profile="concurrency",
+            registry=reg,
+        ) as (agg, _, _):
+            await agg.process([phase, _START, *_BOTH_BASES_SAMPLE])
+            await agg.token_queue.drain_all()
+            collected = list(agg._collector.series()[0].tpot_ns)
+            snap = reg.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        with_es = {
+            m.name
+            for m in snap.metrics
+            if isinstance(m, SeriesStat) and m.early_stopping_percentiles is not None
+        }
+        assert with_es == {"sample_latency_ns", "ttft_ns", "tpot_ns"}
+        assert collected == [_TPOT_BY_BASIS[primary]]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "completion_tokens, recv_first_ts, expected",
+        [
+            (4, 2000, 1000.0),  # (5000 - 2000) / (4 - 1)
+            (1, 2000, None),  # <= 1: skipped (LoadGen would log a negative)
+            (msgspec.UNSET, 2000, None),
+            (4, None, None),  # streaming only
+            (4, 5000, None),  # delta == 0: skipped
+            (4, 6000, None),  # RECV_FIRST stamped after COMPLETE: skipped
+        ],
+    )
+    async def test_server_tpot_uses_loadgen_rule(
+        self, tmp_path, primary, completion_tokens, recv_first_ts, expected
+    ):
+        events = [_START, sample_event(SampleEventType.ISSUED, "s1", ts=1000)]
+        if recv_first_ts is not None:
+            events.append(
+                sample_event(SampleEventType.RECV_FIRST, "s1", ts=recv_first_ts)
+            )
+        events.append(
+            complete_event(
+                "s1",
+                5000,
+                streaming_text("a", " b"),
+                prompt_tokens=2,
+                completion_tokens=completion_tokens,
+            )
+        )
+        tpot = _name(MetricSeriesKey.TPOT_NS, SERVER, primary=primary)
+        with aggregator_scope(tmp_path, "agg_tpot", token_count_source=primary) as (
+            agg,
+            reg,
+            _,
+        ):
+            await agg.process(events)
+            assert snapshot_series_count(reg, tpot) == (expected is not None)
+            if expected is not None:
+                assert snapshot_series_total(reg, tpot) == pytest.approx(expected)
+
+
+@pytest.mark.unit
+def test_aggregator_requires_token_count_source():
+    with pytest.raises(TypeError, match="token_count_source"):
+        MetricsAggregatorService(
+            "unused",
+            None,
+            None,
+            registry=MetricsRegistry(),
+            publisher=None,
+            publish_interval_s=0.25,
+            sig_figs=3,
+            n_histogram_buckets=10,
+        )
