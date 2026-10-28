@@ -48,10 +48,11 @@ from inference_endpoint.config.schema import (
     Timeouts,
     WarmupConfig,
 )
+from inference_endpoint.core.types import TokenCountSource
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.exceptions import ExecutionError
 
-from tests.test_helpers import write_large_prompt_dataset
+from tests.test_helpers import DEFAULT_SOURCE, write_large_prompt_dataset
 
 # Local character-level tokenizer: lets the metrics aggregator tokenize
 # ISL/OSL without a HuggingFace Hub download (same trick as
@@ -83,11 +84,13 @@ def _make_config(
     timeouts: Timeouts | None = None,
     streaming: StreamingMode = StreamingMode.OFF,
     metrics_tokenizer_workers: int | None = None,
+    token_count_source: TokenCountSource = DEFAULT_SOURCE,
 ) -> BenchmarkConfig:
     settings_kwargs: dict[str, Any] = {
         "load_pattern": load_pattern,
         "client": _FAST_CLIENT,
         "warmup": WarmupConfig(enabled=False),
+        "token_count_source": token_count_source,
     }
     if runtime is not None:
         settings_kwargs["runtime"] = runtime
@@ -190,6 +193,9 @@ def test_metrics_drain_timeout_fails_run(mock_http_echo_server, tmp_path):
         # watchdog: the drain deadline itself must fail the run.
         metrics_tokenizer_workers=0,
         timeouts=Timeouts(metrics_drain_timeout_s=1.0),
+        # In server mode a pending client drain is non-fatal; only the
+        # client-mode rule fails the run on it.
+        token_count_source=TokenCountSource.CLIENT,
     )
     report_dir = tmp_path / "report"
 
@@ -202,6 +208,54 @@ def test_metrics_drain_timeout_fails_run(mock_http_echo_server, tmp_path):
 
     summary = _read_result_summary(report_dir)
     assert summary["complete"] is False
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("streaming", [StreamingMode.OFF, StreamingMode.ON])
+def test_metrics_drain_timeout_is_partial_not_fatal_in_server_mode(
+    mock_http_echo_server, tmp_path, streaming
+):
+    """In server mode an expired client drain leaves the run complete.
+
+    Headline ISL/OSL/TPOT come from server usage, so the pending tokenizer
+    backlog only marks the *_client blocks partial and the run exits 0.
+    """
+    # The echo server streams every word (~42k frames per sample), so the
+    # streaming case uses fewer samples; their backlog still outlasts the drain.
+    n_samples = 30 if streaming is StreamingMode.ON else 100
+    dataset_path = write_large_prompt_dataset(tmp_path, n_samples)
+    config = _make_config(
+        mock_http_echo_server.url,
+        dataset_path,
+        tmp_path / "report",
+        model_name=str(_CHAR_TOKENIZER_DIR),
+        metrics_tokenizer_workers=0,
+        timeouts=Timeouts(metrics_drain_timeout_s=1.0),
+        token_count_source=TokenCountSource.SERVER,
+        streaming=streaming,
+    )
+    report_dir = tmp_path / "report"
+
+    run_benchmark(config, TestMode.PERF)
+
+    snapshot = _read_final_snapshot(report_dir)
+    summary = _read_result_summary(report_dir)
+    assert snapshot["state"] == "complete" and snapshot["n_pending_tasks"] > 0
+    assert summary["complete"] is True and summary["token_count_source"] == "server"
+    assert "token_count_source" not in summary["run_config"]
+    assert summary["n_samples_missing_usage"] == 0
+    assert summary["client_token_tasks_pending"] == snapshot["n_pending_tasks"]
+    assert summary["output_sequence_lengths"]["total"] > 0
+    if streaming is StreamingMode.ON:
+        assert summary["tpot"]["total"] > 0
+    # A client block is absent when the expired drain recorded nothing, and
+    # partial otherwise; its throughput is withheld either way.
+    keys = ["input_sequence_lengths_client", "output_sequence_lengths_client"]
+    if streaming is StreamingMode.ON:
+        keys.append("tpot_client")
+    for key in keys:
+        assert summary[key] is None or summary[key]["partial"] is True, key
+    assert summary["tps_client"] is None
 
 
 @pytest.mark.integration
@@ -235,3 +289,28 @@ def test_run_timeout_during_service_launch_aborts_promptly(
     # Prompt unwind: nowhere near the 30 s service_ready_timeout_s the
     # pre-fix behavior would have waited out.
     assert elapsed < 15.0, f"launch abort took {elapsed:.1f}s"
+
+
+@pytest.mark.integration
+def test_run_timeout_outranks_missing_usage(
+    recording_echo_server_factory, ds_dataset_path, tmp_path
+):
+    """A fired run watchdog reports the timeout, not the missing usage."""
+    server = recording_echo_server_factory(report_usage=False)
+    config = _make_config(
+        server.url,
+        ds_dataset_path,
+        tmp_path,
+        test_type=TestType.ONLINE,
+        load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=5),
+        runtime=RuntimeConfig(n_samples_to_issue=600),
+        timeouts=Timeouts(run_timeout_s=6.0),
+        streaming=StreamingMode.ON,
+        token_count_source=TokenCountSource.SERVER,
+    )
+
+    with pytest.raises(ExecutionError, match="Run timeout"):
+        run_benchmark(config, TestMode.PERF)
+
+    summary = _read_result_summary(tmp_path)
+    assert summary["complete"] is False and summary["n_samples_missing_usage"] > 0

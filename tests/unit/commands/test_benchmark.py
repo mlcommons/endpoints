@@ -24,9 +24,11 @@ import random
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error as urllib_error
 
+import cyclopts
 import inference_endpoint.commands.benchmark.execute as execute_mod
 import pandas as pd
 import pytest
@@ -48,6 +50,7 @@ from inference_endpoint.commands.benchmark.execute import (
     finalize_benchmark,
     setup_benchmark,
 )
+from inference_endpoint.commands.benchmark.pipeline import resolve_token_count_source
 from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
     _derive_profile_urls,
@@ -84,7 +87,12 @@ from inference_endpoint.config.schema import (
     OnlineBenchmarkConfig as OnlineConfig,
 )
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
-from inference_endpoint.core.types import APIType, PhaseType, QueryResult
+from inference_endpoint.core.types import (
+    APIType,
+    PhaseType,
+    QueryResult,
+    TokenCountSource,
+)
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -93,6 +101,7 @@ from inference_endpoint.dataset_manager.predefined.swe_bench import SWEBench
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.evaluation.scoring import (
     AgenticInferenceInlineScorer,
+    PassAt1Scorer,
     Scorer,
     SWEBenchScorer,
 )
@@ -112,6 +121,8 @@ from inference_endpoint.load_generator.session import (
 from inference_endpoint.metrics.metric import Throughput
 from inference_endpoint.metrics.report import Report
 from pydantic import ValidationError
+
+from tests.test_helpers import DEFAULT_SOURCE, make_report
 
 TEMPLATE_DIR = (
     Path(__file__).resolve().parents[3]
@@ -219,6 +230,7 @@ def _make_benchmark_context(
         dataloader=dataloader,
         rt_settings=rt_settings,
         total_samples=dataloader.num_samples(),
+        token_count_source=DEFAULT_SOURCE,
         eval_configs=eval_configs or [],
     )
 
@@ -592,6 +604,237 @@ class TestLoadDatasetsSaltValidation:
         assert perf_loader is None
 
 
+@pytest.mark.unit
+class TestMultiChoiceRows:
+    """Rows with ``n > 1`` fail setup on the server basis and warn on the client basis."""
+
+    _ACC_CONFIG = {
+        "eval_method": "pass_at_1",
+        "ground_truth": "ground_truth",
+        "extractor": "boxed_math_extractor",
+    }
+
+    def _config(
+        self,
+        tmp_path: Path,
+        source: TokenCountSource,
+        perf_rows: list[dict],
+        acc_rows: list[dict],
+        *,
+        perf_accuracy: bool = False,
+    ) -> BenchmarkConfig:
+        for name, rows in (("perf", perf_rows), ("acc", acc_rows)):
+            (tmp_path / f"{name}.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows)
+            )
+        perf: dict[str, Any] = {
+            "name": "perf",
+            "type": "performance",
+            "path": str(tmp_path / "perf.jsonl"),
+        }
+        if perf_accuracy:
+            perf["accuracy_config"] = self._ACC_CONFIG
+        return BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "test-model"},
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
+            report_dir=str(tmp_path / "report"),
+            settings={"token_count_source": source},
+            datasets=[
+                perf,
+                {
+                    "name": "acc",
+                    "type": "accuracy",
+                    "path": str(tmp_path / "acc.jsonl"),
+                    "accuracy_config": self._ACC_CONFIG,
+                },
+            ],
+        )
+
+    @staticmethod
+    def _setup(config: BenchmarkConfig, mode: TestMode) -> BenchmarkContext:
+        with (
+            patch.object(execute_mod, "pin_loadgen", return_value=None),
+            patch.object(execute_mod, "_check_tokenizer_exists", return_value=False),
+        ):
+            return setup_benchmark(config, mode)
+
+    @staticmethod
+    def _n_warnings(caplog) -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "set n > 1" in r.getMessage()
+        ]
+
+    @pytest.mark.parametrize("source", list(TokenCountSource))
+    @pytest.mark.parametrize(
+        "perf_row, acc_row, name, mode",
+        [
+            (
+                {"prompt": "p", "n": 2},
+                {"prompt": "q", "ground_truth": "42"},
+                "perf",
+                TestMode.BOTH,
+            ),
+            (
+                {"prompt": "p"},
+                {"prompt": "q", "ground_truth": "42", "n": 2},
+                "acc",
+                TestMode.BOTH,
+            ),
+            (  # PERF still issues accuracy phases
+                {"prompt": "p"},
+                {"prompt": "q", "ground_truth": "42", "n": 2},
+                "acc",
+                TestMode.PERF,
+            ),
+        ],
+    )
+    def test_n_gt_1_rows_rejected_only_for_server_primary(
+        self, tmp_path, caplog, source, perf_row, acc_row, name, mode
+    ):
+        config = self._config(tmp_path, source, [perf_row], [acc_row])
+        if source is TokenCountSource.SERVER:
+            with pytest.raises(
+                SetupError,
+                match=rf"Dataset '{name}': sample 0 sets n=2\. "
+                r".*remove 'n' or set --token-count-source client "
+                r"\(YAML: settings\.token_count_source: client\)\.$",
+            ):
+                self._setup(config, mode)
+            return
+        with caplog.at_level(logging.WARNING):
+            self._setup(config, mode)
+        [warning] = self._n_warnings(caplog)
+        assert warning.startswith("1 sample(s) set n > 1")
+        assert "*_server" in warning
+
+    def test_client_warning_counts_each_issued_row_once(self, tmp_path, caplog):
+        # The performance dataset's inline scorer reuses the same loaded rows.
+        config = self._config(
+            tmp_path,
+            TokenCountSource.CLIENT,
+            [{"prompt": "p", "n": 2, "ground_truth": "42"}] * 2,
+            [{"prompt": "q", "ground_truth": "42", "n": 3}],
+            perf_accuracy=True,
+        )
+        with caplog.at_level(logging.WARNING):
+            self._setup(config, TestMode.BOTH)
+        [warning] = self._n_warnings(caplog)
+        assert warning.startswith("3 sample(s) set n > 1")
+
+    @pytest.mark.parametrize("mode", [TestMode.ACC, TestMode.BOTH])
+    def test_n_allowed_on_external_scorer_dataset(self, tmp_path, mode):
+        config = self._config(
+            tmp_path,
+            TokenCountSource.SERVER,
+            [{"prompt": "p"}],
+            [{"prompt": "q", "ground_truth": "42", "n": 2}],
+        )
+        with patch.object(PassAt1Scorer, "SKIP_ENDPOINT_PHASE", True):
+            ctx = self._setup(config, mode)
+        assert ctx.eval_configs[0].dataset.load_sample(0)["n"] == 2
+
+    def test_n_of_one_allowed_on_server_basis(self, tmp_path, caplog):
+        config = self._config(
+            tmp_path,
+            TokenCountSource.SERVER,
+            [{"prompt": "p", "n": 1}],
+            [{"prompt": "q", "ground_truth": "42"}],
+        )
+        with caplog.at_level(logging.WARNING):
+            ctx = self._setup(config, TestMode.BOTH)
+        assert ctx.dataloader.load_sample(0)["n"] == 1
+        assert self._n_warnings(caplog) == []
+
+
+def _usage_opt_out_config(
+    *,
+    api_type: APIType,
+    streaming: StreamingMode,
+    source: TokenCountSource,
+    stream_include_usage: bool,
+) -> OfflineConfig:
+    return OfflineConfig(
+        **(
+            _OFFLINE_KWARGS
+            | {
+                "endpoint_config": {
+                    "endpoints": ["http://test:8000"],
+                    "api_type": api_type,
+                },
+                "model_params": {"name": "test-model", "streaming": streaming},
+            }
+        ),
+        settings=OfflineSettings(
+            token_count_source=source,
+            client=HTTPClientConfig(stream_include_usage=stream_include_usage),
+        ),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("api_type", [APIType.OPENAI, APIType.OPENAI_COMPLETIONS])
+def test_server_primary_with_usage_opt_out_rejected(api_type):
+    config = _usage_opt_out_config(
+        api_type=api_type,
+        streaming=StreamingMode.ON,
+        source=TokenCountSource.SERVER,
+        stream_include_usage=False,
+    )
+    with pytest.raises(SetupError) as exc:
+        resolve_token_count_source(config)
+    assert "settings.token_count_source" in str(exc.value)
+    assert "settings.client.stream_include_usage" in str(exc.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "api_type, streaming, source, stream_include_usage",
+    [
+        pytest.param(
+            APIType.OPENAI,
+            StreamingMode.OFF,
+            TokenCountSource.SERVER,
+            False,
+            id="non-streaming-body-carries-usage",
+        ),
+        pytest.param(
+            APIType.SGLANG,
+            StreamingMode.ON,
+            TokenCountSource.SERVER,
+            False,
+            id="sglang-always-reports-usage",
+        ),
+        pytest.param(
+            APIType.OPENAI,
+            StreamingMode.ON,
+            TokenCountSource.CLIENT,
+            False,
+            id="client-primary",
+        ),
+        pytest.param(
+            APIType.OPENAI,
+            StreamingMode.ON,
+            TokenCountSource.SERVER,
+            True,
+            id="usage-requested",
+        ),
+    ],
+)
+def test_usage_opt_out_allowed_when_primary_counts_need_no_stream_usage(
+    api_type, streaming, source, stream_include_usage
+):
+    config = _usage_opt_out_config(
+        api_type=api_type,
+        streaming=streaming,
+        source=source,
+        stream_include_usage=stream_include_usage,
+    )
+    assert resolve_token_count_source(config) is source
+
+
 class TestCommandHandlers:
     """Test offline/online/from_config handlers (mock run_benchmark)."""
 
@@ -700,6 +943,54 @@ class TestCommandHandlers:
             [*base, "--no-metrics-isl"], exit_on_error=False
         )
         assert bound.arguments["config"].settings.metrics_isl is False
+
+    @pytest.mark.unit
+    def test_token_count_source_cli_default_and_override(self):
+        base = [
+            "offline",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+        ]
+        _, bound, _ = benchmark_app.parse_args(base, exit_on_error=False)
+        assert bound.arguments["config"].settings.token_count_source is DEFAULT_SOURCE
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--token-count-source", DEFAULT_SOURCE.other.value],
+            exit_on_error=False,
+        )
+        assert (
+            bound.arguments["config"].settings.token_count_source
+            is DEFAULT_SOURCE.other
+        )
+
+        with pytest.raises(cyclopts.ValidationError, match="token_count_source"):
+            benchmark_app.parse_args(
+                [*base, "--token-count-source", "tokenizer"], exit_on_error=False
+            )
+
+    @pytest.mark.unit
+    def test_cli_opt_out_flag(self):
+        base = [
+            "offline",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+        ]
+        for extra, expected in (
+            ([], True),
+            (["--no-stream-include-usage"], False),
+            (["--stream-include-usage"], True),
+        ):
+            _, bound, _ = benchmark_app.parse_args([*base, *extra], exit_on_error=False)
+            client = bound.arguments["config"].settings.client
+            assert client.stream_include_usage is expected, extra
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -1363,7 +1654,47 @@ class TestAggregatorArgs:
             dataloader=ds,
             rt_settings=rt,
             total_samples=1,
+            token_count_source=DEFAULT_SOURCE,
         )
+
+    async def _aggregator_args(self, ctx, tmp_path) -> list[str]:
+        """Run the benchmark up to service launch; return the aggregator argv."""
+        captured: list = []
+
+        async def _capture_launch(service_configs, *, timeout):
+            captured.extend(service_configs)
+            raise KeyboardInterrupt("stop after launch")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(KeyboardInterrupt):
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+        aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
+        return aggregator_cfg.args
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1491,47 +1822,23 @@ class TestAggregatorArgs:
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(metrics_isl=metrics_isl),
         )
-        ctx = self._make_ctx(config, tmp_path)
-
-        captured: list = []
-
-        async def _capture_launch(service_configs, *, timeout):
-            captured.extend(service_configs)
-            raise KeyboardInterrupt("stop after launch")
-
-        mock_zmq = MagicMock()
-        mock_zmq.socket_dir = str(tmp_path / "sockets")
-
-        with (
-            patch(
-                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
-            ) as MockZMQ,
-            patch(
-                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
-            ) as MockPub,
-            patch(
-                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
-            ) as MockSub,
-            patch(
-                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
-            ) as MockLauncher,
-            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
-        ):
-            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
-            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
-            MockPub.return_value.socket_name = "test_pub"
-            MockSub.return_value.start = MagicMock()
-            MockLauncher.return_value.launch = _capture_launch
-
-            loop = asyncio.get_event_loop()
-            with pytest.raises(KeyboardInterrupt):
-                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
-
-        aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
-        args = aggregator_cfg.args
+        args = await self._aggregator_args(self._make_ctx(config, tmp_path), tmp_path)
         assert expected_flag in args
         # Exactly one spelling of the flag is emitted.
         assert sum(a.endswith("metrics-isl") for a in args) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", list(TokenCountSource))
+    async def test_token_count_source_forwarded_to_aggregator_args(
+        self, tmp_path, source
+    ):
+        ctx = dataclasses.replace(
+            self._make_ctx(OfflineConfig(**_OFFLINE_KWARGS), tmp_path),
+            token_count_source=source,
+        )
+        args = await self._aggregator_args(ctx, tmp_path)
+        assert args[args.index("--token-count-source") + 1] == source.value
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -2012,6 +2319,7 @@ class TestBuildPhases:
             dataloader=dataloader,
             rt_settings=rt_settings,
             total_samples=dataloader.num_samples(),
+            token_count_source=DEFAULT_SOURCE,
             eval_configs=[],
         )
 
@@ -2649,6 +2957,28 @@ class TestFinalizeBenchmark:
         assert results["accuracy_scores"][0]["score"] == 1.0
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("source", list(TokenCountSource))
+    def test_accuracy_results_carry_the_run_token_basis(self, tmp_path, source):
+        dataset = _make_loaded_dataset()
+        ctx = _make_benchmark_context(
+            config=OfflineConfig(**_OFFLINE_KWARGS),
+            report_dir=tmp_path,
+            test_mode=TestMode.ACC,
+            dataloader=dataset,
+            eval_configs=[
+                self._make_eval_config(_SelfContainedScorer, dataset, tmp_path)
+            ],
+        )
+        ctx.token_count_source = source
+
+        finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+        results = json.loads(
+            (tmp_path / "accuracy" / "accuracy_results.json").read_text()
+        )
+        assert results["token_count_source"] == source.value
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(("dataset_size", "expected"), [(3, 2), (1, 1)])
     def test_skip_endpoint_phase_scorer_reports_external_sample_count(
         self, tmp_path, dataset_size, expected
@@ -2744,6 +3074,24 @@ class TestFinalizeBenchmark:
         assert summary["complete"] is False
         assert summary["state"] == "interrupted"
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize("source", list(TokenCountSource))
+    def test_full_run_osl_gets_the_effective_token_basis(
+        self, tmp_path, monkeypatch, source
+    ):
+        ctx = dataclasses.replace(
+            _make_benchmark_context(
+                config=OfflineConfig(**_OFFLINE_KWARGS), report_dir=tmp_path
+            ),
+            token_count_source=source,
+        )
+        full_run = MagicMock(return_value=None)
+        monkeypatch.setattr(execute_mod, "full_run_osl_for_report", full_run)
+
+        finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+        full_run.assert_called_once_with(tmp_path, None, token_count_source=source)
+
     @staticmethod
     def _make_report(state: str) -> Report:
         return Report.from_snapshot(
@@ -2766,7 +3114,8 @@ class TestFinalizeBenchmark:
                     },
                     {"type": "counter", "name": "tracked_samples_failed", "value": 0},
                 ],
-            }
+            },
+            token_count_source=DEFAULT_SOURCE,
         )
 
 
@@ -2794,6 +3143,98 @@ class TestRunBenchmarkStallOutcome:
         # reaching pytest.raises without this call would mean the stall
         # propagated before finalization (the pre-fix behavior).
         finalize.assert_called_once_with(ctx, bench)
+
+
+_M = {
+    "complete": False,
+    "token_count_source": TokenCountSource.SERVER,
+    "n_samples_missing_usage": 3,
+}
+
+
+class TestRunBenchmarkFailurePrecedence:
+    """Which failure ``run_benchmark`` reports when several apply.
+
+    Order: interrupt > run timeout/stall/no report > the incomplete report's
+    ``incomplete_reason``.
+    """
+
+    @staticmethod
+    def _run(tmp_path, monkeypatch, **bench_over):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config, tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        for name, value in bench_over.items():
+            setattr(bench, name, value)
+        monkeypatch.setattr(execute_mod, "setup_benchmark", MagicMock(return_value=ctx))
+        monkeypatch.setattr(
+            execute_mod, "run_benchmark_async", MagicMock(return_value=bench)
+        )
+        monkeypatch.setattr(execute_mod, "finalize_benchmark", MagicMock())
+        return execute_mod.run_benchmark(config, TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_interrupt_outranks_missing_usage(self, tmp_path, monkeypatch):
+        with pytest.raises(KeyboardInterrupt):
+            self._run(
+                tmp_path, monkeypatch, user_interrupted=True, report=make_report(**_M)
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("over", "match"),
+        [
+            ({"run_timed_out": True}, "Run timeout"),
+            ({"stall_error": "endpoint stalled"}, "endpoint stalled"),
+            ({"report": None}, "no usable metrics report"),
+        ],
+    )
+    def test_timeout_stall_no_report_outrank_missing_usage(
+        self, tmp_path, monkeypatch, over, match
+    ):
+        with pytest.raises(ExecutionError, match=match):
+            self._run(tmp_path, monkeypatch, **({"report": make_report(**_M)} | over))
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("over", "match"),
+        [
+            (
+                {},
+                r"^3 of 10 successful tracked samples returned no server token "
+                r"usage; set --token-count-source client if this server cannot "
+                r"report usage \(YAML: settings\.token_count_source: client\)$",
+            ),
+            (
+                {"n_samples_missing_usage_empty_output": 3},
+                "; 3 had empty output — likely server errors or cut streams; "
+                "client mode will not fix these$",
+            ),
+            (
+                {
+                    "token_count_source": TokenCountSource.CLIENT,
+                    "n_samples_missing_usage": 0,
+                    "client_token_tasks_pending": 4,
+                },
+                "^Metrics tokenization did not finish$",
+            ),
+            (
+                {"state": "interrupted"},
+                r"^Benchmark report is incomplete \(state=interrupted, "
+                r"n_samples_dropped=0\)$",
+            ),
+        ],
+    )
+    def test_incomplete_report_messages(self, tmp_path, monkeypatch, over, match):
+        with pytest.raises(ExecutionError, match=match):
+            self._run(tmp_path, monkeypatch, report=make_report(**(_M | over)))
+
+    @pytest.mark.unit
+    def test_server_mode_pending_client_drain_exits_zero(self, tmp_path, monkeypatch):
+        report = make_report(
+            token_count_source=TokenCountSource.SERVER, client_token_tasks_pending=4
+        )
+        assert self._run(tmp_path, monkeypatch, report=report) == tmp_path
 
 
 class TestScorerMethodSync:
@@ -3028,6 +3469,59 @@ class TestSetupBenchmarkTokenizer:
             ctx = setup_benchmark(config, TestMode.PERF)
 
         assert ctx.tokenizer_name is None
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            (
+                TokenCountSource.SERVER,
+                "No tokenizer: the *_client ISL/OSL/TPOT blocks are unavailable; "
+                "ISL/OSL/TPOT use server-reported usage",
+            ),
+            (
+                TokenCountSource.CLIENT,
+                "No tokenizer: ISL/OSL/TPOT are unavailable while the client "
+                "basis is primary; the *_server ISL/OSL/TPOT blocks are "
+                "reported when the server returns usage. Set --tokenizer "
+                "(model_params.tokenizer_name) or --token-count-source server "
+                "(settings.token_count_source)",
+            ),
+        ],
+    )
+    def test_no_tokenizer_warning_names_the_token_basis(
+        self,
+        tmp_path,
+        caplog,
+        _base_patches,
+        _simple_dataset,
+        _rt_settings,
+        source,
+        expected,
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            report_dir=str(tmp_path),
+            settings=OfflineSettings(token_count_source=source),
+        )
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                return_value=False,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(_simple_dataset, []),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
+                return_value=_rt_settings,
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            setup_benchmark(config, TestMode.PERF)
+
+        assert expected in caplog.text
 
 
 class TestSetupBenchmark:
@@ -3299,6 +3793,71 @@ class TestSetupBenchmark:
         # One complete pass contributes 2 + 1 + 3 = 6 client-turn samples.
         # Issuing five trajectories repeats c1 and c2, adding 2 + 1 more.
         assert ctx.total_samples == 9
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("api_type", "configured", "expected", "log_line"),
+        [
+            (
+                APIType.OPENAI,
+                TokenCountSource.SERVER,
+                TokenCountSource.SERVER,
+                "Token counts: server",
+            ),
+            (
+                APIType.OPENAI,
+                TokenCountSource.CLIENT,
+                TokenCountSource.CLIENT,
+                "Token counts: client",
+            ),
+            (
+                APIType.VIDEOGEN,
+                TokenCountSource.SERVER,
+                TokenCountSource.CLIENT,
+                "Token counts: client (api_type videogen reports no token usage; "
+                "configured server ignored)",
+            ),
+        ],
+    )
+    def test_setup_sets_effective_token_count_source(
+        self,
+        tmp_path,
+        caplog,
+        _base_patches,
+        _simple_dataset,
+        _rt_settings,
+        api_type,
+        configured,
+        expected,
+        log_line,
+    ):
+        config = OfflineConfig(
+            **(
+                _OFFLINE_KWARGS
+                | {
+                    "endpoint_config": {
+                        "endpoints": ["http://test:8000"],
+                        "api_type": api_type,
+                    }
+                }
+            ),
+            settings=OfflineSettings(token_count_source=configured),
+            report_dir=str(tmp_path),
+        )
+        with caplog.at_level(logging.INFO):
+            ctx = self._setup(
+                config, TestMode.PERF, (_simple_dataset, []), _rt_settings
+            )
+
+        assert ctx.token_count_source is expected
+        assert [m for m in caplog.messages if m.startswith("Token counts:")] == [
+            log_line
+        ]
+
+    @pytest.mark.unit
+    def test_context_takes_the_default_source(self, tmp_path):
+        ctx = _make_benchmark_context(OfflineConfig(**_OFFLINE_KWARGS), tmp_path)
+        assert ctx.token_count_source is DEFAULT_SOURCE
 
 
 class TestReportConfigSecretRedaction:

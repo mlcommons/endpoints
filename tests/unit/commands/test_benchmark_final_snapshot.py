@@ -43,10 +43,17 @@ from inference_endpoint.commands.benchmark.pipeline import (
     _build_aggregator_args,
     _build_report_from_snapshot,
     _load_final_snapshot_from_disk,
+    resolve_token_count_source,
     steady_state_profile,
 )
-from inference_endpoint.config.schema import LoadPatternType
+from inference_endpoint.config.schema import (
+    LoadPatternType,
+    OfflineBenchmarkConfig,
+)
+from inference_endpoint.core.types import APIType, TokenCountSource, basis_key
 from inference_endpoint.metrics.report import Report
+
+from tests.test_helpers import DEFAULT_SOURCE
 
 # Dotted path for monkeypatch string targets — keeps a single import style (the
 # module is imported once via ``from ... import`` and patched by path here).
@@ -127,18 +134,25 @@ class TestReportFromLoadedSnapshot:
     relies on across the three terminal states."""
 
     @pytest.mark.parametrize(
-        "state, n_pending, expected_complete",
+        "state, n_pending, primary, expected_complete",
         [
-            (SessionState.COMPLETE.value, 0, True),
-            # Drain-timeout: COMPLETE state but tasks still pending.
-            (SessionState.COMPLETE.value, 3, False),
+            (SessionState.COMPLETE.value, 0, DEFAULT_SOURCE, True),
+            # Drain-timeout: COMPLETE state but tokenization still pending,
+            # which leaves only the client basis short.
+            (SessionState.COMPLETE.value, 3, TokenCountSource.CLIENT, False),
+            (SessionState.COMPLETE.value, 3, TokenCountSource.SERVER, True),
             # Interrupted: signal-handler-written snapshot.
-            (SessionState.INTERRUPTED.value, 0, False),
-            (SessionState.INTERRUPTED.value, 7, False),
+            (SessionState.INTERRUPTED.value, 0, DEFAULT_SOURCE, False),
+            (SessionState.INTERRUPTED.value, 7, DEFAULT_SOURCE, False),
         ],
     )
     def test_report_complete_flag_matches_state_and_pending(
-        self, tmp_path: Path, state: str, n_pending: int, expected_complete: bool
+        self,
+        tmp_path: Path,
+        state: str,
+        n_pending: int,
+        primary: TokenCountSource,
+        expected_complete: bool,
     ):
         target = tmp_path / "final_snapshot.json"
         target.write_text(
@@ -146,7 +160,7 @@ class TestReportFromLoadedSnapshot:
         )
         loaded = _load_final_snapshot_from_disk(target)
         assert loaded is not None
-        report = Report.from_snapshot(loaded)
+        report = Report.from_snapshot(loaded, token_count_source=primary)
         assert report.state == state
         assert report.complete is expected_complete
 
@@ -159,7 +173,10 @@ class TestReportFromLoadedSnapshot:
         target.write_text(
             json.dumps(_snapshot_dict(state=SessionState.INTERRUPTED.value))
         )
-        report = Report.from_snapshot(_load_final_snapshot_from_disk(target) or {})
+        report = Report.from_snapshot(
+            _load_final_snapshot_from_disk(target) or {},
+            token_count_source=DEFAULT_SOURCE,
+        )
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
         output = "\n".join(lines)
@@ -203,7 +220,11 @@ class TestBuildReportFromSnapshot:
 
     def test_incomplete_report_logs_warning(self, monkeypatch, caplog):
         fake_report = SimpleNamespace(
-            complete=False, state="complete", legacy_loadgen_window_duration_ns=None
+            complete=False,
+            state="complete",
+            legacy_loadgen_window_duration_ns=None,
+            incomplete_reason=lambda: "Metrics tokenization did not finish",
+            other_basis_partial_reason=lambda: None,
         )
         monkeypatch.setattr(
             f"{_PIPE}.Report",
@@ -211,16 +232,52 @@ class TestBuildReportFromSnapshot:
         )
         with caplog.at_level("WARNING"):
             out = _build_report_from_snapshot(
-                _snapshot_dict(n_pending_tasks=3), _fake_config()
+                _snapshot_dict(n_pending_tasks=3),
+                _fake_config(),
+                token_count_source=TokenCountSource.CLIENT,
             )
         assert out is fake_report
-        assert any("incomplete" in r.message.lower() for r in caplog.records)
+        assert (
+            "Report is incomplete: Metrics tokenization did not finish" in caplog.text
+        )
+
+    @pytest.mark.parametrize("source", list(TokenCountSource))
+    def test_report_gets_the_effective_token_count_source(self, monkeypatch, source):
+        seen: dict = {}
+
+        def _from_snapshot(*a, **k):
+            seen.update(k)
+            return SimpleNamespace(
+                complete=True,
+                legacy_loadgen_window_duration_ns=None,
+                other_basis_partial_reason=lambda: None,
+            )
+
+        monkeypatch.setattr(
+            f"{_PIPE}.Report", SimpleNamespace(from_snapshot=_from_snapshot)
+        )
+        _build_report_from_snapshot(
+            _snapshot_dict(), _fake_config(), token_count_source=source
+        )
+        assert seen["token_count_source"] is source
+
+    @pytest.mark.parametrize("source", list(TokenCountSource))
+    def test_result_summary_has_single_basis_key(self, source):
+        """The basis is recorded once, as the summary's top-level key."""
+        report = _build_report_from_snapshot(
+            _snapshot_dict(), _fake_config(), token_count_source=source
+        )
+        assert report is not None
+        summary = json.loads(report.to_json())
+        assert summary["token_count_source"] == source.value
+        assert "token_count_source" not in summary["run_config"]
 
     def test_legacy_loadgen_qps_warning(self, monkeypatch, caplog):
         fake_report = SimpleNamespace(
             complete=True,
             state="complete",
             legacy_loadgen_window_duration_ns=5_000_000_000,
+            other_basis_partial_reason=lambda: None,
         )
         monkeypatch.setattr(
             f"{_PIPE}.Report",
@@ -228,7 +285,9 @@ class TestBuildReportFromSnapshot:
         )
         with caplog.at_level("WARNING"):
             out = _build_report_from_snapshot(
-                _snapshot_dict(), _fake_config(poisson=True, use_legacy=True)
+                _snapshot_dict(),
+                _fake_config(poisson=True, use_legacy=True),
+                token_count_source=TokenCountSource.CLIENT,
             )
         assert out is fake_report
         assert any("legacy" in r.message.lower() for r in caplog.records)
@@ -239,11 +298,61 @@ class TestBuildReportFromSnapshot:
 
         monkeypatch.setattr(f"{_PIPE}.Report", SimpleNamespace(from_snapshot=_boom))
         with caplog.at_level("WARNING"):
-            out = _build_report_from_snapshot(_snapshot_dict(), _fake_config())
+            out = _build_report_from_snapshot(
+                _snapshot_dict(),
+                _fake_config(),
+                token_count_source=TokenCountSource.CLIENT,
+            )
         assert out is None
         assert any(
             "Failed to build report from snapshot" in r.message for r in caplog.records
         )
+
+    @pytest.mark.parametrize(
+        ("primary", "level"),
+        [
+            # Missing server usage beside a client primary is informational.
+            (TokenCountSource.CLIENT, logging.INFO),
+            (TokenCountSource.SERVER, logging.WARNING),
+        ],
+        ids=["client-info", "server-warning"],
+    )
+    def test_other_basis_shortfall_is_complete_and_logged(self, primary, level, caplog):
+        other = primary.other
+        # The client basis falls short through pending tokenization, the
+        # server basis through samples without usage.
+        n_pending, n_missing = (3, 0) if other is TokenCountSource.CLIENT else (0, 2)
+        snap = _snapshot_dict(n_pending_tasks=n_pending)
+        snap["metrics"] += [
+            {
+                "type": "counter",
+                "name": "tracked_samples_missing_usage",
+                "value": n_missing,
+            },
+            {
+                "type": "series",
+                "name": basis_key("osl", other, primary=primary),
+                "count": 2,
+                "total": 10,
+                "min": 4,
+                "max": 6,
+                "sum_sq": 52,
+                "percentiles": {"50.0": 5},
+                "histogram": [[[4.0, 6.0], 2]],
+            },
+        ]
+        with caplog.at_level(logging.INFO, logger=_PIPE):
+            out = _build_report_from_snapshot(
+                snap, _fake_config(), token_count_source=primary
+            )
+        assert out.complete is True and out.token_count_source is primary
+        assert out.other_basis.output_sequence_lengths["partial"] is True
+        [record] = [
+            r
+            for r in caplog.records
+            if f"the *_{other.value} blocks are partial" in r.getMessage()
+        ]
+        assert record.levelno == level
 
 
 def _make_pipe(tmp_path: Path) -> MetricsPipeline:
@@ -255,6 +364,7 @@ def _make_pipe(tmp_path: Path) -> MetricsPipeline:
         event_log_dir=tmp_path / "events",
         metrics_output_dir=tmp_path / "metrics",
         loop=asyncio.get_event_loop(),
+        token_count_source=TokenCountSource.SERVER,
     )
 
 
@@ -273,7 +383,7 @@ class TestDrainFallback:
         pipe.subscriber = MagicMock(latest=object())
         monkeypatch.setattr(f"{_PIPE}.snapshot_to_dict", lambda s: {"k": "v"})
         monkeypatch.setattr(
-            f"{_PIPE}._build_report_from_snapshot", lambda d, c: "REPORT"
+            f"{_PIPE}._build_report_from_snapshot", lambda d, c, **kw: "REPORT"
         )
         with caplog.at_level("WARNING"):
             report = await pipe.drain_and_build_report()
@@ -389,12 +499,14 @@ class TestSteadyStateGate:
         acc=False,
         streaming=True,
         tokenizer="tok",
+        source=TokenCountSource.CLIENT,
     ):
         return steady_state_profile(
             self._config(load_pattern, enabled),
             accuracy_only=acc,
             enable_streaming=streaming,
             tokenizer_name=tokenizer,
+            token_count_source=source,
         )
 
     def test_off_by_default_and_when_opted_out(self):
@@ -454,6 +566,23 @@ class TestSteadyStateGate:
         # plateau gate runs on would be empty and every verdict found: false.
         assert self._profile(LoadPatternType.CONCURRENCY, streaming=False) is None
 
+    def test_server_mode_needs_no_tokenizer(self):
+        server = TokenCountSource.SERVER
+        assert (
+            self._profile(LoadPatternType.CONCURRENCY, tokenizer=None, source=server)
+            == "concurrency"
+        )
+        assert (
+            self._profile(LoadPatternType.CONCURRENCY, streaming=False, source=server)
+            is None
+        )
+        assert (
+            self._profile(
+                LoadPatternType.AGENTIC_INFERENCE, tokenizer=None, source=server
+            )
+            is None
+        )
+
     def test_flag_reaches_the_aggregator_only_when_eligible(self):
         args = _build_aggregator_args(
             socket_dir="/tmp",
@@ -467,6 +596,7 @@ class TestSteadyStateGate:
             enable_isl=True,
             early_stopping=False,
             steady_state_profile="poisson",
+            token_count_source=TokenCountSource.SERVER,
         )
         assert args[args.index("--steady-state-profile") + 1] == "poisson"
         assert "--steady-state-profile" not in _build_aggregator_args(
@@ -481,7 +611,49 @@ class TestSteadyStateGate:
             enable_isl=True,
             early_stopping=False,
             steady_state_profile=None,
+            token_count_source=TokenCountSource.SERVER,
         )
+
+
+@pytest.mark.unit
+class TestResolveTokenCountSource:
+    @pytest.mark.parametrize(
+        ("api_type", "configured", "expected"),
+        [
+            (APIType.OPENAI, "server", TokenCountSource.SERVER),
+            (APIType.OPENAI, "client", TokenCountSource.CLIENT),
+            (APIType.OPENAI_COMPLETIONS, "server", TokenCountSource.SERVER),
+            (APIType.SGLANG, "server", TokenCountSource.SERVER),
+            (APIType.VIDEOGEN, "server", TokenCountSource.CLIENT),
+            (APIType.VIDEOGEN, "client", TokenCountSource.CLIENT),
+        ],
+    )
+    def test_effective_source(self, api_type, configured, expected):
+        config = OfflineBenchmarkConfig(
+            endpoint_config={"endpoints": ["http://h:80"], "api_type": api_type},
+            model_params={"name": "m"},
+            datasets=[{"path": "d.jsonl"}],
+            settings={"token_count_source": configured},
+        )
+        assert resolve_token_count_source(config) is expected
+
+    @pytest.mark.parametrize("source", list(TokenCountSource))
+    def test_token_count_source_reaches_the_aggregator(self, source):
+        args = _build_aggregator_args(
+            socket_dir="/tmp",
+            pub_socket_name="p",
+            metrics_socket_name="m",
+            metrics_output_dir=Path("/tmp"),
+            enable_streaming=True,
+            tokenizer_name="tok",
+            drain_timeout_s=None,
+            tokenizer_workers=1,
+            enable_isl=True,
+            early_stopping=False,
+            steady_state_profile="poisson",
+            token_count_source=source,
+        )
+        assert args[args.index("--token-count-source") + 1] == source.value
 
 
 @pytest.mark.unit
