@@ -1,0 +1,298 @@
+# Per-run checks (`results/<system>/<model>/r<N>/`), every row citing the
+# Endpoints Policy section it enforces (pinned at 4ba8224dc746).
+#
+# Scope of this first version: the checks a row can decide from one run's own
+# artifacts. Rules that need cross-point arithmetic, catalog-conditional
+# rescaling or the power model are listed in ../README.md under "Not yet
+# expressible" with the reason; the vocabulary-only rules (an `offline` value
+# outside §8.3's three, a `region` outside §8.3's six, a steady-state verdict
+# outside §4.4's five, a `load_pattern` outside §6.1's two) are enforced by this
+# cohort's `valid_refs.yaml` notes at collect time, not by rows here.
+
+point_disclosure_complete:
+  description: Every §8.3 disclosure field is present and non-empty.
+  rule: "Endpoints Policy §8.3, Measurement Point (point.yaml); §1, Submission completeness."
+  fix: Add the missing field to this run's point.yaml and re-submit.
+  severity: fail
+  assert:
+    - { left: point.config.division, op: exists }
+    - { left: point.config.max_supported_concurrency, op: exists }
+    - { left: point.config.model_name, op: exists }
+    - { left: point.config.model_precision, op: exists }
+    - { left: point.config.link_to_model, op: exists }
+    - { left: point.config.dataset_name, op: exists }
+    - { left: point.config.dataset_type, op: exists }
+    - { left: point.config.dataset_link, op: exists }
+    - { left: point.config.shared_src, op: exists }
+    - { left: point.config.shared_docs, op: exists }
+    - { left: point.config.seed_set, op: exists }
+    - { left: point.config.target_cohort, op: exists }
+
+point_target_cohort_shape:
+  description: The declared target cohort reads YYYY-MM-C0/C1 (§4.2's calendar).
+  rule: "Endpoints Policy §4.6, Seeds."
+  fix: Set `target_cohort` to the cohort the run was issued for, e.g. 2026-10-C1.
+  severity: fail
+  assert:
+    - left: point.config.target_cohort
+      op: matches
+      right: { literal: "[0-9]{4}-[0-9]{2}-C[01]" }
+
+point_seed_set_membership:
+  description: The declared seed set is one this cohort published (§4.6).
+  rule: "Endpoints Policy §4.6, Seeds."
+  fix: Set `seed_set` to a published set id (this cohort publishes A).
+  severity: fail
+  assert:
+    - { left: point.config.seed_set, op: in, right: [A] }
+
+point_seed_set_adoption:
+  description: The run's target cohort sits inside the set's four-cohort window.
+  rule: "Endpoints Policy §4.6, Seeds."
+  fix: Bind the run to a cohort where set A is still adoptable (through 2026-12-C0).
+  severity: fail
+  assert:
+    - left: point.config.target_cohort
+      op: in
+      right: [2026-10-C1, 2026-11-C0, 2026-11-C1, 2026-12-C0]
+
+point_seed_runtime_match:
+  description: The runtime seeds equal the published set A values.
+  rule: "Endpoints Policy §2.1.1, Run Configuration; §4.6, Seeds."
+  fix: Copy set A's scheduler, sample-index and model seeds into this run's runtime settings.
+  severity: fail
+  assert:
+    - left: point.config.runtime_settings.runtime.scheduler_rng_seed
+      op: eq
+      right: 10487924139932647040
+    - left: point.config.runtime_settings.runtime.sample_index_rng_seed
+      op: eq
+      right: 586478644936801402
+    - left: point.config.runtime_settings.runtime.model_seed
+      op: eq
+      right: 9315206023656308754
+
+point_seed_config_legacy:
+  description: A run with no `seed_set` must carry the legacy seed value instead.
+  rule: "Endpoints Policy §4.6, Seeds."
+  fix: Declare `seed_set` (preferred), or keep the legacy seeds equal to 42.
+  severity: fail
+  when:
+    - { left: point.config.seed_set, op: absent }
+  assert:
+    - left: point.config.runtime_settings.runtime.model_seed
+      op: eq
+      right: 42
+
+point_concurrency_positive:
+  description: A fixed-concurrency run declares a positive concurrency.
+  rule: "Endpoints Policy §6.1, Load Patterns; §8.3, Measurement Point (point.yaml)."
+  fix: Set the run's concurrency above zero (a dedicated Offline run is exempt).
+  severity: fail
+  when:
+    - { left: point.config.offline, op: ne, right: dedicated }
+  assert:
+    - { left: point.config.concurrency, op: gt, right: 0 }
+
+point_warmup_present:
+  description: The run declares its warmup block.
+  rule: "Endpoints Policy §6.3.3, Warmup."
+  fix: Add the run's `warmup` block to point.yaml.
+  severity: fail
+  assert:
+    - { left: point.config.warmup, op: exists }
+
+point_warmup_requests_ordered:
+  description: Warmup completions do not exceed warmup issues.
+  rule: "Endpoints Policy §8.3, Measurement Point (point.yaml)."
+  fix: Fix the warmup counters so completed never exceeds issued.
+  severity: fail
+  when:
+    - { left: point.config.warmup.requests_issued, op: exists }
+    - { left: point.config.warmup.requests_completed, op: exists }
+  assert:
+    - left: point.config.warmup.requests_completed
+      op: le
+      right: point.config.warmup.requests_issued
+
+point_warmup_logs_retained:
+  description: Warmup request logs are retained for review.
+  rule: "Endpoints Policy §6.3.2, Warmup Logs."
+  fix: "Set `logs_retained: true` and keep the warmup logs with the submission."
+  severity: warn
+  when:
+    - { left: point.config.warmup.duration_s, op: gt, right: 0 }
+  assert:
+    - { left: point.config.warmup.logs_retained, op: eq, right: true }
+
+point_warmup_salt_disabled:
+  description: The warmup did not salt its requests (§6.3.3's default salt off).
+  rule: "Endpoints Policy §6.3.3, Warmup."
+  fix: Stop salting warmup requests, or document why the salt was kept.
+  severity: warn
+  when:
+    - { left: point.config.runtime_settings.warmup.salt, op: exists }
+  assert:
+    - { left: point.config.runtime_settings.warmup.salt, op: ne, right: true }
+
+point_duration_minimum:
+  description: The run measured for at least the ten-minute floor.
+  rule: "Endpoints Policy §6.2, Measurement Duration; §11, Measurement Duration."
+  fix: Re-run at this concurrency for at least 600 s and re-submit.
+  severity: warn
+  assert:
+    - { left: point.result_summary.duration_ns, op: ge, right: 600000000000 }
+
+point_output_tokens_present:
+  description: The run reports its total output tokens.
+  rule: "Endpoints Policy §14, Metric Consistency; §4.1, Metrics."
+  fix: Re-run with a tokenizer so the summary carries output_sequence_lengths.total.
+  severity: fail
+  assert:
+    - {
+        left: point.result_summary.output_sequence_lengths.total,
+        op: ge,
+        right: 0,
+      }
+
+point_tpot_p90_positive:
+  description: The summary carries a positive P90 time-per-output-token.
+  rule: "Endpoints Policy §9.1, Automated Checks; §4.1, Metrics."
+  fix: Re-run with streaming so the summary carries a positive tpot.percentiles["90"].
+  severity: fail
+  assert:
+    - { left: point.result_summary.tpot.percentiles.90, op: gt, right: 0 }
+
+point_sample_count_floor:
+  description: The run completed at least its dataset's §12 acceptance count.
+  rule: "Endpoints Policy §12, Dataset Requirements; §6.4, Minimum Query Count."
+  fix: Re-run until the completed sample count reaches the dataset's floor.
+  severity: fail
+  when:
+    - { left: point.config.dataset_name, op: eq, right: cnn_dailymail }
+  assert:
+    - left: point.result_summary.n_samples_completed
+      op: ge
+      right: 13368
+
+point_sample_count_floor_deepseek:
+  description: The run completed at least its dataset's §12 acceptance count.
+  rule: "Endpoints Policy §12, Dataset Requirements; §6.4, Minimum Query Count."
+  fix: Re-run until the completed sample count reaches the dataset's floor.
+  severity: fail
+  when:
+    - { left: point.config.dataset_name, op: eq, right: deepseek_r1_accuracy }
+  assert:
+    - left: point.result_summary.n_samples_completed
+      op: ge
+      right: 4388
+
+point_sample_count_floor_aime25:
+  description: The run completed at least its dataset's §12 acceptance count.
+  rule: "Endpoints Policy §12, Dataset Requirements; §6.4, Minimum Query Count."
+  fix: Re-run until the completed sample count reaches the dataset's floor.
+  severity: fail
+  when:
+    - { left: point.config.dataset_name, op: eq, right: aime25 }
+  assert:
+    - left: point.result_summary.n_samples_completed
+      op: ge
+      right: 30
+
+point_sample_count_floor_gpqa:
+  description: The run completed at least its dataset's §12 acceptance count.
+  rule: "Endpoints Policy §12, Dataset Requirements; §6.4, Minimum Query Count."
+  fix: Re-run until the completed sample count reaches the dataset's floor.
+  severity: fail
+  when:
+    - { left: point.config.dataset_name, op: eq, right: gpqa }
+  assert:
+    - left: point.result_summary.n_samples_completed
+      op: ge
+      right: 198
+
+point_sample_count_floor_livecodebench:
+  description: The run completed at least its dataset's §12 acceptance count.
+  rule: "Endpoints Policy §12, Dataset Requirements; §6.4, Minimum Query Count."
+  fix: Re-run until the completed sample count reaches the dataset's floor.
+  severity: fail
+  when:
+    - { left: point.config.dataset_name, op: eq, right: livecodebench }
+  assert:
+    - left: point.result_summary.n_samples_completed
+      op: ge
+      right: 880
+
+point_sample_count_floor_mlperf_gpt_oss_accuracy:
+  description: The run completed at least its dataset's §12 acceptance count.
+  rule: "Endpoints Policy §12, Dataset Requirements; §6.4, Minimum Query Count."
+  fix: Re-run until the completed sample count reaches the dataset's floor.
+  severity: fail
+  when:
+    - {
+        left: point.config.dataset_name,
+        op: eq,
+        right: mlperf_gpt_oss_accuracy,
+      }
+  assert:
+    - left: point.result_summary.n_samples_completed
+      op: ge
+      right: 4395
+
+point_sample_count_floor_mlperf_gpt_oss_performance:
+  description: The run completed at least its dataset's §12 acceptance count.
+  rule: "Endpoints Policy §12, Dataset Requirements; §6.4, Minimum Query Count."
+  fix: Re-run until the completed sample count reaches the dataset's floor.
+  severity: fail
+  when:
+    - {
+        left: point.config.dataset_name,
+        op: eq,
+        right: mlperf_gpt_oss_performance,
+      }
+  assert:
+    - left: point.result_summary.n_samples_completed
+      op: ge
+      right: 6396
+
+point_sample_count_floor_open_orca:
+  description: The run completed at least its dataset's §12 acceptance count.
+  rule: "Endpoints Policy §12, Dataset Requirements; §6.4, Minimum Query Count."
+  fix: Re-run until the completed sample count reaches the dataset's floor.
+  severity: fail
+  when:
+    - { left: point.config.dataset_name, op: eq, right: open_orca }
+  assert:
+    - left: point.result_summary.n_samples_completed
+      op: ge
+      right: 24576
+
+point_accuracy_scores_present:
+  description: The run carries at least one accuracy result.
+  rule: "Endpoints Policy §5.3, Accuracy Runs; §15, Accuracy."
+  fix: Run this point's accuracy dataset and ship its accuracy_results.json.
+  severity: fail
+  when:
+    - { left: point.accuracy_results, op: exists }
+  assert:
+    - over: point.accuracy_results.accuracy_scores
+      aggregate: count
+      op: gt
+      value: 0
+
+point_accuracy_present:
+  description: This point ships an accuracy_results.json.
+  rule: "Endpoints Policy §5.3, Accuracy Runs; §1, Submission completeness."
+  fix: Ship the accuracy result for this point (mandatory points need one).
+  severity: warn
+  assert:
+    - { left: point.accuracy_results, op: exists }
+point_offline_ordering:
+  description: The dedicated Offline run meets §5.7.2's throughput and concurrency clauses.
+  rule: "Endpoints Policy §5.7.2, Relationship to Maximum Supported Concurrency."
+  fix: Raise the dedicated run's system_tps to 0.98x the C_max point's, or elect the C_max point as Offline.
+  severity: fail
+  when:
+    - { left: point.config.offline, op: eq, right: dedicated }
+  assert:
+    - { left: derived.offline_ordering, op: eq, right: true }

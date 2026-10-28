@@ -1,0 +1,27 @@
+# Per-pareto checks (`results/<system>/<model>/`), every row citing the Endpoints
+# Policy section it enforces (pinned at 4ba8224dc746).
+#
+# A pareto row may name `pareto.…` facts, the coarser `system.`/`submission.`
+# namespaces, and the per-pareto `derived.*`/`regions.*` names. What a row cannot
+# do -- count points, compare a point to the curve's maximum, or place a point in
+# a computed region band -- is listed in ../2026-10-C1.md under "Not yet
+# expressible", with the reason.
+
+pareto_point_cap:
+  description: The pareto traces at most 32 measurement points (§5.6's cap).
+  rule: "Endpoints Policy §5.6, Submission Size."
+  fix: Drop the extra points; a pareto carries at most 32 runs.
+  severity: fail
+  assert:
+    - { left: derived.point_cap, op: eq, right: true }
+
+pareto_out_of_range_points:
+  description: No point sits outside every region, margins included (§5.4/§9).
+  rule: "Endpoints Policy §9.1, Automated Checks; §5.4, C_min."
+  fix: Re-run flagged points inside a covered region, or fix the declared C_min override.
+  severity: fail
+  assert:
+    - over: derived.out_of_range_points
+      aggregate: count
+      op: eq
+      value: 0
