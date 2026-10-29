@@ -70,3 +70,29 @@ class SSEAccumulatorProtocol(Protocol):
             QueryResult with the complete response output.
         """
         ...
+
+
+class NonStreamingAccumulator:
+    """Accumulator stub for api_types whose endpoint has no SSE mode.
+
+    HTTPClientConfig resolves an adapter/accumulator pair for every api_type, so
+    a non-streaming endpoint still needs an accumulator. This one should never
+    be exercised; `get_final_output` raises rather than returning an empty
+    `QueryResult`, because the worker's SSE path swallows the
+    `NotImplementedError` from `decode_sse_message` and would otherwise surface
+    zero-output queries as successful.
+    """
+
+    def __init__(self, query_id: str, stream_all_chunks: bool) -> None:
+        self.query_id = query_id
+        # stream_all_chunks is intentionally ignored: non-streaming endpoint.
+
+    def add_chunk(self, delta: Any) -> StreamChunk | None:
+        return None
+
+    def get_final_output(self) -> QueryResult:
+        raise RuntimeError(
+            "NonStreamingAccumulator.get_final_output called for query "
+            f"{self.query_id}: this api_type has no streaming mode - check "
+            "HTTPClientConfig.streaming and query.data['stream']."
+        )

@@ -36,6 +36,7 @@ class APIType(str, Enum):
 
     OPENAI = "openai"
     OPENAI_COMPLETIONS = "openai_completions"
+    OPENAI_TRANSCRIPTIONS = "openai_transcriptions"
     SGLANG = "sglang"
     VIDEOGEN = "videogen"
 
@@ -46,6 +47,8 @@ class APIType(str, Enum):
                 return "v1/chat/completions"
             case APIType.OPENAI_COMPLETIONS:
                 return "v1/completions"
+            case APIType.OPENAI_TRANSCRIPTIONS:
+                return "v1/audio/transcriptions"
             case APIType.SGLANG:
                 return "generate"
             case APIType.VIDEOGEN:

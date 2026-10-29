@@ -1,0 +1,112 @@
+# MLPerf speech2text — whisper-large-v3 on LibriSpeech
+
+Benchmarks an OpenAI-compatible transcription endpoint
+(`POST /v1/audio/transcriptions`) against the MLPerf
+[speech2text](https://github.com/mlcommons/inference/tree/master/speech2text)
+workload and scores Word Error Rate.
+
+|                  |                                                                             |
+| ---------------- | --------------------------------------------------------------------------- |
+| Model            | `openai/whisper-large-v3`                                                   |
+| Dataset          | LibriSpeech dev-clean + dev-other, repackaged to ~30 s clips (1633 samples) |
+| Metric           | WER (reported as `100 - WER%`)                                              |
+| Reference        | WER 2.0671% → accuracy **97.9329%**                                         |
+| Submission floor | 99% of reference → **96.9536**                                              |
+| Scenario         | Offline (`max_throughput`)                                                  |
+
+## 1. Serve the model
+
+```bash
+vllm serve openai/whisper-large-v3 --port 8000
+```
+
+Whisper is an encoder-decoder ASR model, so it is served only on
+`/v1/audio/transcriptions` — not `/v1/chat/completions`.
+
+## 2. The dataset
+
+Nothing to do: the first run downloads the MLCommons-prepared corpus into
+`dataset_cache/whisper_librispeech/source/` (several GB of audio) and caches the
+parsed rows as a parquet beside it. The ~30 s repackaging is part of the
+benchmark definition, so the prepared artifact is fetched rather than rebuilt
+here: different clip boundaries would produce a WER that is not comparable to
+the reference.
+
+```
+<source>/dev-all-repack.json      # manifest: files[0].fname, original_duration, transcript
+<source>/dev-all-repack/*.wav     # 16 kHz mono clips
+```
+
+The manifest's `fname` entries keep the upstream pipeline's `./data/` prefix,
+which the hosted artifact does not reproduce. The loader probes the first clip
+and drops any leading components that aren't present under the root, so both
+layouts resolve with no configuration.
+
+To use a copy you already have, set `datasets[*].generate_params.manifest` or
+`$WHISPER_LIBRISPEECH_MANIFEST`; either skips the download.
+`generate_params.data_dir` overrides the root that `fname` resolves against; it
+defaults to the manifest's own directory.
+
+Keep the WAVs on **fast local storage**: the client reads each file inside the
+measured request, so a network mount shows up as endpoint latency.
+
+## 3. Run
+
+Edit `endpoint_config.endpoints` first. The config issues the full 1633-sample
+corpus in both the performance and accuracy phases, which is what a submission
+needs.
+
+```bash
+uv run inference-endpoint benchmark from-config \
+  --config examples/12_Whisper_Example/offline_whisper.yaml
+```
+
+To check the wiring first, set `runtime.n_samples_to_issue` and both `samples`
+values to 8. The dataset truncates in manifest order, so the smoke subset is a
+prefix of the full corpus — but a partial perf phase is not a reportable result.
+
+## 4. Read the result
+
+`<report_dir>/accuracy/accuracy_results.json`:
+
+```json
+{
+  "score": 97.93,
+  "breakdown": {
+    "wer_percent": 2.07,
+    "edit_distance": 1241,
+    "reference_words": 60000,
+    "empty_responses": 0,
+    "missing_samples": 0
+  }
+}
+```
+
+**Check `missing_samples == 0` before quoting the score.** WER is corpus-level
+(total errors ÷ total reference words), so a sample that never completed
+contributes neither and silently shrinks the denominator instead of counting
+against you.
+
+A WER far above 2.07% usually points at the dataset rather than the endpoint —
+most often a manifest that is not the repackaged `dev-all-repack.json`.
+
+## How it maps onto the framework
+
+| Piece                    | Where                                                                  |
+| ------------------------ | ---------------------------------------------------------------------- |
+| Route + multipart upload | `openai/transcriptions_adapter.py` (`api_type: openai_transcriptions`) |
+| Dataset                  | `dataset_manager/predefined/whisper_librispeech/`                      |
+| Metric                   | `evaluation/wer.py` + `WERScorer` (`eval_method: wer`)                 |
+
+Notes on the run config:
+
+- **Non-streaming.** OpenAI does not support `stream` for Whisper-class models,
+  so `model_params.streaming` must be `off`. There is no TTFT/TPOT; the metrics
+  are QPS and per-request latency.
+- **`metrics_isl: false`.** Audio rows carry no text prompt, so there is no
+  input sequence length. One "ISL is unavailable" warning per run is expected.
+- **Warmup salt must stay off.** Salting prepends a random hex prefix to a text
+  prompt; an audio row has none, and enabling it is a hard error.
+- **`language: en`** (settable per dataset row) is what makes the server build
+  Whisper's `<|startoftranscript|><|en|><|transcribe|><|notimestamps|>` prompt,
+  matching the MLPerf reference.

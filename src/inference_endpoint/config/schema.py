@@ -143,6 +143,7 @@ class ScorerMethod(str, Enum):
     BFCL_V4 = "bfcl_v4"
     LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
     SWE_BENCH = "swe_bench_scorer"
+    WER = "wer"
 
 
 # Audit configuration; runnable test registry lives in compliance/.
@@ -1067,7 +1068,8 @@ class EndpointConfig(BaseModel):
     api_type: Annotated[
         APIType,
         cyclopts.Parameter(
-            alias="--api-type", help="API type: openai, sglang, or videogen"
+            alias="--api-type",
+            help="API type: openai, openai_transcriptions, sglang, or videogen",
         ),
     ] = APIType.OPENAI
 

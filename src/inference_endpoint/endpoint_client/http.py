@@ -699,30 +699,35 @@ class HttpRequestTemplate:
     Attributes:
         static_prefix: Pre-merged request line + host header bytes.
         cached_headers: Pre-encoded headers from cache_headers(), included in every request.
+        content_type: Request body media type, declared by the adapter.
     """
 
     __slots__ = (
         "static_prefix",
         "cached_headers",
+        "content_type",
         "_prefix_streaming",
         "_prefix_non_streaming",
     )
 
-    # Pre-encoded general headers
-    HEADERS_STREAMING = (
-        b"Content-Type: application/json\r\nAccept: text/event-stream\r\n"
-    )
-    HEADERS_NON_STREAMING = (
-        b"Content-Type: application/json\r\nAccept: application/json\r\n"
-    )
+    DEFAULT_CONTENT_TYPE = "application/json"
 
-    def __init__(self, static_prefix: bytes):
+    def __init__(
+        self, static_prefix: bytes, content_type: str = DEFAULT_CONTENT_TYPE
+    ) -> None:
         self.static_prefix = static_prefix
         self.cached_headers = b""
+        self.content_type = content_type
         self._rebuild_prefixes()
 
     @classmethod
-    def from_url(cls, host: str, port: int, path: str = "/") -> HttpRequestTemplate:
+    def from_url(
+        cls,
+        host: str,
+        port: int,
+        path: str = "/",
+        content_type: str = DEFAULT_CONTENT_TYPE,
+    ) -> HttpRequestTemplate:
         """
         Create an HttpRequestTemplate from URL components.
 
@@ -730,6 +735,8 @@ class HttpRequestTemplate:
             host: Target hostname
             port: Target port
             path: Request path (e.g., "/v1/chat/completions")
+            content_type: Request body media type (e.g. "multipart/form-data;
+                boundary=..." for an audio upload)
 
         Returns:
             HttpRequestTemplate ready for building requests
@@ -745,13 +752,19 @@ class HttpRequestTemplate:
         else:
             host_header = f"Host: {host}:{port}\r\n"
 
-        return cls(static_prefix=(request_line + host_header).encode("ascii"))
+        return cls(
+            static_prefix=(request_line + host_header).encode("ascii"),
+            content_type=content_type,
+        )
 
     def _rebuild_prefixes(self) -> None:
         """Merge static_prefix + cached_headers + content-type into two ready-to-use prefixes."""
         base = self.static_prefix + self.cached_headers
-        self._prefix_streaming = base + self.HEADERS_STREAMING
-        self._prefix_non_streaming = base + self.HEADERS_NON_STREAMING
+        content_type = f"Content-Type: {self.content_type}\r\n".encode("ascii")
+        self._prefix_streaming = base + content_type + b"Accept: text/event-stream\r\n"
+        self._prefix_non_streaming = (
+            base + content_type + b"Accept: application/json\r\n"
+        )
 
     def cache_headers(self, headers: dict[str, str]) -> None:
         """
@@ -782,7 +795,7 @@ class HttpRequestTemplate:
         Build a complete HTTP/1.1 request as raw bytes.
 
         Args:
-            body: Request body bytes (JSON payload)
+            body: Request body bytes, already encoded in `content_type`
             streaming: True for SSE streaming, False for buffered response
             extra_headers: Optional additional headers (e.g., Authorization)
 

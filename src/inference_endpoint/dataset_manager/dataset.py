@@ -17,6 +17,7 @@ import copy
 import inspect
 import os
 import random
+import subprocess
 import warnings
 from abc import ABC
 from enum import Enum
@@ -24,9 +25,11 @@ from logging import getLogger
 from os import PathLike
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
+import requests
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
@@ -256,6 +259,65 @@ def load_from_huggingface(
         except Exception as e:
             logger.warning(f"Error caching dataset: {e}")
     return ds[split].to_pandas()
+
+
+#: Pinned mlcommons/r2-downloader commit used by download_from_r2.
+R2_DOWNLOADER_COMMIT = "27da4421877f2831eeb615b43ee5098c4b70be7e"
+
+#: Dataset URIs are handed to a downloaded shell script, so the host is
+#: restricted to MLCommons R2 storage. This stops a mis-set dataset URI from
+#: pointing the downloader at an attacker-controlled location.
+R2_ALLOWED_HOST = "mlcommons-storage.org"
+
+
+def download_from_r2(uri: str, download_dir: Path) -> None:
+    """Download an MLCommons-hosted dataset into ``download_dir``.
+
+    Fetches the pinned ``mlc-r2-downloader.sh`` and runs it against the
+    dataset's ``.uri`` metadata. The script MD5-verifies every file it pulls and
+    fails its exit code on mismatch, so callers only need to locate the
+    artifact they expect afterwards.
+
+    Raises:
+        ValueError: ``uri`` is not https on MLCommons R2 storage.
+        RuntimeError: the downloader exited non-zero.
+    """
+    parsed = urlparse(uri)
+    host = parsed.hostname or ""
+    if parsed.scheme != "https" or not (
+        host == R2_ALLOWED_HOST or host.endswith("." + R2_ALLOWED_HOST)
+    ):
+        raise ValueError(
+            f"Refusing to download dataset from untrusted URI '{uri}': "
+            f"expected https on {R2_ALLOWED_HOST}"
+        )
+
+    download_dir.mkdir(parents=True, exist_ok=True)
+    script_path = download_dir / "mlc-r2-downloader.sh"
+    resp = requests.get(
+        "https://raw.githubusercontent.com/mlcommons/r2-downloader/"
+        f"{R2_DOWNLOADER_COMMIT}/mlc-r2-downloader.sh",
+        timeout=30,
+    )
+    resp.raise_for_status()
+    script_path.write_bytes(resp.content)
+    script_path.chmod(0o755)
+
+    logger.info("Downloading %s into %s", uri, download_dir)
+    try:
+        result = subprocess.run(
+            ["bash", str(script_path.resolve()), "-d", str(download_dir), uri],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"R2 downloader failed with code {result.returncode}: {result.stderr}"
+            )
+    finally:
+        script_path.unlink(missing_ok=True)
 
 
 def _check_unsaltable(sample: Any) -> DatasetValidationError.Reason | None:

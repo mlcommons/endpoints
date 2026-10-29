@@ -171,6 +171,74 @@ class TestHttpRequestTemplate:
         assert b"Content-Length: 17" in request
 
 
+class TestHttpRequestTemplateContentType:
+    """Adapter-declared Content-Type (e.g. a multipart audio upload)."""
+
+    MULTIPART = "multipart/form-data; boundary=----boundary-With;Punctuation=1"
+
+    @staticmethod
+    def _parse(request: bytes) -> tuple[dict[str, list[str]], bytes]:
+        state: dict[str, list[str]] = {}
+        body = bytearray()
+
+        class Handler:
+            def on_url(self, url):
+                pass
+
+            def on_header(self, name, value):
+                state.setdefault(name.decode().lower(), []).append(value.decode())
+
+            def on_body(self, chunk):
+                body.extend(chunk)
+
+        httptools.HttpRequestParser(Handler()).feed_data(request)
+        return state, bytes(body)
+
+    def test_default_is_json(self):
+        template = HttpRequestTemplate.from_url("localhost", 8080, "/v1/chat")
+        assert template.content_type == "application/json"
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    def test_declared_content_type_renders_exactly_once(self, streaming):
+        template = HttpRequestTemplate.from_url(
+            "localhost", 8080, "/v1/audio/transcriptions", content_type=self.MULTIPART
+        )
+        headers, _ = self._parse(template.build_request(b"--x--\r\n", streaming))
+        # A duplicated Content-Type (the failure mode of appending via
+        # extra_headers) makes the server read the wrong media type.
+        assert headers["content-type"] == [self.MULTIPART]
+
+    def test_boundary_punctuation_does_not_break_header_framing(self):
+        """`;` and `=` inside the Content-Type value must stay in one header."""
+        template = HttpRequestTemplate.from_url(
+            "localhost", 8080, "/v1/audio/transcriptions", content_type=self.MULTIPART
+        )
+        body = b'--x\r\nContent-Disposition: form-data; name="a"\r\n\r\n1\r\n--x--\r\n'
+        headers, parsed_body = self._parse(template.build_request(body, False))
+        assert headers["content-type"] == [self.MULTIPART]
+        assert headers["content-length"] == [str(len(body))]
+        assert parsed_body == body
+
+    def test_binary_body_is_sent_verbatim(self):
+        """A non-JSON body passes through untouched with a correct length."""
+        template = HttpRequestTemplate.from_url(
+            "localhost", 8080, "/v1/audio/transcriptions", content_type=self.MULTIPART
+        )
+        body = bytes(range(256)) * 4
+        headers, parsed_body = self._parse(template.build_request(body, False))
+        assert parsed_body == body
+        assert headers["content-length"] == [str(len(body))]
+
+    def test_cached_headers_preserve_the_content_type(self):
+        template = HttpRequestTemplate.from_url(
+            "localhost", 8080, "/v1/audio/transcriptions", content_type=self.MULTIPART
+        )
+        template.cache_headers({"Authorization": "Bearer t"})
+        headers, _ = self._parse(template.build_request(b"x", False))
+        assert headers["content-type"] == [self.MULTIPART]
+        assert headers["authorization"] == ["Bearer t"]
+
+
 # =============================================================================
 # HttpResponseProtocol Tests
 # =============================================================================

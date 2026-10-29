@@ -1,0 +1,75 @@
+# Offline run for MLPerf speech2text (whisper-large-v3 / LibriSpeech)
+#
+# Issues the MLCommons-prepared LibriSpeech corpus against an OpenAI-compatible
+# transcription endpoint (POST /v1/audio/transcriptions) and scores Word Error
+# Rate. Reference accuracy is 97.9329% (WER 2.0671%); a submission needs 99% of
+# that, i.e. >= 96.9536.
+#
+# Prerequisites:
+#   - A server exposing /v1/audio/transcriptions for whisper-large-v3:
+#       vllm serve openai/whisper-large-v3 --port 8000
+#
+# The dataset needs no setup: the MLCommons-prepared corpus (dev-all-repack.json
+# + WAVs) is downloaded into the dataset cache on first run. To use a copy you
+# already have, add generate_params.manifest to both dataset entries (or export
+# $WHISPER_LIBRISPEECH_MANIFEST).
+#
+# The audio bytes are read by the worker inside the measured request, so keep
+# the WAV directory on fast local storage - a network mount inflates latency.
+#
+# For a smoke run, set runtime.n_samples_to_issue and both `samples` to 8.
+
+name: "offline-whisper-librispeech"
+version: "1.0"
+type: "offline"
+
+model_params:
+  name: "openai/whisper-large-v3"
+  streaming: "off" # /v1/audio/transcriptions has no SSE mode for Whisper
+  temperature: 0.0
+
+datasets:
+  # setup_benchmark() requires a performance dataset to drive issuance; the
+  # accuracy entry below reuses the same corpus and scores the transcripts.
+  - name: whisper_librispeech
+    type: "performance"
+    samples: 1633
+  - name: whisper_librispeech
+    type: "accuracy"
+    samples: 1633
+    accuracy_config:
+      eval_method: "wer"
+      ground_truth: "transcript"
+      num_repeats: 1
+
+settings:
+  runtime:
+    n_samples_to_issue: 1633
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    num_workers: 8
+
+  warmup:
+    # Warmup salt requires text-'prompt' samples; audio rows have none, so
+    # enabling warmup here needs salt left off.
+    enabled: false
+    salt: false
+
+  # Audio rows carry no text prompt, so there is no input sequence length to
+  # measure; this stops the aggregator registering an ISL series that would
+  # stay empty. The load generator still logs one "ISL is unavailable" warning
+  # per run, which is expected here. OSL and latency are unaffected.
+  metrics_isl: false
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_type: "openai_transcriptions"
+  api_key: null
+
+report_dir: logs/whisper_librispeech_offline

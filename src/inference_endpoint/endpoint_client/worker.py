@@ -198,7 +198,10 @@ class Worker:
 
             # Initialize HTTP template from URL components
             self._http_template = HttpRequestTemplate.from_url(
-                self._host, self._port, self._path
+                self._host,
+                self._port,
+                self._path,
+                content_type=self._adapter.CONTENT_TYPE,
             )
             if self.http_config.api_key:
                 self._http_template.cache_headers(

@@ -36,6 +36,8 @@ import numpy as np
 import pandas as pd
 from pydantic import ValidationError
 from tqdm import tqdm
+from transformers import AutoTokenizer
+from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 try:
     import websocket
@@ -59,6 +61,7 @@ from .extractor import (
     Extractor,
     PythonCodeExtractor,
 )
+from .wer import project_to_labels, wer_counts
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +407,116 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         # TODO: return only rouge1 for now to align with other scorers
         # Return the rest of the metrics later
         return result, 1
+
+
+class WERScorer(Scorer, scorer_id="wer"):
+    """Word Error Rate as defined by the MLPerf speech2text benchmark.
+
+    Reports ``100 - WER%`` so the headline number is higher-is-better and on the
+    percentage scale the compliance accuracy gate assumes. The MLPerf reference
+    is WER 2.0671% (accuracy 97.9329%); a submission needs 99% of that.
+
+    Scoring order matches the reference exactly: project both sides through the
+    character-label inventory, apply Whisper's ``EnglishTextNormalizer``, split
+    on whitespace, then accumulate the concatenation-aware edit distance. See
+    :mod:`inference_endpoint.evaluation.wer`.
+    """
+
+    REQUIRES_EXTRACTOR = False
+
+    #: Repo (or local dir) supplying ``normalizer.json`` for the English text
+    #: normalizer. Whisper ships the same mapping across model sizes. The HF
+    #: copy is a superset of ``whisper/normalizers/english.json`` by one key
+    #: (``mm``) with no conflicting values, and `transformers`'
+    #: ``EnglishTextNormalizer`` is output-identical to the one in the
+    #: ``openai-whisper`` package.
+    DEFAULT_NORMALIZER_SOURCE = "openai/whisper-large-v3"
+
+    def __init__(self, *args, normalizer_source: str | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.normalizer_source = normalizer_source or self.DEFAULT_NORMALIZER_SOURCE
+        self._breakdown: dict[str, Any] | None = None
+
+    def _normalizer(self) -> EnglishTextNormalizer:
+        tokenizer = AutoTokenizer.from_pretrained(self.normalizer_source)
+        spelling_map = getattr(tokenizer, "english_spelling_normalizer", None)
+        if not spelling_map:
+            raise ValueError(
+                f"Tokenizer {self.normalizer_source!r} carries no "
+                "english_spelling_normalizer (normalizer.json). Point "
+                "accuracy_config.extras.normalizer_source at a Whisper "
+                "tokenizer repo or local directory."
+            )
+        return EnglishTextNormalizer(spelling_map)
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "WER is a corpus-level metric: errors and reference words are summed "
+            "across the dataset before dividing. Call score() instead."
+        )
+
+    def score(self) -> tuple[float | None, int]:
+        df = self.get_scoring_outputs()
+        df = df[df["sample_uuid"].isin(self.sample_index_map.keys())]
+
+        issued = len(self.sample_index_map)
+        if issued == 0:
+            return None, 0
+        n_repeats = issued // self.dataset.num_samples()
+
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+
+        normalizer = self._normalizer()
+        references = self.dataset.dataframe[self.ground_truth_column].to_numpy()
+
+        distance = 0
+        words = 0
+        empty = 0
+        for _, row in df.iterrows():
+            reference = references[self.sample_index_map[row["sample_uuid"]]]
+            hypothesis = row["output"]
+            if not hypothesis:
+                empty += 1
+            hyp_words = normalizer(project_to_labels(hypothesis)).split()
+            ref_words = normalizer(project_to_labels(str(reference))).split()
+            sample_distance, sample_words = wer_counts(hyp_words, ref_words)
+            distance += sample_distance
+            words += sample_words
+
+        # Samples that never produced a COMPLETE event contribute no errors and
+        # no reference words, so they silently shrink the denominator rather
+        # than penalising the score - surface the count so a partial run is not
+        # mistaken for a clean one.
+        missing = issued - len(df)
+        if words == 0:
+            self._breakdown = {"wer_percent": None, "missing_samples": missing}
+            return None, n_repeats
+
+        wer = distance / words
+        self._breakdown = {
+            "wer_percent": wer * 100.0,
+            "edit_distance": distance,
+            "reference_words": words,
+            "empty_responses": empty,
+            "missing_samples": missing,
+        }
+        if missing:
+            logger.warning(
+                "WER computed over %d of %d issued samples (%d missing); the "
+                "score does not describe a complete run.",
+                len(df),
+                issued,
+                missing,
+            )
+        return 100.0 - wer * 100.0, n_repeats
+
+    def score_breakdown(self) -> dict[str, Any] | None:
+        return self._breakdown
 
 
 def _uv_subproject_env(project_path: os.PathLike | str) -> dict[str, str]:

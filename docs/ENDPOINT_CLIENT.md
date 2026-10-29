@@ -280,7 +280,10 @@ model validator.
 ```python
 class APIType(str, Enum):
     OPENAI = "openai"
+    OPENAI_COMPLETIONS = "openai_completions"
+    OPENAI_TRANSCRIPTIONS = "openai_transcriptions"
     SGLANG = "sglang"
+    VIDEOGEN = "videogen"
 
 class HTTPClientConfig(BaseModel):
     # Target endpoint URLs; workers assigned round-robin at spawn time
@@ -960,19 +963,19 @@ concatenating them with a single `b"".join()`.
 
 | Method                                           | Async | Description                                                                |
 | ------------------------------------------------ | ----- | -------------------------------------------------------------------------- |
-| `from_url(host, port, path)`                     | No    | Classmethod: create template with pre-encoded request line + Host header   |
+| `from_url(host, port, path, content_type?)`      | No    | Classmethod: create template with pre-encoded request line + Host header   |
 | `cache_headers(headers)`                         | No    | Pre-encode headers (e.g. Authorization) into bytes; call once during setup |
 | `build_request(body, streaming, extra_headers?)` | No    | Build complete HTTP/1.1 request bytes; fast path when no extra headers     |
 
 **Request byte segments:**
 
-| Segment        | When Built   | Description                                                                                                                                                                      |
-| -------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Static prefix  | Once (init)  | `POST /v1/chat/completions HTTP/1.1\r\nHost: localhost:8000\r\n` — pre-encoded at construction via `from_url()`                                                                  |
-| Cached headers | Once (setup) | `Authorization: Bearer sk-...\r\n` — pre-encoded via `cache_headers()`; reused across all requests                                                                               |
-| Content-Type   | Once (class) | Two class-level `bytes` constants: `HEADERS_STREAMING` and `HEADERS_NON_STREAMING`. The streaming/non-streaming branch selects between them — no string encoding at request time |
-| Content-Length | Per-request  | `Content-Length: 1234\r\n\r\n` — the only header that changes per request; built from a single f-string and ASCII-encoded                                                        |
-| Body           | Per-request  | JSON bytes produced by the adapter's `encode_query()` ([§9.1](#91-httprequestadapter))                                                                                           |
+| Segment        | When Built   | Description                                                                                                                                                                                                                                           |
+| -------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Static prefix  | Once (init)  | `POST /v1/chat/completions HTTP/1.1\r\nHost: localhost:8000\r\n` — pre-encoded at construction via `from_url()`                                                                                                                                       |
+| Cached headers | Once (setup) | `Authorization: Bearer sk-...\r\n` — pre-encoded via `cache_headers()`; reused across all requests                                                                                                                                                    |
+| Content-Type   | Once (setup) | From the adapter's `CONTENT_TYPE` (default `application/json`; `openai_transcriptions` declares a `multipart/form-data` boundary). Folded into two prefixes with the matching `Accept`, one per streaming branch — no string encoding at request time |
+| Content-Length | Per-request  | `Content-Length: 1234\r\n\r\n` — the only header that changes per request; built from a single f-string and ASCII-encoded                                                                                                                             |
+| Body           | Per-request  | Bytes produced by the adapter's `encode_query()` ([§9.1](#91-httprequestadapter)), encoded in the adapter's `CONTENT_TYPE`                                                                                                                            |
 
 ![build_request() fast/slow path](res/endpoint_client/11_build_request_flow.png)
 

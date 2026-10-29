@@ -51,7 +51,8 @@ class ProbeConfig(BaseModel):
     api_type: Annotated[
         APIType,
         cyclopts.Parameter(
-            alias="--api-type", help="API type: openai, sglang, or videogen"
+            alias="--api-type",
+            help="API type: openai, openai_transcriptions, sglang, or videogen",
         ),
     ] = APIType.OPENAI
     requests: int = Field(10, ge=1)
@@ -95,6 +96,15 @@ async def _probe_async(config: ProbeConfig) -> None:
         raise InputValidationError(
             "Probe does not support api_type=videogen "
             "(per-request latencies exceed the probe timeout). "
+            "Use a dedicated health check or a benchmark from-config run instead."
+        )
+
+    # Transcription requests are an audio upload keyed on an `audio_file` path,
+    # so there is no text prompt the probe could send.
+    if api_type == APIType.OPENAI_TRANSCRIPTIONS:
+        raise InputValidationError(
+            "Probe does not support api_type=openai_transcriptions "
+            "(the request body is an audio upload, not a text prompt). "
             "Use a dedicated health check or a benchmark from-config run instead."
         )
 

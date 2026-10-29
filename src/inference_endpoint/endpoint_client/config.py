@@ -64,6 +64,7 @@ def _endpoint_destination(url: str) -> tuple[str | None, int]:
 ADAPTER_MAP = {
     APIType.OPENAI: "inference_endpoint.openai.openai_msgspec_adapter.OpenAIMsgspecAdapter",
     APIType.OPENAI_COMPLETIONS: "inference_endpoint.openai.completions_adapter.OpenAITextCompletionsAdapter",
+    APIType.OPENAI_TRANSCRIPTIONS: "inference_endpoint.openai.transcriptions_adapter.OpenAITranscriptionsAdapter",
     APIType.SGLANG: "inference_endpoint.sglang.adapter.SGLangGenerateAdapter",
     APIType.VIDEOGEN: "inference_endpoint.videogen.adapter.VideoGenAdapter",
 }
@@ -71,6 +72,7 @@ ADAPTER_MAP = {
 ACCUMULATOR_MAP = {
     APIType.OPENAI: "inference_endpoint.openai.accumulator.OpenAISSEAccumulator",
     APIType.OPENAI_COMPLETIONS: "inference_endpoint.openai.accumulator.OpenAISSEAccumulator",
+    APIType.OPENAI_TRANSCRIPTIONS: "inference_endpoint.endpoint_client.accumulator_protocol.NonStreamingAccumulator",
     APIType.SGLANG: "inference_endpoint.sglang.accumulator.SGLangSSEAccumulator",
     APIType.VIDEOGEN: "inference_endpoint.videogen.adapter.VideoGenAccumulator",
 }
