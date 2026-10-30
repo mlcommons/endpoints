@@ -21,7 +21,9 @@ submission's `Point`/`Node` tree, gates on `when` rows, and evaluates each
 row findings plus one `CheckRun` per check (the state counts the report words
 its `ran at N`/`NEVER-RAN` lines from). A `needs` gate speaks per node: a check
 runs only where every named upstream chain ran and held at the nodes that
-vouch for it.
+vouch for it. A `fail` check a failed claim silences still reports -- one
+blocking finding per refused node, so a mandatory check cannot be dodged by
+failing an advisory prerequisite.
 """
 
 from __future__ import annotations
@@ -93,7 +95,10 @@ class Finding:
         """The `Collected` record of one cohort run over one submission.
 
         One `Finding` per evaluated `assert` row at each applicable node (holds
-        too), plus one `CheckRun` per check: the state counts the report's
+        too); a `fail` check its `needs` chain refused emits one blocking
+        finding per refused node instead of vanishing -- only for a refusal
+        from a failed claim, since an empty vouch-set is no claim at all; plus
+        one `CheckRun` per check: the state counts the report's
         `ran at N instance(s)`/`NEVER-RAN` lines are worded from, so a check
         the `when` rows or a `needs` chain kept from running is told apart
         from one that ran and failed.
@@ -107,9 +112,10 @@ class Finding:
         chain silences the check without evaluating anything), then its `when`,
         then its rows -- and the same record feeds gating and `_row_findings`.
 
-        A check whose own rows fail still emits its Findings. Only its
-        dependents stay silent, and only at the nodes whose upstreams did not
-        hold there.
+        A check whose own rows fail still emits its Findings. Its dependents
+        stay silent at the nodes whose upstreams did not hold there -- and a
+        silenced `fail` check is itself reported when a claim failed: the skip
+        must not read as a pass.
         """
         _validate_points(submission)
         _validate_artifacts(submission)
@@ -120,7 +126,7 @@ class Finding:
         findings: list[Finding] = []
         runs: dict[str, CheckRun] = {}
         for check in candidates:
-            ran_at = gated_off = silenced = 0
+            ran_at = gated_off = silenced = blocked = 0
             for node in _scope_nodes(check.scope, submission):
                 evaluation = gate.evaluation_at(check, node)
                 if evaluation.state is _CheckState.NOT_APPLICABLE:
@@ -128,11 +134,20 @@ class Finding:
                     continue
                 if evaluation.state is _CheckState.SILENCED:
                     silenced += 1
+                    if evaluation.failed_needs:
+                        blocked += 1
+                        if check.severity is Severity.FAIL:
+                            findings.append(
+                                _blocked_finding(check, node, evaluation.failed_needs)
+                            )
                     continue
                 ran_at += 1
                 findings.extend(_row_findings(check, node, evaluation))
             runs[check.id] = CheckRun(
-                ran_at=ran_at, gated_off=gated_off, silenced=silenced
+                ran_at=ran_at,
+                gated_off=gated_off,
+                silenced=silenced,
+                blocked=blocked,
             )
         return Collected(tuple(findings), runs, coercions)
 
@@ -150,11 +165,15 @@ class CheckRun:
             failures alike).
         gated_off (int): Nodes its `when` rows excluded.
         silenced (int): Nodes where its `needs` chain refused to vouch.
+        blocked (int): The `silenced` nodes whose refusal was a failed claim
+            rather than an empty vouch-set; a `fail` check emits one blocking
+            finding at each. (Default: 0)
     """
 
     ran_at: int
     gated_off: int
     silenced: int
+    blocked: int = 0
 
 
 @dataclass(frozen=True)
@@ -335,9 +354,12 @@ class _CheckState(Enum):
     row held. `FAILS`: it ran there and a row failed. `NOT_APPLICABLE`: its
     `when` excluded the node -- it makes no claim there. `SILENCED`: its own
     `needs` chain refused to vouch, so its rows never ran; a silenced check
-    disavows its own dependents in turn. Keeping "no claim" and "cannot vouch"
-    apart is what lets a `when`-gated upstream vouch exactly where it speaks
-    instead of silencing whole subtrees.
+    disavows its own dependents in turn. Two refusals wear this state: a claim
+    that failed (`_Evaluation.failed_needs` names the tokens; a `fail` check's
+    skip is reportable) and an empty vouch-set (no upstream claimed at all --
+    no evidence either way). Keeping "no claim" and "cannot vouch" apart is
+    what lets a `when`-gated upstream vouch exactly where it speaks instead of
+    silencing whole subtrees.
     """
 
     HOLDS = "holds"
@@ -358,10 +380,15 @@ class _Evaluation:
         state (_CheckState): The check's state at the node.
         verdicts (tuple[Verdict, ...]): One verdict per `assert` row, in row
             order. Empty when the check did not run here. (Default: ())
+        failed_needs (tuple[str, ...]): The `needs` tokens whose upstream
+            claims failed -- ran and failed, or were blocked by failures below
+            them; what tells a blocked `SILENCED` from an inert refusal.
+            (Default: ())
     """
 
     state: _CheckState
     verdicts: tuple[Verdict, ...] = ()
+    failed_needs: tuple[str, ...] = ()
 
 
 class _GateResolver:
@@ -376,6 +403,10 @@ class _GateResolver:
     exactly once (`_evaluate`) and every consumer reads that record. A `needs`
     cycle is refused at load (`_collect_candidates`'s DFS); the recursion trail
     here is the backstop.
+
+    A refusal is re-readable: `_Evaluation.failed_needs` names the claims that
+    failed (the report blocks on those nodes' skips), while an empty
+    vouch-set names nothing.
     """
 
     def __init__(self, by_id: Mapping[str, Check], submission: Submission) -> None:
@@ -390,8 +421,8 @@ class _GateResolver:
 
     def _chain_holds(
         self, check: Check, node: Node, trail: tuple[tuple[str, str], ...]
-    ) -> bool:
-        """Whether every named upstream chain vouches for `node`.
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Whether every named upstream chain vouches for `node`, and why not.
 
         An upstream vouches when it **claims** at least one node of its scope
         in the dependent node's chain-or-subtree (`_chain_nodes`) and `HOLDS`
@@ -399,18 +430,44 @@ class _GateResolver:
         `FAILS` one -- an indirect failure must not hide behind it -- while a
         `when`-gated `NOT_APPLICABLE` node is no claim at all. An empty
         vouch-set is no vouch: an unverified premise never passes a dependent.
+
+        The second element names the tokens whose claims **failed** -- a claim
+        that ran and failed, or one silenced by failing claims of its own
+        (blocked-ness propagates). A silence with no failure anywhere below it
+        disavows without being named (an inert refusal), and so does a token
+        with no claims at all.
+
+        Returns:
+            tuple[bool, tuple[str, ...]]: Whether the chain vouches, and the
+                `needs` tokens whose claims failed.
         """
+        holds = True
+        failed: list[str] = []
         for token in check.needs:
             upstream = self._by_id[token]
-            claims = [
-                state
+            evaluations = [
+                self._evaluate(upstream, upstream_node, trail)
                 for upstream_node in _chain_nodes(upstream.scope, node)
-                if (state := self._evaluate(upstream, upstream_node, trail).state)
+            ]
+            claims = [
+                evaluation
+                for evaluation in evaluations
+                if evaluation.state
                 in (_CheckState.HOLDS, _CheckState.FAILS, _CheckState.SILENCED)
             ]
-            if not claims or any(state is not _CheckState.HOLDS for state in claims):
-                return False
-        return True
+            if not claims:
+                holds = False
+                continue
+            if any(claim.state is not _CheckState.HOLDS for claim in claims):
+                holds = False
+            broke = any(
+                claim.state is _CheckState.FAILS
+                or (claim.state is _CheckState.SILENCED and claim.failed_needs)
+                for claim in claims
+            )
+            if broke:
+                failed.append(token)
+        return holds, tuple(failed)
 
     def _evaluate(
         self, check: Check, node: Node, trail: tuple[tuple[str, str], ...]
@@ -422,8 +479,9 @@ class _GateResolver:
         if key in trail:
             raise ValueError(f"`needs` cycle through {check.id!r}")
         trail = (*trail, key)
-        if not self._chain_holds(check, node, trail):
-            evaluation = _Evaluation(_CheckState.SILENCED)
+        holds, failed_needs = self._chain_holds(check, node, trail)
+        if not holds:
+            evaluation = _Evaluation(_CheckState.SILENCED, failed_needs=failed_needs)
         else:
             scopes = self._row_scopes(node)
             if not _when_rows_hold(check, scopes, node.dir):
@@ -500,6 +558,37 @@ def _row_findings(
             check, check.scope, node.dir, verdict, row=row.describe()
         )
         for row, verdict in zip(check.assert_, evaluation.verdicts, strict=True)
+    )
+
+
+def _blocked_finding(
+    check: Check, node: Node, failed_needs: tuple[str, ...]
+) -> Finding:
+    """The blocking finding a `fail` check leaves where a `needs` claim failed.
+
+    A mandatory check must not disappear because a prerequisite did not pass:
+    the skip is reported as a failing finding -- the check was never judged, so
+    the run cannot read as a pass. Only failed claims reach here; a chain no
+    upstream claimed at leaves no finding (there was nothing to judge against).
+
+    Args:
+        check (Check): The silenced check (a `fail` one).
+        node (Node): The node where its chain refused.
+        failed_needs (tuple[str, ...]): The `needs` tokens whose claims failed.
+    Returns:
+        Finding: The blocking finding, its verdict naming the failed tokens.
+    """
+    named = ", ".join(f"`{token}`" for token in failed_needs)
+    return Finding.from_check_row(
+        check,
+        check.scope,
+        node.dir,
+        Verdict(
+            False,
+            f"not judged: `needs` {named} did not pass at this instance",
+            broken=True,
+        ),
+        row="a satisfied `needs` chain",
     )
 
 

@@ -536,13 +536,19 @@ class TestNeedsGate:
 
     @pytest.mark.unit
     def test_failed_needs_gate_suppresses_only_the_dependent(self, tmp_path):
+        # `first` fails, so `second`'s rows never run -- and the skip itself is
+        # reported: a blocking finding, not a pass by omission.
         first = _check("first", assert_=[{"left": 0, "op": "eq", "right": 1}])
         second = _check("second", needs=["first"], assert_=[LITERAL_ROW])
         findings = Finding.collect(
             Cohort((first, second)), _submission(tmp_path, [16])
         ).findings
-        assert [f.check_id for f in findings] == ["first"]
-        assert findings[0].verdict.ok is False
+        assert [(f.check_id, f.verdict.ok) for f in findings] == [
+            ("first", False),
+            ("second", False),
+        ]
+        assert findings[-1].row == "a satisfied `needs` chain"
+        assert "`needs` `first` did not pass" in findings[-1].verdict.why
 
     @pytest.mark.unit
     def test_holding_needs_gate_allows_both(self, tmp_path):
@@ -633,6 +639,9 @@ class TestNeedsGatePerNode:
 
     @pytest.mark.unit
     def test_upstream_failure_silences_only_its_own_nodes(self, tmp_path):
+        # `upstream` holds at r16 and fails at r512: the dependent runs at r16
+        # and is blocked at r512 -- its rows are silenced there, and the skip
+        # is reported rather than passing by omission.
         upstream = _check("upstream", assert_=[NODES_USED_ONE])
         dependent = _check("dependent", needs=["upstream"], assert_=[LITERAL_ROW])
         findings = Finding.collect(
@@ -648,6 +657,7 @@ class TestNeedsGatePerNode:
         )
         assert got == [
             ("dependent", "r16", True),
+            ("dependent", "r512", False),
             ("upstream", "r16", True),
             ("upstream", "r512", False),
         ]
@@ -655,8 +665,8 @@ class TestNeedsGatePerNode:
     @pytest.mark.unit
     def test_one_failing_claim_disavows_a_coarser_dependent(self, tmp_path):
         # The claims list mixes HOLDS (r16) and FAILS (r512): one failing claim
-        # disavows, so the system-scoped dependent must stay silent while both
-        # upstream findings remain.
+        # disavows, so the system-scoped dependent must not run off r16's hold.
+        # Its skip is reported: a blocking finding naming the failed claim.
         upstream = _check("upstream", assert_=[NODES_USED_ONE])
         dependent = _check(
             "dependent",
@@ -675,7 +685,11 @@ class TestNeedsGatePerNode:
         assert [(f.check_id, f.verdict.ok) for f in findings] == [
             ("upstream", True),
             ("upstream", False),
+            ("dependent", False),
         ]
+        blocked = findings[-1]
+        assert blocked.row == "a satisfied `needs` chain"
+        assert "`needs` `upstream` did not pass" in blocked.verdict.why
 
     @pytest.mark.unit
     def test_an_upstream_that_makes_no_claim_at_a_node_does_not_vouch(self, tmp_path):
@@ -694,6 +708,8 @@ class TestNeedsGatePerNode:
 
     @pytest.mark.unit
     def test_an_upstream_that_ran_nowhere_never_vouches(self, tmp_path):
+        # Every node gates the upstream off: no claims at all, so the dependent
+        # stays an empty-vouch silence with no finding (nothing to judge).
         upstream = _check("upstream", when=[NODES_USED_ONE], assert_=[LITERAL_ROW])
         dependent = _check("dependent", needs=["upstream"], assert_=[LITERAL_ROW])
         findings = Finding.collect(
@@ -709,8 +725,8 @@ class TestNeedsGatePerNode:
     @pytest.mark.unit
     def test_a_silenced_claim_at_one_node_disavows_a_coarser_dependent(self, tmp_path):
         # `bottom` fails at r512, `middle` is SILENCED there and holds at r16;
-        # the system-scoped `top` must not run off middle's r16 hold -- an
-        # indirect failure cannot hide behind a silenced check.
+        # the system-scoped `top` must not run off middle's r16 hold -- and both
+        # skips are reported: an indirect failure surfaces as blocking findings.
         bottom = _check("bottom", assert_=[NODES_USED_ONE])
         middle = _check("middle", needs=["bottom"], assert_=[LITERAL_ROW])
         top = _check("top", scope="system", needs=["middle"], assert_=[LITERAL_ROW])
@@ -727,7 +743,33 @@ class TestNeedsGatePerNode:
             ("bottom", "r16", True),
             ("bottom", "r512", False),
             ("middle", "r16", True),
+            ("middle", "r512", False),
+            ("top", "sys", False),
         ]
+
+    @pytest.mark.unit
+    def test_a_failed_advisory_claim_blocks_a_mandatory_dependent(self, tmp_path):
+        # The dodge the review flagged: an advisory (`warn`) upstream whose row
+        # fails must not turn a mandatory dependent's skip into a clean run.
+        advisory = _check(
+            "advisory", severity="warn", assert_=[{"left": 0, "op": "eq", "right": 1}]
+        )
+        mandatory = _check("mandatory", needs=["advisory"], assert_=[LITERAL_ROW])
+        collected = Finding.collect(
+            Cohort((advisory, mandatory)), _submission(tmp_path, [16])
+        )
+        assert [
+            (f.check_id, f.severity.value, f.verdict.ok) for f in collected.findings
+        ] == [
+            ("advisory", "warn", False),
+            ("mandatory", "fail", False),
+        ]
+        blocked = collected.findings[-1]
+        assert blocked.row == "a satisfied `needs` chain"
+        assert "`needs` `advisory` did not pass" in blocked.verdict.why
+        assert collected.runs["mandatory"] == CheckRun(
+            ran_at=0, gated_off=0, silenced=1, blocked=1
+        )
 
 
 class TestNeedsFailLoud:

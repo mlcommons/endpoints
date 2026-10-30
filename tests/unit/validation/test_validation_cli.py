@@ -258,6 +258,33 @@ class TestReportLines:
         assert "its `needs` chain silenced every instance" in err
 
     @pytest.mark.unit
+    def test_a_failed_advisory_prerequisite_cannot_hide_a_mandatory_check(
+        self, tmp_path, capsys
+    ):
+        # The review's repro: A (`warn`) warns, B (`fail`, needs: [A]) would be
+        # judged if A passed -- the run must not exit 0 because A's failure
+        # skipped B. The skip itself is B's blocking finding.
+        check = (
+            "advisory:\n"
+            "  description: An advisory whose row fails.\n"
+            "  rule: R\n"
+            "  severity: warn\n"
+            "  assert: [{left: 1, op: eq, right: 2}]\n"
+            "mandatory:\n"
+            "  description: A mandatory check behind the advisory.\n"
+            "  rule: R\n"
+            "  severity: fail\n"
+            "  needs: [advisory]\n"
+            "  assert: [{left: 1, op: eq, right: 1}]\n"
+        )
+        cohort = write_cohort(tmp_path / "cohort", point=check)
+        assert main([str(cohort), str(_upload(tmp_path))]) == 1
+        out = capsys.readouterr().out
+        assert "WARN advisory [warn]" in out
+        assert "FAIL mandatory [fail]" in out
+        assert "not judged: `needs` `advisory` did not pass" in out
+
+    @pytest.mark.unit
     def test_control_characters_in_directory_names_stay_one_line(
         self, tmp_path, capsys
     ):

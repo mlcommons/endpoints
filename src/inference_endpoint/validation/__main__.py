@@ -56,6 +56,11 @@ def _never_ran_cause(run: CheckRun) -> str:
         str: The cause clause: the `when` gate, the `needs` chain, or both.
     """
     if run.silenced and not run.gated_off:
+        if run.blocked:
+            return (
+                f"a `needs` claim failed ({run.blocked} of {run.silenced} "
+                "silenced instance(s))"
+            )
         return "no node was applicable (its `needs` chain silenced every instance)"
     if run.gated_off and not run.silenced:
         return "no node was applicable (its `when` gated every instance off)"
