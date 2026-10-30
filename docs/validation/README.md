@@ -185,12 +185,17 @@ Read against that table:
 - `accuracy_results` leaves the whole `accuracy_results.json` document open - a
   whole artifact is addressable as is, when declared `dict`
 
-A row naming anything else is refused at cohort load with `names no fact` (a
-one-edit near-miss adds `did you mean 'offline'?`). The policy spells value
-domains out per field: `offline` is Section 8.3's "One of: dedicated, elected,
-absent or `none`", and `region` (five values, `submitters_choice` among them) or
-`division` (`Standardized`/`Serviced`/`RDI`) declare likewise where a cohort
-holds rows to them.
+A row naming anything else is refused at cohort load with `names no fact`; basic
+typo detection gives more meaningful error messages - `ofline` will produce
+`did you mean 'offline'?`.
+
+The allowed values for each field are explicitly defined - by the policy, or by
+an allowlist in a cohort's `valid_refs.yaml`:
+
+- `offline` is Section 8.3's "One of: dedicated, elected, absent or `none`"
+- `region` (six values: `low_latency`, `low_concurrency`, `med_concurrency`,
+  `high_concurrency`, `margin`, `submitters_choice`)
+- `division` (`Standardized`/`Serviced`/`RDI`, the policy's three divisions)
 
 A type name says what a value must carry, and `int`/`float` read a numeric
 string: a leaf declared `int` accepts `512` and the string `"512"` (the integral
@@ -236,7 +241,9 @@ block's fields:
 - a check runs once per **instance** of its scope: once per submission, system,
   pareto, or measurement point
 
-A full check block in `point.yaml` (both kinds in one check):
+A minimal block appears in "How the files are written" above. An additional
+example is given below, showing a real rule from Section 5.7.2's
+"pair-of-clauses" verdict.
 
 ```yaml
 offline_ordering:
@@ -336,32 +343,36 @@ assert:
 
 ### Absent facts
 
-A row's operands know three kinds of absent fact -- the distinctions that keep a
-`when` gate from switching a whole check off by omission (the cohort's
-`valid_refs.yaml` refuses a row naming a fact it does not declare, so a typo
-cannot land here):
+It is possible a row's `Ref` operands are absent after loading. Depending on the
+operand's specification, a `when` gate can switch a whole check off by omission
+(the cohort's `valid_refs.yaml` refuses a row naming a `Ref` it does not
+declare, so a typo cannot land here).
 
-- A **required** fact absent -- one the cohort's `valid_refs.yaml` declares
-  `required: true`: `config.concurrency`,
-  `system_desc.max_supported_concurrency`, `result_summary.system_tps`. A
-  conforming upload always carries it, so seeing it absent is a schema breach
-  and the row breaks loudly (a `when` row over one refuses the run before any
-  check reports; an `assert` row reports
-  `row failed to evaluate: required fact ... is absent`). For those three
-  parser-enforced facts a walked upload is refused earlier still, at submission
-  load.
-- A fact whose declaration spells out its absent-state value -- a `default:` in
-  the cohort's `valid_refs.yaml` (the worked example's `offline` leaf: Section
-  8.3's "absent or `none`") -- lets a comparison judge as that value when the
-  upload omits it. On a point without a declaration,
-  `point.config.offline eq dedicated` is false and
-  `point.config.offline ne dedicated` is true, exactly as on a point declaring
-  `offline: none`. A leaf declared without `default` (e.g. `{ type: str }`)
-  declares no absent-state value and falls to the case below.
-- Every other omitted **optional** fact is its own not-declared state: the row
-  does not hold, and a `when` row over it gates its check off at that instance
-  (the check makes no claim there), instead of failing over evidence the rules
-  never asked for.
+- If a **required** fact is absent, an error is raised.
+  - `Ref`s in `valid_refs.yaml` that specify `required: true` must be present
+    after loading
+  - Examples include `config.concurrency`,
+    `system_desc.max_supported_concurrency`, and `result_summary.system_tps`
+  - If a `when` statement is processed that sees a missing "required" `Ref`, the
+    run is aborted before any verdicts are reported, with
+    `row failed to evaluate: required fact ... is absent`; an `assert` row over
+    one fails with the same message.
+  - Some required `Ref`s are enforced at submission upload, but no assumptions
+    about this are made to support running the submission checks on local,
+    unsubmitted files for testing purposes.
+- A `Ref` in a cohort's `valid_refs.yaml` can specify a `default` to be used if
+  a value is not detected at load time.
+- If a `Ref` is not `required` and no `default` is specified, it is interpreted
+  as a special "missing" state. If a `when` condition requires a `Ref` that is
+  missing, then that `when` will evaluate to `false` and the check will be
+  skipped.
+
+Importantly, specifying `required: true` while also specifying a `default`
+(including `default: null`) is invalid, as their behaviors contradict. An error
+will be raised at load time. The legal shapes for a `Ref`'s definition are:
+
+- `{ type: int, default: 1 }`
+- `{ type: int, required: true }`
 
 Presence probes (`exists`/`absent`/`not_null`) always read the key's own raw
 state, never the declared default: an omitted `config.offline` is absent
@@ -418,10 +429,38 @@ assert:
     value: 3
 ```
 
+An `aggregate` computes its value with the `aggregate` key (a computation from
+the table above) and compares the result with `value` using one of the `op`s
+listed above. `Op`s like `in`, `matches`, `exists`/`absent`/`not_null` have
+semantics for collections, strings, and presence checks, which `aggregate`s do
+not support.
+
+`value` uses the same rules as comparison operands:
+
+- a literal or a dotted `Ref`
+- `abs_tol`/`rel_tol` are supported for `eq`/`ne`
+
+This has a few limitations, including:
+
+- A membership test or interval check requires multiple rows: `count in [4, 5]`
+  would require both `ge 4` and `le 5`.
+- The collection that `over` runs over must be an artifact of the row's own node
+  or an ancestor. For instance, an `over` in a `point.yaml` cannot run over a
+  list of values from across the entire pareto curve (i.e. a 'concurrency' list
+  of all the concurrency values in the pareto).
+
 ### Gating with `needs`
 
-A check can require other checks first by listing their `id`s in `needs`. Two
-conditions describe one instance - one check run:
+A check can require other checks first by listing their `id`s in `needs`.
+Results for checks are separated across scopes - for example:
+
+- A `point.yaml` check can specify another `point.yaml` check as a `need`ed
+  dependency.
+- This check will have multiple **instances**, one per point on the curve.
+- If the dependency fails in one point on the curve, it will only affect the
+  check in that point, not the other instances for other points on the curve.
+
+Two conditions describe a check's instance:
 
 - **queued** - its `when` passes and the check is queued to run.
 - **passed** - a queued check that _ran_ and returned a truthy value (every
@@ -432,13 +471,17 @@ check **passed**:
 
 - A needed check passed: the dependent runs.
 - A needed check was queued but did not pass: the dependent is skipped and
-  de-queued - its findings would possibly be corrupted by a failing
+  de-queued, since its findings would possibly be corrupted by a failing
   prerequisite.
+  - If a `fail` check is skipped, this will de-queue all of its dependents down
+    its chain(s); every `fail` check in that cascade is reported as
+    `not judged: \`needs\` ... did not pass` at its own instance. A chain no
+    upstream ever claimed at stays a no-finding skip.
 - A needed check was never queued (its `when` left that instance out): the
-  dependent is skipped and de-queued.
-- A needed check was silenced in turn (its own `needs` refused to vouch): the
-  dependent is skipped and de-queued too - a failure one level down does not
-  hide behind the check it silenced.
+  dependent is skipped and de-queued - no claim, so no finding.
+- A needed check was de-queued (due to its own `needs` being de-queued or
+  failing): the dependent is skipped and de-queued too (this will recurse down
+  the dependency chain).
 - Any check may be listed in `needs`. If a listed check is at a finer scope,
   **all** of its instances must pass: a pareto-level `pareto_clean` with
   `needs: [point_accuracy_pass]` runs only if `point_accuracy_pass` passes at
@@ -446,8 +489,8 @@ check **passed**:
   way.
 - Unknown ids and `needs` cycles are refused at load.
 
-Example of `point.yaml` check below, with both `needs` and an aggregate (the
-dependent runs only where `concurrency_in_range` was queued and passed).
+A dependency illustration - not the accuracy-coverage rule: the dependent runs
+only where `concurrency_in_range` was queued and passed.
 
 ```yaml
 accuracy_sane:
@@ -465,6 +508,16 @@ accuracy_sane:
 This check will run per point in the submission: i.e. if an `r1024` point passes
 `concurrency_in_range` and `r999999` does not, `accuracy_sane` will still run
 for `r1024`, but is skipped for `r999999`.
+
+The check above judges the document one point carries - it cannot enforce
+coverage. Section 4.3/5.3 require exactly one accuracy validation run at the
+designated point in each mandatory concurrency region (plus the non-agentic
+Offline run), and none at submitter's-choice points; that is a pareto-level
+count over points, from the cohort doc's "Not yet expressible" list.
+
+Currently the shipped cohort's `point_accuracy_present` warn is a placeholder
+for it: it warns wherever a point carries no `accuracy_results.json`, optional
+points included.
 
 ### References
 
@@ -580,7 +633,16 @@ At `Finding.collect` (per submitted run):
 
 Every dotted operand resolves through the ref namespaces below: a ref's first
 segment. `submission`, `system`, `pareto` and `point` are the four node scopes;
-`derived`, `ruleset` and `regions` are checker-owned.
+`derived`, `ruleset` and `regions` are checker-owned. A `dict` subtree accepts
+any path below it (each level resolves as present or absent; its values stay
+unchecked).
+
+| Namespace                                 | Reads                                               | Rows may use it in          | Names come from                                                                                                                |
+| ----------------------------------------- | --------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `submission`, `system`, `pareto`, `point` | that node's own artifact documents (the list below) | every scope file            | the cohort's [`valid_refs.yaml`](../../src/inference_endpoint/config/cohorts/2026-10-C1/valid_refs.yaml)                       |
+| `derived`                                 | one pareto's named derivations                      | `pareto.yaml`, `point.yaml` | checker code (the fixed list below)                                                                                            |
+| `ruleset`                                 | the packaged ruleset the cohort's manifest names    | every scope file            | the ruleset's data - open (the cohort's [`ruleset/` catalog](../../src/inference_endpoint/config/cohorts/2026-10-C1/ruleset/)) |
+| `regions`                                 | the Section 5.5 reference-algorithm regions         | `pareto.yaml`, `point.yaml` | checker code (the fixed list below)                                                                                            |
 
 - `submission` (one per upload), `system` (one per `results/<system>/`),
   `pareto` (one per `results/<system>/<model>/`), `point` (one per `r<N>`

@@ -17,9 +17,13 @@ for.
   `OK`/`FAIL`/`WARN`, prints `<id> ran at N instance(s)` per check and
   `NEVER-RAN <id>` on stderr at zero, both worded from the check's own
   `CheckRun` (its `when` gate, its `needs` chain, or both), and a closing
-  `N finding(s), F failing (B blocking)` summary. Exit codes: `0` everything
-  applicable held or failed only at `warn`; `1` a failing `fail` finding; `2`
-  cohort or submission refused before any check ran.
+  `N finding(s), F failing (B blocking)` summary. A check with a `fail` severity
+  that was skipped due to a dependency not passing reports
+  `not judged: needs ... did not pass`. Exit codes:
+
+  - `0`: everything applicable held, or failed only at `warn`
+  - `1`: a failing `fail` finding
+  - `2`: cohort or submission refused before any check ran
 
 - **`check.py`** — the cohort side.
 
@@ -193,8 +197,8 @@ for.
   `scope`/`node_directory`/`verdict`/`rule`), `Finding.collect` (whose phases
   are "The runner's cascade" below), and the record it returns: `Collected` (the
   findings + one `CheckRun` per check) and `CheckRun`'s state counts
-  (`ran_at`/`gated_off`/`silenced`), what the report's `ran at N`/`NEVER-RAN`
-  lines are worded from.
+  (`ran_at`/`gated_off`/`silenced`/`blocked`), what the report's
+  `ran at N`/`NEVER-RAN` lines are worded from.
 
 ## 2. Row and operator mechanics
 
@@ -241,7 +245,7 @@ cohort = Cohort.from_directory(Path("my_cohort"))
 submission = Submission.from_directory(Path("upload"))
 collected = Finding.collect(cohort, submission)
 collected.findings  # one per evaluated `assert` row (holds too)
-collected.runs  # one `CheckRun` per check: ran_at/gated_off/silenced
+collected.runs  # one `CheckRun` per check: ran_at/gated_off/silenced/blocked
 ```
 
 `Submission.from_directory` reads the same artifacts the rows read — per `r<N>`
@@ -370,10 +374,30 @@ findings plus one `CheckRun` per check) and runs four phases, then the walk.
    elsewhere; one failing claim disavows the dependent there; and an empty claim
    set never vouches — an unverified premise never passes a dependent.
 
+   If a check is skipped, `_Evaluation.failed_needs` names the `needs` ids whose
+   claims failed — the upstream ran and failed, or was skipped because its own
+   `needs` failed. A dependency that never claimed, because its condition
+   excluded every instance, silences the dependent without a finding. For
+   example:
+
+   - `dependent` needs `upstream`
+   - `upstream` is gated on `point.config.nodes_used eq 1` as a condition
+   - point declares `nodes_used: 2`
+   - `upstream` has no assertions
+
+   In this case `upstream` is skipped, since its condition evaluates to `false`.
+   This means `dependent` is also skipped, and is not an error: this prints
+   `NEVER-RAN dependent` rather than an error.
+
 4. **Emission.** One `Finding` per `assert` row at each `when`-applicable node
-   whose chain `HOLDS`, holds and failures alike (the report side filters
-   `not verdict.ok` for the failure summary). A check's own failing rows never
-   gate its own findings; only its dependents stay silent, per node.
+   whose chain `HOLDS`, regardless of the verdict
+   - The consumer is responsible for filtering `not verdict.ok`
+   - An additional `Finding` is emitted per refused node of a `fail` check.
+     - For a long dependency chain of checks with a failure, the failure that
+       caused the breakage in the chain is reported.
+     - Checks that were skipped contribute no row findings of their own.
+     - Each mandatory check that was skipped surfaces its own `Finding`.
+   - A check's failing asserts are reported.
 
 ## 6. Derivation formulas (verbatim-anchored)
 
