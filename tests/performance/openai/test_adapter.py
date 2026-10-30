@@ -82,7 +82,7 @@ def test_encode_query(benchmark, size_name, text):
     """Benchmark encode_query (Query -> HTTP bytes)."""
     query = make_query(text)
     benchmark.group = "openai_adapter_encode_query"
-    benchmark(OpenAIAdapter.encode_query, query)
+    benchmark(OpenAIAdapter.encode_query, query, include_usage=False)
 
 
 @pytest.mark.performance

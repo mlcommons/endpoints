@@ -36,6 +36,10 @@ numerator excludes the first streamed chunk). The diagnostic is normally driven 
 HF tokenizer; for synthetic validation feed it the whitespace word counter so 1 chunk ==
 1 word == ~1 token, making TTFT/TPOT recover the planted base values.
 
+COMPLETE lines also carry the server usage a live run records: ``prompt_tokens`` (the ISL
+draw) and ``completion_tokens`` (== OSL). The server-basis replay divides by
+``completion_tokens - 1``, so it recovers the planted TPOT without a tokenizer.
+
 The steady-state ground truth is the *base* metric level in the flat region: after the
 ramp has decayed, with no drift and before any staircase step. It is written to a sidecar
 ``<out>.groundtruth.json``.
@@ -172,7 +176,13 @@ class _Gen:
         self._add(EV_ISSUED, issue_ns, base)
         self._add(EV_RECV_FIRST, recv_ns, base)
         chunks = ["w "] * osl  # OSL single-word chunks -> whitespace count == OSL
-        self._add(EV_COMPLETE, complete_ns, base, data=["TextModelOutput", chunks])
+        self._add(
+            EV_COMPLETE,
+            complete_ns,
+            base,
+            data=["TextModelOutput", chunks],
+            extra={"prompt_tokens": isl, "completion_tokens": osl},
+        )
         self.n_samples += 1
         self.last_complete_ns = max(self.last_complete_ns, complete_ns)
         return complete_ns
@@ -183,12 +193,15 @@ class _Gen:
         ts: int,
         base: dict[str, Any] | None = None,
         data: Any | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         rec: dict[str, Any] = {"event_type": et, "timestamp_ns": ts}
         if base:
             rec.update(base)
         if data is not None:
             rec["data"] = data
+        if extra:
+            rec.update(extra)
         self.events.append(rec)
 
     def _run_conversation(self, start_ns: int) -> int:
@@ -288,7 +301,9 @@ def groundtruth(planted: Planted, gen: _Gen) -> dict[str, Any]:
 def write_run(out_path: str, gen: _Gen, gt: dict[str, Any]) -> str:
     with open(out_path, "w") as fh:
         for rec in gen.events:
-            fh.write(json.dumps(rec))
+            # Compact, like the JSONL writer: the replays find COMPLETE lines by
+            # their leading bytes (``core.record.is_complete_line``).
+            fh.write(json.dumps(rec, separators=(",", ":")))
             fh.write("\n")
     sidecar = out_path + ".groundtruth.json"
     with open(sidecar, "w") as fh:

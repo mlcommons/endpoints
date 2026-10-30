@@ -90,14 +90,21 @@ Enum: `PENDING` → `RUNNING` → `COMPLETED` / `FAILED` / `CANCELLED`
 **`msgspec.Struct` with `frozen=True`, `array_like=True`, `gc=False`,
 `omit_defaults=True`**
 
-All four flags are deliberate hot-path optimisations:
+The flags are hot-path optimisations, except `omit_defaults`:
 
 - `frozen=True` prevents accidental mutation after creation.
 - `array_like=True` serialises to a JSON array (positional fields) rather than a
   dict, cutting wire size.
 - `gc=False` removes the type from GC tracking; structs with no cyclic
   references don't need it.
-- `omit_defaults=True` reduces serialised size for optional fields.
+- `omit_defaults=True` has no effect together with `array_like=True`: a
+  positional array always encodes every field. It is kept for intent only and
+  does not shrink these types' output.
+
+Because the encoding is positional, never add fields to `Query`, `QueryResult`
+or `StreamChunk`. Per-response data that has no field travels in
+`QueryResult.metadata`; the server-reported `prompt_tokens` and
+`completion_tokens` do.
 
 Field mutation is prohibited. Use `msgspec.structs.force_setattr()` only in
 controlled accumulator code.

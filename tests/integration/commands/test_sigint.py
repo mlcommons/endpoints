@@ -63,11 +63,20 @@ def _write_config(
     endpoint_url: str,
     config_path: Path,
     interrupted_teardown_grace_s: float | None = None,
+    token_count_source: str | None = None,
 ) -> None:
-    """~120 s workload (600 samples @ 5 QPS): only the ^C can end the run."""
+    """~120 s workload (600 samples @ 5 QPS): only the ^C can end the run.
+
+    ``token_count_source`` pins the primary basis; unset keeps the default.
+    """
     grace = (
         f"\n  timeouts:\n    interrupted_teardown_grace_s: {interrupted_teardown_grace_s}"
         if interrupted_teardown_grace_s is not None
+        else ""
+    )
+    basis = (
+        f"\n  token_count_source: {token_count_source}"
+        if token_count_source is not None
         else ""
     )
     config_path.write_text(
@@ -93,7 +102,7 @@ settings:
   runtime:
     n_samples_to_issue: 600
   warmup:
-    enabled: false{grace}
+    enabled: false{grace}{basis}
 """
     )
 
@@ -232,6 +241,36 @@ def test_group_sigint_exits_gracefully(mock_http_echo_server, tmp_path):
     log_text = log_file.read_text()
     assert "event logger received SIGINT — waiting for parent ENDED" in log_text
     assert "KeyboardInterrupt" not in log_text
+
+
+@pytest.mark.integration
+def test_group_sigint_outranks_missing_usage(recording_echo_server_factory, tmp_path):
+    """A group ^C against a server without usage still exits 130."""
+    server = recording_echo_server_factory(report_usage=False)
+    report_dir = tmp_path / "report"
+    config_path = tmp_path / "bench.yaml"
+    _write_config(report_dir, server.url, config_path, token_count_source="server")
+
+    with _benchmark_proc(
+        [_cli(), "benchmark", "from-config", "-c", str(config_path)]
+    ) as proc:
+        _wait_services_ready(proc, report_dir)
+        # ^C only once samples without usage have completed, so the run is
+        # one that would otherwise fail on missing usage.
+        deadline = time.monotonic() + 60.0
+        while len(server.bodies) < 3:
+            assert proc.poll() is None, "benchmark died before issuing"
+            assert time.monotonic() < deadline, "no requests reached the server"
+            time.sleep(0.1)
+        os.killpg(proc.pid, signal.SIGINT)
+        rc = proc.wait(timeout=60.0)
+
+    assert rc == 130, f"user abort must exit 130, got {rc}"
+    _assert_interrupted_artifacts(report_dir)
+    summary = json.loads(
+        (report_dir / "performance" / "result_summary.json").read_text()
+    )
+    assert summary["n_samples_missing_usage"] > 0
 
 
 @pytest.mark.integration

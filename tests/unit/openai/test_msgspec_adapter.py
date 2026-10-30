@@ -25,7 +25,14 @@ from inference_endpoint.openai.openai_msgspec_adapter import (
     OpenAIMsgspecAdapter,
     _chat_message_from_dict,
 )
-from inference_endpoint.openai.types import ChatMessage
+from inference_endpoint.openai.types import (
+    STREAM_OPTIONS_INCLUDE_USAGE,
+    ChatMessage,
+    SSEChoice,
+    SSEDelta,
+    SSEMessage,
+    requests_multiple_choices,
+)
 
 
 def _make_reasoning_response(
@@ -105,7 +112,7 @@ def test_to_endpoint_request_preserves_tool_calls():
             "messages": messages,
         },
     )
-    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query, include_usage=False)
     encoded = msgspec.json.encode(request)
     payload = json.loads(encoded)
 
@@ -134,7 +141,7 @@ def test_backward_compat_plain_messages_unchanged():
         id="q2",
         data={"model": "m", "messages": messages},
     )
-    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query, include_usage=False)
     encoded = msgspec.json.encode(request)
     payload = json.loads(encoded)
 
@@ -263,7 +270,7 @@ def test_seed_in_request_payload():
             "seed": 99,
         },
     )
-    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query, include_usage=False)
     encoded = msgspec.json.encode(request)
     payload = json.loads(encoded)
     assert payload.get("seed") == 99
@@ -307,7 +314,7 @@ def test_chat_template_kwargs_forwarded_when_set():
             "chat_template_kwargs": {"thinking": True, "preserve_thinking": True},
         },
     )
-    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query, include_usage=False)
     payload = json.loads(msgspec.json.encode(request))
     assert payload["chat_template_kwargs"] == {
         "thinking": True,
@@ -321,7 +328,7 @@ def test_chat_template_kwargs_omitted_when_unset():
         id="q4",
         data={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
     )
-    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query, include_usage=False)
     payload = json.loads(msgspec.json.encode(request))
     assert "chat_template_kwargs" not in payload
 
@@ -356,7 +363,9 @@ def test_dataset_transforms_preserve_chat_template_kwargs_dict():
     row = df.to_dict(orient="records")[0]
     assert row["chat_template_kwargs"] == chat_template_kwargs
 
-    request = OpenAIMsgspecAdapter.to_endpoint_request(Query(id="q5", data=row))
+    request = OpenAIMsgspecAdapter.to_endpoint_request(
+        Query(id="q5", data=row), include_usage=False
+    )
     payload = json.loads(msgspec.json.encode(request))
     assert payload["chat_template_kwargs"] == chat_template_kwargs
 
@@ -378,8 +387,208 @@ def test_messages_shadow_prompt_in_request():
             "prompt": "[deadbeefdeadbeef] shadowed",
         },
     )
-    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query, include_usage=False)
     payload = json.loads(msgspec.json.encode(request))
 
     assert [m["content"] for m in payload["messages"]] == ["authoritative"]
     assert "shadowed" not in json.dumps(payload)
+
+
+_CHAT = {
+    "model": "m",
+    "system": "be brief",
+    "prompt": "hi",
+    "max_completion_tokens": 8,
+    "temperature": 0.0,
+}
+
+
+def _chat_body(include_usage: bool, **data) -> dict:
+    query = Query(id="q", data={**_CHAT, **data})
+    return json.loads(
+        OpenAIMsgspecAdapter.encode_query(query, include_usage=include_usage)
+    )
+
+
+@pytest.mark.unit
+def test_streaming_body_requests_usage_when_enabled():
+    query = Query(id="q", data={**_CHAT, "stream": True})
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query, include_usage=True)
+    assert request.stream_options is STREAM_OPTIONS_INCLUDE_USAGE
+    assert _chat_body(True, stream=True)["stream_options"] == {"include_usage": True}
+
+
+# The exact body sent when usage is not requested.
+_MAIN_CHAT_BODY = {
+    True: b'{"model":"m","messages":[{"role":"system","content":"be brief"},'
+    b'{"role":"user","content":"hi"}],"temperature":0.0,'
+    b'"max_completion_tokens":8,"stream":true}',
+    False: b'{"model":"m","messages":[{"role":"system","content":"be brief"},'
+    b'{"role":"user","content":"hi"}],"temperature":0.0,'
+    b'"max_completion_tokens":8,"stream":false}',
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stream", [True, False])
+def test_body_matches_main_when_usage_disabled(stream):
+    query = Query(id="q", data={**_CHAT, "stream": stream})
+    assert (
+        OpenAIMsgspecAdapter.encode_query(query, include_usage=False)
+        == _MAIN_CHAT_BODY[stream]
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("data", [{"stream": False}, {}], ids=["stream-false", "unset"])
+def test_non_streaming_body_never_requests_usage(data):
+    assert "stream_options" not in _chat_body(True, **data)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "n, expected",
+    [(2, "absent"), (2.0, "absent"), (1, {"include_usage": True})],
+)
+def test_n_gt_1_row_omits_stream_options(n, expected):
+    body = _chat_body(True, stream=True, n=n)
+    assert body["n"] == n
+    assert body.get("stream_options", "absent") == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "n, expected",
+    [
+        (2, True),
+        (2.5, True),
+        (1, False),
+        (1.0, False),
+        (0, False),
+        (None, False),
+        (True, False),
+        ("2", False),
+        (float("nan"), False),
+    ],
+)
+def test_requests_multiple_choices(n, expected):
+    assert requests_multiple_choices(n) is expected
+
+
+_USAGE = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+_HI = SSEChoice(delta=SSEDelta(content="Hi"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "frame, expected",
+    [
+        pytest.param({"choices": [{"delta": {"content": "Hi"}}]}, _HI, id="choice"),
+        pytest.param(
+            {"choices": [{"delta": {"content": "Hi"}}], "usage": None},
+            _HI,
+            id="openai-null-usage",
+        ),
+        pytest.param(
+            {"choices": [], "usage": _USAGE},
+            SSEMessage(usage=_USAGE),
+            id="usage-trailer",
+        ),
+        pytest.param(
+            {"choices": [{"delta": {"content": "Hi"}}], "usage": _USAGE},
+            SSEMessage(choices=(_HI,), usage=_USAGE),
+            id="litellm",
+        ),
+        pytest.param(
+            {"choices": [], "usage": {"prompt_tokens": None, "completion_tokens": 3}},
+            SSEMessage(usage={"prompt_tokens": None, "completion_tokens": 3}),
+            id="null-prompt-tokens",
+        ),
+        pytest.param(
+            {"choices": [], "usage": {}}, SSEMessage(usage={}), id="empty-usage-object"
+        ),
+        pytest.param(
+            {"choices": [{"delta": {"content": "Hi"}}], "usage": "x"},
+            SSEMessage(choices=(_HI,), usage="x"),
+            id="malformed-usage",
+        ),
+        pytest.param(
+            {"choices": [{"index": 1, "delta": {"content": "Hi"}}]},
+            _HI,
+            id="second-choice-index-no-usage",
+        ),
+        pytest.param(
+            {"choices": [{"delta": {"content": "Hi"}}, {"index": 1, "delta": {}}]},
+            _HI,
+            id="two-choices-no-usage",
+        ),
+        pytest.param(
+            {
+                "choices": [{"delta": {"content": "Hi"}}, {"index": 1, "delta": {}}],
+                "usage": _USAGE,
+            },
+            SSEMessage(choices=(_HI, SSEChoice(delta=SSEDelta())), usage=_USAGE),
+            id="two-choices-with-usage",
+        ),
+        pytest.param({"choices": []}, None, id="sglang-empty-choices"),
+        pytest.param({"choices": [], "usage": None}, None, id="empty-null-usage"),
+    ],
+)
+def test_decode_sse_message_usage_carrier(frame, expected):
+    assert (
+        OpenAIMsgspecAdapter.decode_sse_message(msgspec.json.encode(frame)) == expected
+    )
+
+
+@pytest.mark.unit
+def test_decode_sse_message_common_frame_is_the_bare_choice():
+    decoded = OpenAIMsgspecAdapter.decode_sse_message(
+        b'{"choices":[{"index":0,"delta":{"content":"Hi"}}],"usage":null}'
+    )
+    assert type(decoded) is SSEChoice
+
+
+def _chat_body_with(usage: object, n_choices: int = 1) -> bytes:
+    body = json.loads(_make_reasoning_response("reasoning", "r"))
+    body["choices"] = [{**body["choices"][0], "index": i} for i in range(n_choices)]
+    body["usage"] = usage
+    return json.dumps(body).encode()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "usage", [{}, "x", [], {"prompt_tokens": 7.0, "completion_tokens": -3}]
+)
+def test_non_streaming_malformed_usage_succeeds(usage):
+    result = OpenAIMsgspecAdapter.decode_response(_chat_body_with(usage), "q1")
+    assert result.error is None
+    assert result.response_output.output == "answer"
+    assert result.metadata["finish_reason"] == "stop"
+    assert "prompt_tokens" not in result.metadata
+    assert "completion_tokens" not in result.metadata
+
+
+@pytest.mark.unit
+def test_non_streaming_n_gt_1_has_no_counts():
+    result = OpenAIMsgspecAdapter.decode_response(
+        _chat_body_with(_USAGE, n_choices=2), "q1"
+    )
+    assert result.response_output.output == "answer"
+    assert "prompt_tokens" not in result.metadata
+    assert "completion_tokens" not in result.metadata
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "usage, expected",
+    [(_USAGE, {"prompt_tokens": 7, "completion_tokens": 3}), (None, {})],
+    ids=["usage", "no-usage"],
+)
+def test_decode_response_copies_usage(usage, expected):
+    body = json.loads(_make_reasoning_response("reasoning", "r"))
+    if usage is not None:
+        body["usage"] = usage
+    md = OpenAIMsgspecAdapter.decode_response(json.dumps(body).encode(), "q1").metadata
+    assert {
+        k: md[k] for k in ("prompt_tokens", "completion_tokens") if k in md
+    } == expected

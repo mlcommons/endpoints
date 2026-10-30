@@ -10,6 +10,7 @@ counter, so 1 chunk == 1 word == ~1 token) and assert the reconstructed TTFT/TPO
 the planted base values and that a flat run is detected as steady.
 """
 
+import dataclasses
 import importlib.util
 import json
 import statistics
@@ -17,6 +18,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from inference_endpoint.core.types import TokenCountSource
 from inference_endpoint.metrics import steady_state_diagnostics as diag
 
 pytestmark = pytest.mark.unit
@@ -36,6 +38,13 @@ synth = _load("synth_events", "scripts/synth_events.py")
 def _words(texts):
     """Fake tokenizer: token count == whitespace word count (matches the emitted chunks)."""
     return [len(t.split()) for t in texts]
+
+
+def _tokenized_series(out):
+    """40-sample super-passes replayed on the client basis with ``_words``."""
+    return diag.build_super_pass_series(
+        out, 40, _words, basis=TokenCountSource.CLIENT
+    ).super_passes
 
 
 def _args(**overrides):
@@ -87,7 +96,7 @@ def _generate(tmp_path, **overrides):
 
 def test_generated_events_parse_and_recover_base_metrics(tmp_path):
     out, planted, gt = _generate(tmp_path)
-    series = diag.build_super_pass_series(out, superpass_size=40, count_tokens=_words)
+    series = _tokenized_series(out)
     assert len(series) >= 4
 
     # Pool the back half (past the ramp) and compare medians to the planted base.
@@ -220,9 +229,14 @@ def test_flat_run_detected_as_steady(tmp_path):
     # Isolate steadiness detection from the min-duration floor (a short synth run can't
     # clear 600s); this test asserts the flat plateau is *found*, not that it's long.
     result = diag.run(
-        out, superpass_size=40, count_tokens=_words, enforce_min_duration=False
+        out,
+        superpass_size=40,
+        count_tokens=_words,
+        enforce_min_duration=False,
+        basis=TokenCountSource.CLIENT,
+        primary=TokenCountSource.CLIENT,
     )
-    ss = result["steady_state"]
+    ss = result.steady_state
     assert ss.found is True
     assert ss.window is not None
     assert ss.window.n_super_passes >= 4
@@ -234,7 +248,7 @@ def test_poisson_mode_generates_and_parses(tmp_path):
     assert gt["mode"] == "poisson"
     assert gt["concurrency"] is None
     assert gt["rate"] == 40.0
-    series = diag.build_super_pass_series(out, superpass_size=40, count_tokens=_words)
+    series = _tokenized_series(out)
     assert sum(sp.n_issued for sp in series) == gt["n_samples"]
 
 
@@ -252,3 +266,28 @@ def test_multiturn_emits_conversation_and_turn(tmp_path):
     assert len(convs) >= 1
     assert turns <= {1, 2, 3}
     assert max(turns) >= 2  # multi-turn trajectories actually issued
+
+
+def test_complete_events_carry_server_usage(tmp_path):
+    out, _, _ = _generate(tmp_path)
+    completes = [
+        r
+        for r in map(json.loads, Path(out).read_text().splitlines())
+        if r["event_type"] == "sample.complete"
+    ]
+    assert completes and all(
+        r["completion_tokens"] == len(r["data"][1]) for r in completes
+    )
+    assert all(
+        isinstance(r["prompt_tokens"], int) and r["prompt_tokens"] >= 1
+        for r in completes
+    )
+
+
+def test_server_replay_matches_whitespace_replay(tmp_path):
+    out, _, _ = _generate(tmp_path)
+    server = diag.build_super_pass_series(out, 40, None, basis=TokenCountSource.SERVER)
+    assert server.n_missing_usage == 0
+    assert [dataclasses.asdict(sp) for sp in server.super_passes] == [
+        dataclasses.asdict(sp) for sp in _tokenized_series(out)
+    ]

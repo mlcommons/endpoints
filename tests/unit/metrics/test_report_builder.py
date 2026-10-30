@@ -24,13 +24,12 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import msgspec.structs
 import pytest
-from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
-    MetricCounterKey,
-)
 from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+    MetricCounterKey,
     MetricSeriesKey,
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
@@ -42,13 +41,20 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     SessionState,
     snapshot_to_dict,
 )
-from inference_endpoint.metrics.report import Report, series_metric_dict
+from inference_endpoint.core.types import TokenCountSource, basis_key
+from inference_endpoint.metrics.report import (
+    OtherBasisMetrics,
+    Report,
+    series_metric_dict,
+)
 from inference_endpoint.metrics.steady_state_diagnostics import (
     Anomaly,
     SteadyState,
     SteadyWindow,
     TpsBlock,
 )
+
+from tests.test_helpers import DEFAULT_SOURCE, make_report
 
 # 1 hour in ns — same as the aggregator's default bound for time-series.
 _NS_HIGH = 3_600_000_000_000
@@ -183,6 +189,7 @@ def _build_report(
     state: SessionState = SessionState.COMPLETE,
     n_pending_tasks: int = 0,
     use_legacy_loadgen_qps_metrics: bool = True,
+    token_count_source: TokenCountSource = DEFAULT_SOURCE,
 ) -> Report:
     """Build a Report from a snapshot dict (matches the consumer contract).
 
@@ -196,6 +203,7 @@ def _build_report(
     return Report.from_snapshot(
         snapshot_to_dict(snap),
         use_legacy_loadgen_qps_metrics=use_legacy_loadgen_qps_metrics,
+        token_count_source=token_count_source,
     )
 
 
@@ -305,7 +313,10 @@ class TestFromSnapshot:
         snap = snapshot_to_dict(
             registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
-        assert Report.from_snapshot(snap).run_config is None
+        assert (
+            Report.from_snapshot(snap, token_count_source=DEFAULT_SOURCE).run_config
+            is None
+        )
         run_config = {
             "load_pattern": {"type": "poisson", "target_qps": 14.75},
             "warmup": {"enabled": False, "warmup_random_seed": 42},
@@ -313,7 +324,10 @@ class TestFromSnapshot:
             "dataloader_random_seed": 42,
         }
         assert (
-            Report.from_snapshot(snap, run_config=run_config).run_config == run_config
+            Report.from_snapshot(
+                snap, run_config=run_config, token_count_source=DEFAULT_SOURCE
+            ).run_config
+            == run_config
         )
 
     def test_additive_accounting_uses_tracked_failures_and_rejects_drops(self):
@@ -361,13 +375,20 @@ class TestFromSnapshot:
         report = _build_report(registry, state=SessionState.COMPLETE, n_pending_tasks=0)
         assert report.complete is True
 
-    def test_complete_flag_false_when_drain_timeout(self):
-        """COMPLETE state but n_pending_tasks > 0 → drain timed out, report
-        is partial.
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    def test_complete_flag_on_drain_timeout_follows_primary(self, primary):
+        """COMPLETE state but n_pending_tasks > 0 → the tokenizer drain timed
+        out. Only a client-primary report is then partial: on the server basis
+        the pending work feeds the *_client blocks alone.
         """
         registry = _make_registry(n_samples=5)
-        report = _build_report(registry, state=SessionState.COMPLETE, n_pending_tasks=2)
-        assert report.complete is False
+        report = _build_report(
+            registry,
+            state=SessionState.COMPLETE,
+            n_pending_tasks=2,
+            token_count_source=primary,
+        )
+        assert report.complete is (primary is TokenCountSource.SERVER)
 
     def test_complete_flag_false_when_state_live(self):
         """LIVE/DRAINING snapshots produce reports with ``complete=False``."""
@@ -470,6 +491,38 @@ class TestReportDisplayAndSerialize:
         assert "Histogram" in output
         assert "Percentiles" in output
 
+    def test_client_primary_sections_render_pinned_lines(self):
+        """The rendering of the primary sections is pinned: order, label, unit
+        and scale (TPOT is recorded in ns and shown in ms)."""
+        registry = _make_registry(n_samples=3)
+        for value in (2_000_000.0, 3_000_000.0, 4_000_000.0):
+            registry.record(MetricSeriesKey.TPOT_NS.value, value)
+        report = _build_report(registry, token_count_source=TokenCountSource.CLIENT)
+
+        lines: list[str] = []
+        report.display(fn=lines.append)
+        breakdowns = lines[
+            lines.index(
+                "\n------------------- Latency Breakdowns -------------------"
+            ) :
+        ]
+        assert [
+            line
+            for line in breakdowns
+            if (line[:1].isalpha() and line.endswith(":")) or line.startswith("  Avg.:")
+        ] == [
+            "TTFT:",
+            "  Avg.: 1.01 ms",
+            "TPOT:",
+            "  Avg.: 3.00 ms",
+            "Latency:",
+            "  Avg.: 5.05 ms",
+            "Input sequence lengths:",
+            "  Avg.: 51.00 tokens",
+            "Output sequence lengths:",
+            "  Avg.: 101.00 tokens",
+        ]
+
     def test_to_json(self):
         registry = _make_registry(n_samples=5)
         report = _build_report(registry)
@@ -523,7 +576,9 @@ class TestReportDisplayAndSerialize:
             "scheduler_random_seed": 42,
             "dataloader_random_seed": 42,
         }
-        report = Report.from_snapshot(snap, run_config=run_config)
+        report = Report.from_snapshot(
+            snap, run_config=run_config, token_count_source=DEFAULT_SOURCE
+        )
         assert json.loads(report.to_json())["run_config"] == run_config
 
         lines: list[str] = []
@@ -532,7 +587,8 @@ class TestReportDisplayAndSerialize:
         assert any("load_pattern:" in ln and "poisson" in ln for ln in lines)
 
         # Absent run_config -> null, not omitted.
-        assert json.loads(Report.from_snapshot(snap).to_json())["run_config"] is None
+        report = Report.from_snapshot(snap, token_count_source=DEFAULT_SOURCE)
+        assert json.loads(report.to_json())["run_config"] is None
 
     def test_to_json_save(self, tmp_path: Path):
         registry = _make_registry(n_samples=5)
@@ -546,21 +602,8 @@ class TestReportDisplayAndSerialize:
 
     def test_display_no_started_at(self):
         """test_started_at=0 should not display a timestamp."""
-        report = Report(
-            version="test",
-            git_sha=None,
-            test_started_at=0,
-            n_samples_issued=0,
-            n_samples_completed=0,
-            n_samples_failed=0,
-            duration_ns=None,
-            state="complete",
-            complete=True,
-            ttft={},
-            tpot={},
-            latency={},
-            input_sequence_lengths={},
-            output_sequence_lengths={},
+        report = make_report(
+            n_samples_issued=0, n_samples_completed=0, duration_ns=None
         )
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
@@ -569,44 +612,23 @@ class TestReportDisplayAndSerialize:
 
     def test_display_warns_when_incomplete(self):
         """Reports with ``complete=False`` surface a WARNING in display()."""
-        report = Report(
-            version="test",
-            git_sha=None,
-            test_started_at=0,
-            n_samples_issued=10,
-            n_samples_completed=10,
-            n_samples_failed=0,
-            duration_ns=1_000_000_000,
-            state="complete",  # drain-timeout case: complete state, n_pending>0
-            complete=False,
-            ttft={},
-            tpot={},
-            latency={},
-            input_sequence_lengths={},
-            output_sequence_lengths={},
-        )
+        # Drain-timeout case: complete state, n_pending>0.
+        report = make_report(duration_ns=1_000_000_000, complete=False)
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
         output = "\n".join(lines)
         assert "WARNING" in output or "incomplete" in output.lower()
 
-    def _report_with_full_run_osl(self, fr, *, osl_windowed=None, complete=True):
-        return Report(
-            version="test",
-            git_sha=None,
-            test_started_at=0,
-            n_samples_issued=10,
-            n_samples_completed=10,
-            n_samples_failed=0,
+    def _report_with_full_run_osl(
+        self, fr, *, osl_windowed=None, complete=True, primary=DEFAULT_SOURCE
+    ):
+        return make_report(
             duration_ns=1_000_000_000,
             state="complete" if complete else "interrupted",
             complete=complete,
-            ttft={},
-            tpot={},
-            latency={},
-            input_sequence_lengths={},
             output_sequence_lengths=osl_windowed or {},
             output_sequence_lengths_full_run=fr,
+            token_count_source=primary,
         )
 
     def test_display_full_run_osl_mean(self):
@@ -663,45 +685,136 @@ class TestReportDisplayAndSerialize:
         assert "PARTIAL" in output
         assert "NOT valid for the OSL accuracy gate" in output
 
-    def test_display_full_run_osl_missing_on_complete_performance_run(self):
+    @pytest.mark.parametrize(
+        ("primary", "expected"),
+        [
+            # Fixed wording that report.txt readers match on. A missing
+            # tokenizer can only cost a client-primary run its block.
+            (
+                TokenCountSource.CLIENT,
+                "  OSL per-turn mean (accuracy): not computed "
+                "(no tokenizer or unreadable sample map)",
+            ),
+            (
+                TokenCountSource.SERVER,
+                "  OSL per-turn mean (accuracy): not computed "
+                "(no event log or unreadable sample map)",
+            ),
+        ],
+        ids=["client", "server"],
+    )
+    def test_display_full_run_osl_missing_on_complete_performance_run(
+        self, primary, expected
+    ):
         """A COMPLETE perf run (windowed OSL present) with no full-run block
-        blames the tokenizer/sample-map, not incompleteness."""
-        report = self._report_with_full_run_osl(None, osl_windowed={"avg": 100.0})
-        lines: list[str] = []
-        report.display(fn=lines.append, summary_only=True)
-        output = "".join(lines)
-        assert "no tokenizer or unreadable sample map" in output
-        assert "run incomplete" not in output
+        blames the sample map (and, client-primary, the tokenizer), not
+        incompleteness."""
+        report = self._report_with_full_run_osl(
+            None, osl_windowed={"avg": 100.0}, primary=primary
+        )
+        lines = _display_lines(report, summary_only=True)
+        assert expected in lines
+        assert not any("run incomplete" in line for line in lines)
 
-    def test_display_full_run_osl_incomplete_run_with_windowed_osl(self):
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    def test_display_full_run_osl_incomplete_run_with_windowed_osl(self, primary):
         """An INTERRUPTED perf run (windowed OSL present, no block) must report
         incompleteness — not a false tokenizer/sample-map diagnosis."""
         report = self._report_with_full_run_osl(
-            None, osl_windowed={"avg": 100.0}, complete=False
+            None, osl_windowed={"avg": 100.0}, complete=False, primary=primary
         )
-        lines: list[str] = []
-        report.display(fn=lines.append, summary_only=True)
-        output = "".join(lines)
+        output = "".join(_display_lines(report, summary_only=True))
         assert "run incomplete" in output
-        assert "no tokenizer or unreadable sample map" not in output
+        assert "unreadable sample map" not in output
+
+    @pytest.mark.parametrize(
+        ("primary", "counts"),
+        [
+            # Missing usage does not decide a client-primary block, so its
+            # counts line omits it.
+            (
+                TokenCountSource.CLIENT,
+                "(1 empty, 0 errored, 0 undecodable, 0 missing)",
+            ),
+            (
+                TokenCountSource.SERVER,
+                "(1 empty, 0 errored, 0 undecodable, 0 missing, 1 missing usage)",
+            ),
+        ],
+    )
+    def test_display_full_run_osl_counts_by_primary(self, primary, counts):
+        """The summary lines name missing usage only on a server primary."""
+        fr = {
+            "output_sequence_lengths": {"avg": 5.0},
+            "n_turns_counted": 2,
+            "n_empty": 1,
+            "n_errors": 0,
+            "n_undecodable": 0,
+            "n_missing": 0,
+            "n_missing_usage": 1,
+            "partial": False,
+        }
+        uncounted = {**fr, "output_sequence_lengths": {}, "n_turns_counted": 0}
+        lines: list[str] = []
+        for block in (fr, uncounted):
+            self._report_with_full_run_osl(block, primary=primary).display(
+                fn=lines.append, summary_only=True
+            )
+        assert [line for line in lines if "OSL per-turn mean" in line] == [
+            f"  OSL per-turn mean (accuracy, all turns): 5.0 tokens over 2 turns "
+            f"{counts}",
+            f"  OSL per-turn mean (accuracy): no countable turns {counts}",
+        ]
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    @pytest.mark.parametrize("other_block", [None, {"avg": 3.0}])
+    def test_display_full_run_osl_by_basis(self, primary, other_block):
+        """The other basis's full-run breakdown is shown from its suffixed key."""
+        fr = {
+            "output_sequence_lengths": {"avg": 5.0},
+            "n_turns_counted": 2,
+            "n_empty": 1,
+            "n_errors": 0,
+            "n_undecodable": 0,
+            "n_missing": 0,
+            "n_missing_usage": 1,
+            basis_key(
+                "output_sequence_lengths", primary.other, primary=primary
+            ): other_block,
+        }
+        lines: list[str] = []
+        self._report_with_full_run_osl(fr, primary=primary).display(fn=lines.append)
+        out = "".join(lines)
+        label = (
+            f"Output sequence lengths (full run, all turns) ({primary.other.value}):"
+        )
+        assert (label in out) is (other_block is not None)
+        assert other_block is None or "  Avg.: 3.00 tokens" in out
+
+    def test_display_full_run_osl_no_usage_at_all(self):
+        """A server block whose turns all lacked usage shows the count, not a mean."""
+        lines: list[str] = []
+        self._report_with_full_run_osl(
+            {
+                "output_sequence_lengths": {},
+                "n_turns_counted": 0,
+                "n_missing_usage": 4,
+                "partial": True,
+            },
+            primary=TokenCountSource.SERVER,
+        ).display(fn=lines.append, summary_only=True)
+        assert (
+            "no countable turns "
+            "(0 empty, 0 errored, 0 undecodable, 0 missing, 4 missing usage)"
+        ) in "".join(lines)
 
     def test_display_warns_when_interrupted(self):
         """Reports with ``state == "interrupted"`` surface a distinct WARNING."""
-        report = Report(
-            version="test",
-            git_sha=None,
-            test_started_at=0,
-            n_samples_issued=10,
+        report = make_report(
             n_samples_completed=5,
-            n_samples_failed=0,
             duration_ns=1_000_000_000,
             state="interrupted",
             complete=False,
-            ttft={},
-            tpot={},
-            latency={},
-            input_sequence_lengths={},
-            output_sequence_lengths={},
         )
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
@@ -730,7 +843,7 @@ class TestFromSnapshotDict:
             "n_pending_tasks": 0,
             "metrics": [],
         }
-        report = Report.from_snapshot(snap)
+        report = Report.from_snapshot(snap, token_count_source=DEFAULT_SOURCE)
         assert report.n_samples_issued == 0
         assert report.n_samples_completed == 0
         assert report.n_samples_failed == 0
@@ -744,7 +857,7 @@ class TestFromSnapshotDict:
         produces a non-crashing Report tagged interrupted and incomplete.
         Defaults: state→interrupted, counters→0, series→empty.
         """
-        report = Report.from_snapshot({})
+        report = Report.from_snapshot({}, token_count_source=DEFAULT_SOURCE)
         assert report.state == "interrupted"
         assert report.complete is False
         assert report.n_samples_issued == 0
@@ -762,7 +875,7 @@ class TestFromSnapshotDict:
                 {"type": "counter", "name": "tracked_samples_completed", "value": 80},
             ],
         }
-        report = Report.from_snapshot(snap)
+        report = Report.from_snapshot(snap, token_count_source=DEFAULT_SOURCE)
         assert report.state == "interrupted"
         assert report.complete is False
         # Partial counters still surface through.
@@ -781,7 +894,7 @@ class TestFromSnapshotDict:
                 {"type": "counter", "name": "tracked_samples_issued", "value": 5},
             ],
         }
-        report = Report.from_snapshot(snap)
+        report = Report.from_snapshot(snap, token_count_source=DEFAULT_SOURCE)
         assert report.n_samples_issued == 5
 
     def test_display_handles_scrubbed_nan_percentiles(self):
@@ -828,7 +941,7 @@ class TestFromSnapshotDict:
                 },
             ],
         }
-        report = Report.from_snapshot(snap)
+        report = Report.from_snapshot(snap, token_count_source=DEFAULT_SOURCE)
 
         lines: list[str] = []
         # Currently crashes with TypeError on val * scale_factor.
@@ -995,7 +1108,7 @@ class TestSteadyStateOnTheReport:
                 state=SessionState.COMPLETE, n_pending_tasks=0, steady_state=verdict
             )
         )
-        return Report.from_snapshot(snap)
+        return Report.from_snapshot(snap, token_count_source=DEFAULT_SOURCE)
 
     def test_absent_by_default(self):
         assert self._report(None).steady_state is None
@@ -1023,7 +1136,7 @@ class TestSteadyStateOnTheReport:
             registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
         snap["steady_state"] = raw
-        report = Report.from_snapshot(snap)
+        report = Report.from_snapshot(snap, token_count_source=DEFAULT_SOURCE)
         assert report.steady_state is None
         lines: list[str] = []
         report.display(lines.append)  # must not raise
@@ -1048,3 +1161,534 @@ class TestSteadyStateOnTheReport:
         assert "Steady state: not found (no admissible steady plateau)" in "".join(
             lines
         )
+
+
+# ---------------------------------------------------------------------------
+# Token-count bases: the primary keeps the base names, the other is suffixed
+# ---------------------------------------------------------------------------
+
+# Snapshot inputs that leave one basis short of some samples: the server basis
+# through samples without usable usage, the client basis through tokenization
+# still pending at the final snapshot.
+_SHORTFALL: dict[TokenCountSource, dict[str, int]] = {
+    TokenCountSource.SERVER: {"n_missing": 2, "n_missing_empty": 1},
+    TokenCountSource.CLIENT: {"n_pending": 3},
+}
+_TOKEN_SERIES = ("isl", "osl", "tpot_ns")
+_SERVER_USAGE_COUNTERS = frozenset(
+    key.value
+    for key in (
+        MetricCounterKey.TRACKED_SAMPLES_MISSING_USAGE,
+        MetricCounterKey.TRACKED_SAMPLES_MISSING_USAGE_EMPTY_OUTPUT,
+        MetricCounterKey.OSL_PAIRED_SAMPLES,
+        MetricCounterKey.OSL_PAIRED_CLIENT_TOKENS,
+        MetricCounterKey.OSL_PAIRED_SERVER_TOKENS,
+    )
+)
+# Report fields that describe server usage, which a snapshot without server
+# series or usage counters cannot fill.
+_SERVER_USAGE_FIELDS = frozenset(
+    {
+        "other_basis",
+        "osl_paired",
+        "n_samples_missing_usage",
+        "n_samples_missing_usage_empty_output",
+    }
+)
+_NO_OTHER_BASIS = OtherBasisMetrics(
+    input_sequence_lengths=None, output_sequence_lengths=None, tpot=None, tps=None
+)
+
+
+def _basis_snapshot(
+    primary: TokenCountSource,
+    *,
+    other_series: bool = True,
+    other_records: bool = True,
+    n_pending: int = 0,
+    n_missing: int = 0,
+    n_missing_empty: int = 0,
+    paired: tuple[int, int, int] = (0, 0, 0),
+    loadgen_window_ns: int = 0,
+    state: SessionState = SessionState.COMPLETE,
+) -> dict[str, Any]:
+    """A 5-sample snapshot dict with the other basis's series beside the primary's.
+
+    The primary basis records ISL 50..54 and OSL 100..104 (total 510) over a
+    10 s tracked window. The other basis records ISL 40..44 (total 210), OSL
+    90..94 (total 460) and a 2 ms TPOT per sample.
+    """
+    registry = _make_registry(n_samples=5)
+    if other_series:
+        isl, osl, tpot = (
+            basis_key(base, primary.other, primary=primary) for base in _TOKEN_SERIES
+        )
+        for name, dtype in ((isl, int), (osl, int), (tpot, float)):
+            registry.register_series(
+                name,
+                hdr_low=1,
+                hdr_high=_NS_HIGH,
+                n_histogram_buckets=10,
+                percentiles=(50.0, 90.0, 99.0),
+                dtype=dtype,
+            )
+        for i in range(5 if other_records else 0):
+            registry.record(isl, 40 + i)
+            registry.record(osl, 90 + i)
+            registry.record(tpot, 2_000_000.0)
+    for key, value in (
+        (MetricCounterKey.TRACKED_SAMPLES_MISSING_USAGE, n_missing),
+        (MetricCounterKey.TRACKED_SAMPLES_MISSING_USAGE_EMPTY_OUTPUT, n_missing_empty),
+        (MetricCounterKey.OSL_PAIRED_SAMPLES, paired[0]),
+        (MetricCounterKey.OSL_PAIRED_CLIENT_TOKENS, paired[1]),
+        (MetricCounterKey.OSL_PAIRED_SERVER_TOKENS, paired[2]),
+    ):
+        registry.set_counter(key.value, value)
+    if loadgen_window_ns:
+        _set_loadgen_window(registry, duration_ns=loadgen_window_ns)
+    return snapshot_to_dict(
+        registry.build_snapshot(state=state, n_pending_tasks=n_pending)
+    )
+
+
+def _basis_report(primary: TokenCountSource, **snapshot_over: Any) -> Report:
+    return Report.from_snapshot(
+        _basis_snapshot(primary, **snapshot_over), token_count_source=primary
+    )
+
+
+def _display_lines(report: Report, **display_over: Any) -> list[str]:
+    lines: list[str] = []
+    report.display(fn=lines.append, **display_over)
+    return lines
+
+
+def _with_full_run(report: Report, *, other_partial: bool) -> Report:
+    """``report`` with a full-run OSL block on both bases.
+
+    The primary basis counts 2 turns (mean 6.0) and one empty turn; the other
+    basis counts 1 turn, marked partial when ``other_partial``.
+    """
+    primary = report.token_count_source
+    other_series = series_metric_dict([5])
+    if other_partial:
+        other_series["partial"] = True
+    block = {
+        "output_sequence_lengths": series_metric_dict([3, 9]),
+        "n_turns_counted": 2,
+        "n_empty": 1,
+        "n_errors": 0,
+        "n_undecodable": 0,
+        "n_missing": 0,
+        "partial": False,
+        "n_missing_usage": 0,
+        basis_key("output_sequence_lengths", primary.other, primary=primary): (
+            other_series
+        ),
+    }
+    return msgspec.structs.replace(report, output_sequence_lengths_full_run=block)
+
+
+@pytest.mark.unit
+class TestTokenCountSourceRoles:
+    @pytest.mark.parametrize(
+        ("state", "n_pending"),
+        [
+            (SessionState.COMPLETE, 0),
+            (SessionState.COMPLETE, 3),
+            (SessionState.INTERRUPTED, 0),
+        ],
+    )
+    def test_client_primary_unsuffixed_fields_ignore_server_series(
+        self, state, n_pending
+    ):
+        """S+ adds the *_server series and usage counters to S; under the client
+        basis that changes only the fields describing server usage, and the
+        display only gains lines."""
+        client = TokenCountSource.CLIENT
+        s_plus = _basis_snapshot(
+            client,
+            n_missing=2,
+            n_missing_empty=1,
+            paired=(4, 380, 400),
+            n_pending=n_pending,
+            state=state,
+        )
+        server_only = _SERVER_USAGE_COUNTERS | {
+            basis_key(base, TokenCountSource.SERVER, primary=client)
+            for base in _TOKEN_SERIES
+        }
+        s = {
+            **s_plus,
+            "metrics": [m for m in s_plus["metrics"] if m["name"] not in server_only],
+        }
+        base = Report.from_snapshot(s, token_count_source=client)
+        plus = Report.from_snapshot(s_plus, token_count_source=client)
+
+        fields = [f for f in Report.__struct_fields__ if f not in _SERVER_USAGE_FIELDS]
+        assert {f: getattr(plus, f) for f in fields} == {
+            f: getattr(base, f) for f in fields
+        }
+        assert plus.incomplete_reason() == base.incomplete_reason()
+        assert base.other_basis == _NO_OTHER_BASIS != plus.other_basis
+        # Every line of base's display appears in plus's, in the same order.
+        plus_lines = iter(_display_lines(plus))
+        assert all(line in plus_lines for line in _display_lines(base))
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    def test_other_basis_json_keys_follow_naming_rule(self, primary):
+        data = json.loads(_basis_report(primary).to_json())
+        other = primary.other
+        for field in (
+            "input_sequence_lengths",
+            "output_sequence_lengths",
+            "tpot",
+            "tps",
+        ):
+            assert basis_key(field, other, primary=primary) in data, field
+        assert [key for key in data if key.endswith(f"_{primary.value}")] == []
+        assert "other_basis" not in data
+        assert (
+            data[basis_key("output_sequence_lengths", other, primary=primary)]["total"]
+            == 460
+        )
+        assert data[basis_key("tps", other, primary=primary)] == pytest.approx(46.0)
+        assert data["token_count_source"] == primary.value
+        assert {
+            "n_samples_missing_usage",
+            "n_samples_missing_usage_empty_output",
+            "client_token_tasks_pending",
+            "osl_paired",
+        } <= data.keys()
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    @pytest.mark.parametrize(
+        ("window_ns", "tps", "other_tps"),
+        [(0, 51.0, 46.0), (5_000_000_000, 102.0, 92.0)],
+    )
+    def test_other_basis_tps_shares_the_tps_window(
+        self, primary, window_ns, tps, other_tps
+    ):
+        r = _basis_report(primary, loadgen_window_ns=window_ns)
+        other = r.other_basis
+        assert r.tps == pytest.approx(tps)
+        assert other.tps == pytest.approx(other_tps)
+        assert other.input_sequence_lengths["total"] == 210
+        assert other.output_sequence_lengths["total"] == 460
+        assert other.tpot["min"] == pytest.approx(2_000_000.0)
+        assert "partial" not in other.output_sequence_lengths
+        # From the primary OSL.
+        assert r.e2e_avg_interactivity == pytest.approx(20_000.0)
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    def test_other_block_partial_inside_dict_and_tps_none(self, primary):
+        r = _basis_report(primary, **_SHORTFALL[primary.other])
+        other = r.other_basis
+        for block in (
+            other.input_sequence_lengths,
+            other.output_sequence_lengths,
+            other.tpot,
+        ):
+            assert block["partial"] is True
+        assert other.tps is None
+        assert "partial" not in r.output_sequence_lengths
+        assert r.tps == pytest.approx(51.0)
+        data = json.loads(r.to_json())
+        assert (
+            data[basis_key("output_sequence_lengths", primary.other, primary=primary)][
+                "partial"
+            ]
+            is True
+        )
+        assert data[basis_key("tps", primary.other, primary=primary)] is None
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    @pytest.mark.parametrize("other_series", [False, True], ids=["absent", "empty"])
+    def test_other_block_none_when_nothing_recorded(self, primary, other_series):
+        """No recorded sample means no block, even when the basis fell short."""
+        r = _basis_report(
+            primary,
+            other_series=other_series,
+            other_records=False,
+            **_SHORTFALL[primary.other],
+        )
+        assert r.other_basis == _NO_OTHER_BASIS
+        assert r.other_basis_partial_reason() is None
+        data = json.loads(r.to_json())
+        for field in (
+            "input_sequence_lengths",
+            "output_sequence_lengths",
+            "tpot",
+            "tps",
+        ):
+            assert data[basis_key(field, primary.other, primary=primary)] is None
+        label = f"({primary.other.value})"
+        assert [line for line in _display_lines(r) if label in line] == [
+            f"Other token basis {label}:"
+        ]
+
+    @pytest.mark.parametrize(
+        ("primary", "short", "complete"),
+        [
+            (TokenCountSource.CLIENT, TokenCountSource.SERVER, True),
+            (TokenCountSource.SERVER, TokenCountSource.CLIENT, True),
+            (TokenCountSource.CLIENT, TokenCountSource.CLIENT, False),
+            (TokenCountSource.SERVER, TokenCountSource.SERVER, False),
+        ],
+    )
+    def test_complete_follows_primary_only(self, primary, short, complete):
+        assert _basis_report(primary, **_SHORTFALL[short]).complete is complete
+
+    @pytest.mark.parametrize(
+        ("primary", "reason"),
+        [
+            (
+                TokenCountSource.CLIENT,
+                "2 of 5 successful tracked samples returned no server token "
+                "usage; the *_server blocks are partial and the run is not "
+                "affected",
+            ),
+            (
+                TokenCountSource.SERVER,
+                "3 client tokenization tasks were still pending; the *_client "
+                "blocks are partial and the run is not affected",
+            ),
+        ],
+    )
+    def test_partial_other_basis_is_shown_as_information(self, primary, reason):
+        r = _basis_report(primary, **_SHORTFALL[primary.other])
+        assert r.other_basis_partial_reason() == reason
+        out = "\n".join(_display_lines(r, summary_only=True))
+        assert reason in out
+        assert "WARNING" not in out
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    def test_other_basis_sections_are_labelled_with_the_basis(self, primary):
+        other = primary.other.value
+        out = "\n".join(_display_lines(_basis_report(primary, paired=(4, 380, 400))))
+        for text in (
+            "Input sequence lengths:",
+            "Output sequence lengths:",
+            f"Input sequence lengths ({other}):",
+            f"Output sequence lengths ({other}):",
+            f"TPOT ({other}):",
+            f"Token count source: {primary.value}",
+            f"TPS ({other}): 46.00",
+            "OSL paired (client - server): mean -5.00 tokens/sample, "
+            "ratio 0.9500 over 4 samples",
+        ):
+            assert text in out
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    def test_other_basis_lines_follow_the_primary_summary(self, primary):
+        other = primary.other.value
+        report = _basis_report(
+            primary, paired=(4, 380, 400), **_SHORTFALL[primary.other]
+        )
+        lines = _display_lines(
+            _with_full_run(report, other_partial=False), summary_only=True
+        )
+        heading = lines.index(f"Other token basis ({other}):")
+        assert lines[heading + 1 : -1] == [
+            f"  Token count source: {primary.value}",
+            "  OSL paired (client - server): mean -5.00 tokens/sample, "
+            "ratio 0.9500 over 4 samples",
+            f"  {report.other_basis_partial_reason()}",
+        ]
+        assert lines[heading - 1].startswith(
+            "  OSL per-turn mean (accuracy, all turns)"
+        )
+        assert lines[-1] == "----------------- End of Summary -----------------"
+        assert f"  TPS ({other}): 46.00" in _display_lines(
+            _basis_report(primary), summary_only=True
+        )
+
+    def test_client_primary_summary_is_mains_up_to_the_other_basis_heading(self):
+        report = msgspec.structs.replace(
+            _with_full_run(
+                _basis_report(
+                    TokenCountSource.CLIENT,
+                    paired=(4, 380, 400),
+                    **_SHORTFALL[TokenCountSource.SERVER],
+                ),
+                other_partial=True,
+            ),
+            version="9.9.9",
+            git_sha="abc1234",
+            steady_state=TestSteadyStateOnTheReport._verdict(),
+            accuracy=[
+                {
+                    "dataset_name": "gpqa",
+                    "score": 0.5,
+                    "unit_samples": 5,
+                    "num_repeats": 1,
+                    "total_samples": 5,
+                }
+            ],
+        )
+        lines = _display_lines(report, summary_only=True)
+        heading = lines.index("Other token basis (server):")
+        # Byte-identical to main's display() for this snapshot: 5 samples over
+        # a 10 s window, primary OSL 100..104, latency 5.00..5.20 ms.
+        assert lines[:heading] == [
+            "----------------- Summary -----------------",
+            "Version: 9.9.9",
+            "Git SHA: abc1234",
+            "Total samples issued: 5",
+            "Total samples succeeded: 5",
+            "Total samples failed: 0",
+            "Total samples dropped: 0",
+            "Duration: 10.00 seconds",
+            "QPS: 0.50",
+            "TPS: 51.00",
+            "E2E average interactivity: 20000.00 tokens/s",
+            "Steady state: super-passes 1...8 (post-warmup), 4000 samples over 700s",
+            "  Steady TPS: 1234.50 system, 42.00 per user",
+            "  WARNING: ttft_p50 drifting up over the rest of the run",
+            "  ANOMALY: level shift at super-pass 7, TPOT +12.5% toward end of run",
+            "Accuracy:",
+            "  gpqa: 0.5 (unit=5, repeats=1, total=5)",
+            "  Average: 0.5",
+            "  OSL per-turn mean (accuracy, all turns): 6.0 tokens over 2 turns "
+            "(1 empty, 0 errored, 0 undecodable, 0 missing)",
+        ]
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
+    @pytest.mark.parametrize("short", [False, True], ids=["whole", "partial"])
+    def test_partial_other_basis_sections_are_marked(self, primary, short):
+        other = primary.other.value
+        report = _with_full_run(
+            _basis_report(primary, **(_SHORTFALL[primary.other] if short else {})),
+            other_partial=short,
+        )
+        titles = [line for line in _display_lines(report) if line.endswith(":")]
+        mark = " (partial)" if short else ""
+        for label in (
+            "Input sequence lengths",
+            "Output sequence lengths",
+            "TPOT",
+            "Output sequence lengths (full run, all turns)",
+        ):
+            assert f"{label} ({other}){mark}:" in titles
+        for label in (
+            "Input sequence lengths",
+            "Output sequence lengths",
+            "Output sequence lengths (full run, all turns)",
+        ):
+            assert f"{label}:" in titles
+        assert sum("(partial)" in title for title in titles) == (4 if short else 0)
+
+    def test_osl_paired_json_shape(self):
+        golden = {
+            "n_samples": 4,
+            "client_tokens": 380,
+            "server_tokens": 400,
+            "mean_diff": -5.0,
+            "ratio": 0.95,
+        }
+        paired = json.loads(
+            _basis_report(DEFAULT_SOURCE, paired=(4, 380, 400)).to_json()
+        )["osl_paired"]
+        assert paired == golden
+        assert list(paired) == list(golden)
+        assert _basis_report(DEFAULT_SOURCE).osl_paired is None
+        no_server_tokens = _basis_report(DEFAULT_SOURCE, paired=(2, 10, 0))
+        assert json.loads(no_server_tokens.to_json())["osl_paired"]["ratio"] is None
+
+    def test_from_snapshot_requires_basis(self):
+        with pytest.raises(TypeError, match="token_count_source"):
+            Report.from_snapshot(_basis_snapshot(DEFAULT_SOURCE))
+
+
+_USAGE = "3 of 10 successful tracked samples returned no server token usage"
+# The CLI flag, then the YAML key: `benchmark from-config` takes no such flag.
+_FIX = (
+    "set --token-count-source client if this server cannot report usage "
+    "(YAML: settings.token_count_source: client)"
+)
+_MISSING = {
+    "complete": False,
+    "token_count_source": TokenCountSource.SERVER,
+    "n_samples_missing_usage": 3,
+}
+# Report fields that leave each basis short when it is primary, and the cause
+# ``incomplete_reason`` then names.
+_PRIMARY_SHORTFALL: dict[TokenCountSource, tuple[dict[str, int], str]] = {
+    TokenCountSource.CLIENT: (
+        {"client_token_tasks_pending": 4},
+        "Metrics tokenization did not finish",
+    ),
+    TokenCountSource.SERVER: ({"n_samples_missing_usage": 3}, f"{_USAGE}; {_FIX}"),
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("primary", list(TokenCountSource))
+def test_incomplete_reason_names_state_then_drops_then_primary(primary):
+    """State, then dropped samples, then the primary basis's shortfall."""
+    shortfall, reason = _PRIMARY_SHORTFALL[primary]
+    incomplete = {"complete": False, "token_count_source": primary, **shortfall}
+    assert make_report(**incomplete).incomplete_reason() == reason
+    assert make_report(**incomplete, n_samples_completed=8).incomplete_reason() == (
+        "Benchmark report is incomplete (state=complete, n_samples_dropped=2)"
+    )
+    assert make_report(**incomplete, state="interrupted").incomplete_reason() == (
+        "Benchmark report is incomplete (state=interrupted, n_samples_dropped=0)"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("over", "expected"),
+    [
+        ({}, None),
+        (
+            {"complete": False, "state": "live"},
+            "Benchmark report is incomplete (state=live, n_samples_dropped=0)",
+        ),
+        # Every server count is whole, so there is no shortfall to name.
+        (
+            {"complete": False, "token_count_source": TokenCountSource.SERVER},
+            "Benchmark report is incomplete (state=complete, n_samples_dropped=0)",
+        ),
+    ],
+)
+def test_incomplete_reason_without_a_primary_shortfall(over, expected):
+    assert make_report(**over).incomplete_reason() == expected
+
+
+@pytest.mark.unit
+def test_display_names_the_cause_not_a_drain_timeout():
+    lines: list[str] = []
+    make_report(**_MISSING).display(fn=lines.append, summary_only=True)
+    out = "\n".join(lines)
+    assert f"WARNING: report is incomplete: {_USAGE}" in out
+    assert "drain timed out" not in out and "tokenization did not finish" not in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("primary", "expected"),
+    [
+        # Fixed wording that report.txt readers match on.
+        (
+            TokenCountSource.CLIENT,
+            "WARNING: report is incomplete (drain timed out or no final "
+            "snapshot received) — some async metrics may be missing.",
+        ),
+        (
+            TokenCountSource.SERVER,
+            f"WARNING: report is incomplete: {_USAGE}; {_FIX}",
+        ),
+    ],
+    ids=["client", "server"],
+)
+def test_display_incomplete_warning_wording_by_primary(primary, expected):
+    shortfall, _ = _PRIMARY_SHORTFALL[primary]
+    report = make_report(
+        duration_ns=1_000_000_000,
+        complete=False,
+        token_count_source=primary,
+        **shortfall,
+    )
+    assert expected in _display_lines(report, summary_only=True)

@@ -63,6 +63,30 @@ except RuntimeError:  # pragma: no cover
     # Already set, which is fine (likely in tests or when importing multiple times)
     pass
 
+# Streaming single-choice requests in a run all carry the same stream_options,
+# so an endpoint that rejects it rejects them all; one hint per worker process
+# is enough. A module flag because each worker process holds exactly one Worker.
+_stream_options_hint_logged = False
+
+
+def _is_stream_options_rejection(
+    status_code: int, body: bytes, streaming: bool
+) -> bool:
+    """Whether an error response reads as the endpoint refusing ``stream_options``."""
+    return streaming and 400 <= status_code < 500 and b"stream_options" in body
+
+
+def _log_stream_options_hint(status_code: int) -> None:
+    global _stream_options_hint_logged
+    _stream_options_hint_logged = True
+    logger.warning(
+        "Endpoint rejected a streaming request that names stream_options "
+        "(HTTP %d). If it cannot report usage on streams, rerun with "
+        "--no-stream-include-usage (YAML: settings.client.stream_include_usage: "
+        "false).",
+        status_code,
+    )
+
 
 def worker_main(
     worker_id: int,
@@ -335,7 +359,9 @@ class Worker:
     def _prepare_request(self, query: Query) -> InFlightRequest:
         """Build InFlightRequest with serialized HTTP bytes."""
         # Encode Query into HTTP payload bytes using adapter
-        body_bytes = self._adapter.encode_query(query)
+        body_bytes = self._adapter.encode_query(
+            query, include_usage=self.http_config.stream_include_usage
+        )
         is_streaming = query.data.get("stream", False)
 
         # Build complete HTTP request bytes
@@ -395,6 +421,14 @@ class Worker:
             if status_code != 200:
                 error_body = await conn.protocol.read_body()
                 self._pool.release(conn)
+                if (
+                    not _stream_options_hint_logged
+                    and self.http_config.stream_include_usage
+                    and _is_stream_options_rejection(
+                        status_code, error_body, req.is_streaming
+                    )
+                ):
+                    _log_stream_options_hint(status_code)
                 await self._handle_error(
                     req.query_id,
                     f"HTTP {status_code}: {error_body.decode('utf-8', errors='replace')}",

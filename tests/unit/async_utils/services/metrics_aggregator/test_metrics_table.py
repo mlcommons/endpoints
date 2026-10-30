@@ -306,7 +306,7 @@ class TestOslTriggerToolCalls:
         registry.register_series("osl", hdr_low=1, hdr_high=100_000)
         loop = asyncio.get_running_loop()
         queue = TokenBatchQueue(MockBatchTokenizer(), loop)
-        trigger = OslTrigger(registry, queue)
+        trigger = OslTrigger(registry, queue, metric_name="osl")
 
         tool_calls = (
             {
@@ -342,7 +342,7 @@ class TestOslTriggerToolCalls:
         registry.register_series("osl", hdr_low=1, hdr_high=100_000)
         loop = asyncio.get_running_loop()
         queue = TokenBatchQueue(MockBatchTokenizer(), loop)
-        trigger = OslTrigger(registry, queue)
+        trigger = OslTrigger(registry, queue, metric_name="osl")
 
         tmo = TextModelOutput(output="hello world")
         ev = EventRecord(
@@ -379,7 +379,7 @@ class TestOslTriggerToolCalls:
         registry.register_series("osl", hdr_low=1, hdr_high=100_000)
         tokenizer = CapturingTokenizer()
         queue = TokenBatchQueue(tokenizer, asyncio.get_running_loop())
-        trigger = OslTrigger(registry, queue)
+        trigger = OslTrigger(registry, queue, metric_name="osl")
         output = TextModelOutput(output="answer", reasoning="private reasoning")
 
         trigger.fire(
@@ -419,7 +419,7 @@ class TestTpotTriggerToolCalls:
         )
         loop = asyncio.get_running_loop()
         queue = TokenBatchQueue(MockBatchTokenizer(), loop)
-        trigger = TpotTrigger(registry, queue)
+        trigger = TpotTrigger(registry, queue, metric_name="tpot_ns", collector=None)
 
         tool_calls = (
             {
@@ -459,7 +459,7 @@ class TestTpotTriggerToolCalls:
         )
         loop = asyncio.get_running_loop()
         queue = TokenBatchQueue(MockBatchTokenizer(), loop)
-        trigger = TpotTrigger(registry, queue)
+        trigger = TpotTrigger(registry, queue, metric_name="tpot_ns", collector=None)
 
         tool_call_chunks = (
             (

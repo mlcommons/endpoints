@@ -26,7 +26,7 @@ import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -49,11 +49,18 @@ except ImportError:
     _evaluate = None
     _nltk = None
 
-from ..core.record import EventRecord, EventType, SampleEventType
+from ..core.record import (
+    EventLogFormatError,
+    EventRecord,
+    EventType,
+    SampleEventType,
+    is_complete_line,
+)
 from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
+from ..metrics.token_count_basis import read_server_usage
 from .accuracy_results import build_breakdown
 from .extractor import (
     Extractor,
@@ -61,6 +68,37 @@ from .extractor import (
 )
 
 logger = logging.getLogger(__name__)
+
+_EVENT_DECODER = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+# How every line of the JSONL writer's compact form starts; ``is_complete_line``
+# matches nothing in any other form.
+_COMPACT_EVENT_PREFIX = b'{"event_type":"'
+# The output a COMPLETE event without a text payload is classified against.
+_NO_OUTPUT = TextModelOutput(output="")
+
+
+def _require_compact_log(lines: Iterable[bytes], path: Path) -> None:
+    """Raise ``EventLogFormatError`` unless the first non-empty line is compact.
+
+    Without this check a log in any other form reads as one with no COMPLETE
+    record, and every sample scores as missing.
+    """
+    for line in lines:
+        if not line.strip():
+            continue
+        if not line.startswith(_COMPACT_EVENT_PREFIX):
+            raise EventLogFormatError(
+                f"{path}: the event log is not in the JSONL writer's compact "
+                "form (each line starts with "
+                f"{_COMPACT_EVENT_PREFIX.decode()}); re-encode it with "
+                "separators=(',', ':')"
+            )
+        return
+
+
+def _generated_text(data: Any) -> str:
+    """The text the model generated: ``str(TextModelOutput)``, "" without output."""
+    return str(data) if data is not None else ""
 
 
 class Scorer(ABC):
@@ -163,26 +201,61 @@ class Scorer(ABC):
             d = msgspec.json.decode(f.read())
             return d[self.dataset_name]  # Implicitly raises KeyError
 
-    def _iter_complete(self) -> Iterator[tuple[str, Any]]:
-        """Yield ``(sample_uuid, data)`` for each COMPLETE event in events.jsonl.
+    def _iter_complete_records(self) -> Iterator[EventRecord]:
+        """Yield each COMPLETE ``EventRecord`` in events.jsonl.
 
-        The single events reader shared by ``get_raw_outputs`` and any scorer
-        that needs the structured event data (e.g. BFCL's ``tool_calls``). The
-        EventLoggerService writes EventRecord objects serialized via msgspec.
+        The single events reader behind ``_iter_complete``,
+        ``get_raw_outputs`` and ``iter_complete_outputs``. The
+        EventLoggerService writes EventRecord objects serialized via msgspec;
+        only COMPLETE lines are decoded (``is_complete_line``). Raises
+        ``EventLogFormatError`` for a log not in that compact form.
         """
         events_log_path = self.report_dir / "events.jsonl"
         if not events_log_path.exists():
             raise FileNotFoundError(f"Events log file not found at {events_log_path}")
 
-        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
-        with events_log_path.open("r") as f:
+        decode = _EVENT_DECODER.decode
+        with events_log_path.open("rb") as f:
+            _require_compact_log(f, events_log_path)
+            f.seek(0)
             for line in f:
-                stripped = line.strip()
-                if not stripped:
+                if not is_complete_line(line):
                     continue
-                record = decoder.decode(stripped)
+                record = decode(line)
                 if record.event_type == SampleEventType.COMPLETE:
-                    yield record.sample_uuid, record.data
+                    yield record
+
+    def _iter_complete(self) -> Iterator[tuple[str, Any]]:
+        """Yield ``(sample_uuid, data)`` for each COMPLETE event in events.jsonl.
+
+        For ``get_raw_outputs`` and any scorer that needs the structured event
+        data (e.g. BFCL's ``tool_calls``).
+        """
+        for record in self._iter_complete_records():
+            yield record.sample_uuid, record.data
+
+    def iter_complete_outputs(
+        self, uuids: set[str] | None
+    ) -> Iterator[tuple[str, str, int | None]]:
+        """Yield ``(uuid, text, completion_tokens)`` per COMPLETE event.
+
+        One read serves accuracy OSL and response accounting on both token
+        bases. ``text`` is the model's generated text, as in
+        ``get_raw_outputs``. ``completion_tokens`` is the event's
+        server-reported count when its usage is usable (``read_server_usage``),
+        else ``None``. ``uuids`` bounds the read to a target population;
+        ``None`` reads every event.
+        """
+        for record in self._iter_complete_records():
+            if uuids is not None and record.sample_uuid not in uuids:
+                continue
+            data = record.data
+            _, completion_tokens = read_server_usage(
+                record.prompt_tokens,
+                record.completion_tokens,
+                data if isinstance(data, TextModelOutput) else _NO_OUTPUT,
+            )
+            yield record.sample_uuid, _generated_text(data), completion_tokens
 
     def get_raw_outputs(self, wanted_uuids: set[str] | None = None) -> pd.DataFrame:
         """uuid -> the text the model generated (``str(TextModelOutput)``).
@@ -194,7 +267,7 @@ class Scorer(ABC):
         response-text corpus.
         """
         rows = [
-            {"sample_uuid": u, "output": str(d) if d is not None else ""}
+            {"sample_uuid": u, "output": _generated_text(d)}
             for u, d in self._iter_complete()
             if wanted_uuids is None or u in wanted_uuids
         ]

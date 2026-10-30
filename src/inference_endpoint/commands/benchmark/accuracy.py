@@ -27,18 +27,24 @@ import json
 import logging
 import numbers
 import time
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 import msgspec.json
 
 from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
     encode_lengths,
     load_reference_backend,
 )
-from inference_endpoint.config.schema import DatasetType, ScorerMethod, TestMode
+from inference_endpoint.config.schema import (
+    DatasetType,
+    ScorerMethod,
+    TestMode,
+)
+from inference_endpoint.core.types import TokenCountSource, basis_key
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.evaluation import Extractor
 from inference_endpoint.evaluation.accuracy_results import (
@@ -91,14 +97,14 @@ def _phase_osl_stats(
     backend: Any,
     batch_size: int = 256,
 ) -> dict[str, Any] | None:
-    """Output-token-length rollup over one accuracy phase's completions.
+    """Client-basis output-token-length rollup over one accuracy phase.
 
-    Counts tokens on each sample's response text via the shared reference
-    tokenizer backend — the server's ``completion_tokens`` is not persisted, only
-    the text is (in ``events.jsonl``) — then shapes the lengths via
+    Counts tokens on each sample's response text (from ``events.jsonl``) via the
+    shared reference tokenizer backend, then shapes the lengths via
     ``series_metric_dict`` so the block matches the perf report's
-    ``output_sequence_lengths`` exactly. Returns ``None`` when the phase has no
-    completed outputs.
+    ``output_sequence_lengths`` exactly; :func:`_phase_server_osl_stats` is the
+    server-basis counterpart. Returns ``None`` when the phase has no completed
+    outputs.
 
     ``batch_size`` bounds each ``encode_batch`` pass: accuracy outputs can be tens
     of thousands of tokens each (e.g. gpt-oss lcb at 32768), so counting the whole
@@ -118,6 +124,129 @@ def _phase_osl_stats(
     for i in range(0, len(texts), batch_size):
         lengths.extend(encode_lengths(backend, texts[i : i + batch_size]))
     return series_metric_dict(lengths) or None
+
+
+class PhaseServerOsl(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """Server-basis output-token lengths of one accuracy phase.
+
+    ``block`` has the shape of :func:`_phase_osl_stats` and is ``None`` when no
+    scored sample carried usable usage; ``n_counted`` is the number of samples
+    in it, and ``n_missing_usage`` the scored samples without usable usage.
+    """
+
+    block: dict[str, Any] | None
+    n_counted: int
+    n_missing_usage: int
+
+
+def _phase_server_osl_stats(
+    sample_uuids: Iterable[str],
+    uuid_to_text: dict[str, str],
+    uuid_to_server_tokens: dict[str, int],
+) -> PhaseServerOsl:
+    """Server-basis output-token-length rollup over one accuracy phase.
+
+    The population is the phase's scored samples: non-empty output, the
+    ``scored`` class of :func:`_phase_response_counts`. Each is counted at its
+    usable ``completion_tokens`` (``uuid_to_server_tokens`` holds only those).
+    A scored sample without usable usage is counted as missing usage, which is
+    not an error: an accuracy-only run may target a server that reports none,
+    and its score stands.
+    """
+    values: list[int] = []
+    n_missing_usage = 0
+    for u in sample_uuids:
+        if not uuid_to_text.get(u):
+            continue
+        tokens = uuid_to_server_tokens.get(u)
+        if tokens is None:
+            n_missing_usage += 1
+        else:
+            values.append(tokens)
+    return PhaseServerOsl(
+        block=series_metric_dict(values) or None,
+        n_counted=len(values),
+        n_missing_usage=n_missing_usage,
+    )
+
+
+def _phase_osl_entry(
+    sample_uuids: Collection[str],
+    uuid_to_text: dict[str, str],
+    uuid_to_server_tokens: dict[str, int],
+    backend: Any | None,
+    *,
+    primary: TokenCountSource,
+    dataset_name: str,
+) -> dict[str, Any]:
+    """Response accounting and output-token lengths of one accuracy phase.
+
+    Each basis's block is named by ``basis_key("output_sequence_lengths", …)``
+    and is present only when that basis counted a sample: the client basis
+    needs ``backend``, the server basis usable usage. A server block that is
+    not primary carries ``"partial": True`` when some scored samples lacked
+    usable usage, as other-basis blocks do. ``n_osl_samples`` counts the
+    samples behind each block and ``n_missing_usage`` the scored samples
+    without usable usage, which are never filled in from the tokenizer. A
+    tokenizer failure drops only the client block.
+    """
+    response_counts = _phase_response_counts(sample_uuids, uuid_to_text)
+    server = _phase_server_osl_stats(sample_uuids, uuid_to_text, uuid_to_server_tokens)
+    blocks: dict[TokenCountSource, dict[str, Any] | None] = {
+        TokenCountSource.CLIENT: None,
+        TokenCountSource.SERVER: server.block,
+    }
+    tokenize_s = None
+    if backend is not None:
+        t0 = time.perf_counter()
+        try:
+            blocks[TokenCountSource.CLIENT] = _phase_osl_stats(
+                sample_uuids, uuid_to_text, backend
+            )
+        except Exception as e:  # noqa: BLE001 - optional block; keep the server one
+            logger.warning(
+                "Accuracy client-basis OSL skipped for %s: %s", dataset_name, e
+            )
+        # Wall-clock of just this phase's tokenization (seconds); summed across
+        # datasets for the accuracy report's total.
+        tokenize_s = round(time.perf_counter() - t0, 3)
+    server_is_other = primary is not TokenCountSource.SERVER
+    if server.block is not None and server.n_missing_usage and server_is_other:
+        blocks[TokenCountSource.SERVER] = {**server.block, "partial": True}
+    n_osl_samples = {
+        TokenCountSource.CLIENT: (
+            response_counts["scored"]
+            if blocks[TokenCountSource.CLIENT] is not None
+            else 0
+        ),
+        TokenCountSource.SERVER: server.n_counted,
+    }
+
+    entry: dict[str, Any] = {"response_counts": response_counts}
+    for basis in (primary, primary.other):
+        block = blocks[basis]
+        if block is not None:
+            # Same shape as the perf report's output_sequence_lengths.
+            entry[basis_key("output_sequence_lengths", basis, primary=primary)] = block
+            if basis is TokenCountSource.CLIENT:
+                entry["osl_tokenize_s"] = tokenize_s
+        entry[basis_key("n_osl_samples", basis, primary=primary)] = n_osl_samples[basis]
+    entry["n_missing_usage"] = server.n_missing_usage
+    return entry
+
+
+def _read_accuracy_outputs(
+    scorer: Scorer, uuids: set[str] | None
+) -> tuple[dict[str, str], dict[str, int]]:
+    """One read of ``events.jsonl``: each sample's response text, and the
+    ``completion_tokens`` of each sample whose server usage is usable."""
+    uuid_to_text: dict[str, str] = {}
+    uuid_to_server_tokens: dict[str, int] = {}
+    for uuid, text, completion_tokens in scorer.iter_complete_outputs(uuids):
+        uuid_to_text[uuid] = text
+        if completion_tokens is not None:
+            uuid_to_server_tokens[uuid] = completion_tokens
+    return uuid_to_text, uuid_to_server_tokens
 
 
 def _phase_response_counts(
@@ -246,10 +375,14 @@ def score_accuracy(
         )
 
     # Accuracy-phase output-token lengths (finalize-side, off the hot path): the
-    # aggregator only tokenizes perf-window samples, so count the accuracy
-    # responses (already in events.jsonl) here, using the same reference tokenizer
-    # as the perf side. (Counts still differ from perf for tool-call responses —
-    # client-side OSL is approximate for structured output.)
+    # aggregator only counts perf-window samples, so the accuracy responses
+    # (already in events.jsonl) are counted here on both token bases. The client
+    # basis uses the same reference tokenizer as the perf side; the server basis
+    # each sample's usable completion_tokens and needs no tokenizer. The run's
+    # primary basis keeps the base key names. (Tokenizer counts still differ from
+    # perf for tool-call responses — client-side OSL is approximate for
+    # structured output.)
+    primary = ctx.token_count_source
     has_accuracy = any(ec.dataset_type == DatasetType.ACCURACY for ec in eval_configs)
     osl_backend = _load_osl_backend(has_accuracy, ctx.tokenizer_name)
     # Bound the raw-output read to the accuracy population so finalize never holds
@@ -257,7 +390,7 @@ def score_accuracy(
     accuracy_uuids = (
         _accuracy_uuid_bound(ctx.report_dir, eval_configs) if has_accuracy else set()
     )
-    uuid_to_text: dict[str, str] | None = None
+    outputs: tuple[dict[str, str], dict[str, int]] | None = None
 
     for eval_cfg in eval_configs:
         try:
@@ -337,38 +470,29 @@ def score_accuracy(
         # perf entry (its OSL / failure counts live in result_summary.json). The
         # counts are computed independent of the tokenizer and of OSL returning a
         # block — an all-failed phase must still publish scored=0 rather than
-        # silently omitting everything. OSL stays tokenizer-gated. A read/tokenize
-        # failure only drops these blocks — it never fails scoring.
+        # silently omitting everything. A read failure only drops these blocks —
+        # it never fails scoring.
         if eval_cfg.dataset_type == DatasetType.ACCURACY:
             try:
-                if uuid_to_text is None:
+                if outputs is None:
                     # Built once from the first scorer and reused for every
-                    # dataset. get_raw_outputs() returns the model's actual
-                    # completion text (not the scorer's scoring-normalized form)
+                    # dataset: the model's actual completion text (not the
+                    # scorer's scoring-normalized form) and usable server counts
                     # for *all* phases' COMPLETE events, bounded to the accuracy
-                    # population; intersecting it with each dataset's
+                    # population; intersecting them with each dataset's
                     # sample_index_map yields correct per-dataset counts.
-                    out_df = scorer_instance.get_raw_outputs(accuracy_uuids)
-                    uuid_to_text = dict(
-                        zip(out_df["sample_uuid"], out_df["output"], strict=False)
+                    outputs = _read_accuracy_outputs(scorer_instance, accuracy_uuids)
+                uuid_to_text, uuid_to_server_tokens = outputs
+                entry.update(
+                    _phase_osl_entry(
+                        scorer_instance.sample_index_map,
+                        uuid_to_text,
+                        uuid_to_server_tokens,
+                        osl_backend,
+                        primary=primary,
+                        dataset_name=eval_cfg.dataset_name,
                     )
-                    # Drop the DataFrame so finalize doesn't hold both it and the
-                    # dict (each carrying the response-text corpus).
-                    del out_df
-                entry["response_counts"] = _phase_response_counts(
-                    scorer_instance.sample_index_map, uuid_to_text
                 )
-                if osl_backend is not None:
-                    t0 = time.perf_counter()
-                    osl = _phase_osl_stats(
-                        scorer_instance.sample_index_map, uuid_to_text, osl_backend
-                    )
-                    if osl is not None:
-                        # Same shape/key as the perf report output_sequence_lengths.
-                        entry["output_sequence_lengths"] = osl
-                        # Wall-clock of just this phase's tokenization (seconds);
-                        # summed across datasets for the accuracy report's total.
-                        entry["osl_tokenize_s"] = round(time.perf_counter() - t0, 3)
             except Exception as e:  # noqa: BLE001 - optional blocks; never fail scoring
                 logger.warning(
                     "Accuracy response counts/OSL skipped for %s: %s",
@@ -386,7 +510,10 @@ def score_accuracy(
 
 
 def write_accuracy_results(
-    report_dir: Path, accuracy_scores: list[dict[str, Any]]
+    report_dir: Path,
+    accuracy_scores: list[dict[str, Any]],
+    *,
+    token_count_source: TokenCountSource,
 ) -> None:
     """Emit ``accuracy/accuracy_results.json`` from the per-dataset score entries.
 
@@ -394,6 +521,10 @@ def write_accuracy_results(
     ``performance/result_summary.json`` and response/error text lives in
     ``events.jsonl``, so neither is duplicated here. A no-op when ``accuracy_scores``
     is empty — a perf-only run leaves no ``accuracy/`` folder.
+
+    ``token_count_source`` is the run's effective token basis, written top level
+    as the label of every entry's ``output_sequence_lengths`` (the file is read
+    on its own, without the sibling ``result_summary.json``).
     """
     if not accuracy_scores:
         return
@@ -420,6 +551,7 @@ def write_accuracy_results(
         accuracy_payload["average_accuracy"] = avg_accuracy
     if osl_computed:
         accuracy_payload["osl_tokenization_s"] = osl_tokenization_s
+    accuracy_payload["token_count_source"] = token_count_source.value
     accuracy_payload["accuracy_scores"] = accuracy_scores
     # Atomic write so a crash mid-write can't leave truncated JSON the
     # compliance checker would read as corrupt. Not swallowed: if scoring

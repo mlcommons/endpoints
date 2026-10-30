@@ -92,7 +92,7 @@ def test_encode_query(benchmark, size_name, input_tokens):
     """Benchmark encode_query (Query -> HTTP bytes)."""
     query = make_query(input_tokens)
     benchmark.group = "sglang_adapter_encode_query"
-    benchmark(SGLangGenerateAdapter.encode_query, query)
+    benchmark(SGLangGenerateAdapter.encode_query, query, include_usage=False)
 
 
 @pytest.mark.performance

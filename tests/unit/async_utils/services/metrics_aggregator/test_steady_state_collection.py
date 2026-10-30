@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 
+import msgspec
 import pytest
 from inference_endpoint.async_utils.services.event_logger.file_writer import JSONLWriter
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
@@ -34,11 +35,18 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import PhaseData, PhaseType, TextModelOutput
+from inference_endpoint.core.types import (
+    PhaseData,
+    PhaseType,
+    TextModelOutput,
+    TokenCountSource,
+)
 from inference_endpoint.metrics.steady_state_diagnostics import (
     build_super_pass_series,
     compute_steady_state_metrics,
 )
+
+from tests.test_helpers import DEFAULT_SOURCE
 
 from .conftest import (
     MockBatchTokenizer,
@@ -62,7 +70,13 @@ def phase_start(
 
 
 def _sample(uuid: str, issue: int, ttft: int, decode: int, chunks, turn=None):
-    """ISSUED -> RECV_FIRST -> COMPLETE for one streamed sample."""
+    """ISSUED -> RECV_FIRST -> COMPLETE for one streamed sample.
+
+    The COMPLETE carries server usage with ``completion_tokens`` equal to the
+    whitespace word count of the whole output. Every fixture's first chunk is
+    one word, so ``completion_tokens - 1`` equals the post-first-chunk count the
+    tokenizing replay derives, and server-mode TPOT/OSL match it exactly.
+    """
     return [
         EventRecord(
             event_type=SampleEventType.ISSUED,
@@ -83,11 +97,13 @@ def _sample(uuid: str, issue: int, ttft: int, decode: int, chunks, turn=None):
             sample_uuid=uuid,
             turn=turn,
             data=TextModelOutput(output=tuple(chunks)),
+            prompt_tokens=1,
+            completion_tokens=len("".join(chunks).split()),
         ),
     ]
 
 
-def _event_stream() -> list[EventRecord]:
+def _event_stream(*, ns_usage: bool = True) -> list[EventRecord]:
     """A run exercising every collector rule that equivalence can break on."""
     records = [
         session_event(SessionEventType.STARTED, ts=0),
@@ -112,6 +128,7 @@ def _event_stream() -> list[EventRecord]:
     # A retry: re-ISSUED inside the window, so only its issue timestamp moves.
     records += _sample("s3", issue, 12, 900, ["r ", "z z"])
     # Non-streaming output: no post-first-chunk text, so no TPOT contribution.
+    # Without usage it is the run's one tracked sample missing server counts.
     records += [
         EventRecord(
             event_type=SampleEventType.ISSUED,
@@ -123,6 +140,8 @@ def _event_stream() -> list[EventRecord]:
             timestamp_ns=issue + 900,
             sample_uuid="ns",
             data=TextModelOutput(output="whole answer"),
+            prompt_tokens=1 if ns_usage else msgspec.UNSET,
+            completion_tokens=2 if ns_usage else msgspec.UNSET,
         ),
     ]
     # Still in flight when the window closes.
@@ -144,6 +163,16 @@ def _event_stream() -> list[EventRecord]:
     return records
 
 
+def _tokenized_replay(events_path, superpass_size):
+    """The event-log replay on the client basis with the aggregator's test tokenizer."""
+    return build_super_pass_series(
+        events_path,
+        superpass_size,
+        count_text_tokens,
+        basis=TokenCountSource.CLIENT,
+    ).super_passes
+
+
 def _write_log(tmp_path, records):
     writer = JSONLWriter(tmp_path / "events")
     for record in records:
@@ -152,7 +181,9 @@ def _write_log(tmp_path, records):
     return str(writer.file_path)
 
 
-async def _collect(tmp_path, records, socket_name):
+async def _collect(
+    tmp_path, records, socket_name, *, token_count_source: TokenCountSource
+):
     """Drive ``records`` through a steady-state-enabled aggregator."""
     loop = asyncio.get_event_loop()
     with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
@@ -163,6 +194,7 @@ async def _collect(tmp_path, records, socket_name):
             tokenizer=MockBatchTokenizer(),
             steady_state_profile="concurrency",
             streaming=True,
+            token_count_source=token_count_source,
         )
         try:
             await agg.process(records)
@@ -210,12 +242,12 @@ def _steady_run_records(n_super_passes: int = 14) -> list[EventRecord]:
 @pytest.mark.unit
 class TestProducerEquivalence:
     @pytest.mark.asyncio
-    async def test_live_series_equals_the_event_log_parse(self, tmp_path):
+    async def test_live_series_equals_the_event_log_parse(self, tmp_path, primary):
         records = _event_stream()
-        collector = await _collect(tmp_path, records, "ss_equiv")
-        replayed = build_super_pass_series(
-            _write_log(tmp_path, records), SUPERPASS, count_text_tokens
+        collector = await _collect(
+            tmp_path, records, "ss_equiv", token_count_source=primary
         )
+        replayed = _tokenized_replay(_write_log(tmp_path, records), SUPERPASS)
         live = collector.series()
         assert live, "the collector produced no super-passes"
         assert [dataclasses.asdict(sp) for sp in live] == [
@@ -223,25 +255,27 @@ class TestProducerEquivalence:
         ]
 
     @pytest.mark.asyncio
-    async def test_both_producers_reach_the_same_verdict(self, tmp_path):
+    async def test_both_producers_reach_the_same_verdict(self, tmp_path, primary):
         records = _event_stream()
-        collector = await _collect(tmp_path, records, "ss_equiv_verdict")
-        replayed = build_super_pass_series(
-            _write_log(tmp_path, records), SUPERPASS, count_text_tokens
+        collector = await _collect(
+            tmp_path, records, "ss_equiv_verdict", token_count_source=primary
         )
+        replayed = _tokenized_replay(_write_log(tmp_path, records), SUPERPASS)
         kwargs = {"superpass_size": SUPERPASS, "warmup": 0}
         assert compute_steady_state_metrics(
             collector.series(), **kwargs
         ) == compute_steady_state_metrics(replayed, **kwargs)
 
     @pytest.mark.asyncio
-    async def test_a_certified_window_is_identical_on_both_producers(self, tmp_path):
+    async def test_a_certified_window_is_identical_on_both_producers(
+        self, tmp_path, primary
+    ):
         """Equivalence where it counts: a run the detector actually certifies."""
         records = _steady_run_records()
-        collector = await _collect(tmp_path, records, "ss_equiv_window")
-        replayed = build_super_pass_series(
-            _write_log(tmp_path, records), STEADY_SUPERPASS, count_text_tokens
+        collector = await _collect(
+            tmp_path, records, "ss_equiv_window", token_count_source=primary
         )
+        replayed = _tokenized_replay(_write_log(tmp_path, records), STEADY_SUPERPASS)
         live_verdict = compute_steady_state_metrics(
             collector.series(), superpass_size=STEADY_SUPERPASS
         )
@@ -253,11 +287,49 @@ class TestProducerEquivalence:
         )
 
 
+def _with_usage(records):
+    """Server count = whitespace words + 1 (EOS): differs from the tokenizer count, so a
+    replay that fell back to the tokenizer cannot match."""
+    return [
+        (
+            msgspec.structs.replace(r, completion_tokens=len(str(r.data).split()) + 1)
+            if r.event_type is SampleEventType.COMPLETE
+            and isinstance(r.data, TextModelOutput)
+            else r
+        )
+        for r in records
+    ]
+
+
+@pytest.mark.unit
+class TestServerProducerEquivalence:
+    @pytest.mark.asyncio
+    async def test_live_server_series_equals_the_event_log_parse(self, tmp_path):
+        records = _with_usage(_event_stream())
+        collector = await _collect(
+            tmp_path,
+            records,
+            "ss_equiv_srv",
+            token_count_source=TokenCountSource.SERVER,
+        )
+        replayed = build_super_pass_series(
+            _write_log(tmp_path, records),
+            SUPERPASS,
+            None,
+            basis=TokenCountSource.SERVER,
+        )
+        live = collector.series()
+        assert any(sp.tpot_ns for sp in live)
+        assert [dataclasses.asdict(sp) for sp in live] == [
+            dataclasses.asdict(sp) for sp in replayed.super_passes
+        ]
+
+
 @pytest.mark.unit
 class TestOrderingInvariants:
     @pytest.mark.asyncio
     async def test_tpot_lands_in_the_bucket_the_sample_was_issued_into(self, tmp_path):
-        """Pins both ordering rules in the aggregator's TPOT path.
+        """Pins both ordering rules in the aggregator's tokenizer (client) TPOT path.
 
         ``on_complete`` must run AFTER ``set_field`` (``TpotTrigger`` fires from
         inside it and reads the sample's super-pass), and ``TpotTrigger`` must
@@ -273,7 +345,9 @@ class TestOrderingInvariants:
             *_sample("b", 200, 10, 900, ["c ", "x y z"]),
             *_sample("c", 900, 10, 900, ["c ", "x y z"]),
         ]
-        collector = await _collect(tmp_path, records, "ss_order")
+        collector = await _collect(
+            tmp_path, records, "ss_order", token_count_source=TokenCountSource.CLIENT
+        )
         series = collector.series()
         assert [sp.n_issued for sp in series] == [2, 1]
         # 3 words after the first chunk -> tpot = 900 / 3.
@@ -304,6 +378,7 @@ class TestOrderingInvariants:
                 tokenizer=MockBatchTokenizer(),
                 steady_state_profile="concurrency",
                 streaming=True,
+                token_count_source=TokenCountSource.CLIENT,
             )
             try:
                 await agg.process(records)
@@ -314,6 +389,37 @@ class TestOrderingInvariants:
             finally:
                 agg.close()
 
+    @pytest.mark.asyncio
+    async def test_server_tpot_lands_at_complete_without_a_flush(self, tmp_path):
+        records = [
+            session_event(SessionEventType.STARTED, ts=0),
+            phase_start(),
+            session_event(SessionEventType.START_PERFORMANCE_TRACKING, ts=10),
+            *_sample("a", 100, 10, 900, ["c ", "x y z"]),
+        ]
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            # No tokenizer and no flush: only the synchronous server path can feed TPOT.
+            agg, _, _ = make_aggregator(
+                ctx,
+                loop,
+                "ss_srv_sync",
+                steady_state_profile="concurrency",
+                streaming=True,
+                token_count_source=TokenCountSource.SERVER,
+            )
+            try:
+                await agg.process(records)
+                assert agg.token_queue is None and agg.table.get_row("a") is None
+                sp = agg._collector.series()[0]
+                assert (list(sp.tpot_ns), list(sp.osl), sp.out_tokens) == (
+                    [300.0],
+                    [3.0],
+                    3,
+                )
+            finally:
+                agg.close()
+
 
 @pytest.mark.unit
 class TestCollectionGate:
@@ -321,7 +427,9 @@ class TestCollectionGate:
     async def test_disabled_by_default(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
-            agg, _, _ = make_aggregator(ctx, loop, "ss_off")
+            agg, _, _ = make_aggregator(
+                ctx, loop, "ss_off", token_count_source=DEFAULT_SOURCE
+            )
             try:
                 await agg.process(_event_stream())
                 assert agg._collector is None
@@ -345,6 +453,7 @@ class TestCollectionGate:
                 f"ss_unsupported_{profile}",
                 tokenizer=MockBatchTokenizer(),
                 steady_state_profile=profile,
+                token_count_source=DEFAULT_SOURCE,
             )
             try:
                 await agg.process(_event_stream())
@@ -365,7 +474,9 @@ class TestCollectionGate:
             session_event(SessionEventType.STARTED, ts=0),
             phase_start(num_turns=99, phase_type=PhaseType.WARMUP),
         ]
-        collector = await _collect(tmp_path, records, "ss_warmup_size")
+        collector = await _collect(
+            tmp_path, records, "ss_warmup_size", token_count_source=DEFAULT_SOURCE
+        )
         assert collector.superpass_size == 0
 
     @pytest.mark.asyncio
@@ -378,7 +489,9 @@ class TestCollectionGate:
             *_sample("a", 100, 10, 900, ["c ", "x"]),
             phase_start(num_turns=77, phase_type=PhaseType.ACCURACY),
         ]
-        collector = await _collect(tmp_path, records, "ss_size")
+        collector = await _collect(
+            tmp_path, records, "ss_size", token_count_source=DEFAULT_SOURCE
+        )
         assert collector.superpass_size == 3
 
     @pytest.mark.asyncio
@@ -400,7 +513,9 @@ class TestCollectionGate:
             phase_start(num_turns=77),
             *_sample("b", 2000, 10, 900, ["d ", "y"]),
         ]
-        collector = await _collect(tmp_path, records, "ss_resize")
+        collector = await _collect(
+            tmp_path, records, "ss_resize", token_count_source=DEFAULT_SOURCE
+        )
         assert collector.superpass_size == 3
 
 
@@ -418,6 +533,7 @@ class TestVerdictOnTheFinalSnapshot:
                 socket_name,
                 tokenizer=MockBatchTokenizer(),
                 steady_state_profile="concurrency",
+                token_count_source=DEFAULT_SOURCE,
             )
             try:
                 await agg.process(
@@ -458,11 +574,46 @@ class TestVerdictOnTheFinalSnapshot:
                 "ss_final_pending",
                 tokenizer=MockBatchTokenizer(),
                 steady_state_profile="concurrency",
+                token_count_source=TokenCountSource.CLIENT,
             )
             try:
                 await agg.process(_event_stream())
                 assert await agg._steady_state_verdict(n_pending=3) is None
                 assert await agg._steady_state_verdict(n_pending=0) is not None
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "source, ns_usage, n_pending, has_verdict",
+        [
+            # A pending tokenizer drain only touches the client basis.
+            (TokenCountSource.SERVER, True, 3, True),
+            # A tracked sample without usage withholds it.
+            (TokenCountSource.SERVER, False, 0, False),
+            # Missing server usage only touches the server basis.
+            (TokenCountSource.CLIENT, False, 0, True),
+            # A pending tokenizer drain withholds it.
+            (TokenCountSource.CLIENT, True, 3, False),
+        ],
+    )
+    async def test_steady_state_verdict_gate_follows_primary(
+        self, tmp_path, source, ns_usage, n_pending, has_verdict
+    ):
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, _ = make_aggregator(
+                ctx,
+                loop,
+                "ss_gate",
+                tokenizer=MockBatchTokenizer(),
+                steady_state_profile="concurrency",
+                token_count_source=source,
+            )
+            try:
+                await agg.process(_event_stream(ns_usage=ns_usage))
+                verdict = await agg._steady_state_verdict(n_pending=n_pending)
+                assert (verdict is not None) is has_verdict
             finally:
                 agg.close()
 
@@ -478,6 +629,7 @@ class TestVerdictOnTheFinalSnapshot:
                 "ss_final_boom",
                 tokenizer=MockBatchTokenizer(),
                 steady_state_profile="concurrency",
+                token_count_source=DEFAULT_SOURCE,
             )
             try:
                 await agg.process(_event_stream())

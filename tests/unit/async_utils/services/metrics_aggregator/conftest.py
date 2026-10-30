@@ -27,8 +27,13 @@ shared fixture would mostly hide it).
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import msgspec
+import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
     MetricsAggregatorService,
 )
@@ -52,7 +57,7 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import TextModelOutput
+from inference_endpoint.core.types import TextModelOutput, TokenCountSource
 
 # ---------------------------------------------------------------------------
 # Mock BatchTokenizer — whitespace token counts; matches the BatchTokenizer
@@ -79,8 +84,6 @@ class MockBatchTokenizer:
     async def count_batch_async(self, inputs, _loop, live=False):
         if self._delay:
             await asyncio.sleep(self._delay)
-        import msgspec
-
         outcomes = []
         for item in inputs:
             if isinstance(item, TokenIdsInput):
@@ -137,6 +140,25 @@ def sample_event(
     return EventRecord(event_type=ev_type, timestamp_ns=ts, sample_uuid=uuid, data=data)
 
 
+def complete_event(
+    uuid: str,
+    ts: int,
+    data=None,
+    *,
+    prompt_tokens: int | msgspec.UnsetType = msgspec.UNSET,
+    completion_tokens: int | msgspec.UnsetType = msgspec.UNSET,
+) -> EventRecord:
+    """A COMPLETE record carrying the server usage counts (UNSET = not reported)."""
+    return EventRecord(
+        event_type=SampleEventType.COMPLETE,
+        timestamp_ns=ts,
+        sample_uuid=uuid,
+        data=data,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+
 def text_output(s: str) -> TextModelOutput:
     return TextModelOutput(output=s)
 
@@ -187,11 +209,18 @@ def snapshot_series_total(registry: MetricsRegistry, name: str) -> int | float:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(params=list(TokenCountSource), ids=lambda source: source.value)
+def primary(request: pytest.FixtureRequest) -> TokenCountSource:
+    """Each primary token-count basis in turn."""
+    return request.param
+
+
 def make_aggregator(
     zmq_ctx: ManagedZMQContext,
     loop: asyncio.AbstractEventLoop,
     socket_name: str,
     *,
+    token_count_source: TokenCountSource,
     tokenizer=None,
     live_flush_interval_s: float | None = None,
     streaming: bool = True,
@@ -199,6 +228,7 @@ def make_aggregator(
     shutdown_event: asyncio.Event | None = None,
     drain_timeout_s: float | None = None,
     steady_state_profile: str | None = None,
+    registry: MetricsRegistry | None = None,
 ) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
     """Construct an aggregator wired to a real SUB socket and a mocked publisher.
 
@@ -210,7 +240,7 @@ def make_aggregator(
 
     Returns ``(agg, registry, publisher_mock)``.
     """
-    registry = MetricsRegistry()
+    registry = registry or MetricsRegistry()
     # ``publish_final`` and ``aclose`` are awaited by the aggregator's
     # ENDED handler, so they must be AsyncMocks. The remaining surface
     # (``start``, ``close``) is synchronous and falls back to MagicMock's
@@ -234,5 +264,21 @@ def make_aggregator(
         shutdown_event=shutdown_event,
         drain_timeout_s=drain_timeout_s,
         steady_state_profile=steady_state_profile,
+        token_count_source=token_count_source,
     )
     return agg, registry, publisher
+
+
+@contextlib.contextmanager
+def aggregator_scope(
+    tmp_path: Path, socket_name: str, **kwargs
+) -> Iterator[tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]]:
+    """``make_aggregator`` inside a scoped ZMQ context; closes the aggregator."""
+    with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+        agg, registry, publisher = make_aggregator(
+            ctx, asyncio.get_event_loop(), socket_name, **kwargs
+        )
+        try:
+            yield agg, registry, publisher
+        finally:
+            agg.close()

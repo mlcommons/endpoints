@@ -14,8 +14,13 @@ import importlib.util
 import json
 from pathlib import Path
 
+import msgspec
 import pytest
-from inference_endpoint.core.types import TextModelOutput
+from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
+from inference_endpoint.core.types import TextModelOutput, TokenCountSource
+from inference_endpoint.metrics.token_count_basis import ServerUsage
+
+from tests.test_helpers import LOGGED_SERVER_USAGE_CASES
 
 pytestmark = pytest.mark.unit
 
@@ -33,8 +38,13 @@ def _load_script():
 mod = _load_script()
 
 
+def _line(record: dict) -> str:
+    """One event-log line, compact like the JSONL writer's."""
+    return json.dumps(record, separators=(",", ":"))
+
+
 def _ev(event_type, ts, uuid="", data=None):
-    return json.dumps(
+    return _line(
         {
             "event_type": event_type,
             "timestamp_ns": ts,
@@ -57,6 +67,10 @@ def _write(tmp_path, lines):
     p = tmp_path / "events.jsonl"
     p.write_text("\n".join(lines) + "\n")
     return p
+
+
+_CLIENT = TokenCountSource.CLIENT
+_SERVER = TokenCountSource.SERVER
 
 
 def test_extract_tpot_text_gates_on_decoded_type():
@@ -99,12 +113,13 @@ def test_tracking_window_gating_and_metric_deltas(tmp_path):
             _ev("sample.complete", 700, "c", _tmo("nonstream full")),  # no recv_first
         ],
     )
-    s = mod.compute_series(events, count_tokens=_ws_counts)
+    s = mod.compute_series(events, count_tokens=_ws_counts, basis=_CLIENT)
     assert s["ttft_ns"] == [50]  # a only; w untracked, c never streamed
     assert sorted(s["sample_latency_ns"]) == [300, 400]  # a and c
     assert s["tpot_ns"] == [(400 - 150) / 2]  # "one twothree" -> 2 ws tokens
     # without a tokenizer the tool degrades to ttft/latency only
-    assert mod.compute_series(events, count_tokens=None)["tpot_ns"] == []
+    tokenless = mod.compute_series(events, count_tokens=None, basis=_CLIENT)
+    assert tokenless["tpot_ns"] == []
 
 
 def test_imperfect_log_robustness(tmp_path, capsys):
@@ -133,7 +148,7 @@ def test_imperfect_log_robustness(tmp_path, capsys):
             _ev("session.stop_performance_tracking", 700),
         ],
     )
-    s = mod.compute_series(events, count_tokens=_ws_counts)
+    s = mod.compute_series(events, count_tokens=_ws_counts, basis=_CLIENT)
     # aggregator parity: BOTH recv_first events fire ttft (150-100, 250-200)
     assert sorted(s["ttft_ns"]) == [50, 50, 60]
     # a: complete - REFRESHED issue ts (duplicate-ISSUED parity)
@@ -258,3 +273,287 @@ def test_main_cli_contract(tmp_path, capsys):
     with pytest.raises(SystemExit):
         mod.main([str(events), "--confidence", "1.0"])
     capsys.readouterr()  # drain
+
+
+def _usage(line, completion_tokens, prompt_tokens=1):
+    rec = json.loads(line)
+    rec["prompt_tokens"] = prompt_tokens
+    rec["completion_tokens"] = completion_tokens
+    return _line(rec)
+
+
+def _summary(run_dir, primary, **fields):
+    """The run's ``result_summary.json``, recording ``primary`` as its basis."""
+    path = run_dir / "performance" / "result_summary.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"token_count_source": primary.value, **fields}))
+    return path
+
+
+def test_server_basis_tpot_from_completion_tokens(tmp_path, capsys):
+    events = _write(
+        tmp_path,
+        [
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _usage(_ev("sample.complete", 400, "a", _tmo(["x", "one two"])), 3),
+            _ev("sample.issued", 300, "b"),
+            _ev("sample.recv_first", 360, "b"),
+            _usage(
+                _ev("sample.complete", 600, "b", _tmo(["x", "y"], tool_calls=[["tc"]])),
+                5,
+            ),
+            _ev("sample.issued", 320, "c"),
+            _ev("sample.recv_first", 380, "c"),
+            _usage(_ev("sample.complete", 500, "c", _tmo(["x"])), 1),  # <= 1: skipped
+            _ev("sample.issued", 340, "d"),
+            _ev("sample.recv_first", 390, "d"),
+            _ev("sample.complete", 700, "d", _tmo(["x", "y z"])),  # no usage: skipped
+            _ev("session.stop_performance_tracking", 800),
+        ],
+    )
+    s = mod.compute_series(events, count_tokens=None, basis=_SERVER)
+    assert sorted(s["tpot_ns"]) == [
+        60.0,
+        125.0,
+    ]  # b: 240 / 4 (tool call kept), a: 250 / 2
+    assert "tool-call" not in capsys.readouterr().err
+
+
+def test_main_reads_server_basis_from_sibling_summary(tmp_path, capsys):
+    events = _write(
+        tmp_path,
+        [
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _usage(_ev("sample.complete", 400, "a", _tmo(["x", "one two"])), 3),
+            _ev("session.stop_performance_tracking", 500),
+        ],
+    )
+    _summary(tmp_path, _SERVER)
+    mod.main([str(events)])
+    captured = capsys.readouterr()
+    assert "tpot (from tpot_ns, n=1)" in captured.out
+    assert "TPOT skipped" not in captured.err
+
+
+def test_server_basis_counts_missing_usage(tmp_path, capsys):
+    events = _write(
+        tmp_path,
+        [
+            _ev("sample.issued", 5, "w"),  # untracked: never counted
+            _ev("sample.complete", 50, "w", _tmo(["x"])),
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _usage(_ev("sample.complete", 400, "a", _tmo(["x", "one two"])), 3),
+            _ev("sample.issued", 300, "b"),
+            _ev("sample.recv_first", 360, "b"),
+            _ev("sample.complete", 600, "b", _tmo(["x", "y"])),  # streamed, no usage
+            _ev("sample.issued", 320, "c"),
+            _ev("sample.complete", 500, "c", _tmo("whole")),  # non-streaming, no usage
+            _ev("sample.issued", 340, "d"),
+            _ev("sample.complete", 700, "d", None),  # error: not a missing-usage sample
+            _ev("session.stop_performance_tracking", 800),
+        ],
+    )
+    s = mod.compute_series(events, count_tokens=None, basis=_SERVER)
+    assert s["tpot_ns"] == [125.0]  # missing usage is never filled in from a tokenizer
+    err = capsys.readouterr().err
+    assert "WARN: 2 tracked samples returned no server token usage" in err
+
+
+_ENCODER = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+
+
+@pytest.mark.parametrize(
+    ("prompt", "completion", "output", "expected"),
+    [pytest.param(*case[1:], id=case[0]) for case in LOGGED_SERVER_USAGE_CASES],
+)
+def test_replay_missing_usage_matches_live_rule(
+    tmp_path, capsys, prompt, completion, output, expected
+):
+    """The server-basis replay reads usage by ``classify_server_usage``, as live."""
+    complete = EventRecord(
+        event_type=SampleEventType.COMPLETE,
+        timestamp_ns=400,
+        sample_uuid="a",
+        data=output,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+    )
+    events = _write(
+        tmp_path,
+        [
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _ENCODER.encode(complete).decode(),
+            _ev("session.stop_performance_tracking", 500),
+        ],
+    )
+    s = mod.compute_series(events, count_tokens=None, basis=_SERVER)
+    usable = expected is ServerUsage.USABLE
+    assert s["tpot_ns"] == ([250 / (completion - 1)] if usable else [])
+    missing = expected is ServerUsage.MISSING
+    err = capsys.readouterr().err
+    assert ("1 tracked samples returned no server token usage" in err) is missing
+
+
+def _usage_run_events(run_dir, *, usage):
+    """Streamed samples whose COMPLETE lines carry server usage iff ``usage``."""
+    lines = [_ev("session.start_performance_tracking", 10)]
+    for i in range(4):
+        t, u = 100 * (i + 1), f"s{i}"
+        complete = _ev("sample.complete", t + 70 + i, u, _tmo(["x", "one two"]))
+        lines += [
+            _ev("sample.issued", t, u),
+            _ev("sample.recv_first", t + 20, u),
+            _usage(complete, 9) if usage else complete,
+        ]
+    run_dir.mkdir()
+    return _write(run_dir, [*lines, _ev("session.stop_performance_tracking", 900)])
+
+
+def test_client_primary_replay_identical_with_and_without_usage_keys(tmp_path):
+    with_usage, without_usage = (
+        mod.compute_series(
+            _usage_run_events(tmp_path / f"usage_{usage}", usage=usage),
+            count_tokens=_ws_counts,
+            basis=_CLIENT,
+        )
+        for usage in (True, False)
+    )
+    assert with_usage == without_usage
+    assert len(with_usage["tpot_ns"]) == 4
+
+
+@pytest.mark.parametrize("primary", list(TokenCountSource))
+def test_es_script_refuses_json_off_primary(tmp_path, capsys, monkeypatch, primary):
+    # The summary holds TPOT ES maps on the run's basis. A replay on the other
+    # basis must not be cross-checked against them, nor written into them.
+    events = _write(
+        tmp_path,
+        [
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _usage(_ev("sample.complete", 400, "a", _tmo(["x", "one two"])), 4),
+            _ev("session.stop_performance_tracking", 500),
+        ],
+    )
+    tpot = {"percentiles": {"50.0": 83.0}, "early_stopping_percentiles": {"50.0": 1.0}}
+    summary = _summary(tmp_path, primary, tpot=tpot)
+    monkeypatch.setattr(mod, "_make_counter", lambda path: _ws_counts)
+    off = primary.other
+    argv = [str(events), "--summary", str(summary), "--tokenizer", "unused"]
+    argv += ["--token-count-source", off.value]
+    with pytest.raises(SystemExit, match=f"on the {primary.value} token basis"):
+        mod.main([*argv, "--json", str(tmp_path / "o.json")])
+
+    augmented = mod.main(argv)
+    out = capsys.readouterr().out
+    assert "tpot (from tpot_ns, n=1)" in out  # the off-primary replay still prints
+    assert (
+        f"XCHECK in-band: skipped (TPOT replayed on the {off.value} basis; "
+        f"the run reported {primary.value})"
+    ) in out
+    assert "MISMATCH" not in out
+    assert augmented["tpot"] == tpot  # the run's own maps are untouched
+
+
+def _copied_run(tmp_path, summary_basis, tpot):
+    """An event log copied away from its run; the run's summary stays behind."""
+    (tmp_path / "copy").mkdir()
+    events = _write(
+        tmp_path / "copy",
+        [
+            _ev("session.start_performance_tracking", 10),
+            _ev("sample.issued", 100, "a"),
+            _ev("sample.recv_first", 150, "a"),
+            _usage(_ev("sample.complete", 400, "a", _tmo(["x", "one two"])), 6),
+            _ev("session.stop_performance_tracking", 500),
+        ],
+    )
+    summary = tmp_path / "run" / "result_summary.json"
+    summary.parent.mkdir()
+    summary.write_text(json.dumps({"token_count_source": summary_basis, "tpot": tpot}))
+    return events, summary
+
+
+def test_es_script_summary_outside_the_run_dir_sets_the_basis(
+    tmp_path, capsys, monkeypatch
+):
+    # Nothing beside the copied log records a basis; --summary records server.
+    tpot = {"percentiles": {"50.0": 50.0}}
+    events, summary = _copied_run(tmp_path, _SERVER.value, tpot)
+    monkeypatch.setattr(mod, "_make_counter", lambda path: _ws_counts)
+    argv = [str(events), "--summary", str(summary), "--tokenizer", "unused"]
+    off_primary = [*argv, "--token-count-source", _CLIENT.value]
+    with pytest.raises(SystemExit, match="on the server token basis"):
+        mod.main([*off_primary, "--json", str(tmp_path / "o.json")])
+
+    out = tmp_path / "augmented.json"
+    mod.main([*argv, "--json", str(out)])
+    captured = capsys.readouterr()
+    assert "token basis: server" in captured.out
+    assert "no token-count basis recorded" not in captured.err
+    assert "tpot (from tpot_ns, n=1)" in captured.out
+    augmented = json.loads(out.read_text())
+    assert augmented["token_count_source"] == _SERVER.value
+    assert augmented["tpot"]["early_stopping_percentiles"] == {"50.0": None}  # n=1
+
+
+def test_es_script_unreadable_summary_basis_with_override_never_labels_it(
+    tmp_path, capsys, monkeypatch
+):
+    events, summary = _copied_run(tmp_path, "bogus", {})
+    monkeypatch.setattr(mod, "_make_counter", lambda path: _ws_counts)
+    argv = [str(events), "--summary", str(summary), "--tokenizer", "unused"]
+    with pytest.raises(SystemExit) as exc:
+        mod.main(argv)
+    assert exc.value.code == 2
+    assert "pass --token-count-source" in capsys.readouterr().err
+    chosen = [*argv, "--token-count-source", _SERVER.value]
+    # The summary's own basis is unknown, so the chosen one cannot label it.
+    with pytest.raises(SystemExit, match="could not be read"):
+        mod.main([*chosen, "--json", str(tmp_path / "o.json")])
+    mod.main(chosen)
+    assert "token basis: server" in capsys.readouterr().out
+
+
+def test_es_script_unreadable_summary_exits_with_hint(tmp_path, capsys):
+    events = _write(tmp_path, [_ev("session.start_performance_tracking", 10)])
+    (tmp_path / "performance").mkdir()
+    (tmp_path / "performance" / "result_summary.json").write_text("{not json")
+    with pytest.raises(SystemExit) as exc:
+        mod.main([str(events)])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "cannot read the token-count basis" in err
+    assert "pass --token-count-source" in err
+    # The hint holds: choosing the basis replays the run.
+    mod.main([str(events), "--token-count-source", _SERVER.value])
+    capsys.readouterr()  # drain
+
+
+def test_es_script_missing_summary_fails_before_the_replay(tmp_path, monkeypatch):
+    events = _write(tmp_path, [_ev("session.start_performance_tracking", 10)])
+    monkeypatch.setattr(
+        mod, "compute_series", lambda *a, **k: pytest.fail("log replayed")
+    )
+    missing = tmp_path / "nope.json"
+    with pytest.raises(SystemExit, match=f"FATAL: --summary {missing} not found"):
+        mod.main([str(events), "--summary", str(missing)])
+
+
+def test_es_script_override_needs_no_archived_basis_note(tmp_path, capsys):
+    events = _write(tmp_path, [_ev("session.start_performance_tracking", 10)])
+    mod.main([str(events)])
+    assert "no token-count basis recorded" in capsys.readouterr().err
+    mod.main([str(events), "--token-count-source", _SERVER.value])
+    err = capsys.readouterr().err
+    assert "no token-count basis recorded" not in err
+    assert "NOTE: token basis: server" in err

@@ -31,13 +31,13 @@ from inference_endpoint.videogen.types import VideoPathResponse, VideoPayloadRes
 class TestVideoGenAdapter:
     def test_encode_query_produces_valid_json(self):
         query = Query(id="q1", data={"prompt": "a golden retriever running"})
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["prompt"] == "a golden retriever running"
 
     def test_encode_query_default_response_format_is_video_path(self):
         """Perf mode default — server saves to Lustre, returns path only."""
         query = Query(id="q1", data={"prompt": "ocean waves"})
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["response_format"] == "video_path"
 
     def test_encode_query_accuracy_mode_requests_video_bytes(self):
@@ -45,12 +45,12 @@ class TestVideoGenAdapter:
         query = Query(
             id="q1", data={"prompt": "ocean waves", "response_format": "video_bytes"}
         )
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["response_format"] == "video_bytes"
 
     def test_encode_query_uses_mlperf_defaults(self):
         query = Query(id="q1", data={"prompt": "ocean waves"})
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["fps"] == 16
         assert payload["seconds"] == pytest.approx(5.0)
         assert payload["size"] == "720x1280"
@@ -64,43 +64,43 @@ class TestVideoGenAdapter:
             id="q1",
             data={"prompt": "test", "seed": 99, "fps": 24, "guidance_scale": 6.0},
         )
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["seed"] == 99
         assert payload["fps"] == 24
         assert payload["guidance_scale"] == pytest.approx(6.0)
 
     def test_encode_query_includes_negative_prompt(self):
         query = Query(id="q1", data={"prompt": "test", "negative_prompt": "blurry"})
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["negative_prompt"] == "blurry"
 
     def test_encode_query_omits_negative_prompt_when_absent(self):
         """exclude_none=True so server can apply its own default."""
         query = Query(id="q1", data={"prompt": "test"})
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert "negative_prompt" not in payload
 
     def test_encode_query_includes_latent_path(self):
         query = Query(
             id="q1", data={"prompt": "test", "latent_path": "/lustre/fixed_latent.pt"}
         )
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["latent_path"] == "/lustre/fixed_latent.pt"
 
     def test_encode_query_omits_latent_path_when_absent(self):
         query = Query(id="q1", data={"prompt": "test"})
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert "latent_path" not in payload
 
     def test_encode_query_missing_prompt_raises(self):
         query = Query(id="q1", data={"seed": 42})
         with pytest.raises(KeyError):
-            VideoGenAdapter.encode_query(query)
+            VideoGenAdapter.encode_query(query, include_usage=False)
 
     def test_encode_query_rejects_stream_true(self):
         query = Query(id="q1", data={"prompt": "test", "stream": True})
         with pytest.raises(ValueError, match="non-streaming"):
-            VideoGenAdapter.encode_query(query)
+            VideoGenAdapter.encode_query(query, include_usage=False)
 
     def test_decode_response_returns_video_bytes_in_metadata(self):
         resp = VideoPayloadResponse(

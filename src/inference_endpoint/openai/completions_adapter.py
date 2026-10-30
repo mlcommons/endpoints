@@ -15,9 +15,17 @@
 
 """OpenAI /v1/completions adapter for pre-tokenized prompts (bypasses server chat template)."""
 
+from typing import Any
+
 import msgspec
 from inference_endpoint.config.schema import ModelParams, StreamingMode
-from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
+from inference_endpoint.core.types import (
+    Query,
+    QueryResult,
+    TextModelOutput,
+    put_server_usage,
+    server_usage_counts,
+)
 from inference_endpoint.dataset_manager.transforms import (
     AddStaticColumns,
     ColumnFilter,
@@ -27,11 +35,14 @@ from inference_endpoint.dataset_manager.transforms import (
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
 from .types import (
+    STREAM_OPTIONS_INCLUDE_USAGE,
     SSEChoice,
     SSEDelta,
+    SSEMessage,
     TextCompletionRequest,
     TextCompletionResponse,
     TextCompletionSSEMessage,
+    requests_multiple_choices,
 )
 
 
@@ -75,16 +86,23 @@ class OpenAITextCompletionsAdapter(HttpRequestAdapter):
         ]
 
     @classmethod
-    def encode_query(cls, query: Query) -> bytes:
+    def encode_query(cls, query: Query, *, include_usage: bool) -> bytes:
         if "input_tokens" not in query.data:
             raise KeyError(
                 f"input_tokens not found in query.data: {list(query.data.keys())}"
             )
+        stream = query.data.get("stream")
+        n = query.data.get("n")
         return cls._request_encoder.encode(
             TextCompletionRequest(
                 model=query.data.get("model", "no-model-name"),
                 prompt=query.data["input_tokens"],
-                stream=query.data.get("stream"),
+                stream=stream,
+                stream_options=(
+                    STREAM_OPTIONS_INCLUDE_USAGE
+                    if include_usage and stream and not requests_multiple_choices(n)
+                    else None
+                ),
                 max_tokens=query.data.get("max_tokens"),
                 min_tokens=query.data.get("min_tokens"),
                 skip_special_tokens=query.data.get("skip_special_tokens"),
@@ -92,7 +110,7 @@ class OpenAITextCompletionsAdapter(HttpRequestAdapter):
                 top_p=query.data.get("top_p"),
                 top_k=query.data.get("top_k"),
                 repetition_penalty=query.data.get("repetition_penalty"),
-                n=query.data.get("n"),
+                n=n,
                 presence_penalty=query.data.get("presence_penalty"),
                 frequency_penalty=query.data.get("frequency_penalty"),
                 stop=query.data.get("stop"),
@@ -105,21 +123,40 @@ class OpenAITextCompletionsAdapter(HttpRequestAdapter):
         if not resp.choices:
             raise ValueError("Response must contain at least one choice")
         choice = resp.choices[0]
+        metadata: dict[str, Any] = {}
+        if choice.finish_reason:
+            metadata["finish_reason"] = choice.finish_reason
+        # Usage sums every choice while only the first is measured.
+        if len(resp.choices) == 1:
+            put_server_usage(metadata, *server_usage_counts(resp.usage))
         return QueryResult(
             id=query_id,
             response_output=TextModelOutput(output=choice.text),
-            metadata=(
-                {"finish_reason": choice.finish_reason} if choice.finish_reason else {}
-            ),
+            metadata=metadata,
         )
 
     @classmethod
-    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice:
+    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice | SSEMessage | None:
+        """Decode an SSE frame to the chat-shaped part the accumulator consumes.
+
+        Returns an ``SSEChoice`` built from the first choice for a frame without
+        usage (the common case), ``None`` for a frame with neither usage nor
+        choices, and an ``SSEMessage`` carrying every choice and the usage for
+        a frame that carries usage.
+        """
         msg = cls._sse_decoder.decode(json_bytes)
-        if not msg.choices:
-            return SSEChoice()
-        choice = msg.choices[0]
-        return SSEChoice(
-            delta=SSEDelta(content=choice.text),
-            finish_reason=choice.finish_reason,
+        if msg.usage is None:
+            if not msg.choices:
+                return None
+            choice = msg.choices[0]
+            return SSEChoice(
+                delta=SSEDelta(content=choice.text),
+                finish_reason=choice.finish_reason,
+            )
+        return SSEMessage(
+            choices=tuple(
+                SSEChoice(delta=SSEDelta(content=c.text), finish_reason=c.finish_reason)
+                for c in msg.choices
+            ),
+            usage=msg.usage,
         )
