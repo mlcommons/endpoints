@@ -161,6 +161,9 @@ Each entry is one of four forms:
     value)
   - `allowlist:` fixes the values a present fact may carry (leaf types only: a
     `dict` subtree has nothing to enumerate)
+  - `nullable: true` is required to allow `null` as a value. By default,
+    `nullable` is `false`, and will treat `null` as a disallowed value, erroring
+    at load time.
   - cohort load guards the notes: an `allowlist` holds a non-empty list of
     scalar values and sits on a leaf type, a non-`null` `default` must match its
     declared type and be one of its `allowlist`'s values where one is declared
@@ -170,12 +173,21 @@ Each entry is one of four forms:
 - a mapping without `type` - a nested block of sub-entries (`config:`, `warmup:`
   above), as deep as the names go.
 
-A mapping matches the schema of a declared leaf only when its `type` value is a
-type name (`int`, `bool`, `float`, `str`, `list`, `dict`) and every key is one
-of that leaf's annotation keys (`type`, `required`, `default`, `allowlist`);
-otherwise it is a nested block. So `field: { type: int }` is a leaf, while a
-rule field literally named `type` keeps its value a block (its `type` value
-there is a mapping, not a type name: `field: { type: { ... } }`).
+A mapping is a declared leaf only when its `type` value is a type name (`int`,
+`bool`, `float`, `str`, `list`, `dict`) and every key is one of that leaf's
+annotation keys:
+
+    { type, required, default, allowlist, nullable }
+
+```yaml
+# a declared leaf: `field` is a typed fact
+field: { type: int, required: true, ... }
+```
+
+```yaml
+# a nested block: a rule field literally named `type` keeps its value a block
+field: { type: { ... } }
+```
 
 Read against that table:
 
@@ -665,8 +677,14 @@ unchecked).
   may name it:
   - `derived.offline_ordering` - Section 5.7.2's pair-of-clauses verdict
   - `derived.point_cap` - Section 5.6's `<=32`
+  - `derived.point_count` - the pareto's measurement-point count
   - `derived.point_count_min` - Section 5.3's minimum count
+  - `derived.accuracy_run_count` - points carrying an `accuracy_results.json`
   - `derived.accuracy_run_count_requirement` - Section 4.3's `N`
+  - `derived.uncovered_regions` - Section 5.4's mandatory regions with no point
+  - `derived.offline_points` - the points carrying an `offline` declaration
+  - `derived.agentic` - the catalog's agentic flag for the declared model (the
+    declared shape's reading where no catalog entry exists)
   - `derived.out_of_range_points` - Section 5.4's flagged points tuple
 - `ruleset` - the packaged ruleset the cohort's `cohort.yaml` names (a
   registered round, e.g. `mlperf-inference-v6.1`):

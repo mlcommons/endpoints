@@ -42,7 +42,8 @@ from typing import Any, Literal
 
 from inference_endpoint.validation.catalog import Catalog
 from inference_endpoint.validation.refs import decode_number
-from inference_endpoint.validation.regions import Regions
+from inference_endpoint.validation.regions import RegionKind, Regions
+from inference_endpoint.validation.sentinels import MISSING
 from inference_endpoint.validation.tree import Node, RuleScopes, SubmissionNode
 
 RULES_URL = (
@@ -64,6 +65,14 @@ OFFLINE_TPS_RATIO = 0.98
 # slot); §5.3's minimum point count adds the three choice points.
 MANDATORY_REGION_COUNT = 4
 SUBMITTERS_CHOICE_COUNT = 3
+# §5.4's four mandatory regions (Ultra Low through High); `margin` is the
+# 10%-extension band, not a coverage requirement.
+_MANDATORY_REGIONS: tuple[RegionKind, ...] = (
+    RegionKind.ULTRA_LOW_CONCURRENCY,
+    RegionKind.LOW_CONCURRENCY,
+    RegionKind.MED_CONCURRENCY,
+    RegionKind.HIGH_CONCURRENCY,
+)
 
 
 def normalize_offline(declared: Any) -> Any:
@@ -180,6 +189,9 @@ class Point:
         node (Node | None): The run directory's tree node. `None` on a
             derivation-only point (built by hand for derivations over named values, not
             walked from the tree).
+        model_name (str | None): The declared `model_name` (§8.3): the key the
+            catalog's agentic flag is looked up by. `None` when the artifact omits it
+            or spells another type. (Default: None)
     """
 
     offline: Literal["dedicated", "elected"] | None
@@ -189,6 +201,7 @@ class Point:
     # A derivation-only Point carries no tree link; `Finding.collect` refuses
     # one without its point node.
     node: Node | None = None
+    model_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.offline not in (None, "dedicated", "elected"):
@@ -216,6 +229,7 @@ class Point:
         """
         config = _mapping_artifact(node, "point.yaml")
         concurrency = _int_fact(config, "concurrency", f"{node.dir}/point.yaml")
+        declared_name = config.get("model_name")
         offline = normalize_offline(config.get("offline"))
         if offline not in (None, "dedicated", "elected"):
             raise ValueError(
@@ -236,6 +250,7 @@ class Point:
             system_tps=system_tps,
             system_desc=system_desc,
             node=node,
+            model_name=declared_name if isinstance(declared_name, str) else None,
         )
 
     def point_power_kw(
@@ -451,50 +466,146 @@ class Pareto:
             and offline_point.concurrency >= c_max
         )
 
+    def agentic(self) -> bool:
+        """Whether this pareto is an agentic benchmark, from the catalog first.
+
+        §5.7/§4.3 care whether the benchmark is agentic (the Offline point and
+        the fifth accuracy run apply to non-agentic only). The declared
+        `model_name` keys the catalog's `agentic` flag, so a missing Offline
+        declaration is a finding rather than a redefinition of the minimum. A
+        pareto with no catalog entry (no ruleset, an unknown model, or a
+        hand-built pareto) falls back to the declared shape: an `offline`
+        declaration reads as non-agentic, its absence as agentic.
+
+        Returns:
+            bool: The catalog's flag for the declared model, else the declared
+                shape's reading.
+        """
+        catalog = self._catalog()
+        model_name = self._model_name()
+        if catalog is not None and model_name is not None:
+            entry = catalog.models.get(model_name)
+            if isinstance(entry, Mapping):
+                return bool(entry.get("agentic", False))
+        return not any(p.offline is not None for p in self.points)
+
+    def _catalog(self) -> Catalog | None:
+        """The ruleset catalog this pareto's tree was built with, if any."""
+        if self.node is None:
+            return None
+        return self.node.root().ruleset
+
+    def _model_name(self) -> str | None:
+        """The first `model_name` the pareto's points declare."""
+        return next((p.model_name for p in self.points if p.model_name), None)
+
+    def point_count(self) -> int:
+        """The pareto's measurement-point count (§5.3/§9.1's Point count)."""
+        return len(self.points)
+
+    def uncovered_regions(self) -> tuple[str, ...]:
+        """The §5.4 mandatory regions no point lands in (coverage findings).
+
+        "One point in each of the concurrency regions" (§5.3): a region is
+        covered when a fixed-concurrency point's concurrency falls in it. The
+        dedicated Offline run covers nothing (§5.7.2: it does not satisfy any
+        region-coverage requirement) and the `margin` band is not a coverage
+        region, so neither can satisfy the requirement.
+
+        Returns:
+            tuple[str, ...]: One `region` wire value per uncovered mandatory
+                region, empty when every one is covered.
+        """
+        regions = self.regions()
+        covered: set[RegionKind] = set()
+        for point in self.points:
+            if point.offline == "dedicated":
+                continue
+            kind = regions.covers(point.concurrency)
+            if kind is not None:
+                covered.add(kind)
+        return tuple(kind.value for kind in _MANDATORY_REGIONS if kind not in covered)
+
+    def offline_points(self) -> tuple[Point, ...]:
+        """The points carrying an `offline` declaration (§5.7's presence rule).
+
+        Refused at build when more than one carries one, so a non-agentic
+        pareto reads `1` here and an agentic pareto's ideal is `0`.
+        """
+        return tuple(self._offline_partition()[0])
+
+    def accuracy_run_count(self) -> int:
+        """How many points carry an `accuracy_results.json` (§9.1's run count).
+
+        For a non-agentic pareto a carrying point IS the §4.3 validation run
+        (`point_accuracy_present` keys on the same presence), so this count is
+        the measured side of §9.1's Accuracy-run-count row. An agentic
+        `accuracy_results.json` may hold inline scores only - the file cannot
+        tell inline from validation - which is why the row gates on
+        `agentic()` false rather than counting here.
+
+        Returns:
+            int: The points whose run directory carries a parsable
+                `accuracy_results.json`.
+        """
+        count = 0
+        for point in self.points:
+            if point.node is None:
+                continue
+            value, error = point.node.read("accuracy_results.json")
+            if value is not MISSING and error is None:
+                count += 1
+        return count
+
     def point_count_min(self) -> int:
         """Endpoints Policy §5.3's minimum point count this pareto needs.
 
         The four mandatory region points plus the three submitter's-choice
-        points. The dedicated Offline run adds one more (`8`). A pareto whose
-        C_max point is elected as the Offline result, and an agentic pareto
-        (no `offline` declaration, §5.7), runs one fewer distinct run (`7`).
+        points. A non-agentic pareto adds the Offline slot - one more distinct
+        run (`8`), unless the submitter elects the C_max point as the Offline
+        result, which carries no new run (`7`). An agentic pareto runs `7`
+        (§5.7: no Offline point applies). Which shape the pareto is keys on
+        `agentic()` (the catalog's flag for the declared model), so a
+        non-agentic pareto that forgot its Offline declaration is short of
+        `8`, not silently re-read as agentic.
 
         Returns:
             int: `MANDATORY_REGION_COUNT` + `SUBMITTERS_CHOICE_COUNT` (7), plus
-                one where a dedicated Offline run is declared (`8`). The elected or
-                agentic shape stays at `7`.
+                one for a non-agentic pareto with no `elected` declaration (`8`).
         """
         base = MANDATORY_REGION_COUNT + SUBMITTERS_CHOICE_COUNT
-        return base + (1 if any(p.offline == "dedicated" for p in self.points) else 0)
+        if self.agentic():
+            return base
+        return base + (0 if any(p.offline == "elected" for p in self.points) else 1)
 
     def accuracy_run_count_requirement(self) -> int:
         """Endpoints Policy §4.3's accuracy result count `N` this pareto needs.
 
         "One per mandatory point": one per mandatory concurrency region (4)
-        plus the Offline point where any `offline` run is declared
-        (non-agentic), hence `5`. Agentic paretos declare none (`4`).
+        plus the Offline point for non-agentic benchmarks, hence `5`. Agentic
+        paretos declare none (`4`); as with `point_count_min`, the shape keys
+        on `agentic()`.
 
         Returns:
-            int: `MANDATORY_REGION_COUNT` plus one where any `offline` run is
-                declared (`5`). `MANDATORY_REGION_COUNT` alone for agentic paretos
-                (`4`).
+            int: `MANDATORY_REGION_COUNT` plus one for a non-agentic pareto
+                (`5`); `MANDATORY_REGION_COUNT` alone for agentic paretos (`4`).
         """
-        return MANDATORY_REGION_COUNT + (
-            1 if any(p.offline is not None for p in self.points) else 0
-        )
+        return MANDATORY_REGION_COUNT + (0 if self.agentic() else 1)
 
     def derived(self) -> Mapping[str, Any]:
         """Named derivations for `derived.<name>` row refs, as a lazy mapping.
 
         The boundary rule for derivations ("named derivations on their subject,
-        exposed as fields `Ref` reads"): keys are `offline_ordering`,
-        `point_cap`, `point_count_min`, `accuracy_run_count_requirement` and
-        `out_of_range_points`, each resolved via its own named method at first
-        access and memoized (`DerivedFields`). An unlisted name -> `KeyError`.
+        exposed as fields `Ref` reads"): the keys are `_DERIVATION_METHODS`'
+        names - the Offline/point-count/region-coverage/accuracy-count facts a
+        row cannot compute itself - each resolved via its own named method at
+        first access and memoized (`DerivedFields`). An unlisted name ->
+        `KeyError`.
 
         Returns:
             Mapping[str, Any]: The `DerivedFields` view over this pareto: the
-                five names above are its keys, and nothing runs until a row names one.
+                `_DERIVATION_METHODS` names are its keys, and nothing runs until
+                a row names one.
         """
         return DerivedFields(self)
 
@@ -645,8 +756,13 @@ class DerivedFields(Mapping[str, Any]):
 _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "offline_ordering": Pareto.offline_ordering,
     "point_cap": Pareto.point_cap,
+    "point_count": Pareto.point_count,
     "point_count_min": Pareto.point_count_min,
+    "accuracy_run_count": Pareto.accuracy_run_count,
     "accuracy_run_count_requirement": Pareto.accuracy_run_count_requirement,
+    "uncovered_regions": Pareto.uncovered_regions,
+    "offline_points": Pareto.offline_points,
+    "agentic": Pareto.agentic,
     "out_of_range_points": lambda pareto: pareto.out_of_range_points(pareto.regions()),
 }
 

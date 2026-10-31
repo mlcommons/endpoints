@@ -389,6 +389,52 @@ class TestCohortRefTable:
             assert fact.matches(fact.coerce(text))
 
     @pytest.mark.unit
+    def test_a_nullable_leaf_admits_an_explicit_null(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={"point": {"config": {"e2e": {"type": "float", "nullable": True}}}},
+            point=LITERAL_CHECK,
+        )
+        table = Cohort.from_directory(root).refs
+        assert table.validate_values("point", {"config": {"e2e": None}}) == ()
+
+    @pytest.mark.unit
+    def test_a_null_on_a_non_nullable_leaf_is_refused(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={"point": {"config": {"e2e": {"type": "float"}}}},
+            point=LITERAL_CHECK,
+        )
+        table = Cohort.from_directory(root).refs
+        with pytest.raises(ValueError, match="does not match its declared type"):
+            table.validate_values("point", {"config": {"e2e": None}})
+
+    @pytest.mark.unit
+    def test_a_nullable_dict_subtree_admits_null_too(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={"point": {"config": {"osl": {"type": "dict", "nullable": True}}}},
+            point=LITERAL_CHECK,
+        )
+        table = Cohort.from_directory(root).refs
+        assert table.validate_values("point", {"config": {"osl": None}}) == ()
+
+    @pytest.mark.unit
+    def test_nullable_needs_a_bool(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={"point": {"config": {"e2e": {"type": "float", "nullable": "yes"}}}},
+            point=LITERAL_CHECK,
+        )
+        with pytest.raises(ValueError, match="needs to be true or false"):
+            Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_matches_reads_null_by_nullable(self):
+        assert _Fact(type="float", nullable=True).matches(None)
+        assert not _Fact(type="float").matches(None)
+
+    @pytest.mark.unit
     def test_a_scalar_where_a_block_or_type_name_belongs_is_refused(self, tmp_path):
         root = write_cohort(tmp_path / "cohort", refs={"point": 5}, point=LITERAL_CHECK)
         with pytest.raises(ValueError, match="expected a type name"):

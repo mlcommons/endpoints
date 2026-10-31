@@ -136,7 +136,8 @@ for.
     percentile keys.
   - `validate_values` checks one node's present values against its scope's
     declaration: `_check_values` walks declared-vs-carried and `_Fact.matches`
-    types each leaf (`bool` is not `int`; `float` accepts ints), `allowlist`
+    types each leaf (`bool` is not `int`; `float` accepts ints), only allows
+    explicit `null` where the leaf declares `nullable`, checks `allowlist`
     membership, and "a declared block must carry a block". A declared
     `int`/`float` leaf whose value is a numeric string reads as the number it
     spells (`_Fact.coerce`, exact spellings only) and the pass returns one note
@@ -164,8 +165,9 @@ for.
 - **`submission.py`** — the typed submission side.
 
   - `normalize_offline` is Section 8.3's three-state `offline` normalization.
-  - `Point` (frozen: `offline`/`concurrency`/`system_tps`/`system_desc`/`node`)
-    and `Point.from_node`, which reads one `r<N>` run directory — `point.yaml`'s
+  - `Point` (frozen:
+    `offline`/`concurrency`/`system_tps`/`system_desc`/`node`/`model_name`) and
+    `Point.from_node`, which reads one `r<N>` run directory — `point.yaml`'s
     `concurrency`/`offline`, its own `system_desc.json`, and
     `result_summary.json`'s `system_tps` — refusing each missing, mistyped, or
     unrepresentable fact at load (a `NaN`/`Infinity` `system_tps`, or an integer
@@ -178,11 +180,13 @@ for.
     `results/<system>/<model>/` and the unit every policy derivation is per;
     `Pareto.from_nodes` latches that pareto's `regions` root on its tree node.
     Its methods: `offline_ordering` (Section 5.7.2's two clauses), `point_cap`
-    (Section 5.6's `<= 32`), `point_count_min` (Section 5.3's 8-or-7),
-    `accuracy_run_count_requirement` (Section 4.3's 5/4), `out_of_range_points`
-    (Section 5.4's Concurrency-in-range row), `derived()` (the lazy
-    `derived.<name>` facts-projection), and `_validate_shape`, which refuses
-    shapes the derivations would trip on. Points must agree on their
+    (Section 5.6's `<= 32`), `point_count`/`point_count_min` (Section 5.3),
+    `uncovered_regions` (Section 5.4's coverage gaps), `offline_points` (Section
+    5.7's presence), `accuracy_run_count`/ `accuracy_run_count_requirement`
+    (Section 4.3), `agentic` (the catalog's benchmark flag),
+    `out_of_range_points` (Section 5.4's Concurrency-in-range row), `derived()`
+    (the lazy `derived.<name>` facts-projection), and `_validate_shape`, which
+    refuses shapes the derivations would trip on. Points must agree on their
     `max_supported_concurrency`/`c_min_override` by presence and typed value
     (`_shared_facts`), so a later run's `null` override cannot compare equal to
     a first run's omission.
@@ -432,12 +436,33 @@ Each formula below is anchored to the Endpoints Policy section it implements.
 - **`Pareto.point_cap()`** — `len(points) <= 32` per pareto, Offline counted
   (Section 5.6).
 
-- **`Pareto.point_count_min()`** — `8` if a dedicated `offline` is declared
-  (non-agentic), `7` otherwise (elected or agentic), Section 5.3's
-  one-fewer-distinct-run derivation.
+- **`Pareto.point_count_min()`** — `7` for an agentic pareto, else `8` unless
+  the C_max point is `elected` as the Offline result (`7`), Section 5.3's
+  one-fewer-distinct-run derivation. `agentic()` decides the shape.
 
-- **`Pareto.accuracy_run_count_requirement()`** — `5` if any `offline` is
-  declared (non-agentic), `4` otherwise (agentic), Section 4.3's `N`.
+- **`Pareto.accuracy_run_count_requirement()`** — `4` for an agentic pareto, `5`
+  otherwise, Section 4.3's `N`. `agentic()` decides the shape.
+
+- **`Pareto.point_count()`** — `len(points)`, Section 5.3/9.1's Point-count
+  row's measured side.
+
+- **`Pareto.uncovered_regions()`** — the mandatory `RegionKind`s (Ultra
+  Low/Low/Medium/High) with no point's concurrency in them, as `region` wire
+  values. A dedicated Offline point covers nothing (Section 5.7.2); `margin` is
+  not a coverage region.
+
+- **`Pareto.offline_points()`** —
+  `tuple(p for p in points if p.offline is not None)`, Section 5.7's presence
+  rule (`_validate_shape` refuses more than one).
+
+- **`Pareto.accuracy_run_count()`** — count of points whose run directory
+  carries a parsable `accuracy_results.json`, Section 9.1's Accuracy-run-count
+  row's measured side. The row gates it on `agentic()` false: an agentic file
+  cannot be told inline from validation.
+
+- **`Pareto.agentic()`** — the catalog's `agentic` flag for the declared
+  `model_name` (`node.root().ruleset`, the cohort's catalog), falling back to
+  the declared shape for an unknown model or no catalog at all.
 
 - **`Pareto.out_of_range_points(regions)`** —
   `tuple(p for p in points if p.offline != "dedicated" and p.concurrency not in regions.coverage())`,
@@ -464,34 +489,35 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   ref table, and a brand-new namespace or derivation still needs code. One
   caveat on the mapping form: a mapping is the annotated-leaf form when its
   `type` value is a type name and every key is reserved
-  (`type`/`required`/`default`/`allowlist`), so `field: { type: int }` is a leaf
-  while `field: { type: { ... } }` is a block (its `type` value is itself a
-  mapping, not a type name).
+  (`type`/`required`/`default`/`allowlist`/`nullable`), so
+  `field: { type: int }` is a leaf while `field: { type: { ... } }` is a block
+  (its `type` value is itself a mapping, not a type name).
 
 - **Rows above a pareto cannot aggregate over points.** There is no
   `derived`/`regions` namespace above a pareto (both are per-pareto by
   construction), so a system- or submission-scoped row cannot count over points
-  at all. Per-pareto aggregate rows (point-count-from-nodes, region-coverage
-  counts, accuracy-run counting) await a points-collection in the row model.
+  at all; the pareto-level counts are the named derivations above.
 
-- **Agentic shape is inferred from omission.** With no `offline` declaration,
-  `point_count_min` and `accuracy_run_count_requirement` report the agentic 7/4.
-  A non-agentic upload that forgot its declaration is indistinguishable from an
-  agentic one at this layer.
+- **Agentic shape keys on the catalog, with an inference fallback.** With a
+  catalog, `agentic()` reads the declared model's flag; without one (or for an
+  unlisted model) it falls back to the declared shape, where an absent `offline`
+  declaration reads as agentic -- the older inference.
 
 ## 8. Notable engineering calls (for reviewers)
 
 - **Derivations are exposed as fields `Ref` reads, and that exposure is
-  priced.** The `derived.<name>` names are exactly `offline_ordering`,
-  `point_cap`, `point_count_min`, `accuracy_run_count_requirement` and
-  `out_of_range_points` (the `_DERIVATION_METHODS` table, published as
-  `DERIVATION_NAMES`). `Point.point_power_kw` and `Interval.for_accuracy_gate`
-  stay **method-only**: their inputs (provisioned/engaged node counts; the
-  per-model reference score and gate factor) are carried on no fact the rows can
-  reach today, so they price into the rows that need them (the per-point
-  denominator and accuracy-gate rows) together with the carries those rows
-  bring. `Regions.covers`' row use is `regions.by_kind.<kind>` membership
-  (`op: in`) — the shape the stub cohort in `tests/assets/cohorts/stub/` writes.
+  priced.** The `derived.<name>` names are exactly `_DERIVATION_METHODS`' keys,
+  published as `DERIVATION_NAMES`: `offline_ordering`, `point_cap`,
+  `point_count`, `point_count_min`, `accuracy_run_count`,
+  `accuracy_run_count_requirement`, `uncovered_regions`, `offline_points`,
+  `agentic`, `out_of_range_points`. `Point.point_power_kw` and
+  `Interval.for_accuracy_gate` stay **method-only**: their inputs
+  (provisioned/engaged node counts; the per-model reference score and gate
+  factor) are carried on no fact the rows can reach today, so they price into
+  the rows that need them (the per-point denominator and accuracy-gate rows)
+  together with the carries those rows bring. `Regions.covers`' row use is
+  `regions.by_kind.<kind>` membership (`op: in`) — the shape the stub cohort in
+  `tests/assets/cohorts/stub/` writes.
 
 - **The strict loader refuses duplicate keys, `<<` merge keys and all YAML
   aliases.** Alias fan-out can re-walk shared subtrees exponentially, and silent

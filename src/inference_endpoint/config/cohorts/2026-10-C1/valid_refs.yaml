@@ -7,13 +7,15 @@
 # and its values stay unchecked, while the value itself must be a block. A leaf
 # carries the type the document must hold; `required: true` marks the facts the
 # checker refuses a run for omitting at all (the parser-minimum trio plus
-# `point.config.concurrency`).
+# `point.config.concurrency`); `nullable: true` admits an explicit `null` (the
+# facts the client's own summary writes as null).
 
 point:
   config:
     concurrency: { type: int, required: true }
     offline: { type: str, allowlist: [dedicated, elected, none], default: null }
-    load_pattern: { type: str, allowlist: [concurrency, agentic_inference] }
+    load_pattern:
+      { type: str, allowlist: [concurrency, agentic_inference, max_throughput] }
     region:
       {
         type: str,
@@ -37,6 +39,7 @@ point:
     dataset_type: { type: str }
     dataset_link: { type: str }
     link_to_model: { type: str }
+    link_to_model_transformation: { type: str, nullable: true }
     shared_src: { type: str }
     shared_docs: { type: str }
     division: { type: str }
@@ -93,13 +96,16 @@ point:
     host_processor_vcpu_count: { type: int }
   result_summary:
     system_tps: { type: float, required: true }
-    qps: { type: float }
-    duration_ns: { type: int }
+    complete: { type: bool }
+    state: { type: str }
+    qps: { type: float, nullable: true }
+    duration_ns: { type: int, nullable: true }
     n_samples_issued: { type: int }
     n_samples_completed: { type: int }
     n_samples_failed: { type: int }
+    n_samples_dropped: { type: int }
     output_sequence_lengths: dict
-    output_sequence_lengths_full_run: dict
+    output_sequence_lengths_full_run: { type: dict, nullable: true }
     ttft: dict
     tpot: dict
     latency: dict
@@ -109,7 +115,7 @@ point:
     tps_per_user: { type: float }
     tps_utilization: { type: float }
     system_tps_per_kw: { type: float }
-    e2e_avg_interactivity: { type: float }
+    e2e_avg_interactivity: { type: float, nullable: true }
   accuracy_results: dict
   results: dict
   system_power:

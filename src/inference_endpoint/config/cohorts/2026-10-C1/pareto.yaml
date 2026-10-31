@@ -2,10 +2,12 @@
 # Policy section it enforces (pinned at 4ba8224dc746).
 #
 # A pareto row may name `pareto.…` facts, the coarser `system.`/`submission.`
-# namespaces, and the per-pareto `derived.*`/`regions.*` names. What a row cannot
-# do -- count points, compare a point to the curve's maximum, or place a point in
-# a computed region band -- is listed in ../2026-10-C1.md under "Not yet
-# expressible", with the reason.
+# namespaces, and the per-pareto `derived.*`/`regions.*` names. Counting over
+# the pareto's points is available as `derived.point_count`,
+# `derived.uncovered_regions`, `derived.offline_points` and
+# `derived.accuracy_run_count`; what a row still cannot do -- compare a point
+# to the curve's maximum, or place a point in a computed region band -- is
+# listed in ../2026-10-C1.md under "Not yet expressible", with the reason.
 
 pareto_point_cap:
   description: The pareto traces at most 32 measurement points (§5.6's cap).
@@ -25,3 +27,53 @@ pareto_out_of_range_points:
       aggregate: count
       op: eq
       value: 0
+
+pareto_point_count_min:
+  description: The pareto carries at least §5.3's minimum number of measurement points.
+  rule: "Endpoints Policy §5.3, Minimum Submission Requirements; §9.1, Point count."
+  fix: Add measurement points until this pareto's shape carries its §5.3 minimum.
+  severity: fail
+  assert:
+    - { left: derived.point_count, op: ge, right: derived.point_count_min }
+
+pareto_region_coverage:
+  description: Every mandatory concurrency region carries at least one measurement point.
+  rule: "Endpoints Policy §5.4, Regions of Interest; §9.1, Concurrency coverage."
+  fix: Add a measurement point inside each uncovered region the finding lists.
+  severity: fail
+  assert:
+    - { over: derived.uncovered_regions, aggregate: count, op: eq, value: 0 }
+
+pareto_offline_present:
+  description: A non-agentic pareto carries its one Offline declaration (§5.7).
+  rule: "Endpoints Policy §5.7, Offline Point; §9.1, Offline point present."
+  fix: Declare exactly one point as the Offline result (a dedicated run, or the elected C_max point).
+  severity: fail
+  when:
+    - { left: derived.agentic, op: eq, right: false }
+  assert:
+    - { over: derived.offline_points, aggregate: count, op: ge, value: 1 }
+
+pareto_offline_absent_for_agentic:
+  description: An agentic pareto carries no Offline declaration (§5.7).
+  rule: "Endpoints Policy §5.7, Offline Point; §9.1, Offline point present."
+  fix: Drop the `offline` declaration; an agentic submission may not include an Offline point.
+  severity: fail
+  when:
+    - { left: derived.agentic, op: eq, right: true }
+  assert:
+    - { over: derived.offline_points, aggregate: count, op: eq, value: 0 }
+
+pareto_accuracy_run_count:
+  description: A non-agentic pareto carries exactly N accuracy validation results.
+  rule: "Endpoints Policy §4.3, Accuracy Metric; §9.1, Accuracy run count."
+  fix: Ship exactly one accuracy result at each mandatory point and none at submitter's-choice points.
+  severity: fail
+  when:
+    - { left: derived.agentic, op: eq, right: false }
+  assert:
+    - {
+        left: derived.accuracy_run_count,
+        op: eq,
+        right: derived.accuracy_run_count_requirement,
+      }

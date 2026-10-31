@@ -26,6 +26,7 @@ declare (e.g. a concurrency below 1).
 from pathlib import Path
 
 import pytest
+from inference_endpoint.validation.catalog import Catalog
 from inference_endpoint.validation.regions import Regions
 from inference_endpoint.validation.submission import (
     DERIVATION_NAMES,
@@ -515,18 +516,140 @@ class TestThresholdsPerShape:
         assert pareto.point_count_min() == 7
         assert pareto.accuracy_run_count_requirement() == 4
 
+    @pytest.mark.unit
+    def test_a_cataloged_non_agentic_model_without_offline_reads_8(self, tmp_path):
+        # The declared model keys the catalog's flag, so a missing Offline
+        # declaration cannot silently re-read the pareto as agentic.
+        upload = write_upload(
+            tmp_path / "acme",
+            {
+                SYSTEM: [
+                    Run(
+                        concurrency=16,
+                        config_extra={"model_name": "gpt-oss-120b"},
+                    )
+                ]
+            },
+            ruleset=Catalog(models={"gpt-oss-120b": {"agentic": False}}, datasets={}),
+        )
+        pareto = upload.paretos[0]
+        assert pareto.agentic() is False
+        assert pareto.point_count_min() == 8
+        assert pareto.accuracy_run_count_requirement() == 5
+
+    @pytest.mark.unit
+    def test_a_cataloged_agentic_model_reads_7_and_4(self, tmp_path):
+        upload = write_upload(
+            tmp_path / "acme",
+            {SYSTEM: [Run(concurrency=16, config_extra={"model_name": "kimi-k3"})]},
+            ruleset=Catalog(models={"kimi-k3": {"agentic": True}}, datasets={}),
+        )
+        pareto = upload.paretos[0]
+        assert pareto.agentic() is True
+        assert pareto.point_count_min() == 7
+        assert pareto.accuracy_run_count_requirement() == 4
+
+    @pytest.mark.unit
+    def test_an_unknown_model_falls_back_to_the_declared_shape(self, tmp_path):
+        upload = write_upload(
+            tmp_path / "acme",
+            {
+                SYSTEM: [
+                    Run(concurrency=16),
+                    Run(
+                        concurrency=512,
+                        offline="dedicated",
+                        config_extra={"model_name": "unlisted-model"},
+                    ),
+                    Run(concurrency=8192),
+                ]
+            },
+            ruleset=Catalog(models={"other": {"agentic": True}}, datasets={}),
+        )
+        pareto = upload.paretos[0]
+        assert pareto.agentic() is False
+        assert pareto.point_count_min() == 8
+
+
+class TestCoverageAndCounts:
+    """`uncovered_regions` / `offline_points` / `accuracy_run_count`."""
+
+    @pytest.mark.unit
+    def test_every_mandatory_region_can_be_covered(self, tmp_path):
+        # c_min 16, c_max 8192: Low is 17..36, Medium is 37..422.
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16),
+                Run(concurrency=24),
+                Run(concurrency=100),
+                Run(concurrency=8192, system_tps=5400.0),
+            ],
+        )
+        assert pareto.uncovered_regions() == ()
+
+    @pytest.mark.unit
+    def test_a_region_with_no_point_is_named(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16), Run(concurrency=100), Run(concurrency=8192)],
+        )
+        assert pareto.uncovered_regions() == ("low_concurrency",)
+
+    @pytest.mark.unit
+    def test_a_dedicated_offline_point_covers_nothing(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16),
+                Run(concurrency=24),
+                Run(concurrency=8192, system_tps=5400.0),
+                Run(concurrency=50, offline="dedicated"),
+            ],
+        )
+        # 50 sits in Medium, but §5.7.2 exempts the dedicated run from coverage.
+        assert pareto.uncovered_regions() == ("med_concurrency",)
+
+    @pytest.mark.unit
+    def test_offline_points_lists_the_declaration(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16), Run(concurrency=8192, offline="elected")],
+        )
+        assert tuple(p.offline for p in pareto.offline_points()) == ("elected",)
+
+    @pytest.mark.unit
+    def test_accuracy_run_count_counts_carrying_points(self, tmp_path):
+        root = tmp_path / "acme"
+        for name, carries in (("r16", True), ("r8192", False)):
+            run_dir = write_run(
+                root / "results" / "sys" / "model" / name,
+                Run(concurrency=int(name[1:])),
+            )
+            if carries:
+                (run_dir / "accuracy_results.json").write_text(
+                    '{"accuracy_scores": [{"score": 1.0}]}', encoding="utf-8"
+                )
+        pareto = Submission.from_directory(root).paretos[0]
+        assert pareto.accuracy_run_count() == 1
+
 
 class TestDerivedExposure:
     """`Pareto.derived`: the `derived.<name>` fields, resolved from the pareto itself."""
 
     @pytest.mark.unit
-    def test_the_derivation_names_are_the_five_policy_derivations(self):
+    def test_the_derivation_names_are_the_policy_derivations(self):
         assert set(DERIVATION_NAMES) == {
-            "offline_ordering",
-            "point_cap",
-            "point_count_min",
+            "agentic",
+            "accuracy_run_count",
             "accuracy_run_count_requirement",
+            "offline_ordering",
+            "offline_points",
             "out_of_range_points",
+            "point_cap",
+            "point_count",
+            "point_count_min",
+            "uncovered_regions",
         }
 
     @pytest.mark.unit
@@ -534,6 +657,8 @@ class TestDerivedExposure:
         pareto = _pareto(tmp_path, [Run(concurrency=16), Run(concurrency=8192)])
         derived = pareto.derived()
         assert set(derived) == set(DERIVATION_NAMES)
+        assert derived["agentic"] is True
+        assert derived["point_count"] == 2
         assert derived["point_count_min"] == 7
         assert derived["out_of_range_points"] == ()
 

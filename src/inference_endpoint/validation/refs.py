@@ -321,6 +321,9 @@ class _Fact:
             (Default: MISSING)
         allowlist (tuple[Any, ...] | None): The valid values `allowlist` names,
             checked against the upload at collect time. (Default: None)
+        nullable (bool): Whether an explicit `null` counts as a value the upload
+            may carry. Without it a present `null` refuses the upload at collect
+            time, like any other mistyped value. (Default: False)
     """
 
     VALID_TYPES: ClassVar[frozenset[str]] = frozenset(
@@ -331,6 +334,7 @@ class _Fact:
     required: bool = False
     default: Any = MISSING
     allowlist: tuple[Any, ...] | None = None
+    nullable: bool = False
 
     def __post_init__(self) -> None:
         """Refuse an unknown `type` at construction, whoever builds the fact."""
@@ -366,7 +370,14 @@ class _Fact:
         return decode_number(value, self.type)
 
     def matches(self, value: Any) -> bool:
-        """Whether an upload value may carry this leaf, by its declared type."""
+        """Whether an upload value may carry this leaf, by its declared type.
+
+        `None` matches exactly where `nullable` is set: a declared-nullable fact
+        reads an explicit `null` as its "no value" spelling, and no type test
+        classifies it.
+        """
+        if value is None:
+            return self.nullable
         match self.type:
             case "bool":
                 return isinstance(value, bool)
@@ -561,7 +572,8 @@ def _check_values(
 
     A numeric string on a declared `int`/`float` leaf is decoded
     (`_Fact.coerce`) and one note appended to `notes`; the decoded value is what
-    `matches` and the `allowlist` then judge.
+    `matches` and the `allowlist` then judge. An explicit `null` passes where
+    the leaf declares `nullable` and refuses elsewhere.
 
     Args:
         declared (Mapping[str, Any]): A declared block of the cohort's ref table.
@@ -579,6 +591,9 @@ def _check_values(
         if key is None:
             continue
         value = values[key]
+        if value is None and not isinstance(entry, Mapping) and entry.nullable:
+            # A declared-nullable value states "no value": nothing below classifies it.
+            continue
         here = [*path, name]
         if isinstance(entry, Mapping):
             if isinstance(value, Mapping):
@@ -619,10 +634,10 @@ def _entry(name: str, node: Any) -> Any:
     - `warmup: { ... }` -> a block
 
     A mapping is the annotated-leaf form when `type` names one of the valid
-    types and every key is reserved (`type`/`required`/`default`/`allowlist`);
-    anything else is a block of sub-entries, so a rule field literally named
-    `type` stays a block when its value is not a type name:
-    `field: { type: { ... } }` is a block.
+    types and every key is reserved
+    (`type`/`required`/`default`/`allowlist`/`nullable`); anything else is a
+    block of sub-entries, so a rule field literally named `type` stays a block
+    when its value is not a type name: `field: { type: { ... } }` is a block.
 
     Args:
         name (str): The entry's name, for the fault messages.
@@ -646,6 +661,9 @@ def _entry(name: str, node: Any) -> Any:
             required = node.get("required", False)
             if not isinstance(required, bool):
                 raise ValueError(f"{name}: `required` needs to be true or false")
+            nullable = node.get("nullable", False)
+            if not isinstance(nullable, bool):
+                raise ValueError(f"{name}: `nullable` needs to be true or false")
             allowlist = node.get("allowlist")
             if allowlist is not None and node["type"] == "dict":
                 raise ValueError(
@@ -682,6 +700,7 @@ def _entry(name: str, node: Any) -> Any:
                 required=required,
                 default=default,
                 allowlist=tuple(allowlist) if allowlist is not None else None,
+                nullable=nullable,
             )
             if (
                 default is not MISSING

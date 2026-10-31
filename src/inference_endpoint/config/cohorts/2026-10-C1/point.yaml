@@ -28,6 +28,14 @@ point_disclosure_complete:
     - { left: point.config.seed_set, op: exists }
     - { left: point.config.target_cohort, op: exists }
 
+point_run_complete:
+  description: The run completed; a drain timeout or interrupt leaves it incomplete.
+  rule: "Endpoints Policy §9.1, Automated Checks; §1, Submission completeness."
+  fix: "Re-run this point to completion (`complete: false` marks a drain timeout or an interrupted run)."
+  severity: fail
+  assert:
+    - { left: point.result_summary.complete, op: eq, right: true }
+
 point_target_cohort_shape:
   description: The declared target cohort reads YYYY-MM-C0/C1 (§4.2's calendar).
   rule: "Endpoints Policy §4.6, Seeds."
@@ -94,6 +102,16 @@ point_concurrency_positive:
   assert:
     - { left: point.config.concurrency, op: gt, right: 0 }
 
+point_offline_load_pattern:
+  description: The dedicated Offline run declares the Offline load pattern (§6.1).
+  rule: "Endpoints Policy §6.1, Load Patterns; §9.1, Load pattern."
+  fix: "Declare `load_pattern: max_throughput` for the dedicated Offline run."
+  severity: fail
+  when:
+    - { left: point.config.offline, op: eq, right: dedicated }
+  assert:
+    - { left: point.config.load_pattern, op: eq, right: max_throughput }
+
 point_warmup_present:
   description: The run declares its warmup block.
   rule: "Endpoints Policy §6.3.3, Warmup."
@@ -156,10 +174,12 @@ point_output_tokens_present:
       }
 
 point_tpot_p90_positive:
-  description: The summary carries a positive P90 time-per-output-token.
-  rule: "Endpoints Policy §9.1, Automated Checks; §4.1, Metrics."
-  fix: Re-run with streaming so the summary carries a positive tpot.percentiles["90"].
+  description: A fixed-concurrency run reports a positive P90 time-per-output-token.
+  rule: "Endpoints Policy §9.1, Automated Checks; §4.1, Metrics; §6.5, Dataset Considerations."
+  fix: Re-run with streaming so the summary carries a positive tpot.percentiles["90"] (the dedicated Offline run is exempt).
   severity: fail
+  when:
+    - { left: point.config.offline, op: ne, right: dedicated }
   assert:
     - { left: point.result_summary.tpot.percentiles.90, op: gt, right: 0 }
 
