@@ -143,23 +143,47 @@ point_warmup_logs_retained:
   assert:
     - { left: point.config.warmup.logs_retained, op: eq, right: true }
 
-point_warmup_salt_disabled:
-  description: The warmup did not salt its requests (§6.3.3's default salt off).
-  rule: "Endpoints Policy §6.3.3, Warmup."
-  fix: Stop salting warmup requests, or document why the salt was kept.
+point_warmup_unsalted:
+  description: The warmup enabled salt when it issued requests (§6.3.1 requires it for the client's performance-dataset warmup).
+  rule: "Endpoints Policy §6.3.1, Prohibited Warmup Data."
+  fix: "Set `runtime_settings.warmup.salt: true` (--warmup-salt) and disable KV cache reuse, or warm up from data outside the performance dataset."
   severity: warn
   when:
-    - { left: point.config.runtime_settings.warmup.salt, op: exists }
+    - { left: point.config.warmup.requests_issued, op: gt, right: 0 }
   assert:
-    - { left: point.config.runtime_settings.warmup.salt, op: ne, right: true }
+    - { left: point.config.runtime_settings.warmup.salt, op: eq, right: true }
 
 point_duration_minimum:
-  description: The run measured for at least the ten-minute floor.
-  rule: "Endpoints Policy §6.2, Measurement Duration; §11, Measurement Duration."
+  description: The ≤32-concurrency run measured for at least the ten-minute floor.
+  rule: "Endpoints Policy §6.2, Minimum Run Duration; §9.1, Run duration."
   fix: Re-run at this concurrency for at least 600 s and re-submit.
   severity: warn
+  when:
+    - { left: point.config.concurrency, op: le, right: 32 }
   assert:
     - { left: point.result_summary.duration_ns, op: ge, right: 600000000000 }
+
+point_duration_minimum_high_concurrency:
+  description: The >32-concurrency run measured for at least the twenty-minute floor.
+  rule: "Endpoints Policy §6.2, Minimum Run Duration; §9.1, Run duration."
+  fix: Re-run at this concurrency for at least 1200 s and re-submit.
+  severity: warn
+  when:
+    - { left: point.config.concurrency, op: gt, right: 32 }
+    - { left: derived.agentic, op: eq, right: false }
+  assert:
+    - { left: point.result_summary.duration_ns, op: ge, right: 1200000000000 }
+
+point_duration_minimum_high_concurrency_agentic:
+  description: The >32-concurrency agentic run measured for at least the forty-minute floor.
+  rule: "Endpoints Policy §6.2, Minimum Run Duration; §9.1, Run duration."
+  fix: Re-run at this concurrency for at least 2400 s and re-submit.
+  severity: warn
+  when:
+    - { left: point.config.concurrency, op: gt, right: 32 }
+    - { left: derived.agentic, op: eq, right: true }
+  assert:
+    - { left: point.result_summary.duration_ns, op: ge, right: 2400000000000 }
 
 point_output_tokens_present:
   description: The run reports its total output tokens.
