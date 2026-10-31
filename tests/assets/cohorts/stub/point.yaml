@@ -1,0 +1,42 @@
+# Stub checks over one measurement point (Endpoints Policy section 5.4 and
+# section 5.7.2). Scope comes from the filename (point.yaml) and each check's
+# id is its mapping key.
+#
+# Representative stubs covering the shapes the checker must carry. `left` names
+# the point's `concurrency` row-field (Endpoints Policy section 8.3's
+# `concurrency`, landed under `point.config` per `FILE_TO_KEY_MAP`) and
+# `right` reads `regions.coverage`-interval (section 5.5's computed region).
+# The gate exempts a dedicated Offline run: §5.7.2's dedicated point is not a
+# fixed-concurrency point (its concurrency is the performance dataset's
+# cardinality), which is why `Pareto.out_of_range_points` exempts it too.
+concurrency_in_range:
+  description: Each measurement point's concurrency lands in a valid region (incl. 10% margin).
+  rule: "Endpoints Policy Section 5.4, Concurrency Regions and its compliance-checklist row 'Concurrency in range'."
+  fix: Adjust the point's target concurrency to fall within one of the five regions computed from your declared C_max and the Low Concurrency/other regions around it.
+  severity: warn
+  when:
+    - left: point.config.offline
+      op: ne
+      right: dedicated
+  assert:
+    - left: point.config.concurrency
+      op: in
+      right: regions.coverage
+
+# The `when` guard matches the prose's "for a dedicated Offline run (not
+# applicable to an elected point)" against the point's own `offline`
+# declaration (Endpoints Policy section 8.3), and `assert` reads the named
+# derivation already landed via the `derived` root.
+offline_ordering:
+  description: The dedicated Offline run shall meet the Section 5.7.2 throughput and concurrency clauses.
+  rule: "Endpoints Policy Section 5.7.2, Relationship to Maximum Supported Concurrency."
+  fix: Either raise the dedicated Offline run's system_tps to at least 0.98x the C_max point's, or elect the C_max point as the Offline result instead.
+  severity: warn
+  when:
+    - left: point.config.offline
+      op: eq
+      right: dedicated
+  assert:
+    - left: derived.offline_ordering
+      op: eq
+      right: true

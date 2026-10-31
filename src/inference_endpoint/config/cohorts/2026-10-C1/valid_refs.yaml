@@ -1,0 +1,134 @@
+# The facts a 2026-10-C1 row may name, declared exactly as the submission's own
+# documents spell them (Endpoints Policy 4ba8224dc746: §8.3 point.yaml, §8.2
+# system_desc.json, §4.1/§8.1 result_summary.json, §4.4 steady state, §4.6 seeds,
+# §4.5.2 system_power.json).
+#
+# `field: dict` declares an open subtree: a row may name any deeper key under it
+# and its values stay unchecked, while the value itself must be a block. A leaf
+# carries the type the document must hold; `required: true` marks the facts the
+# checker refuses a run for omitting at all (the parser-minimum trio plus
+# `point.config.concurrency`).
+
+point:
+  config:
+    concurrency: { type: int, required: true }
+    offline: { type: str, allowlist: [dedicated, elected, none], default: null }
+    load_pattern: { type: str, allowlist: [concurrency, agentic_inference] }
+    region:
+      {
+        type: str,
+        allowlist:
+          [
+            low_latency,
+            low_concurrency,
+            med_concurrency,
+            high_concurrency,
+            margin,
+            submitters_choice,
+          ],
+      }
+    seed_set: { type: str }
+    target_cohort: { type: str }
+    model_name: { type: str }
+    model_precision: { type: str }
+    model_notes: { type: str }
+    dataset: { type: str }
+    dataset_name: { type: str }
+    dataset_type: { type: str }
+    dataset_link: { type: str }
+    link_to_model: { type: str }
+    shared_src: { type: str }
+    shared_docs: { type: str }
+    division: { type: str }
+    max_supported_concurrency: { type: int }
+    nodes_used: { type: list }
+    dp_shortfall: dict
+    speculative_decoding: dict
+    warmup:
+      duration_s: { type: int }
+      requests_issued: { type: int }
+      requests_completed: { type: int }
+      concurrency: { type: int }
+      logs_retained: { type: bool }
+      data_source: { type: str }
+      salt: { type: bool }
+    steady_state:
+      status:
+        {
+          type: str,
+          allowlist:
+            [
+              windowable,
+              insufficient_duration,
+              insufficient_passes,
+              partial_dataset,
+            ],
+        }
+      verdict:
+        {
+          type: str,
+          allowlist:
+            [steady_state, drifting_up, drifting_down, anomaly, not_found],
+        }
+      window: dict
+      state: dict
+    runtime_settings:
+      runtime: dict
+      warmup: dict
+      load_pattern: { type: str }
+      stream_all_chunks: { type: bool }
+  system_desc:
+    max_supported_concurrency: { type: int, required: true }
+    c_min_override: { type: int, default: null }
+    division: { type: str }
+    cooling: { type: str }
+    node_sets: { type: list }
+    accelerators: dict
+    tensor_parallel: { type: int }
+    pipeline_parallel: { type: int }
+    expert_parallel: { type: int }
+    data_parallel: { type: int }
+    tps_utilization: { type: float }
+    host_processor_core_count: { type: int }
+    host_processor_vcpu_count: { type: int }
+  result_summary:
+    system_tps: { type: float, required: true }
+    qps: { type: float }
+    duration_ns: { type: int }
+    n_samples_issued: { type: int }
+    n_samples_completed: { type: int }
+    n_samples_failed: { type: int }
+    output_sequence_lengths: dict
+    output_sequence_lengths_full_run: dict
+    ttft: dict
+    tpot: dict
+    latency: dict
+    percentiles: dict
+    isl: dict
+    osl: dict
+    tps_per_user: { type: float }
+    tps_utilization: { type: float }
+    system_tps_per_kw: { type: float }
+    e2e_avg_interactivity: { type: float }
+  accuracy_results: dict
+  results: dict
+  system_power:
+    system_desc_id: { type: str }
+    provisioned_power_kw: { type: float }
+    cooling: { type: str }
+    mlc_estimated_power: { type: bool }
+    node_sets: { type: list }
+    scale_out: dict
+    computed: dict
+    notes: { type: str }
+
+system:
+  system_power:
+    system_desc_id: { type: str }
+    provisioned_power_kw: { type: float }
+    cooling: { type: str }
+    mlc_estimated_power: { type: bool }
+    node_sets: { type: list }
+    scale_out: dict
+    computed: dict
+    notes: { type: str }
