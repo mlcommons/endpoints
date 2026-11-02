@@ -1370,6 +1370,37 @@ class TestBenchmarkSession:
         )
 
     @pytest.mark.asyncio
+    async def test_complete_stamp_is_decode_time_floored_by_own_chunks(self):
+        """COMPLETE keeps QueryResult.completed_at unless one of the response's
+        own chunks was handled later; then it takes that chunk's stamp."""
+        loop = asyncio.get_running_loop()
+        publisher = FakePublisher()
+        session = BenchmarkSession(FakeIssuer(), publisher, loop)
+
+        late = QueryResult(id="q-late", response_output="out")
+        session._handle_response(
+            StreamChunk(id="q-late", metadata={"first_chunk": True}),
+            late.completed_at + 500,
+        )
+        session._handle_response(late, late.completed_at + 900)
+        early = QueryResult(id="q-early", response_output="out")
+        session._handle_response(
+            StreamChunk(id="q-early", metadata={"first_chunk": True}),
+            early.completed_at - 500,
+        )
+        session._handle_response(early, early.completed_at + 900)
+
+        complete = {
+            e.sample_uuid: e.timestamp_ns
+            for e in publisher.events_of_type(SampleEventType.COMPLETE)
+        }
+        assert complete == {
+            "q-late": late.completed_at + 500,
+            "q-early": early.completed_at,
+        }
+        assert session._last_chunk_ns == {}
+
+    @pytest.mark.asyncio
     async def test_handle_response_stamps_conversation_id_and_turn(self):
         """All event types inherit (conv_id, turn) seeded at issue time; streaming
         events use .get() so the entry survives for the terminal QueryResult pop."""
@@ -1422,9 +1453,8 @@ class TestBenchmarkSession:
         assert [(e.conversation_id, e.turn) for e in complete] == [("conv-9", 5)]
         assert complete[0].finish_reason == "stop"
         assert complete[0].worker_id == 3
-        # COMPLETE carries the caller's arrival stamp, like the chunk events,
-        # not the decode-time QueryResult.completed_at.
-        assert complete[0].timestamp_ns == 1_002
+        # Without chunks, COMPLETE keeps the decode-time QueryResult.completed_at.
+        assert complete[0].timestamp_ns == ok_resp.completed_at
         assert "q-ok" not in phase_issuer.uuid_to_conv_info
         assert "q-ok" not in phase_issuer.completed_uuids
 

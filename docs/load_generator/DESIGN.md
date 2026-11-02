@@ -309,8 +309,8 @@ async def _receive_responses(self):
             if self._strategy_task and not self._strategy_task.done():
                 self._strategy_task.cancel()
             break
-        # One clock read per response, shared by the event records
-        # (RECV_FIRST/RECV_NON_FIRST/COMPLETE) and the liveness stamp.
+        # One clock read per response, shared by the chunk event records
+        # (RECV_FIRST/RECV_NON_FIRST), the COMPLETE floor and the liveness stamp.
         now_ns = time.monotonic_ns()
         self._handle_response(resp, now_ns)
         if self._endpoint_response_idle_timeout_ns is not None:
@@ -355,16 +355,19 @@ poll-based approach.
   until the batch threshold is reached or `flush()` is called. The timestamp
   itself is still accurate (captured before buffering), but the EventRecord
   reaches subscribers with batching latency.
-- RECV_FIRST, RECV_NON_FIRST and COMPLETE: one `monotonic_ns()` read per
-  response in `_receive_responses`, when the session handles it. All three use
-  this same clock point, so a response's COMPLETE is never earlier than its own
-  chunks. (`QueryResult.completed_at` is set at decode; the transport decodes a
-  whole drain before the session handles any message, so a result decoded in the
-  same drain as its chunks would precede them and give a negative TPOT.) Both
-  ISSUED and COMPLETE timestamps share the same ZMQ transit bias. TTFT
-  (`RECV_FIRST - ISSUED`) is still sensitive to this overhead since it spans the
-  full ZMQ round-trip. TPOT avoids cross-process clock skew by computing time
-  deltas between consecutive chunks within the same process.
+- RECV_FIRST and RECV_NON_FIRST: one `monotonic_ns()` read per response in
+  `_receive_responses`, when the session handles it.
+- COMPLETE: `QueryResult.completed_at` is set via
+  `force_setattr(monotonic_ns())` in `__post_init__`, regenerated on
+  deserialization. The transport decodes a whole drain before the session
+  handles any message, so a result decoded in the same drain as its chunks is
+  older than their RECV stamps (negative TPOT). In that case only, COMPLETE
+  takes the handling stamp of the response's last chunk, so a response's
+  COMPLETE is never earlier than its own chunks. A response without chunks keeps
+  `completed_at`. Both ISSUED and COMPLETE timestamps share the same ZMQ transit
+  bias. TTFT (`RECV_FIRST - ISSUED`) is still sensitive to this overhead since
+  it spans the full ZMQ round-trip. TPOT avoids cross-process clock skew by
+  computing time deltas between consecutive chunks within the same process.
 
 ### LoadStrategy (Protocol)
 
@@ -642,7 +645,7 @@ sequenceDiagram
     alt Non-streaming
         W-->>I: ZMQ PUSH (QueryResult)
         I-->>B: recv()
-        B->>E: publish(COMPLETE, uuid, timestamp_ns)
+        B->>E: publish(COMPLETE, uuid, completed_at)
     else Streaming
         W-->>I: ZMQ PUSH (StreamChunk first_chunk)
         I-->>B: recv()
@@ -654,7 +657,7 @@ sequenceDiagram
         end
         W-->>I: ZMQ PUSH (QueryResult — final accumulated output)
         I-->>B: recv()
-        B->>E: publish(COMPLETE, uuid, timestamp_ns)
+        B->>E: publish(COMPLETE, uuid, max(completed_at, last chunk stamp))
     end
 
     E->>M: ZMQ PUB (EventRecord)
@@ -950,11 +953,14 @@ shorter strings, no parsing overhead. Update `Query.default_factory` to match.
 
 - **ISSUED**: `monotonic_ns()` taken in `PhaseIssuer.issue()` immediately before
   `issuer.issue(query)`. ZMQ push is sync/non-blocking — timestamp is honest.
-- **RECV_FIRST / RECV_NON_FIRST / COMPLETE**: one `monotonic_ns()` read per
-  response in `_receive_responses`, when the session handles it. Measures
-  main-process handling time, not worker-side completion. All three use the same
-  clock point, so a response's COMPLETE is never earlier than its own chunks.
-  `QueryResult.completed_at` is set at decode and does not give this guarantee.
+- **COMPLETE**: `QueryResult.completed_at` set in `__post_init__` on
+  deserialization in the main process. Measures main-process receipt time, not
+  worker-side completion. If a chunk of the same response was handled later
+  (same transport drain), COMPLETE takes that chunk's stamp instead, so it is
+  never earlier than its own chunks.
+- **RECV_FIRST / RECV_NON_FIRST**: one `monotonic_ns()` read per response in
+  `_receive_responses`, when the session handles it. Measures main-process
+  handling time.
 - **TTFT**: `RECV_FIRST - ISSUED` includes full round-trip ZMQ overhead
   (outbound to worker + return to main). This adds 20-100μs of systematic bias.
   Acceptable for most benchmarks; document as a known measurement overhead.
@@ -970,6 +976,7 @@ phase. The receiver must distinguish stale vs current-phase completions:
 ```python
 def _handle_response(self, resp: QueryResult, now_ns: int) -> None:
     query_id = resp.id
+    last_chunk_ns = self._last_chunk_ns.pop(query_id, None)  # set by its chunks
     phase_issuer = self._current_phase_issuer
     # ERROR is published before COMPLETE (the aggregator depends on this order
     # for tracked-failure counting).
@@ -980,7 +987,8 @@ def _handle_response(self, resp: QueryResult, now_ns: int) -> None:
     if self._current_phase_type != PhaseType.WARMUP:
         self._publisher.publish(EventRecord(
             event_type=SampleEventType.COMPLETE,
-            timestamp_ns=now_ns,  # the caller's per-response arrival stamp
+            # completed_at, never earlier than this response's chunks
+            timestamp_ns=self._complete_timestamp_ns(resp, now_ns, last_chunk_ns),
             sample_uuid=query_id,
         ))
     # Only route to the current phase's strategy if this is a current-phase query.
