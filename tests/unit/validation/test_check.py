@@ -389,6 +389,19 @@ class TestCohortRefTable:
             assert fact.matches(fact.coerce(text))
 
     @pytest.mark.unit
+    def test_an_undeclared_key_reads_as_an_ignored_note(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={"point": {"config": {"concurrency": {"type": "int"}}}},
+            point=LITERAL_CHECK,
+        )
+        table = Cohort.from_directory(root).refs
+        notes = table.validate_values(
+            "point", {"config": {"concurrency": 8, "junk": 1}}
+        )
+        assert notes == (("ignored", "point.config.junk"),)
+
+    @pytest.mark.unit
     def test_a_magnitude_past_the_cap_spells_no_integer(self):
         # `Decimal` carries `1e1000000000` compactly; materializing it would be
         # an integer of a billion digits, so the decoding refuses up front and

@@ -140,12 +140,13 @@ for.
     explicit `null` where the leaf declares `nullable`, checks `allowlist`
     membership, and "a declared block must carry a block". A declared
     `int`/`float` leaf whose value is a numeric string reads as the number it
-    spells (`_Fact.coerce`, exact spellings only) and the pass returns one note
-    per decoding, which `Collected.coercions` carries to the report's `coerced:`
-    lines. Absent facts go unchecked; `dict` subtrees stay open (an `allowlist`
-    on a `dict` is refused: nothing to enumerate). The grammar's constants live
-    on their users (`_Fact.VALID_TYPES`); the mapping form's reserved keys
-    derive from `_Fact`'s own fields.
+    spells (`_Fact.coerce`, exact spellings only) and the pass returns one
+    `coerced:` note per decoding plus one `ignored:` note per present key no
+    declaration names, which `Collected.notes` carries to stderr. Absent facts
+    go unchecked; `dict` subtrees stay open (an `allowlist` on a `dict` is
+    refused: nothing to enumerate). The grammar's constants live on their users
+    (`_Fact.VALID_TYPES`); the mapping form's reserved keys derive from
+    `_Fact`'s own fields.
 
 - **`typo_checks.py`** — the one one-edit name matcher (`near_match`: one
   insert/delete/substitute). It serves both hint paths:
@@ -346,14 +347,14 @@ findings plus one `CheckRun` per check) and runs four phases, then the walk.
    that failed to parse (a corrupt file must never read as an absent fact and
    switch checks off); a present value its `valid_refs.yaml` declaration will
    not carry (one per-node `RefTable.validate_values` pass, whose numeric-string
-   decodings come back on `Collected.coercions`); or a cohort naming the
-   `ruleset` namespace the tree was built without (`derived`/`regions` are
-   per-pareto and always present at their nodes). The rule behind all four:
-   silence must never be the verdict. A `when` row that failed to evaluate is
-   refused loudly for the same reason — `Verdict.broken` separates "judged
-   false" from "could not be judged" — while an optional fact the upload never
-   declared stays judgeable: the row reads false, and `compare._missing_outcome`
-   keeps that case distinct (README, "Absent facts").
+   shape notes come back on `Collected.notes`); or a cohort naming the `ruleset`
+   namespace the tree was built without (`derived`/`regions` are per-pareto and
+   always present at their nodes). The rule behind all four: silence must never
+   be the verdict. A `when` row that failed to evaluate is refused loudly for
+   the same reason — `Verdict.broken` separates "judged false" from "could not
+   be judged" — while an optional fact the upload never declared stays
+   judgeable: the row reads false, and `compare._missing_outcome` keeps that
+   case distinct (README, "Absent facts").
 
 2. **Candidate validation.** `_collect_candidates(cohort)` validates `needs` id
    references against the cohort and refuses a `needs` cycle outright (the DFS
@@ -527,12 +528,12 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   stringify numbers: a hand-edited YAML quotes one, a dumper formats floats
   (`"90.0"`), and refusing a real value over its quotation marks would fail a
   conforming submission. A declared `int`/`float` leaf therefore reads exact
-  numeric spellings, and every decoding is reported (`coerced:` on stderr), so
-  the leniency is visible instead of silent. Partial spellings (`"512 kw"`),
-  separators, non-finite text and every non-numeric declaration stay as they
-  were, and nothing decodes without a declaration: an un-annotated `Ref` (a
-  checker-owned namespace, a hand-built row) reads the artifact raw. The
-  parser-enforced facts decode through the same rule, so a stringified
+  numeric spellings, and every reading is reported (`coerced:`/`ignored:` on
+  stderr), so the leniency is visible instead of silent. Partial spellings
+  (`"512 kw"`), separators, non-finite text and every non-numeric declaration
+  stay as they were, and nothing decodes without a declaration: an un-annotated
+  `Ref` (a checker-owned namespace, a hand-built row) reads the artifact raw.
+  The parser-enforced facts decode through the same rule, so a stringified
   `concurrency` is read once and identically by the parser and by the row.
 
 - **`_read_artifact` is fd-anchored.** The node's directory opens

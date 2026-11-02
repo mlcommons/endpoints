@@ -76,10 +76,90 @@ point:
       window: dict
       state: dict
     runtime_settings:
-      runtime: dict
-      warmup: dict
-      load_pattern: { type: str }
-      stream_all_chunks: { type: bool }
+      # Deliberately copied out of the client's `Settings` model
+      # (src/inference_endpoint/config/schema.py) to maintain per-version
+      # compatibility pending any schema changes: a cohort pins the shape it
+      # validates against, and a later client change lands as a new cohort
+      # revision instead of moving this one.
+      runtime:
+        min_issue_duration_ms: { type: int }
+        max_issue_duration_ms: { type: int }
+        n_samples_to_issue: { type: int }
+        scheduler_random_seed: { type: int }
+        dataloader_random_seed: { type: int }
+      load_pattern:
+        type:
+          {
+            type: str,
+            allowlist:
+              [
+                max_throughput,
+                poisson,
+                concurrency,
+                agentic_inference,
+                burst,
+                step,
+              ],
+          }
+        target_qps: { type: float }
+        target_concurrency: { type: int }
+        use_legacy_loadgen_qps_metrics: { type: bool }
+      client:
+        num_workers: { type: int }
+        log_level: { type: str }
+        warmup_connections: { type: int }
+        auto_warmup_budget_fraction: { type: float }
+        max_concurrent_warmup_connects: { type: int }
+        max_connections: { type: int }
+        transport:
+          type: { type: str, allowlist: [zmq] }
+          recv_buffer_size: { type: int }
+          send_buffer_size: { type: int }
+          io_threads: { type: int }
+          worker_io_threads: { type: int }
+          high_water_mark: { type: int }
+          linger: { type: int }
+          immediate: { type: int }
+        stream_all_chunks: { type: bool }
+        worker_initialization_timeout: { type: float }
+        worker_graceful_shutdown_wait: { type: float }
+        worker_force_kill_timeout: { type: float }
+        insecure: { type: bool }
+        max_idle_time: { type: float }
+        min_required_connections: { type: int }
+        worker_gc_mode: { type: str, allowlist: [disabled, relaxed, system] }
+        endpoint_urls: { type: list }
+        api_type:
+          {
+            type: str,
+            allowlist: [openai, openai_completions, sglang, videogen],
+          }
+        api_key: { type: str, nullable: true }
+        event_logs_dir: { type: str }
+      timeouts:
+        run_timeout_s: { type: float }
+        endpoint_response_idle_timeout_s: { type: float }
+        interrupted_teardown_grace_s: { type: float }
+        service_ready_timeout_s: { type: float }
+        warmup_drain_timeout_s: { type: float }
+        performance_drain_timeout_s: { type: float }
+        accuracy_drain_timeout_s: { type: float }
+        metrics_drain_timeout_s: { type: float }
+      warmup:
+        enabled: { type: bool }
+        n_requests: { type: int }
+        salt: { type: bool }
+        drain: { type: bool }
+        warmup_random_seed: { type: int }
+      profiling:
+        engine: { type: str, allowlist: [vllm] }
+        urls: { type: list }
+      early_stopping:
+        enabled: { type: bool }
+      steady_state:
+        enabled: { type: bool }
+      metrics_tokenizer_workers: { type: int }
+      metrics_isl: { type: bool }
   system_desc:
     max_supported_concurrency: { type: int, required: true }
     c_min_override: { type: int, default: null }

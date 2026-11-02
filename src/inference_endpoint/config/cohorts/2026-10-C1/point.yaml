@@ -64,21 +64,35 @@ point_seed_set_adoption:
       op: in
       right: [2026-10-C1, 2026-11-C0, 2026-11-C1, 2026-12-C0]
 
+# Set A also publishes a `model_seed`; the client never records one (its purpose
+# is undocumented in the policies), so no client artifact can carry it - a
+# server-side artifact would be needed to check it.
 point_seed_runtime_match:
-  description: The runtime seeds equal the published set A values.
+  description: The recorded runtime seeds equal the published set A values.
   rule: "Endpoints Policy §2.1.1, Run Configuration; §4.6, Seeds."
-  fix: Copy set A's scheduler, sample-index and model seeds into this run's runtime settings.
+  fix: "Bind the run to the set A ruleset (`submission_ref.ruleset: endpoints-v1.0-2026-10-C1-A`) and re-run."
   severity: fail
   assert:
-    - left: point.config.runtime_settings.runtime.scheduler_rng_seed
+    - left: point.config.runtime_settings.runtime.scheduler_random_seed
       op: eq
       right: 10487924139932647040
-    - left: point.config.runtime_settings.runtime.sample_index_rng_seed
+    - left: point.config.runtime_settings.runtime.dataloader_random_seed
       op: eq
       right: 586478644936801402
-    - left: point.config.runtime_settings.runtime.model_seed
-      op: eq
-      right: 9315206023656308754
+
+point_api_key_redacted:
+  description: A present client API key carries no secret (empty or redacted).
+  rule: "Endpoints Policy §2.1.1, Run Configuration; §8.3, Measurement Point (point.yaml)."
+  fix: "Omit `runtime_settings.client.api_key`, or keep the client's own `<redacted>` marker or an empty string - never a live key."
+  severity: fail
+  when:
+    - { left: point.config.runtime_settings.client.api_key, op: not_null }
+  assert:
+    - {
+        left: point.config.runtime_settings.client.api_key,
+        op: in,
+        right: ["", "<redacted>"],
+      }
 
 point_concurrency_positive:
   description: A fixed-concurrency run declares a positive concurrency.

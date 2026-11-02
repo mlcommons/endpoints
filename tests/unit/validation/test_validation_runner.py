@@ -331,10 +331,12 @@ class TestDeclaredValueChecking:
             _submission(tmp_path, [16], extras={16: {"warmup": {"duration_s": "5"}}}),
         )
         assert [f.verdict.ok for f in collected.findings] == [True]
-        assert len(collected.coercions) == 1
-        assert collected.coercions[0].endswith(
-            "point.config.warmup.duration_s: '5' read as 5"
-        )
+        coerced = [note for note in collected.notes if note.startswith("coerced: ")]
+        assert len(coerced) == 1
+        assert coerced[0].endswith("point.config.warmup.duration_s: '5' read as 5")
+        # Every other present key has no declaration in this test's minimal
+        # table: it reports `ignored:` instead of refusing.
+        assert any(note.startswith("ignored: ") for note in collected.notes)
 
     @pytest.mark.unit
     def test_a_string_that_spells_no_number_still_refuses(self, tmp_path):

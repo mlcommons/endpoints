@@ -56,9 +56,8 @@ OFFLINE_CONCURRENCY = FLOOR
 ACCURACY_POINTS = (8, 16, 64, 2048, OFFLINE_CONCURRENCY)
 FAILED_SAMPLE_POINT = 64
 SET_A = {
-    "scheduler_rng_seed": 10487924139932647040,
-    "sample_index_rng_seed": 586478644936801402,
-    "model_seed": 9315206023656308754,
+    "scheduler_random_seed": 10487924139932647040,
+    "dataloader_random_seed": 586478644936801402,
 }
 
 
@@ -119,7 +118,12 @@ def _summary(run_dir: Path, *, failed: int, with_tpot: bool) -> None:
 
 
 def _point_yaml(
-    run_dir: Path, concurrency: int, *, offline: str | None, load_pattern: str
+    run_dir: Path,
+    concurrency: int,
+    *,
+    offline: str | None,
+    load_pattern: str,
+    api_key: str,
 ) -> None:
     """Write `point.yaml` (§8.3) with the disclosures the cohort checks."""
     config: dict[str, Any] = {
@@ -136,9 +140,9 @@ def _point_yaml(
         "model_name": MODEL,
         "model_precision": "FP16",
         "runtime_settings": {
-            "load_pattern": load_pattern,
             "runtime": dict(SET_A),
-            "stream_all_chunks": True,
+            "load_pattern": {"type": load_pattern},
+            "client": {"stream_all_chunks": True, "api_key": api_key},
             "warmup": {"enabled": True, "n_requests": 160, "salt": True},
         },
         "seed_set": "A",
@@ -193,7 +197,7 @@ def _accuracy(run_dir: Path) -> None:
     (run_dir / "accuracy").rmdir()
 
 
-def _build_upload(root: Path) -> None:
+def _build_upload(root: Path, *, api_key: str = "<redacted>") -> None:
     """One conforming 8-point pareto plus its system-level power descriptor."""
     results = root / "results" / SYSTEM
     model_dir = results / MODEL
@@ -206,6 +210,7 @@ def _build_upload(root: Path) -> None:
             concurrency,
             offline=offline,
             load_pattern="max_throughput" if offline else "concurrency",
+            api_key=api_key,
         )
         (run_dir / "system_desc.json").write_text(
             json.dumps({"max_supported_concurrency": MAX_SUPPORTED}),
@@ -249,3 +254,10 @@ class TestShippedCohortGolden:
         out = capsys.readouterr().out
         assert "pareto_offline_present" in out
         assert "pareto_point_count_min" in out
+
+    @pytest.mark.unit
+    def test_a_live_api_key_fails_the_cohort(self, tmp_path, capsys):
+        root = tmp_path / "upload"
+        _build_upload(root, api_key="sk-live-abc123")
+        assert main([str(COHORT), str(root)]) == 1
+        assert "point_api_key_redacted" in capsys.readouterr().out

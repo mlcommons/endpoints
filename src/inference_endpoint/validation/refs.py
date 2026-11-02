@@ -41,7 +41,9 @@ present fact's value must carry is declared the same way (`allowlist` next to
 its `type`) and checked at collect time (`RefTable.validate_values`).
 A declared `int`/`float` leaf also reads a numeric string as the number it
 spells (`decode_number`): writers stringify numbers, and refusing a real value
-its quotation marks helps nobody. Every decoding is reported, never silent. A
+its quotation marks helps nobody. Every decoding is reported, never silent, and
+a present key no declaration names reports `ignored:` too (a diagnostic: an
+undeclared key is ignored, never refused). A
 numeric path component reads the key that spells the same number (`_key_for`),
 so `point.result_summary.tpot.percentiles.90` finds a block written `"90.0"`.
 `derived`/`regions`/`ruleset` namespaces are checker-owned (the derivation
@@ -554,8 +556,10 @@ class RefTable:
             return replace(ref, members=members) if members else ref
         return ref
 
-    def validate_values(self, root: str, values: Mapping[str, Any]) -> tuple[str, ...]:
-        """Refuse a present artifact value its declaration will not carry, reporting decodings.
+    def validate_values(
+        self, root: str, values: Mapping[str, Any]
+    ) -> tuple[tuple[str, str], ...]:
+        """Refuse a present value its declaration will not carry; note what the walk read.
 
         Every declared leaf below `root` that the upload does carry must match
         its `type` and be in its `allowlist` (where declared). A declared block
@@ -567,19 +571,24 @@ class RefTable:
 
         A declared `int`/`float` leaf whose value is a numeric string is no
         fault: it reads as the number it spells (`_Fact.coerce`), and the
-        caller gets one note per decoding, so the report can say what was read.
+        caller gets one note per decoding, so the report can say what was read. A
+        present key no declaration at its level names contributes one `ignored:`
+        note too: the walk judges declared facts only, so extras surface without
+        refusing the upload.
 
         Args:
             root (str): The node scope to check.
             values (Mapping[str, Any]): The node's collected artifact document.
         Returns:
-            tuple[str, ...]: One `"<path>: '<text>' read as <number>"` note per
-                decoded value, in declaration order.
+            tuple[tuple[str, str], ...]: `(kind, message)` notes, in walk order:
+                `("coerced", "<path>: '<text>' read as <number>")` per decoded
+                value, and `("ignored", "<path>")` per present key no
+                declaration names.
         Raises:
             ValueError: When a present value does not match its declared type or
                 allowlist, or a declared block or `dict` leaf carries no block.
         """
-        notes: list[str] = []
+        notes: list[tuple[str, str]] = []
         tree = self._roots.get(root)
         if isinstance(tree, Mapping):
             _check_values(tree, values, [root], notes)
@@ -590,30 +599,36 @@ def _check_values(
     declared: Mapping[str, Any],
     values: Mapping[str, Any],
     path: list[str],
-    notes: list[str],
+    notes: list[tuple[str, str]],
 ) -> None:
     """Walk `declared` against one document's `values`. ValueError names the fault.
 
     A numeric string on a declared `int`/`float` leaf is decoded
-    (`_Fact.coerce`) and one note appended to `notes`; the decoded value is what
-    `matches` and the `allowlist` then judge. An explicit `null` passes where
-    the leaf declares `nullable` and refuses elsewhere.
+    (`_Fact.coerce`) and one `("coerced", ...)` note appended to `notes`; the
+    decoded value is what `matches` and the `allowlist` then judge. An explicit
+    `null` passes where the leaf declares `nullable` and refuses elsewhere. A
+    present key no declaration at this level names appends one
+    `("ignored", <path>)` note: the walk judges declared facts only, so extras
+    surface without refusing.
 
     Args:
         declared (Mapping[str, Any]): A declared block of the cohort's ref table.
         values (Mapping[str, Any]): The document to check against it.
         path (list[str]): The scopes walked so far, for the fault's message.
-        notes (list[str]): Appended with one decoding note per decoded value.
+        notes (list[tuple[str, str]]): Appended with one `(kind, text)` note per
+            decoded value and per present undeclared key.
     Raises:
         ValueError: When a present value does not match its declared type or
             allowlist, or a declared block or `dict` leaf carries no block.
     """
+    consumed: set[str] = set()
     for name, entry in declared.items():
         # The same key reading `Ref.resolve` uses: a declared `90` and an
         # artifact key `"90.0"` name one fact, and the declaration must judge it.
         key = _key_for(values, name)
         if key is None:
             continue
+        consumed.add(key)
         value = values[key]
         if value is None and not isinstance(entry, Mapping) and entry.nullable:
             # A declared-nullable value states "no value": nothing below classifies it.
@@ -632,7 +647,9 @@ def _check_values(
             continue
         decoded = entry.coerce(value)
         if decoded is not value:
-            notes.append(f"{'.'.join(here)}: {value!r} read as {decoded!r}")
+            notes.append(
+                ("coerced", f"{'.'.join(here)}: {value!r} read as {decoded!r}")
+            )
         if not entry.matches(decoded):
             raise ValueError(
                 f"{'.'.join(here)}: {value!r} does not match its declared type "
@@ -642,6 +659,9 @@ def _check_values(
             raise ValueError(
                 f"{'.'.join(here)}: {value!r} is not one of {entry.allowlist!r}"
             )
+    for key in values:
+        if key not in consumed:
+            notes.append(("ignored", ".".join([*path, str(key)])))
 
 
 def _entry(name: str, node: Any) -> Any:

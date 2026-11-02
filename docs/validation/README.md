@@ -214,9 +214,11 @@ string: a leaf declared `int` accepts `512` and the string `"512"` (the integral
 spelling `"512.0"` too), a `float` accepts `12.61` and `"12.61"`. Only exact
 spellings decode - `"512 kw"`, `"1,000"`, `"inf"` and `"nan"` still refuse - and
 only on numeric declarations: `"512"` on a `str` leaf stays a string. Each
-decoding prints a `coerced:` line, so the leniency is visible, never silent. The
-parser-enforced facts (`concurrency`, `max_supported_concurrency`, `system_tps`)
-read the same way: a stringified number is not a mistyped one.
+decoding prints a `coerced:` line, so the leniency is visible, never silent, and
+a present key no declaration names prints an `ignored:` line (a diagnostic only:
+undeclared keys are ignored, never refused). The parser-enforced facts
+(`concurrency`, `max_supported_concurrency`, `system_tps`) read the same way: a
+stringified number is not a mistyped one.
 
 Two limits on what the file may declare:
 
@@ -711,14 +713,19 @@ document -> fields (`point.config.concurrency` is the `config` document's
   `steady_state.status`, `nodes_used`, `system_tps`, `qps`, and the rest of each
   table.
 - Blocks the rules describe without listing their keys are declared `dict`:
-  `config.runtime_settings`, `config.dataset`,
-  `config.steady_state.window`/`state`/`total`, `result_summary`'s
-  `percentiles`/`isl`/`osl`, plus `client_config`, `system_power`,
-  `accuracy_results` and `results` (the benchmark's report writer owns their
-  spelling). Under such a `dict`, an unknown `<key>` resolves as **absent**
-  (what `exists`/`absent`/`not_null` are for), not an error, and `ruleset` keys
-  are open data too - whatever the entry contains (`vocab_size`, `is_drafter`,
-  ...).
+  `config.dataset`, `config.steady_state.window`/`state`/`total`,
+  `result_summary`'s `percentiles`/`isl`/`osl`, plus `client_config`,
+  `system_power`, `accuracy_results` and `results` (the benchmark's report
+  writer owns their spelling). Under such a `dict`, an unknown `<key>` resolves
+  as **absent** (what `exists`/`absent`/`not_null` are for), not an error, and
+  `ruleset` keys are open data too - whatever the entry contains (`vocab_size`,
+  `is_drafter`, ...).
+- `config.runtime_settings` is declared as a deliberate copy of the client's
+  `Settings` shape (`src/inference_endpoint/config/schema.py`) instead of
+  `dict`, so its fields are typed and rows can name them; the copy carries a
+  comment saying why (per-version compatibility: a later client change lands as
+  a new cohort revision, not a moved goalpost). Undeclared keys under it report
+  `ignored:` like anywhere else: the copy types what it lists, nothing more.
 - What a present value must carry is declared the same way and checked at
   collect time (`Finding.collect` refuses before any finding): match its leaf's
   type (`does not match its declared type`), sit in its `allowlist` where one is

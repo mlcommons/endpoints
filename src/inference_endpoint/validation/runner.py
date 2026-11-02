@@ -119,7 +119,7 @@ class Finding:
         """
         _validate_points(submission)
         _validate_artifacts(submission)
-        coercions = _validate_declared_values(cohort, submission)
+        notes = _validate_declared_values(cohort, submission)
         _validate_ruleset_needs(cohort, submission)
         candidates = _collect_candidates(cohort)
         gate = _GateResolver({check.id: check for check in candidates}, submission)
@@ -149,7 +149,7 @@ class Finding:
                 silenced=silenced,
                 blocked=blocked,
             )
-        return Collected(tuple(findings), runs, coercions)
+        return Collected(tuple(findings), runs, notes)
 
 
 @dataclass(frozen=True)
@@ -185,14 +185,15 @@ class Collected:
             applicable node (holds too).
         runs (Mapping[str, CheckRun]): One record per candidate check (cohort
             order), keyed by check id.
-        coercions (tuple[str, ...]): One `<node directory>: <path>: '<text>'
-            read as <number>` note per declared `int`/`float` value decoded from
-            a numeric string, in node then declaration order.
+        notes (tuple[str, ...]): One shape note per decoded value and per
+            present undeclared key, each a full line
+            `<coerced|ignored>: <node directory>: <path> ...`, in node then
+            walk order.
     """
 
     findings: tuple[Finding, ...]
     runs: Mapping[str, CheckRun]
-    coercions: tuple[str, ...]
+    notes: tuple[str, ...]
 
 
 def _validate_points(submission: Submission) -> None:
@@ -269,8 +270,10 @@ def _validate_declared_values(
     values' contract, so this is a collect-time refusal, never a finding.
 
     Returns:
-        tuple[str, ...]: One note per declared `int`/`float` value the pass read
-            from a numeric string, each prefixed with the node directory (a
+        tuple[str, ...]: The shape notes, each a full line prefixed with the
+            node directory: `coerced: <path>: '<text>' read as <number>` per
+            declared `int`/`float` value decoded from a numeric string, and
+            `ignored: <path>` per present key no declaration names (a
             multi-pareto upload has many `point.config.…` paths, one per run).
     """
     if cohort.refs is None:
@@ -279,12 +282,12 @@ def _validate_declared_values(
     for node in _all_nodes(_tree_root(submission)):
         fields = node.scopes().get(node.kind.value, {})
         try:
-            decoded = cohort.refs.validate_values(node.kind.value, fields)
+            shape_notes = cohort.refs.validate_values(node.kind.value, fields)
         except ValueError as exc:
             # The run directory names the offending node: a multi-pareto upload
             # has many `point.config.…` paths, one per run.
             raise ValueError(f"{node.dir}: {exc}") from exc
-        notes.extend(f"{node.dir}: {note}" for note in decoded)
+        notes.extend(f"{kind}: {node.dir}: {message}" for kind, message in shape_notes)
     return tuple(notes)
 
 
