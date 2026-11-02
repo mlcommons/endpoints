@@ -205,15 +205,18 @@ class _FakeTokenizerWithTemplate(_FakeTokenizer):
 
 @pytest.mark.unit
 class TestBatchTokenizerMessageTokenization:
-    def test_chat_template_requests_token_ids_not_batch_encoding(self):
+    def test_prompt_counts_the_rendered_template(self):
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
             with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
-                count = tok._token_count_prompt(
-                    ({"role": "user", "content": "one two three four"},),
-                    None,
-                    None,
-                    None,
-                    None,
+                (count,) = tok.count_batch_sync(
+                    [
+                        PromptInput(
+                            ({"role": "user", "content": "one two three four"},),
+                            None,
+                            None,
+                            None,
+                        )
+                    ]
                 )
 
                 assert count == 7
@@ -333,23 +336,29 @@ class TestBatchTokenizerMessageTokenization:
 
         with patch(_MOCK_TARGET, _TextOnlyTemplateTokenizer):
             with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
-                count = tok._token_count_prompt(
-                    (
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "describe this image"},
-                                {"type": "image_url", "image_url": {"url": "x"}},
-                            ],
-                        },
-                    ),
-                    None,
-                    None,
-                    None,
-                    None,
+                (count,) = tok.count_batch_sync(
+                    [
+                        PromptInput(
+                            (
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": "describe this image"},
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {"url": "x"},
+                                        },
+                                    ],
+                                },
+                            ),
+                            None,
+                            None,
+                            None,
+                        )
+                    ]
                 )
 
-                assert count > 0
+                assert isinstance(count, int) and count > 0
 
     def test_token_count_prompt_normalizes_tools_and_forwards_template_kwargs(self):
         class _RecordingTokenizer(_FakeTokenizerWithTemplate):
@@ -379,12 +388,16 @@ class TestBatchTokenizerMessageTokenization:
         )
         with patch(_MOCK_TARGET, _RecordingTokenizer):
             with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
-                tok._token_count_prompt(
-                    messages,
-                    None,
-                    {"enable_thinking": False},
-                    "custom template",
-                    "auto",
+                tok.count_batch_sync(
+                    [
+                        PromptInput(
+                            messages,
+                            None,
+                            {"enable_thinking": False},
+                            "custom template",
+                            "auto",
+                        )
+                    ]
                 )
 
         normalized_call = _RecordingTokenizer.last_messages[0]["tool_calls"][0]
@@ -395,7 +408,7 @@ class TestBatchTokenizerMessageTokenization:
         assert _RecordingTokenizer.last_kwargs["enable_thinking"] is False
         assert _RecordingTokenizer.last_kwargs["chat_template"] == "custom template"
         assert _RecordingTokenizer.last_kwargs["tool_choice"] == "auto"
-        assert _RecordingTokenizer.last_kwargs["return_dict"] is False
+        assert _RecordingTokenizer.last_kwargs["tokenize"] is False
 
 
 class _Encoding:
@@ -570,16 +583,13 @@ class TestSetupShardsDecisions:
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
             with BatchTokenizer("fake", live_workers=2) as tok:
                 assert tok._procs == []
-                assert (
-                    tok._token_count_prompt(
-                        ({"role": "user", "content": "one two"},),
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                    == 5
-                )
+                assert tok.count_batch_sync(
+                    [
+                        PromptInput(
+                            ({"role": "user", "content": "one two"},), None, None, None
+                        )
+                    ]
+                ) == [5]
 
     def test_affinity_unavailable_shards_unpinned(self, monkeypatch):
         """No affinity API (e.g. macOS): shard from the CPU count, unpinned."""
