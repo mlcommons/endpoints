@@ -22,7 +22,8 @@ See mlcommons/endpoints#500.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Collection
+import os
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,10 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
 )
 from inference_endpoint.core.record import EventRecord, EventType
 from inference_endpoint.core.types import PhaseType, TextModelOutput
+from inference_endpoint.endpoint_client.cpu_affinity import (
+    UnsupportedPlatformError,
+    get_all_online_cpus,
+)
 from inference_endpoint.metrics.report import series_metric_dict
 
 logger = logging.getLogger(__name__)
@@ -49,7 +54,13 @@ _PREFIX_BYTES = 256
 # AgenticInferenceInlineScorer's dataset_name; the key its turns live under in
 # sample_idx_map.json.
 
-TokenCounter = Callable[[MessageInput | TextInput], int]
+# Counts a batch of turns, returning a count or the exception for each turn.
+BatchTokenCounter = Callable[
+    [Sequence[MessageInput | TextInput]], list[int | Exception]
+]
+
+# Turns counted per tokenizer batch at finalize.
+_DEFAULT_BATCH_SIZE = 1024
 
 
 def _in_population(
@@ -85,9 +96,10 @@ def _in_population(
 
 def compute_full_run_osl(
     events_path: Path,
-    count_tokens: TokenCounter,
+    count_batch: BatchTokenCounter,
     *,
     performance_uuids: Collection[str] | None = None,
+    batch_size: int = _DEFAULT_BATCH_SIZE,
 ) -> dict[str, Any] | None:
     """Roll up OSL over every completed turn in ``events_path``.
 
@@ -109,6 +121,23 @@ def compute_full_run_osl(
     n_undecodable = 0
     first_error: str | None = None
     seen_uuids: set[str] = set()
+    batch_size = max(1, batch_size)
+    pending: list[MessageInput | TextInput] = []
+
+    def count_pending() -> None:
+        nonlocal n_errors, first_error
+        try:
+            outcomes = count_batch(pending)
+        except Exception as e:  # noqa: BLE001 - charge the batch, keep the stat
+            outcomes = [e] * len(pending)
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                n_errors += 1
+                if first_error is None:
+                    first_error = str(outcome)
+            else:
+                lengths.append(outcome)
+        pending.clear()
 
     with events_path.open("rb") as events_file:
         for line in events_file:
@@ -142,11 +171,15 @@ def compute_full_run_osl(
                 if tokenization_input is None:
                     n_empty += 1
                     continue
-                lengths.append(count_tokens(tokenization_input))
+                pending.append(tokenization_input)
+                if len(pending) >= batch_size:
+                    count_pending()
             except Exception as e:  # noqa: BLE001 - one bad turn must not void the stat
                 n_errors += 1
                 if first_error is None:
                     first_error = str(e)
+    if pending:
+        count_pending()
 
     # A performance turn whose COMPLETE record never reached the log is invisible
     # to the counters above; reconcile observed UUIDs against the expected
@@ -253,10 +286,19 @@ def full_run_osl_for_report(
         logger.info("Full-run OSL skipped: no performance-phase samples to bound to")
         return None
     try:
-        with BatchTokenizer(tokenizer_name, live_workers=1, n_workers=0) as tokenizer:
+        # A batch is encoded across the tokenizer's rayon threads, which
+        # live_workers caps (an exported RAYON_NUM_THREADS still wins): one per
+        # CPU this process may run on, so a taskset-pinned client stays in its set.
+        try:
+            threads = len(get_all_online_cpus()) or 1
+        except UnsupportedPlatformError:
+            threads = os.cpu_count() or 1
+        with BatchTokenizer(
+            tokenizer_name, live_workers=threads, n_workers=0
+        ) as tokenizer:
             return compute_full_run_osl(
                 events_path,
-                tokenizer.count_sync,
+                tokenizer.count_batch_sync,
                 performance_uuids=performance_uuids,
             )
     except Exception as e:  # noqa: BLE001 - optional block; never fail finalize

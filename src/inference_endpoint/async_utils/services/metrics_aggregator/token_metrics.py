@@ -37,7 +37,7 @@ import multiprocessing
 import os
 import signal
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from itertools import chain
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -500,6 +500,39 @@ class BatchTokenizer:
             ]
             return self._token_count_text("\n".join(parts))
 
+    def _maybe_apply_chat_template(
+        self,
+        content: str,
+        reasoning: str | None,
+        tool_calls: tuple[dict[str, Any], ...] | None,
+    ) -> tuple[str, bool]:
+        """Apply the chat template to content, reasoning and tool_calls if the model
+        provides one, otherwise fall back to a plain string join.
+
+        Returns the text to count and whether the template rendered it.
+        """
+        msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
+        if reasoning:
+            msg["reasoning_content"] = reasoning
+        if tool_calls:
+            msg["tool_calls"] = _normalize_tool_calls_for_template(tool_calls)
+        try:
+            rendered = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
+                [_PREFIX_USER_MSG, msg],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            return cast(str, rendered), True
+        except Exception as exc:
+            self._warn_template_fallback(exc, "Tool-call OSL/TPOT may diverge.")
+            tool_calls_json = (
+                msgspec.json.encode(list(tool_calls)).decode() if tool_calls else None
+            )
+            parts = [
+                p for p in (content or None, reasoning or None, tool_calls_json) if p
+            ]
+            return "\n".join(parts), False
+
     def _token_count_prompt(
         self,
         messages: tuple[dict[str, Any], ...],
@@ -540,6 +573,40 @@ class BatchTokenizer:
                 prompt["tools"] = list(tools)
             return self._token_count_text(msgspec.json.encode(prompt).decode())
 
+    def _maybe_apply_prompt_template(
+        self,
+        messages: tuple[dict[str, Any], ...],
+        tools: tuple[dict[str, Any], ...] | None,
+        chat_template_kwargs: dict[str, Any] | None,
+        chat_template: str | None,
+        tool_choice: str | dict[str, Any] | None,
+    ) -> str:
+        """Apply the chat template to a complete input prompt if the model
+        provides one, otherwise fall back to its JSON encoding.
+
+        Returns the text to count.
+        """
+        kwargs = dict(chat_template_kwargs or {})
+        kwargs.update(tokenize=False, add_generation_prompt=True)
+        if tools is not None:
+            kwargs["tools"] = list(tools)
+        if chat_template is not None:
+            kwargs["chat_template"] = chat_template
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        prompt_messages = _normalize_prompt_messages_for_template(messages)
+        try:
+            rendered = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
+                prompt_messages, **kwargs
+            )
+            return cast(str, rendered)
+        except Exception as exc:
+            self._warn_template_fallback(exc, "Structured ISL may diverge.")
+            prompt = {"messages": prompt_messages}
+            if tools is not None:
+                prompt["tools"] = list(tools)
+            return msgspec.json.encode(prompt).decode()
+
     async def _count_indexed_texts_async(
         self,
         indexed_texts: list[tuple[int, str]],
@@ -566,39 +633,74 @@ class BatchTokenizer:
             for (index, _), count in zip(indexed_texts, counts, strict=True)
         ]
 
-    def count_sync(self, item: TokenizationInput) -> int:
-        """Count one input on the calling thread.
+    def count_batch_sync(
+        self, items: Sequence[TokenizationInput]
+    ) -> list[int | Exception]:
+        """Count many inputs on the calling thread, in input order.
 
         The post-run counterpart to :meth:`count_batch_async`, for callers that
-        run after the event loop is gone (full-run OSL at finalize). Dispatch
-        mirrors ``count_batch_async`` exactly — same text backend, same chat
-        template, same baseline subtraction — so a turn counted here and a turn
-        counted on the perf hot path yield the same number. Divergence between
-        the two lanes would make the windowed and full-run OSL statistics
-        incomparable (mlcommons/endpoints#500).
+        run after the event loop is gone (full-run OSL at finalize). The chat
+        template is applied to each input serially, since it costs little next
+        to encoding; the resulting texts are then encoded in parallel.
         """
-        match item:
-            case TokenIdsInput(token_ids=token_ids):
-                return len(token_ids)
-            case TextInput(text=text):
-                return self._encode_lengths_inproc([text])[0]
-            case MessageInput(content, reasoning, tool_calls):
-                return self._token_count_message(content, reasoning, tool_calls)
-            case PromptInput(
-                messages,
-                tools,
-                chat_template_kwargs,
-                chat_template,
-                tool_choice,
-            ):
-                return self._token_count_prompt(
-                    messages,
-                    tools,
-                    chat_template_kwargs,
-                    chat_template,
-                    tool_choice,
-                )
-        raise TypeError(f"unsupported tokenization input: {type(item).__name__}")
+        outcomes: list[int | Exception | None] = [None] * len(items)
+        texts: list[str] = []
+        text_slots: list[int] = []
+        chat_template_applied: list[bool] = []
+        for index, item in enumerate(items):
+            try:
+                match item:
+                    case TokenIdsInput(token_ids=token_ids):
+                        outcomes[index] = len(token_ids)
+                    case TextInput(text=text):
+                        texts.append(text)
+                        text_slots.append(index)
+                        chat_template_applied.append(False)
+                    case MessageInput(content, reasoning, tool_calls):
+                        text, rendered = self._maybe_apply_chat_template(
+                            content, reasoning, tool_calls
+                        )
+                        texts.append(text)
+                        text_slots.append(index)
+                        chat_template_applied.append(rendered)
+                    case PromptInput(
+                        messages,
+                        tools,
+                        chat_template_kwargs,
+                        chat_template,
+                        tool_choice,
+                    ):
+                        texts.append(
+                            self._maybe_apply_prompt_template(
+                                messages,
+                                tools,
+                                chat_template_kwargs,
+                                chat_template,
+                                tool_choice,
+                            )
+                        )
+                        text_slots.append(index)
+                        chat_template_applied.append(False)
+                    case _:
+                        raise TypeError(
+                            f"unsupported tokenization input: {type(item).__name__}"
+                        )
+            except Exception as exc:  # noqa: BLE001 - isolate this input.
+                outcomes[index] = exc
+        if texts:
+            try:
+                token_counts: list[int] | None = self._encode_lengths_inproc(texts)
+            except Exception as exc:  # noqa: BLE001 - charge the whole text batch.
+                token_counts = None
+                for index in text_slots:
+                    outcomes[index] = exc
+            if token_counts is not None:
+                offset = self._prefix_len + self._baseline
+                for index, count, rendered in zip(
+                    text_slots, token_counts, chat_template_applied, strict=True
+                ):
+                    outcomes[index] = max(0, count - offset) if rendered else count
+        return cast(list[int | Exception], outcomes)
 
     async def count_batch_async(
         self,

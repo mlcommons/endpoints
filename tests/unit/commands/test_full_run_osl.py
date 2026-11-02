@@ -48,6 +48,24 @@ def _word_count(tok_input: MessageInput | TextInput) -> int:
     return len(" ".join(parts).split())
 
 
+def _batched(count):
+    """A batch counter from a per-turn one: each turn's exception lands in its slot."""
+
+    def count_batch(items: list[MessageInput | TextInput]) -> list[int | Exception]:
+        outcomes: list[int | Exception] = []
+        for item in items:
+            try:
+                outcomes.append(count(item))
+            except Exception as exc:  # noqa: BLE001 - mirror count_batch_sync
+                outcomes.append(exc)
+        return outcomes
+
+    return count_batch
+
+
+_word_counts = _batched(_word_count)
+
+
 def _write_events(path: Path, records: list[EventRecord]) -> Path:
     path.write_bytes(b"\n".join(_ENCODER.encode(r) for r in records) + b"\n")
     return path
@@ -88,7 +106,7 @@ def test_counts_turns_completed_after_the_performance_window(tmp_path: Path) -> 
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count)
+    result = compute_full_run_osl(events, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 4
@@ -120,8 +138,8 @@ def test_full_run_osl_is_invariant_to_window_position(tmp_path: Path) -> None:
             ],
         )
 
-    early = compute_full_run_osl(build("early.jsonl", 2), _word_count)
-    late = compute_full_run_osl(build("late.jsonl", 5), _word_count)
+    early = compute_full_run_osl(build("early.jsonl", 2), _word_counts)
+    late = compute_full_run_osl(build("late.jsonl", 5), _word_counts)
 
     assert early is not None and late is not None
     assert early["n_turns_counted"] == late["n_turns_counted"] == 6
@@ -148,7 +166,7 @@ def test_excludes_completions_from_other_phases(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+    result = compute_full_run_osl(events, _word_counts, performance_uuids={"u1", "u3"})
 
     assert result is not None
     assert result["n_turns_counted"] == 2
@@ -171,7 +189,7 @@ def test_counts_empty_completions_separately(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count)
+    result = compute_full_run_osl(events, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 1
@@ -233,10 +251,10 @@ def test_full_run_mean_invariant_while_windowed_mean_moves(tmp_path: Path) -> No
         return sum(counted) / len(counted)
 
     early = compute_full_run_osl(
-        build("e.jsonl", 2), _word_count, performance_uuids=uuids
+        build("e.jsonl", 2), _word_counts, performance_uuids=uuids
     )
     late = compute_full_run_osl(
-        build("l.jsonl", 5), _word_count, performance_uuids=uuids
+        build("l.jsonl", 5), _word_counts, performance_uuids=uuids
     )
 
     assert windowed_mean(2) != windowed_mean(5)  # the windowed mean moves
@@ -261,7 +279,7 @@ def test_data_none_completion_counts_as_empty(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count)
+    result = compute_full_run_osl(events, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 1
@@ -286,12 +304,64 @@ def test_count_failure_is_isolated_to_n_errors(tmp_path: Path) -> None:
             raise ValueError("tokenizer blew up")
         return _word_count(tok_input)
 
-    result = compute_full_run_osl(events, flaky)
+    result = compute_full_run_osl(events, _batched(flaky))
 
     assert result is not None
     assert result["n_turns_counted"] == 1
     assert result["n_errors"] == 1
     assert result["output_sequence_lengths"]["total"] == 1  # only "one" counted
+
+
+def _five_turns(tmp_path: Path) -> Path:
+    texts = ["a", "b b", "c c c", "d d d d", "e e e e e"]
+    return _write_events(
+        tmp_path / "events.jsonl",
+        [
+            _session(SessionEventType.STARTED),
+            *(_complete(turn, text) for turn, text in enumerate(texts, start=1)),
+            _session(SessionEventType.ENDED),
+        ],
+    )
+
+
+def test_batches_count_every_turn(tmp_path: Path) -> None:
+    """Full batches plus a final partial one count the same as a single batch."""
+    events = _five_turns(tmp_path)
+    batch_sizes: list[int] = []
+
+    def recording(items):
+        batch_sizes.append(len(items))
+        return _word_counts(items)
+
+    batched = compute_full_run_osl(events, recording, batch_size=2)
+    single = compute_full_run_osl(events, _word_counts, batch_size=1024)
+
+    assert batch_sizes == [2, 2, 1]
+    assert batched is not None and single is not None
+    assert batched["n_turns_counted"] == 5
+    assert batched["output_sequence_lengths"] == single["output_sequence_lengths"]
+
+
+def test_failed_batch_charges_each_of_its_turns(tmp_path: Path) -> None:
+    """A batch call that raises charges each of its turns to n_errors; later
+    batches still count."""
+    events = _five_turns(tmp_path)
+    batch_sizes: list[int] = []
+
+    def first_batch_fails(items):
+        batch_sizes.append(len(items))
+        if len(batch_sizes) == 1:
+            raise RuntimeError("encoder crashed")
+        return _word_counts(items)
+
+    result = compute_full_run_osl(events, first_batch_fails, batch_size=2)
+
+    assert batch_sizes == [2, 2, 1]  # the failed batch is not retried
+    assert result is not None
+    assert result["n_errors"] == 2
+    assert result["n_turns_counted"] == 3
+    assert result["output_sequence_lengths"]["total"] == 3 + 4 + 5
+    assert result["partial"] is True
 
 
 def test_all_empty_population_returns_a_visible_block(tmp_path: Path) -> None:
@@ -309,7 +379,7 @@ def test_all_empty_population_returns_a_visible_block(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count)
+    result = compute_full_run_osl(events, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 0
@@ -329,7 +399,7 @@ def test_undecodable_complete_line_is_skipped(
     path.write_bytes(good + b"\n" + corrupt + b"\n")
 
     with caplog.at_level(logging.WARNING):
-        result = compute_full_run_osl(path, _word_count)
+        result = compute_full_run_osl(path, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 1
@@ -347,7 +417,7 @@ def test_all_undecodable_returns_visible_block(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     path.write_bytes(corrupt + b"\n" + corrupt + b"\n")
 
-    result = compute_full_run_osl(path, _word_count)
+    result = compute_full_run_osl(path, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 0
@@ -382,7 +452,7 @@ def test_missing_turn_is_detected_via_uuid_reconciliation(tmp_path: Path) -> Non
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+    result = compute_full_run_osl(events, _word_counts, performance_uuids={"u1", "u3"})
 
     assert result is not None
     assert result["n_turns_counted"] == 1
@@ -408,7 +478,9 @@ def test_failed_turn_marks_block_partial(tmp_path: Path) -> None:
             raise ValueError("tokenizer blew up")
         return _word_count(tok_input)
 
-    result = compute_full_run_osl(events, flaky, performance_uuids={"u1", "u3"})
+    result = compute_full_run_osl(
+        events, _batched(flaky), performance_uuids={"u1", "u3"}
+    )
 
     assert result is not None
     assert result["n_turns_counted"] == 1
@@ -428,7 +500,7 @@ def test_clean_run_is_not_partial(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+    result = compute_full_run_osl(events, _word_counts, performance_uuids={"u1", "u3"})
 
     assert result is not None
     assert result["n_turns_counted"] == 2
@@ -449,7 +521,7 @@ def test_empty_turns_do_not_make_block_partial(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+    result = compute_full_run_osl(events, _word_counts, performance_uuids={"u1", "u3"})
 
     assert result is not None
     assert result["n_empty"] == 1

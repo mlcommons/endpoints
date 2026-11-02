@@ -1012,8 +1012,8 @@ def test_terminate_procs_kills_running_workers():
 
 
 @pytest.mark.unit
-class TestCountSync:
-    """The finalize-side synchronous counter.
+class TestCountBatchSync:
+    """The finalize-side synchronous batch counter.
 
     Full-run OSL is computed after the run, outside the event loop, but it
     must produce the same number the perf-side async path would for the same
@@ -1021,29 +1021,70 @@ class TestCountSync:
     (mlcommons/endpoints#500).
     """
 
+    _MESSAGES = [
+        MessageInput(
+            "hello world",
+            "reasoning here",
+            (
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                },
+            ),
+        ),
+        MessageInput("plain answer", "some longer reasoning text", None),
+        TextInput("hello world"),
+        PromptInput(
+            (
+                {"role": "user", "content": "find the bug"},
+                {"role": "assistant", "content": "looking", "reasoning_content": "hmm"},
+            ),
+            ({"type": "function", "function": {"name": "grep", "parameters": {}}},),
+            None,
+            None,
+        ),
+        PromptInput(({"role": "user", "content": "just text"},), None, None, None),
+    ]
+
     @pytest.mark.asyncio
-    async def test_count_sync_agrees_with_count_batch_async(self):
-        """Same input, same count, whichever lane counted it."""
-        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+    @pytest.mark.parametrize(
+        "tokenizer_cls",
+        [
+            _FakeTokenizerWithTemplate,
+            _FakeTokenizerWithTemplateAndBackend,
+            _FakeTokenizer,
+            _FakeTokenizerWithBackend,
+        ],
+        ids=[
+            "chat-template-encode",
+            "chat-template-backend",
+            "fallback-encode",
+            "fallback-backend",
+        ],
+    )
+    async def test_agrees_with_count_batch_async(self, tokenizer_cls):
+        """Same inputs, same counts, whichever lane counted them."""
+        with patch(_MOCK_TARGET, tokenizer_cls):
             loop = asyncio.get_running_loop()
             with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
-                message = MessageInput(
-                    "hello world",
-                    "reasoning here",
-                    (
-                        {
-                            "id": "c1",
-                            "type": "function",
-                            "function": {"name": "f", "arguments": "{}"},
-                        },
-                    ),
-                )
-                expected = (await tok.count_batch_async([message], loop))[0]
+                expected = await tok.count_batch_async(self._MESSAGES, loop)
 
-                assert tok.count_sync(message) == expected
+                assert tok.count_batch_sync(self._MESSAGES) == expected
 
-    def test_count_sync_counts_plain_text(self):
-        """Text inputs take the text path, not the chat template."""
+    def test_counts_plain_text_and_token_ids(self):
+        """Text takes the text path, not the chat template; token IDs count by length."""
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
             with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
-                assert tok.count_sync(TextInput("hello world")) == 2
+                counts = tok.count_batch_sync(
+                    [TextInput("hello world"), TokenIdsInput((1, 2, 3))]
+                )
+                assert counts == [2, 3]
+
+    def test_unsupported_input_fails_in_its_slot(self):
+        """An input it cannot count yields its exception without voiding the batch."""
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                counts = tok.count_batch_sync([TextInput("a b"), object()])  # type: ignore[list-item]
+                assert counts[0] == 2
+                assert isinstance(counts[1], TypeError)
