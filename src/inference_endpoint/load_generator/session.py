@@ -837,7 +837,11 @@ class BenchmarkSession:
                 conv_id_str, turn_num = phase_issuer.uuid_to_conv_info.get(
                     resp.id, ("", None)
                 )
-            self._last_chunk_ns[resp.id] = now_ns
+            if phase_issuer is None or (
+                resp.id in phase_issuer.uuid_to_conv_info
+                and resp.id not in phase_issuer.completed_uuids
+            ):
+                self._last_chunk_ns[resp.id] = now_ns
             self._publisher.publish(
                 EventRecord(
                     event_type=event_type,

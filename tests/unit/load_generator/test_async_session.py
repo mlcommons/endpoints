@@ -1401,6 +1401,29 @@ class TestBenchmarkSession:
         assert session._last_chunk_ns == {}
 
     @pytest.mark.asyncio
+    async def test_chunk_stamp_kept_only_for_active_queries(self):
+        """Chunks of stale (previous-phase) or terminated queries may never get
+        a QueryResult, so their stamps are not kept."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+        phase_issuer = PhaseIssuer(FakeDataset(2), issuer, publisher, lambda: False)
+        session._current_phase_issuer = phase_issuer
+        active = phase_issuer.issue(0)
+        terminated = phase_issuer.issue(1)
+        phase_issuer.completed_uuids.add(terminated)
+
+        for query_id in (active, terminated, "q-stale"):
+            session._handle_response(
+                StreamChunk(id=query_id, metadata={"first_chunk": True}), 100
+            )
+
+        assert session._last_chunk_ns == {active: 100}
+        assert len(publisher.events_of_type(SampleEventType.RECV_FIRST)) == 3
+
+    @pytest.mark.asyncio
     async def test_handle_response_stamps_conversation_id_and_turn(self):
         """All event types inherit (conv_id, turn) seeded at issue time; streaming
         events use .get() so the entry survives for the terminal QueryResult pop."""
