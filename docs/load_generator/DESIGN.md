@@ -366,9 +366,10 @@ poll-based approach.
   COMPLETE is never earlier than its own chunks. A response without chunks keeps
   `completed_at`. When COMPLETE keeps `completed_at`, ISSUED and COMPLETE share
   the same ZMQ transit bias. When it takes the last chunk's stamp, COMPLETE also
-  includes the session's handling backlog for that drain. TTFT (`RECV_FIRST - ISSUED`) is still sensitive to this overhead since
-  it spans the full ZMQ round-trip. TPOT avoids cross-process clock skew by
-  computing time deltas between consecutive chunks within the same process.
+  includes the session's handling backlog for that drain. TTFT
+  (`RECV_FIRST - ISSUED`) is still sensitive to this overhead since it spans the
+  full ZMQ round-trip. TPOT avoids cross-process clock skew by computing time
+  deltas between consecutive chunks within the same process.
 
 ### LoadStrategy (Protocol)
 
@@ -968,8 +969,8 @@ shorter strings, no parsing overhead. Update `Query.default_factory` to match.
 - **Latency (COMPLETE - ISSUED)**: Both timestamps taken on the main process
   side. When COMPLETE keeps `completed_at`, the ZMQ transit bias is symmetric
   and cancels; this is the most accurate measurement. When COMPLETE is floored
-  to the response's last chunk, it also includes the session's handling
-  backlog for that drain.
+  to the response's last chunk, it also includes the session's handling backlog
+  for that drain.
 
 ### Stale Completions After Saturation
 
