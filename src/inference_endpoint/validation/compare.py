@@ -35,7 +35,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_valida
 
 from inference_endpoint.validation.operations import Op, Predicate, vet_pattern
 from inference_endpoint.validation.ranges import Interval
-from inference_endpoint.validation.refs import Ref
+from inference_endpoint.validation.refs import Ref, decode_number
 from inference_endpoint.validation.sentinels import MISSING
 from inference_endpoint.validation.typo_checks import near_match
 
@@ -575,15 +575,20 @@ class Aggregate(BaseModel):
         if missing:
             return _missing_outcome(missing)
         over, value = resolved
-        items = (
-            list(over.values())
-            if isinstance(over, Mapping)
-            else (
-                list(over)
-                if isinstance(over, Sequence) and not isinstance(over, str)
-                else None
+        items: list[Any] | None = None
+        if isinstance(over, Mapping):
+            # Members read by their declared types, the normalization a scalar
+            # row gets (`Ref.members` carries the declarations from cohort load),
+            # so `"10"` reduces as 10, not as a string.
+            member_types = (
+                dict(self.over.members or ()) if isinstance(self.over, Ref) else {}
             )
-        )
+            items = [
+                decode_number(member, member_types.get(str(name)))
+                for name, member in over.items()
+            ]
+        elif isinstance(over, Sequence) and not isinstance(over, str):
+            items = list(over)
         if items is None:
             # A present value that cannot be aggregated refuses (broken), it does
             # not judge False: as a `when` gate a false verdict reads as "not
@@ -593,7 +598,12 @@ class Aggregate(BaseModel):
             )
         if not items and not self.defines_empty:
             return False, f"expected {self.name} of {self.over}, got no values"
-        measured = self.run(items)
+        # Members are validated before the reduction: an ordered `max`/`min`
+        # can keep a finite result while a non-finite member hides behind the
+        # order, so a bad member refuses in either order.
+        measured = self.run(
+            [_finite(member, f"one value of {self.over}") for member in items]
+        )
         held = self._operation().holds(
             Predicate(
                 _finite(measured, f"{self.name} of {self.over}"),

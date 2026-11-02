@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 from inference_endpoint.validation.check import Check, Cohort, Severity, _decode_row
 from inference_endpoint.validation.compare import Aggregate, Compare
-from inference_endpoint.validation.refs import _Fact
+from inference_endpoint.validation.refs import Ref, _Fact
 from inference_endpoint.validation.runner import Finding
 from inference_endpoint.validation.sentinels import MISSING
 from inference_endpoint.validation.tree import RuleScopes
@@ -347,7 +347,7 @@ class TestCohortRefTable:
     def test_every_declared_type_name_has_a_value_test(self):
         # `VALID_TYPES` and the tests inlined in `_Fact.matches` are declared
         # separately, so this pin keeps the vocabulary and the behavior in step.
-        for name in sorted(_Fact.VALID_TYPES - {"dict"}):
+        for name in sorted(_Fact.VALID_TYPES):
             assert isinstance(_Fact(type=name).matches(0), bool)
 
     @pytest.mark.unit
@@ -387,6 +387,16 @@ class TestCohortRefTable:
         fact = _Fact(type="int")
         for text in ("512", "512.0", " 12 ", "1e3"):
             assert fact.matches(fact.coerce(text))
+
+    @pytest.mark.unit
+    def test_a_magnitude_past_the_cap_spells_no_integer(self):
+        # `Decimal` carries `1e1000000000` compactly; materializing it would be
+        # an integer of a billion digits, so the decoding refuses up front and
+        # the spelling stays the string `matches` then refuses.
+        fact = _Fact(type="int")
+        assert fact.coerce("1e1000000000") == "1e1000000000"
+        assert not fact.matches(fact.coerce("1e1000000000"))
+        assert fact.coerce("1e99") == 10**99
 
     @pytest.mark.unit
     def test_a_nullable_leaf_admits_an_explicit_null(self, tmp_path):
@@ -549,6 +559,23 @@ class TestCohortRefTable:
         )
         with pytest.raises(ValueError, match="does not match its type"):
             Cohort.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_dict_default_must_be_a_block(self, tmp_path):
+        root = write_cohort(
+            tmp_path / "cohort",
+            refs={"point": {"accuracy_results": {"type": "dict", "default": {}}}},
+            point=LITERAL_CHECK,
+        )
+        table = Cohort.from_directory(root).refs
+        assert table.annotate(Ref(("point", "accuracy_results"))).default == {}
+        bad = write_cohort(
+            tmp_path / "bad",
+            refs={"point": {"accuracy_results": {"type": "dict", "default": []}}},
+            point=LITERAL_CHECK,
+        )
+        with pytest.raises(ValueError, match="does not match its type"):
+            Cohort.from_directory(bad)
 
     @pytest.mark.unit
     def test_an_allowlist_value_must_match_its_declared_type(self, tmp_path):

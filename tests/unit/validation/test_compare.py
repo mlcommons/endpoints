@@ -759,6 +759,37 @@ class TestAggregateVerdict:
         assert row.run(items) == expected
 
     @pytest.mark.unit
+    def test_mapping_members_decode_by_their_declarations(self, tmp_path):
+        # A scalar row reads `metrics.a` as the number its declaration spells;
+        # the collection row must read the same values, so `"10"` compares as 10
+        # instead of reducing as a string.
+        path = tmp_path / "valid_refs.yaml"
+        path.write_text(
+            "point:\n  metrics:\n    a: { type: float }\n    b: { type: float }\n",
+            encoding="utf-8",
+        )
+        row = _annotated(
+            _aggregate(over="point.metrics", name="max", op="eq", value=10),
+            RefTable.from_yaml(path),
+        )
+        verdict = Verdict.evaluate(row, {"point": {"metrics": {"a": "10", "b": "2"}}})
+        assert verdict.ok is True
+
+    @pytest.mark.unit
+    def test_a_non_finite_member_refuses_before_the_reduction(self):
+        # `max(1, nan)` is 1 while `max(nan, 1)` is nan: an ordered reduction
+        # can hide the bad member behind the mapping order, so members are
+        # validated first.
+        for order in (("a", "b"), ("b", "a")):
+            values = {"a": 1.0, "b": float("nan")}
+            scopes = {"point": {"metrics": {key: values[key] for key in order}}}
+            row = _aggregate(over="point.metrics", name="max", op="eq", value=1)
+            verdict = Verdict.evaluate(row, scopes)
+            assert verdict.ok is False
+            assert verdict.broken is True
+            assert "non-finite" in verdict.why
+
+    @pytest.mark.unit
     def test_why_names_the_aggregated_value(self):
         verdict = Verdict.evaluate(
             _aggregate(over="point.accuracy", name="count", op="ge", value=3),

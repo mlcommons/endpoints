@@ -71,6 +71,11 @@ from inference_endpoint.validation.typo_checks import near_match
 # number, and the key spelling a percentile-shaped block was written under.
 _NUMERIC_TYPES: frozenset[str] = frozenset({"int", "float"})
 
+# The largest magnitude an `int` spelling may materialize: past it the spelling
+# refuses, before `int()` can build an astronomically large integer (`Decimal`
+# carries `1e1000000000` compactly; its integer form has no practical size).
+_MAX_SPELLED_INT = Decimal(10) ** 100
+
 
 def _spelled_number(text: str) -> float | None:
     """The finite number `text` spells whole, or None when it spells none.
@@ -101,7 +106,9 @@ def _spelled_integer(text: str) -> int | None:
     fractional spelling that merely rounds to a whole number
     (`"512.9999999999999999"`) stays refused, and a large exact spelling
     (`"9007199254740993.0"`) keeps every digit instead of losing one to
-    binary-float rounding.
+    binary-float rounding. A magnitude past `_MAX_SPELLED_INT` refuses too:
+    converting it would materialize an integer the spelling never needed
+    (`Decimal("1e1000000000")` is compact; `int()` of it is not).
 
     Example:
 
@@ -111,6 +118,7 @@ def _spelled_integer(text: str) -> int | None:
         _spelled_integer("512.5")  # None: not integral
         _spelled_integer("512.9999999999999999")  # None: rounds, not integral
         _spelled_integer("9007199254740993.0")  # 9007199254740993: exact
+        _spelled_integer("1e1000000000")  # None: beyond the magnitude cap
         _spelled_integer("inf")  # None: not finite
 
     Args:
@@ -126,7 +134,9 @@ def _spelled_integer(text: str) -> int | None:
     if not spelled.is_finite():
         return None
     integral = spelled.to_integral_value()
-    return int(integral) if spelled == integral else None
+    if spelled != integral or integral.copy_abs() > _MAX_SPELLED_INT:
+        return None
+    return int(integral)
 
 
 def decode_number(value: Any, type_name: str | None) -> Any:
@@ -154,6 +164,7 @@ def decode_number(value: Any, type_name: str | None) -> Any:
         decode_number("512.5", "int")  # "512.5": an int leaf takes whole numbers
         decode_number("9007199254740993.0", "int")  # 9007199254740993: exact
         decode_number("512.9999999999999999", "int")  # the spelling: not integral
+        decode_number("1e1000000000", "int")  # the spelling: beyond the cap
         decode_number("12.61", "float")  # 12.61
         decode_number("512", "str")  # "512": a str leaf means a str
         decode_number(512, "int")  # 512: already a number
@@ -226,6 +237,10 @@ class Ref:
             what a numeric string on it decodes as. An un-annotated Ref (a hand-built
             row, or a checker-owned namespace) has none, and nothing decodes.
             (Default: None)
+        members (tuple[tuple[str, str], ...] | None): Filled from the cohort's
+            ref table at cohort load (`RefTable.annotate`) when this ref names a
+            block: the declared `(name, type)` of every leaf directly under it,
+            which the collection rows decode their members by. (Default: None)
     """
 
     # The row language's scope namespaces: the node scopes a fact tree hangs under.
@@ -245,6 +260,7 @@ class Ref:
     required: bool = False
     default: Any = MISSING
     type: str | None = None
+    members: tuple[tuple[str, str], ...] | None = None
 
     @classmethod
     def from_string(cls, value: str) -> Ref | None:
@@ -392,10 +408,10 @@ class _Fact:
             case "list":
                 return isinstance(value, list)
             case "dict":
-                # `dict` never asks here: `_check_values` requires the leaf's own
-                # value to be a mapping, and the values below it stay unchecked.
-                # The arm is spelled out so every declared type name has one.
-                raise NotImplementedError(f"no value test for {self.type!r}")
+                # At collect time `_check_values` tests the leaf's own value is
+                # a block; this arm answers the declaration-time checks
+                # (`default`/`allowlist`), where only a mapping can carry.
+                return isinstance(value, Mapping)
             case _:
                 # Any other name is a missing branch and must fail loud.
                 raise NotImplementedError(f"no value test for {self.type!r}")
@@ -505,16 +521,17 @@ class RefTable:
             )
 
     def annotate(self, ref: Ref) -> Ref:
-        """`ref` with its leaf's `required`/`default`/`type` filled from the table.
+        """`ref` filled from the table: its leaf's notes, or a block's members.
 
-        Call after `validate_names`: a path naming an open subtree or a block (or a
-        table-free hand-built Ref) carries none of them.
+        Call after `validate_names`: a path naming an open subtree carries none
+        of the leaf notes, while a path naming a block carries its direct leaves'
+        `(name, type)` pairs on `members`.
 
         Args:
             ref (Ref): The row's `Ref`, after `validate_names`.
         Returns:
-            Ref: `ref` with its leaf's `required`/`default`/`type` filled, or
-                `ref` itself when it names no leaf.
+            Ref: `ref` with its leaf's `required`/`default`/`type`, or its
+                block's `members`, filled; `ref` itself when it names neither.
         """
         level: Any = self._roots
         for name in ref.parts:
@@ -528,6 +545,13 @@ class RefTable:
                 default=level.default,
                 type=level.type,
             )
+        if isinstance(level, Mapping):
+            members = tuple(
+                (str(name), entry.type)
+                for name, entry in level.items()
+                if isinstance(entry, _Fact)
+            )
+            return replace(ref, members=members) if members else ref
         return ref
 
     def validate_values(self, root: str, values: Mapping[str, Any]) -> tuple[str, ...]:
