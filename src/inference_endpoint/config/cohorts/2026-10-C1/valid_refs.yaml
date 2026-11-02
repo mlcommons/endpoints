@@ -196,6 +196,13 @@ point:
     tps_utilization: { type: float }
     system_tps_per_kw: { type: float }
     e2e_avg_interactivity: { type: float, nullable: true }
+    # §4.4's reporting block: the client's `SteadyState` document; the tree's
+    # `system_tps` alias reads `steady_state.window`/`.tps.system` out of it.
+    steady_state: { type: dict, nullable: true }
+    tps: { type: float, nullable: true }
+    # The whole-run aggregate (`tps`) under its own name; `system_tps` is the
+    # §4.4 official reading.
+    full_run_system_tps: { type: float, nullable: true }
   accuracy_results: dict
   results: dict
   system_power:

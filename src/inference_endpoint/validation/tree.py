@@ -75,35 +75,58 @@ FILE_TO_KEY_MAP = {
     "results.json": "results",
 }
 
-# The run summary's aggregate throughput: the benchmark's report writes the
-# same quantity as `tps` (None on a run that recorded no OSL), while the
-# Endpoints Rules name the metric `system_tps` (§4.1). Which spelling an
-# upload must carry is a policy question with MLCommons; until it lands, the
-# read surfaces both.
+# The run summary's aggregate throughput, under the names rows read it by.
+# `tps` is the client's whole-run spelling (None on a run that recorded no
+# OSL); `system_tps` is §4.1's policy name and §4.4's official reading - the
+# steady-state window's TPS (`steady_state.tps.system`) wherever the summary
+# carries a valid window, the whole-run value otherwise;
+# `full_run_system_tps` names the whole-run value explicitly.
 _CLIENT_TPS_KEY: Final = "tps"
 _POLICY_TPS_KEY: Final = "system_tps"
+_FULL_RUN_TPS_KEY: Final = "full_run_system_tps"
+
+
+def _steady_tps(value: Mapping[str, Any]) -> Any:
+    """The §4.4 steady-state TPS: `steady_state.tps.system` with a window held.
+
+    A verdict without a window (`window: null`) or without the TPS block is no
+    usable official reading, and answers None for the alias to fall back.
+    """
+    steady = value.get("steady_state")
+    if not isinstance(steady, Mapping):
+        return None
+    tps = steady.get("tps")
+    if steady.get("window") is None or not isinstance(tps, Mapping):
+        return None
+    return tps.get("system")
 
 
 def _with_system_tps(value: Any) -> Any:
-    """`value` with the run's aggregate throughput under the policy's name.
+    """`value` with its aggregate throughput under the policy's names.
 
-    One-way and non-destructive: a document that carries `system_tps` is
-    returned unchanged, one carrying only the client's `tps` gains the policy
-    name beside it (every value stays the document's own), and a non-mapping is
-    left for its own refusal to name.
+    Non-destructive and additive: a document carrying `system_tps` keeps it,
+    one carrying the client's `tps` gains `system_tps` (the §4.4 official
+    reading: the steady window's TPS where `steady_state.window` holds, the
+    whole-run value otherwise) and `full_run_system_tps` (the whole-run value,
+    always), and a non-mapping is left for its own refusal to name.
 
     Args:
         value (Any): One `result_summary.json` document, as parsed.
     Returns:
-        Any: The document, or a copy carrying `system_tps`.
+        Any: The document, or a copy carrying the policy names.
     """
-    if (
-        not isinstance(value, Mapping)
-        or _POLICY_TPS_KEY in value
-        or _CLIENT_TPS_KEY not in value
-    ):
+    if not isinstance(value, Mapping) or _CLIENT_TPS_KEY not in value:
         return value
-    return {**value, _POLICY_TPS_KEY: value[_CLIENT_TPS_KEY]}
+    whole = value[_CLIENT_TPS_KEY]
+    aliases: dict[str, Any] = {}
+    steady = _steady_tps(value)
+    if _POLICY_TPS_KEY not in value:
+        official = steady if steady is not None else whole
+        if official is not None:
+            aliases[_POLICY_TPS_KEY] = official
+    if _FULL_RUN_TPS_KEY not in value and whole is not None:
+        aliases[_FULL_RUN_TPS_KEY] = whole
+    return {**value, **aliases} if aliases else value
 
 
 class StrictLoader(yaml.SafeLoader):
@@ -223,10 +246,12 @@ class Node:
     def read(self, name: str) -> tuple[Any, str | None]:
         """(value, error) of the artifact `name` of this node. `MISSING` when absent.
 
-        The run summary is read under the policy's throughput name: the
-        benchmark writes the same aggregate as `tps`, so a summary carrying
-        only that spelling surfaces `system_tps` too (`_with_system_tps`); the
-        parsed document itself stays as written.
+        The run summary is read under the policy's throughput names: the
+        benchmark writes the whole-run aggregate as `tps`, so a summary
+        carrying it surfaces `system_tps` (§4.4's official reading: the steady
+        window's TPS where one holds, the whole-run value otherwise) and
+        `full_run_system_tps` (the whole-run value) beside it
+        (`_with_system_tps`); the parsed document itself stays as written.
 
         Args:
             name (str): The artifact's file name, one of the

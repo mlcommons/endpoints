@@ -176,6 +176,36 @@ class TestRead:
         assert value["system_tps"] == 1.0
 
     @pytest.mark.unit
+    def test_a_valid_steady_window_is_the_system_tps(self, tmp_path):
+        point = self._point(
+            tmp_path,
+            {
+                "result_summary.json": {
+                    "tps": 999.0,
+                    "steady_state": {"window": {"sp_lo": 0}, "tps": {"system": 6000.0}},
+                }
+            },
+        )
+        value, _ = point.read("result_summary.json")
+        assert value["system_tps"] == 6000.0
+        assert value["full_run_system_tps"] == 999.0
+
+    @pytest.mark.unit
+    def test_a_windowless_steady_state_falls_back_to_the_whole_run(self, tmp_path):
+        point = self._point(
+            tmp_path,
+            {
+                "result_summary.json": {
+                    "tps": 999.0,
+                    "steady_state": {"window": None, "tps": {"system": 6000.0}},
+                }
+            },
+        )
+        value, _ = point.read("result_summary.json")
+        assert value["system_tps"] == 999.0
+        assert value["full_run_system_tps"] == 999.0
+
+    @pytest.mark.unit
     def test_absent_artifact_is_missing(self, tmp_path):
         point = self._point(tmp_path)
         value, error = point.read("result_summary.json")

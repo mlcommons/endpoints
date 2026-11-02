@@ -170,13 +170,15 @@ for.
     `offline`/`concurrency`/`system_tps`/`system_desc`/`node`/`model_name`) and
     `Point.from_node`, which reads one `r<N>` run directory — `point.yaml`'s
     `concurrency`/`offline`, its own `system_desc.json`, and
-    `result_summary.json`'s `system_tps` — refusing each missing, mistyped, or
-    unrepresentable fact at load (a `NaN`/`Infinity` `system_tps`, or an integer
-    no `float` can widen, would otherwise judge quietly or crash a derivation).
-    A numeric string reads as the number it spells (`refs.decode_number`, the
-    rule the ref table applies to its declared leaves). `Point.point_power_kw`
-    derives `provisioned_power_kw x Y/N` (Section 4.5.2/4.5.3,
-    2dp-rounded-once).
+    `result_summary.json`'s `system_tps` (the read's Section 4.4 alias: the
+    steady window's TPS where one holds, the whole-run `tps` otherwise;
+    `full_run_system_tps` names the whole-run value) — refusing each missing,
+    mistyped, or unrepresentable fact at load (a `NaN`/`Infinity` `system_tps`,
+    or an integer no `float` can widen, would otherwise judge quietly or crash a
+    derivation). A numeric string reads as the number it spells
+    (`refs.decode_number`, the rule the ref table applies to its declared
+    leaves). `Point.point_power_kw` derives `provisioned_power_kw x Y/N`
+    (Section 4.5.2/4.5.3, 2dp-rounded-once).
   - `Pareto` (frozen `system_desc` + ordered `points`) is one
     `results/<system>/<model>/` and the unit every policy derivation is per;
     `Pareto.from_nodes` latches that pareto's `regions` root on its tree node.

@@ -69,7 +69,10 @@ The submission argument is the upload root (`results/<system>/<model>/r<N>/`
 below it). Each run directory `r<N>/` carries its own `system_desc.json`
 (Section 8.2.1), its `point.yaml` (`concurrency`, `offline` declaration) and its
 `result_summary.json`, whose Section 4.1 aggregate `system_tps` is the point's
-throughput.
+throughput - read as Section 4.4's official value: the steady-state window's TPS
+(`steady_state.tps.system`) wherever the summary carries a valid window
+(`steady_state.window`), the whole-run `tps` otherwise; the whole-run reading
+stays addressable as `full_run_system_tps`.
 
 A submission may carry several paretos - one `<system>/<model>` pair each; each
 check runs once per instance of its scope ("Check blocks" below), so a
