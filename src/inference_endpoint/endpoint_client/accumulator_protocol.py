@@ -76,11 +76,17 @@ class NonStreamingAccumulator:
     """Accumulator stub for api_types whose endpoint has no SSE mode.
 
     HTTPClientConfig resolves an adapter/accumulator pair for every api_type, so
-    a non-streaming endpoint still needs an accumulator. This one should never
-    be exercised; `get_final_output` raises rather than returning an empty
-    `QueryResult`, because the worker's SSE path swallows the
-    `NotImplementedError` from `decode_sse_message` and would otherwise surface
-    zero-output queries as successful.
+    a non-streaming endpoint still needs an accumulator. This one should never be
+    exercised.
+
+    `get_final_output` raises rather than returning an empty `QueryResult`
+    because a streamed response body carrying no `data:` frames never calls
+    `decode_sse_message` at all: `parse_sse_chunk` finds no matches, nothing
+    raises, and the stream ends with nothing accumulated. Returning an empty
+    result there would record a zero-output query as successful. A body that
+    does carry frames raises `NotImplementedError` out of the adapter instead —
+    `parse_sse_chunk` catches only msgspec decode errors — and the worker
+    records that query as failed.
     """
 
     def __init__(self, query_id: str, stream_all_chunks: bool) -> None:

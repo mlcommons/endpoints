@@ -99,9 +99,8 @@ class TestWerCounts:
         assert wer_counts(["anyoneelse"], ["any", "one", "else"]) == (0, 3)
 
     def test_four_word_join_exceeds_the_span_and_counts_errors(self):
-        distance, words = wer_counts(["abcd"], ["a", "b", "c", "d"])
-        assert words == 4
-        assert distance > 0
+        # Pinned against upstream: 4 errors over 4 words, not a partial credit.
+        assert wer_counts(["abcd"], ["a", "b", "c", "d"]) == (4, 4)
 
     def test_join_credited_mid_sentence(self):
         assert wer_counts(["i", "cannot", "go"], ["i", "can", "not", "go"]) == (0, 4)
@@ -128,3 +127,75 @@ class TestEndToEndOnText:
         hyp = project_to_labels(hypothesis).split()
         ref = project_to_labels(reference).split()
         assert wer_counts(hyp, ref) == (0, 9)
+
+
+#: ``(hypothesis, reference, (edit_distance, reference_words))`` captured by
+#: running the MLCommons reference implementation directly — its
+#: ``speech2text/helpers.py:compute_wer_with_concatenation`` composed with
+#: ``legacy_helpers.py:__levenshtein``, pinned at mlcommons/inference commit
+#: 3fbc329939999c13d0a7b5e67fb2092287e06047. These are the upstream numbers, not
+#: this implementation's output, so they fail if the port drifts.
+#:
+#: Generated alongside a randomized differential sweep (20k trials over a small
+#: alphabet chosen so concatenations actually occur) that found zero divergence.
+#: The cases below are the ones where the metric's behaviour is load-bearing:
+#: joins in each direction, a join past the 3-word span, and the empty edges.
+UPSTREAM_VECTORS = [
+    (["the", "cat", "sat"], ["the", "cat", "sat"], (0, 3)),
+    (["the", "dog", "sat"], ["the", "cat", "sat"], (1, 3)),
+    (["the", "sat"], ["the", "cat", "sat"], (1, 3)),
+    (["the", "big", "cat", "sat"], ["the", "cat", "sat"], (1, 3)),
+    ([], ["the", "cat", "sat"], (3, 3)),
+    (["the"], [], (1, 0)),
+    ([], [], (0, 0)),
+    (["cannot"], ["can", "not"], (0, 2)),
+    (["can", "not"], ["cannot"], (0, 1)),
+    (["anyoneelse"], ["any", "one", "else"], (0, 3)),
+    (["any", "one", "else"], ["anyoneelse"], (0, 1)),
+    (["abcd"], ["a", "b", "c", "d"], (4, 4)),
+    (["i", "cannot", "go"], ["i", "can", "not", "go"], (0, 4)),
+    (
+        ["mister", "quilter", "is", "the", "apostle"],
+        ["mister", "quilter", "is", "the", "apostle"],
+        (0, 5),
+    ),
+    (
+        ["mister", "quilter", "is", "the", "epistle"],
+        ["mister", "quilter", "is", "the", "apostle"],
+        (1, 5),
+    ),
+    (
+        ["nor", "is", "mister", "quilters", "manner", "less", "interesting"],
+        ["nor", "is", "mister", "quilter", "s", "manner", "less", "interesting"],
+        (0, 8),
+    ),
+    (
+        ["goodmorning", "everyone", "welcome"],
+        ["good", "morning", "every", "one", "welcome"],
+        (0, 5),
+    ),
+    (["a", "bc", "d"], ["a", "b", "c", "d"], (0, 4)),
+    (["abc", "d"], ["a", "b", "c", "d"], (0, 4)),
+    (["x", "abc"], ["x", "a", "b", "c"], (0, 4)),
+    (
+        ["and", "we", "are", "glad", "to", "welcome", "his", "gospel"],
+        ["and", "we", "are", "glad", "to", "welcome", "his", "gospel"],
+        (0, 8),
+    ),
+]
+
+
+@pytest.mark.unit
+class TestUpstreamParity:
+    @pytest.mark.parametrize(("hypothesis", "reference", "expected"), UPSTREAM_VECTORS)
+    def test_matches_the_reference_implementation(
+        self, hypothesis, reference, expected
+    ):
+        assert wer_counts(hypothesis, reference) == tuple(expected)
+
+    def test_corpus_wer_over_the_whole_vector_set(self):
+        # The aggregate the benchmark actually reports: summed, then divided.
+        distance = sum(e[0] for _, _, e in UPSTREAM_VECTORS)
+        words = sum(e[1] for _, _, e in UPSTREAM_VECTORS)
+        ours = [wer_counts(h, r) for h, r, _ in UPSTREAM_VECTORS]
+        assert (sum(d for d, _ in ours), sum(w for _, w in ours)) == (distance, words)

@@ -21,10 +21,12 @@ and subprocess.run (the mlc-r2-downloader invocation) are mocked in
 """
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from inference_endpoint.dataset_manager import dataset
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.predefined.whisper_librispeech import (
     MANIFEST_FILENAME,
@@ -259,6 +261,47 @@ class TestR2Download:
         ):
             with pytest.raises(RuntimeError, match="r2 boom"):
                 WhisperLibriSpeech.generate(tmp_path / "cache")
+
+    def test_downloader_is_bounded_by_a_timeout(
+        self, tmp_path: Path, no_local_manifest: None
+    ):
+        # Dataset generation runs before RunWatchdog arms the whole-run
+        # deadline, so a stalled multi-GB fetch has nothing else to stop it.
+        with (
+            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
+            patch(f"{_MODULE}.subprocess.run") as run,
+        ):
+            run.side_effect = _fake_run_unpacking
+            WhisperLibriSpeech.generate(tmp_path / "cache")
+        assert run.call_args.kwargs["timeout"] == dataset.R2_DOWNLOAD_TIMEOUT_S
+
+    def test_a_stalled_download_raises_rather_than_hanging(
+        self, tmp_path: Path, no_local_manifest: None
+    ):
+        with (
+            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
+            patch(
+                f"{_MODULE}.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="bash", timeout=1),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="exceeded"):
+                WhisperLibriSpeech.generate(tmp_path / "cache")
+
+    def test_the_downloader_script_is_removed_after_a_timeout(
+        self, tmp_path: Path, no_local_manifest: None
+    ):
+        cache = tmp_path / "cache"
+        with (
+            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
+            patch(
+                f"{_MODULE}.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="bash", timeout=1),
+            ),
+        ):
+            with pytest.raises(RuntimeError):
+                WhisperLibriSpeech.generate(cache)
+        assert not list(cache.rglob("mlc-r2-downloader.sh"))
 
 
 @pytest.mark.unit

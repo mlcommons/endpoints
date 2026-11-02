@@ -39,8 +39,20 @@ AUDIO_FILE_COLUMN = "audio_file"
 #: is not a practical concern.
 _BOUNDARY = "----mlperf-inference-endpoints-audio-boundary-Q3nV7xTt"
 
-_DASHES = f"--{_BOUNDARY}\r\n".encode("ascii")
-_CLOSING = f"--{_BOUNDARY}--\r\n".encode("ascii")
+_DELIMITER = f"--{_BOUNDARY}"
+_DASHES = f"{_DELIMITER}\r\n".encode("ascii")
+_CLOSING = f"{_DELIMITER}--\r\n".encode("ascii")
+
+#: Characters that would terminate a `Content-Disposition` parameter early, with
+#: the percent escapes browsers substitute for them (WHATWG HTML, "multipart/
+#: form-data encoding algorithm"). Servers decode these, so escaping keeps the
+#: original value recoverable where rejecting the row would not.
+_PARAM_ESCAPES = str.maketrans({'"': "%22", "\r": "%0D", "\n": "%0A"})
+
+
+def _escape_param(value: str) -> str:
+    """Escape a quoted-string header parameter (a `name=` or `filename=` value)."""
+    return value.translate(_PARAM_ESCAPES)
 
 
 def encode_multipart(
@@ -48,21 +60,37 @@ def encode_multipart(
 ) -> bytes:
     """Encode `fields` plus one `file` part as an RFC 7578 multipart body.
 
+    Both the parameter names and the filename are dataset-controlled, so they are
+    escaped: an unescaped `"` or CRLF would close the parameter early and let a
+    row inject its own headers or parts. Field *values* sit in a part's body
+    where CRLF is legal, so they are checked only for the one string that would
+    forge a part boundary.
+
     Args:
         fields: Text form fields, in the order they should be written.
         filename: Value of the file part's `filename` parameter.
         audio: Raw audio bytes.
         mime_type: Media type of the file part.
+
+    Raises:
+        ValueError: A field value contains the multipart delimiter.
     """
     parts: list[bytes] = []
     for name, value in fields.items():
+        if _DELIMITER in value:
+            raise ValueError(
+                f"Form field {name!r} contains the multipart delimiter "
+                f"{_DELIMITER!r}, which would forge a part boundary."
+            )
         parts.append(_DASHES)
         parts.append(
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+            f'Content-Disposition: form-data; name="{_escape_param(name)}"'
+            f"\r\n\r\n{value}\r\n".encode()
         )
     parts.append(_DASHES)
     parts.append(
-        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f'Content-Disposition: form-data; name="file"; '
+        f'filename="{_escape_param(filename)}"\r\n'
         f"Content-Type: {mime_type}\r\n\r\n".encode()
     )
     parts.append(audio)
@@ -77,16 +105,23 @@ class OpenAITranscriptionsAdapter(HttpRequestAdapter):
     The request is a `multipart/form-data` audio upload, so the body is not JSON
     and `CONTENT_TYPE` carries the boundary. The dataset row holds a *path*; the
     bytes are read here, inside the worker, so a full audio corpus never
-    traverses the issue thread or the ZMQ frame. Keep the audio on fast local
-    storage: the read happens inside the measured request.
+    traverses the issue thread or the ZMQ frame.
+
+    The read is synchronous on the worker's event loop, so it stalls every
+    in-flight response in that worker process, not just this request. Keep the
+    audio on fast local storage: a cold-cache or network-mounted read shows up
+    as added latency across the whole worker.
 
     `language` is what makes the server build Whisper's
-    `<|startoftranscript|><|LANG|><|transcribe|><|notimestamps|>` prompt, which
-    is how this matches the MLPerf speech2text reference.
+    `<|startoftranscript|><|LANG|><|transcribe|><|notimestamps|>` prompt instead
+    of auto-detecting per clip, which is how this matches the MLPerf speech2text
+    reference. `DEFAULT_LANGUAGE` supplies it; a dataset `language` column wins.
 
     The endpoint is non-streaming: OpenAI does not support `stream` for
     Whisper-class models, so `decode_sse_message` raises and the registered
-    accumulator is `NonStreamingAccumulator`.
+    accumulator is `NonStreamingAccumulator`. Config validation rejects
+    `streaming: on` for this api_type, and `ColumnFilter` admits no `stream`
+    column, so `query.data` never carries one.
     """
 
     CONTENT_TYPE: ClassVar[str] = f"multipart/form-data; boundary={_BOUNDARY}"
@@ -107,6 +142,12 @@ class OpenAITranscriptionsAdapter(HttpRequestAdapter):
     #: bytes to librosa/soundfile), so a per-row MIME column buys nothing.
     MIME_TYPE: ClassVar[str] = "audio/wav"
 
+    #: Transcription language, sent on every request. The MLPerf speech2text
+    #: corpus is English LibriSpeech and the reference decodes with the language
+    #: pinned, so leaving the server to auto-detect per clip would be a different
+    #: workload. A dataset `language` column overrides this per row.
+    DEFAULT_LANGUAGE: ClassVar[str] = "en"
+
     _response_decoder: msgspec.json.Decoder = msgspec.json.Decoder(
         TranscriptionResponse
     )
@@ -115,6 +156,7 @@ class OpenAITranscriptionsAdapter(HttpRequestAdapter):
     def dataset_transforms(cls, model_params: ModelParams) -> list[Transform]:
         metadata = {
             "model": model_params.name,
+            "language": cls.DEFAULT_LANGUAGE,
             "response_format": "json",
             "temperature": model_params.temperature,
         }
@@ -135,11 +177,6 @@ class OpenAITranscriptionsAdapter(HttpRequestAdapter):
             raise KeyError(
                 f"{AUDIO_FILE_COLUMN!r} not found in query.data keys: "
                 f"{list(data.keys())}"
-            )
-        if data.get("stream"):
-            raise ValueError(
-                "OpenAITranscriptionsAdapter is non-streaming; remove `stream` "
-                "from query.data and set model_params.streaming to 'off'."
             )
         audio_path = Path(data[AUDIO_FILE_COLUMN])
         fields = {

@@ -47,8 +47,15 @@ To use a copy you already have, set `datasets[*].generate_params.manifest` or
 `generate_params.data_dir` overrides the root that `fname` resolves against; it
 defaults to the manifest's own directory.
 
-Keep the WAVs on **fast local storage**: the client reads each file inside the
-measured request, so a network mount shows up as endpoint latency.
+The parsed-row cache is keyed on the dataset ID alone, so if you change
+`manifest` or `data_dir` after a first run, also pass
+`generate_params.force: true` once — otherwise the rows built from the previous
+manifest are reused.
+
+Keep the WAVs on **fast local storage**. The worker reads each file inside the
+measured request, and that read is synchronous on its event loop: a slow read
+stalls every other in-flight request in the same worker process, so a network
+mount or cold cache inflates latency beyond the clip that caused it.
 
 ## 3. Run
 
@@ -72,6 +79,7 @@ prefix of the full corpus — but a partial perf phase is not a reportable resul
 ```json
 {
   "score": 97.93,
+  "complete": true,
   "breakdown": {
     "wer_percent": 2.07,
     "edit_distance": 1241,
@@ -82,10 +90,12 @@ prefix of the full corpus — but a partial perf phase is not a reportable resul
 }
 ```
 
-**Check `missing_samples == 0` before quoting the score.** WER is corpus-level
-(total errors ÷ total reference words), so a sample that never completed
-contributes neither and silently shrinks the denominator instead of counting
-against you.
+A submission needs `complete: true` and `missing_samples: 0`. An issued sample
+that never produced a response is scored as an empty transcript — its reference
+words count in the denominator and all of them count as errors — so a partial
+run shows up as a depressed score rather than as a flattering one, and
+`complete` goes `false`. `empty_responses` is the separate case of a sample that
+did answer, with nothing in it.
 
 A WER far above 2.07% usually points at the dataset rather than the endpoint —
 most often a manifest that is not the repackaged `dev-all-repack.json`.
@@ -97,16 +107,32 @@ most often a manifest that is not the repackaged `dev-all-repack.json`.
 | Route + multipart upload | `openai/transcriptions_adapter.py` (`api_type: openai_transcriptions`) |
 | Dataset                  | `dataset_manager/predefined/whisper_librispeech/`                      |
 | Metric                   | `evaluation/wer.py` + `WERScorer` (`eval_method: wer`)                 |
+| Accuracy gate            | `config/rulesets/mlcommons/models.py` (`Whisper_large_v3`)             |
 
-Notes on the run config:
+Notes on the run config. All three constraints below are enforced by config
+validation keyed on `api_type: openai_transcriptions`, so a hand-written config
+gets an error rather than a silently odd run:
 
-- **Non-streaming.** OpenAI does not support `stream` for Whisper-class models,
-  so `model_params.streaming` must be `off`. There is no TTFT/TPOT; the metrics
-  are QPS and per-request latency.
-- **`metrics_isl: false`.** Audio rows carry no text prompt, so there is no
-  input sequence length. One "ISL is unavailable" warning per run is expected.
-- **Warmup salt must stay off.** Salting prepends a random hex prefix to a text
-  prompt; an audio row has none, and enabling it is a hard error.
-- **`language: en`** (settable per dataset row) is what makes the server build
-  Whisper's `<|startoftranscript|><|en|><|transcribe|><|notimestamps|>` prompt,
-  matching the MLPerf reference.
+- **Non-streaming.** OpenAI does not support `stream` for Whisper-class models.
+  `streaming: on` is rejected and `auto` resolves to `off` even in online mode.
+  There is no TTFT/TPOT; the metrics are QPS and per-request latency.
+- **`metrics_isl` is forced off.** Audio rows carry no text prompt, so there is
+  no input sequence length. One "ISL is unavailable" warning per run is
+  expected.
+- **Warmup salt is rejected.** Salting prepends a random hex prefix to a text
+  prompt to defeat prefix caching; an audio upload has no prompt, and its cache
+  key is the audio.
+- **`language: en`** is sent on every request (the adapter's `DEFAULT_LANGUAGE`;
+  a dataset `language` column overrides it). It makes the server build Whisper's
+  `<|startoftranscript|><|en|><|transcribe|><|notimestamps|>` prompt instead of
+  auto-detecting the language per clip, which is what the MLPerf reference does.
+
+## Submission checking
+
+The reference accuracy and the 0.99 factor are registered in
+`config/rulesets/mlcommons/models.py`, so `submission_ref` and
+`compliance/checker.py` can enforce them rather than leaving the numbers in
+prose. Both are transcriptions of the MLPerf Inference submission checker's own
+constants, where the gate is `"whisper": ("ACCURACY", (100.0 - 2.0671) * 0.99)`
+and the required sample count is 1633 — the same `100 - WER` scale `WERScorer`
+reports on.

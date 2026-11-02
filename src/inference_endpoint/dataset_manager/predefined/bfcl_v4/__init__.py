@@ -22,16 +22,13 @@ Reference: https://gorilla.cs.berkeley.edu/leaderboard.html
 import hashlib
 import json
 import os
-import subprocess
 from logging import getLogger
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import pandas as pd
-import requests
 
-from ...dataset import Dataset
+from ...dataset import Dataset, download_from_r2
 from . import presets
 
 logger = getLogger(__name__)
@@ -168,13 +165,6 @@ class BFCLv4(
     # staging/testing via the BFCL_V4_DATASET_URI env var.
     R2_DATASET_URI: str | None = None
     R2_DATASET_URI_ENV = "BFCL_V4_DATASET_URI"
-    # Pinned mlcommons/r2-downloader commit (same convention as open_orca).
-    R2_DOWNLOADER_COMMIT = "27da4421877f2831eeb615b43ee5098c4b70be7e"
-    # The resolved dataset URI is handed to a downloaded shell script, so the
-    # host is restricted to MLCommons R2 storage. This stops a mis-set
-    # BFCL_V4_DATASET_URI env var from pointing the downloader at an
-    # attacker-controlled location.
-    R2_ALLOWED_HOST = "mlcommons-storage.org"
 
     @classmethod
     def generate(
@@ -413,8 +403,9 @@ class BFCLv4(
     def _download_full_parquet_from_r2(cls, dst_path: Path) -> bool:
         """Download the full single-turn parquet from MLCommons R2 storage.
 
-        Mirrors the OpenOrca pattern: fetch the pinned ``mlc-r2-downloader.sh``,
-        run it against the dataset ``.uri``, then SHA-256 verify the result.
+        Fetching and running the pinned ``mlc-r2-downloader.sh`` is
+        ``download_from_r2``; this adds the SHA-256 verification and the
+        relocation to ``dst_path``.
 
         Returns True when a verified parquet is in place at ``dst_path``; returns
         False when no R2 URI is configured, in which case the caller builds the
@@ -426,48 +417,12 @@ class BFCLv4(
         if not uri:
             return False
 
-        # The uri is passed to a downloaded shell script; restrict it to https
-        # on MLCommons R2 storage before invoking anything.
-        parsed = urlparse(uri)
-        host = parsed.hostname or ""
-        if parsed.scheme != "https" or not (
-            host == cls.R2_ALLOWED_HOST or host.endswith("." + cls.R2_ALLOWED_HOST)
-        ):
-            raise ValueError(
-                f"Refusing to download dataset from untrusted URI '{uri}': "
-                f"expected https on {cls.R2_ALLOWED_HOST}"
-            )
-
         download_dir = dst_path.parent
         download_dir.mkdir(parents=True, exist_ok=True)
         # Start from a clean target so a stale parquet can't shadow the fresh
         # download (the relocate below only fires when dst_path is absent).
         dst_path.unlink(missing_ok=True)
-        downloader_url = (
-            "https://raw.githubusercontent.com/mlcommons/r2-downloader/"
-            f"{cls.R2_DOWNLOADER_COMMIT}/mlc-r2-downloader.sh"
-        )
-        script_path = download_dir / "mlc-r2-downloader.sh"
-        resp = requests.get(downloader_url, timeout=30)
-        resp.raise_for_status()
-        script_path.write_bytes(resp.content)
-        script_path.chmod(0o755)
-
-        try:
-            result = subprocess.run(
-                ["bash", str(script_path.resolve()), "-d", str(download_dir), uri],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"R2 downloader failed with code {result.returncode}: "
-                    f"{result.stderr}"
-                )
-        finally:
-            script_path.unlink(missing_ok=True)
+        download_from_r2(uri, download_dir)
 
         # The downloader may nest the file under a subdir per the .uri manifest;
         # relocate it to the expected cache path if so.

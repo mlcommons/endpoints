@@ -106,16 +106,45 @@ class TestEncodeQuery:
         with pytest.raises(KeyError, match="audio_file"):
             Adapter.encode_query(Query(id="q", data={"model": "m"}))
 
-    def test_streaming_request_raises(self, audio_file: Path):
-        with pytest.raises(ValueError, match="non-streaming"):
-            Adapter.encode_query(_query(audio_file, stream=True))
-
     def test_missing_audio_on_disk_raises(self, tmp_path: Path):
         query = Query(
             id="q", data={"audio_file": str(tmp_path / "gone.wav"), "model": "m"}
         )
         with pytest.raises(FileNotFoundError):
             Adapter.encode_query(query)
+
+
+@pytest.mark.unit
+class TestBodyInjection:
+    """Dataset-controlled strings must not be able to forge headers or parts."""
+
+    def test_quote_in_filename_is_escaped(self, tmp_path: Path):
+        path = tmp_path / 'ev"il.wav'
+        path.write_bytes(WAV_BYTES)
+        body = Adapter.encode_query(_query(path))
+        # The raw quote would close filename= early; %22 is what servers decode.
+        assert b'filename="ev%22il.wav"' in body
+        assert b'filename="ev"il.wav"' not in body
+
+    def test_crlf_in_filename_is_escaped(self, tmp_path: Path):
+        # A bare CRLF would end the Content-Disposition line and let the rest of
+        # the name be read as its own header.
+        path = tmp_path / "a\r\nX-Injected: yes\r\n\r\nx.wav"
+        path.write_bytes(WAV_BYTES)
+        body = Adapter.encode_query(_query(path))
+        assert b"%0D%0AX-Injected: yes" in body
+        assert b"\r\nX-Injected: yes\r\n\r\nx.wav" not in body
+
+    def test_field_value_carrying_the_delimiter_is_rejected(self, audio_file: Path):
+        boundary = Adapter.CONTENT_TYPE.split("boundary=", 1)[1]
+        query = _query(audio_file, prompt=f"x\r\n--{boundary}\r\nforged")
+        with pytest.raises(ValueError, match="delimiter"):
+            Adapter.encode_query(query)
+
+    def test_ordinary_multiline_field_value_is_allowed(self, audio_file: Path):
+        # CRLF is legal inside a part body; only the delimiter is a forgery.
+        query = _query(audio_file, prompt="line one\r\nline two")
+        assert b"line one\r\nline two" in Adapter.encode_query(query)
 
 
 @pytest.mark.unit
@@ -167,6 +196,19 @@ class TestDatasetTransforms:
         assert row["model"] == "openai/whisper-large-v3"
         assert row["response_format"] == "json"
         assert row["temperature"] == 0.0
+
+    def test_language_is_sent_by_default(self):
+        # Without it the server auto-detects per clip, which is a different
+        # workload from the MLPerf reference's pinned-language decode.
+        df = pd.DataFrame([{"audio_file": "/a.wav", "transcript": "hello"}])
+        assert self._apply(df).iloc[0]["language"] == "en"
+
+    def test_default_language_reaches_the_request_body(self, audio_file: Path):
+        df = pd.DataFrame([{"audio_file": str(audio_file), "transcript": "hello"}])
+        row = self._apply(df).iloc[0]
+        body = Adapter.encode_query(Query(id="q", data=row.to_dict()))
+        assert b'name="language"' in body
+        assert b"\r\n\r\nen\r\n" in body
 
     def test_dataset_language_overrides_defaults(self):
         df = pd.DataFrame(

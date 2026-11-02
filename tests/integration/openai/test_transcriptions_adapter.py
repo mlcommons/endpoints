@@ -269,6 +269,13 @@ async def test_server_rejects_a_non_multipart_body(
 def test_dataset_rows_are_request_ready(dataset) -> None:
     """The loaded row is used verbatim as Query.data, so it must encode."""
     row = dataset.load_sample(0)
-    assert set(row) == {"audio_file", "model", "response_format", "temperature"}
+    assert set(row) == {
+        "audio_file",
+        "model",
+        "language",
+        "response_format",
+        "temperature",
+    }
+    assert row["language"] == "en"
     body = OpenAITranscriptionsAdapter.encode_query(Query(id="q", data=row))
     assert Path(row["audio_file"]).read_bytes() in body

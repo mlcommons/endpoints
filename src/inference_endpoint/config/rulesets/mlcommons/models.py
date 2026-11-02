@@ -146,6 +146,22 @@ Mixtral8x7B = _Model(
     dataset=datasets.TextGenComplex,
 )
 
+# speech2text. The inference submission checker's constants.py gates one metric,
+# which it names ACCURACY and defines as 100 - WER over the corpus:
+# "whisper": ("ACCURACY", (100.0 - 2.0671) * 0.99). So golden WER 2.0671% is a
+# golden accuracy of 97.9329 with the usual 0.99 factor, and WERScorer reports on
+# that same 100 - WER scale.
+#
+# equal_issue_mode is off: the clips are fixed-length (~30 s) by construction, so
+# the non-uniform-input case it exists for does not arise.
+Whisper_large_v3 = _Model(
+    "whisper-large-v3",
+    golden_accuracy=("fp32", {"accuracy": 97.9329}),
+    accuracy_target_settings=[{"accuracy": (0.99,)}],
+    dataset=datasets.LibriSpeechDevAll,
+    use_equal_issue_mode=False,
+)
+
 # Edge-Agentic (BFCL v4) reference model. The accuracy gate is BFCL v4 single-turn
 # (overall + non_live-normalized). golden_accuracy here is the validated Q4_K_M
 # reference point on a Jetson Thor (llama.cpp, reasoning off); accuracy is

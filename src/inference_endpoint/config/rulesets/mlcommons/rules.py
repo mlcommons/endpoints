@@ -272,6 +272,23 @@ _v5_1 = RoundRuleset(
                 max_ttft_latency_ms=2000, max_tpot_latency_ms=200
             ),
         },
+        # speech2text is Offline-only upstream ("whisper": ["Offline"] in the
+        # submission checker's required-scenarios table), so THROUGHPUT is its
+        # only priority. A plain PerModelRuleset rather than a TokenBasedRuleset:
+        # /v1/audio/transcriptions has no SSE mode, so there is no TTFT or TPOT
+        # to cap or report, and samples/second is the whole metric.
+        #
+        # min_sample_count_valid is the "dataset-size" entry (1633) rather than
+        # the Offline "min-queries" value (1): the full corpus is what makes a
+        # WER comparable to the reference, and a short run is the failure mode
+        # worth catching here.
+        models.Whisper_large_v3: {
+            OptimizationPriority.THROUGHPUT: PerModelRuleset(
+                min_sample_count_valid=1633,
+                metric=metrics.Throughput,
+                reported_metrics=[metrics.Throughput],
+            ),
+        },
     },
 )
 

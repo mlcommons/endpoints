@@ -56,6 +56,7 @@ from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
+from ..exceptions import InputValidationError
 from .accuracy_results import build_breakdown
 from .extractor import (
     Extractor,
@@ -420,6 +421,15 @@ class WERScorer(Scorer, scorer_id="wer"):
     character-label inventory, apply Whisper's ``EnglishTextNormalizer``, split
     on whitespace, then accumulate the concatenation-aware edit distance. See
     :mod:`inference_endpoint.evaluation.wer`.
+
+    An issued sample with no COMPLETE event is scored as an empty hypothesis:
+    its reference words enter the denominator and every one of them counts as a
+    deletion, exactly as a completed-but-blank response already does. Skipping
+    it instead would shrink the denominator, so dropping the samples a SUT
+    handles worst would *raise* the score. This matches the reference number
+    whenever nothing is missing, and ``complete`` is set False when something
+    is, so a partial run is machine-detectable rather than needing a reader to
+    notice ``missing_samples``.
     """
 
     REQUIRES_EXTRACTOR = False
@@ -434,20 +444,42 @@ class WERScorer(Scorer, scorer_id="wer"):
 
     def __init__(self, *args, normalizer_source: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        if self.extractor is not None:
+            raise InputValidationError(
+                f"accuracy_config.extractor is not supported by "
+                f"{type(self).__name__}: WER scores the transcript verbatim, so "
+                "an extractor would be silently ignored. Remove it."
+            )
         self.normalizer_source = normalizer_source or self.DEFAULT_NORMALIZER_SOURCE
         self._breakdown: dict[str, Any] | None = None
 
-    def _normalizer(self) -> EnglishTextNormalizer:
-        tokenizer = AutoTokenizer.from_pretrained(self.normalizer_source)
+    @classmethod
+    def preflight(cls, extras: dict[str, Any]) -> None:
+        """Resolve the normalizer before the run, not after it.
+
+        ``_normalizer`` needs network access or a warm HF cache. Scoring happens
+        after the whole performance phase, so a cold cache in an air-gapped
+        submission environment would otherwise fail the run at its very last
+        step, with the endpoint work already spent.
+        """
+        cls._load_normalizer(extras.get("normalizer_source"))
+
+    @classmethod
+    def _load_normalizer(cls, source: str | None) -> EnglishTextNormalizer:
+        resolved = source or cls.DEFAULT_NORMALIZER_SOURCE
+        tokenizer = AutoTokenizer.from_pretrained(resolved)
         spelling_map = getattr(tokenizer, "english_spelling_normalizer", None)
         if not spelling_map:
             raise ValueError(
-                f"Tokenizer {self.normalizer_source!r} carries no "
+                f"Tokenizer {resolved!r} carries no "
                 "english_spelling_normalizer (normalizer.json). Point "
                 "accuracy_config.extras.normalizer_source at a Whisper "
                 "tokenizer repo or local directory."
             )
         return EnglishTextNormalizer(spelling_map)
+
+    def _normalizer(self) -> EnglishTextNormalizer:
+        return self._load_normalizer(self.normalizer_source)
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(
@@ -461,6 +493,7 @@ class WERScorer(Scorer, scorer_id="wer"):
 
         issued = len(self.sample_index_map)
         if issued == 0:
+            self.complete = False
             return None, 0
         n_repeats = issued // self.dataset.num_samples()
 
@@ -473,26 +506,29 @@ class WERScorer(Scorer, scorer_id="wer"):
 
         normalizer = self._normalizer()
         references = self.dataset.dataframe[self.ground_truth_column].to_numpy()
+        outputs = dict(zip(df["sample_uuid"], df["output"], strict=True))
 
+        # Iterate the issued samples, not the returned ones: a sample with no
+        # COMPLETE event is scored as an empty hypothesis (all of its reference
+        # words count as deletions) rather than dropped from the denominator.
         distance = 0
         words = 0
         empty = 0
-        for _, row in df.iterrows():
-            reference = references[self.sample_index_map[row["sample_uuid"]]]
-            hypothesis = row["output"]
-            if not hypothesis:
+        missing = 0
+        for sample_uuid, index in self.sample_index_map.items():
+            hypothesis = outputs.get(sample_uuid)
+            if hypothesis is None:
+                missing += 1
+                hypothesis = ""
+            elif not hypothesis:
                 empty += 1
             hyp_words = normalizer(project_to_labels(hypothesis)).split()
-            ref_words = normalizer(project_to_labels(str(reference))).split()
+            ref_words = normalizer(project_to_labels(str(references[index]))).split()
             sample_distance, sample_words = wer_counts(hyp_words, ref_words)
             distance += sample_distance
             words += sample_words
 
-        # Samples that never produced a COMPLETE event contribute no errors and
-        # no reference words, so they silently shrink the denominator rather
-        # than penalising the score - surface the count so a partial run is not
-        # mistaken for a clean one.
-        missing = issued - len(df)
+        self.complete = missing == 0
         if words == 0:
             self._breakdown = {"wer_percent": None, "missing_samples": missing}
             return None, n_repeats
@@ -507,11 +543,10 @@ class WERScorer(Scorer, scorer_id="wer"):
         }
         if missing:
             logger.warning(
-                "WER computed over %d of %d issued samples (%d missing); the "
-                "score does not describe a complete run.",
-                len(df),
-                issued,
+                "%d of %d issued samples produced no output and were scored as "
+                "empty transcripts; this run is reported as incomplete.",
                 missing,
+                issued,
             )
         return 100.0 - wer * 100.0, n_repeats
 

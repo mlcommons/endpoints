@@ -25,6 +25,14 @@ The concatenation-aware alignment is why a generic WER library (jiwer,
 torchmetrics) will not reproduce the reference number: the reference credits a
 hypothesis word that equals up to three joined reference words, and vice versa,
 before measuring edit distance. See ``docs/evaluation/DESIGN.md``.
+
+Parity with upstream is pinned by the golden vectors in
+``tests/unit/evaluation/test_wer.py`` (``UPSTREAM_VECTORS``), captured by running
+the reference functions at mlcommons/inference commit
+``3fbc329939999c13d0a7b5e67fb2092287e06047``.
+
+Upstream reports ``accuracy = (1 - wer) * 100`` (``speech2text/accuracy_eval.py``),
+which is the ``100 - WER%`` scale :class:`WERScorer` reports on.
 """
 
 from collections.abc import Sequence
@@ -45,13 +53,18 @@ def project_to_labels(text: str) -> str:
     lossy in exactly this way. Reproducing it keeps punctuation handling
     identical to the reference.
 
-    The lowercasing is applied to both sides. The reference lowercases only the
-    SUT output (in its SUT) and not the manifest transcript (in
-    ``manifest.parse_transcript``), so an uppercase transcript — which is how
-    LibriSpeech ships — would have every letter dropped as out-of-inventory,
-    leaving an empty reference. Lowercasing both is a no-op whenever the
-    manifest is already lowercase, and the only behaviour that yields a
-    meaningful number when it is not.
+    The lowercasing is applied to both sides, which is a no-op on the official
+    corpus: the MLCommons preparation pipeline already lowercases every
+    transcript (``speech2text/utils/preprocessing_utils.py`` writes
+    ``data['transcript'].lower().strip()``), so the manifest this loader
+    consumes is lowercase before it arrives.
+
+    It is kept as defence for a hand-built manifest. Upstream's
+    ``manifest.parse_transcript`` maps each character through the label
+    inventory and *drops* whatever is absent, and the inventory holds no
+    uppercase letters — so an uppercase transcript would reduce to an empty
+    reference there rather than failing loudly. Lowercasing first is the only
+    behaviour that still yields a meaningful number in that case.
     """
     lowered = text.lower()
     return "".join(c for c in lowered if c in LABELS)
@@ -97,7 +110,9 @@ def wer_counts(hypothesis: Sequence[str], reference: Sequence[str]) -> tuple[int
 
         ref_match_len = hyp_match_len = 1
         match_found = False
-        for k in range(1, MAX_CONCATENATION_SPAN + 1):
+        # From 2: a k of 1 would re-test reference[i] == hypothesis[j], which the
+        # branch above already handled and left unequal.
+        for k in range(2, MAX_CONCATENATION_SPAN + 1):
             if (
                 i + k <= len(reference)
                 and "".join(reference[i : i + k]) == hypothesis[j]

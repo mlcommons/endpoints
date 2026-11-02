@@ -1171,11 +1171,23 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             self.benchmark_mode if self.type == TestType.SUBMISSION else self.type
         )
 
+        # An audio transcription endpoint has no SSE mode at all, so streaming is
+        # a property of the api_type rather than of the test type: AUTO must not
+        # resolve to ON here the way it does for an online text run.
+        non_streaming_api = (
+            self.endpoint_config.api_type == APIType.OPENAI_TRANSCRIPTIONS
+        )
         if self.model_params.streaming == StreamingMode.AUTO:
             mp_updates["streaming"] = (
                 StreamingMode.OFF
-                if effective_mode in (TestType.OFFLINE,)
+                if non_streaming_api or effective_mode in (TestType.OFFLINE,)
                 else StreamingMode.ON
+            )
+        elif non_streaming_api and self.model_params.streaming == StreamingMode.ON:
+            raise ValueError(
+                f"endpoint_config.api_type={self.endpoint_config.api_type.value} "
+                "has no streaming mode; set model_params.streaming to 'off' or "
+                "leave it 'auto'"
             )
 
         if not self.model_params.name and self.submission_ref:
@@ -1190,6 +1202,29 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
+
+        if non_streaming_api:
+            # The request body is an audio upload with no text prompt, so there
+            # is no input sequence length to measure. Left on, the aggregator
+            # registers an ISL series that can only stay empty. Derived rather
+            # than demanded of the user: metrics_isl defaults to True, so every
+            # transcription config would otherwise have to turn it off by hand.
+            if self.settings.metrics_isl:
+                object.__setattr__(
+                    self,
+                    "settings",
+                    self.settings.model_copy(update={"metrics_isl": False}),
+                )
+            # Salt exists to defeat prefix caching by prepending random hex to a
+            # text prompt. Here the cache key is the audio, so salting cannot do
+            # that job, and a row with no 'prompt' at all is a hard error later.
+            if self.settings.warmup.salt:
+                raise ValueError(
+                    f"settings.warmup.salt is not supported with "
+                    f"endpoint_config.api_type="
+                    f"{self.endpoint_config.api_type.value}: the request is an "
+                    "audio upload, not a text prompt"
+                )
 
         uses_swe_bench = any(
             dataset.accuracy_config is not None

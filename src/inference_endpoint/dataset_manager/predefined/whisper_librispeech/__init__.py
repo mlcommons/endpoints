@@ -56,7 +56,9 @@ class WhisperLibriSpeech(Dataset, dataset_id="whisper_librispeech"):
         ``OpenAITranscriptionsAdapter`` (which reads the bytes in the worker).
       - ``transcript`` : reference text, read by ``WERScorer`` off the
         dataframe as the ground-truth column.
-      - ``duration``   : clip length in seconds, carried for reporting only.
+      - ``duration``   : clip length in seconds. Retained in the cached parquet
+        for inspection only — nothing in the benchmark reads it, and the
+        adapter's ``ColumnFilter`` drops it before issuance.
 
     One loader serves both phases: the performance phase issues ``audio_file``
     and the accuracy phase scores against ``transcript``.
@@ -100,7 +102,9 @@ class WhisperLibriSpeech(Dataset, dataset_id="whisper_librispeech"):
             seed: Unused; present for the ``get_dataloader`` contract.
             force: Rebuild the cached parquet even if it already exists. An
                 already-downloaded corpus is reused — this does not re-fetch
-                several GB of audio.
+                several GB of audio. The cache path is keyed on the dataset ID
+                alone, so changing ``manifest`` or ``data_dir`` reuses the rows
+                built from the previous one until this is set.
         """
         dst_path = datasets_dir / cls.DATASET_ID / "whisper_librispeech.parquet"
         dst_path.parent.mkdir(parents=True, exist_ok=True)

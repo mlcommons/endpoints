@@ -25,8 +25,15 @@ type: "offline"
 
 model_params:
   name: "openai/whisper-large-v3"
-  streaming: "off" # /v1/audio/transcriptions has no SSE mode for Whisper
+  # /v1/audio/transcriptions has no SSE mode for Whisper. Stated here for the
+  # reader; config validation also rejects "on" for this api_type and resolves
+  # "auto" to "off", so an online whisper config cannot silently stream.
+  streaming: "off"
   temperature: 0.0
+  # The transcription language is sent on every request (language=en, from the
+  # adapter's DEFAULT_LANGUAGE) so the server builds Whisper's pinned-language
+  # decoder prompt instead of auto-detecting per clip, which is what the MLPerf
+  # reference does. A dataset `language` column overrides it per row.
 
 datasets:
   # setup_benchmark() requires a performance dataset to drive issuance; the
@@ -55,15 +62,17 @@ settings:
     num_workers: 8
 
   warmup:
-    # Warmup salt requires text-'prompt' samples; audio rows have none, so
-    # enabling warmup here needs salt left off.
+    # Salt prepends random hex to a text prompt to defeat prefix caching; an
+    # audio upload has no prompt, so config validation rejects salt for this
+    # api_type. Warmup itself is fine with salt off.
     enabled: false
     salt: false
 
   # Audio rows carry no text prompt, so there is no input sequence length to
-  # measure; this stops the aggregator registering an ISL series that would
-  # stay empty. The load generator still logs one "ISL is unavailable" warning
-  # per run, which is expected here. OSL and latency are unaffected.
+  # measure. Validation forces this off for openai_transcriptions, so the line
+  # is documentation rather than a requirement. The load generator still logs
+  # one "ISL is unavailable" warning per run, which is expected here. OSL and
+  # latency are unaffected.
   metrics_isl: false
 
 endpoint_config:

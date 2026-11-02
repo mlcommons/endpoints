@@ -24,7 +24,10 @@ import pytest
 from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
 from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.evaluation import scoring
+from inference_endpoint.evaluation.extractor import PythonCodeExtractor
 from inference_endpoint.evaluation.scoring import Scorer, WERScorer
+from inference_endpoint.evaluation.wer import project_to_labels
+from inference_endpoint.exceptions import InputValidationError
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 DATASET_NAME = "whisper_librispeech"
@@ -34,6 +37,12 @@ REFERENCES = [
     "and we are glad to welcome his gospel",
     "nor is mister quilter's manner less interesting than his matter",
 ]
+
+
+def _ref_word_count(reference: str) -> int:
+    """Reference word count as the scorer counts it (post-normalization)."""
+    normalizer = EnglishTextNormalizer({})
+    return len(normalizer(project_to_labels(reference)).split())
 
 
 @pytest.fixture
@@ -167,25 +176,76 @@ class TestScore:
 @pytest.mark.unit
 @pytest.mark.usefixtures("hermetic_normalizer")
 class TestPartialRuns:
-    def test_missing_samples_are_reported(self, tmp_path: Path, dataset):
-        # Only 2 of 3 issued samples completed.
+    def test_missing_sample_is_scored_as_an_empty_transcript(
+        self, tmp_path: Path, dataset
+    ):
+        # Only 2 of 3 issued samples completed, both perfectly. The third
+        # contributes its reference words as deletions rather than vanishing
+        # from the denominator, so the score must fall below 100.
         report_dir = _stage(tmp_path / "r", {0: REFERENCES[0], 1: REFERENCES[1]})
         scorer = _scorer(report_dir, dataset)
         score, _ = scorer.score()
-        assert score == pytest.approx(100.0)
         breakdown = scorer.score_breakdown()
         assert breakdown is not None
         assert breakdown["missing_samples"] == 1
+        # Counted through the same normalizer the scorer uses: it rewrites
+        # contractions, so a raw str.split() is not the reference word count.
+        assert breakdown["edit_distance"] == _ref_word_count(REFERENCES[2])
+        assert breakdown["reference_words"] == sum(
+            _ref_word_count(r) for r in REFERENCES
+        )
+        assert score == pytest.approx(100.0 - breakdown["wer_percent"])
+        assert score < 100.0
 
-    def test_no_completions_yields_no_score(self, tmp_path: Path, dataset):
+    def test_missing_samples_mark_the_score_incomplete(self, tmp_path: Path, dataset):
+        report_dir = _stage(tmp_path / "r", {0: REFERENCES[0], 1: REFERENCES[1]})
+        scorer = _scorer(report_dir, dataset)
+        scorer.score()
+        assert scorer.complete is False
+
+    def test_a_full_run_is_complete(self, tmp_path: Path, dataset):
+        report_dir = _stage(tmp_path / "r", dict(enumerate(REFERENCES)))
+        scorer = _scorer(report_dir, dataset)
+        scorer.score()
+        assert scorer.complete is True
+
+    def test_an_empty_response_does_not_mark_the_run_incomplete(
+        self, tmp_path: Path, dataset
+    ):
+        # A blank transcript is a response: the sample completed and scored 0.
+        report_dir = _stage(tmp_path / "r", {i: "" for i in range(len(REFERENCES))})
+        scorer = _scorer(report_dir, dataset)
+        scorer.score()
+        assert scorer.complete is True
+        breakdown = scorer.score_breakdown()
+        assert breakdown is not None
+        assert breakdown["missing_samples"] == 0
+
+    def test_no_completions_scores_zero_and_is_incomplete(
+        self, tmp_path: Path, dataset
+    ):
+        # Every issued sample is scored as an empty transcript, so the whole
+        # corpus is deletions: WER 100% -> score 0, not an absent number.
         report_dir = _stage(tmp_path / "r", {})
         scorer = _scorer(report_dir, dataset)
         score, _ = scorer.score()
-        assert score is None
-        assert scorer.score_breakdown() == {
-            "wer_percent": None,
-            "missing_samples": len(REFERENCES),
-        }
+        assert score == pytest.approx(0.0)
+        assert scorer.complete is False
+        breakdown = scorer.score_breakdown()
+        assert breakdown is not None
+        assert breakdown["missing_samples"] == len(REFERENCES)
+        assert breakdown["wer_percent"] == pytest.approx(100.0)
+
+    def test_nothing_issued_yields_no_score(self, tmp_path: Path, dataset):
+        report_dir = tmp_path / "r"
+        report_dir.mkdir()
+        (report_dir / "sample_idx_map.json").write_bytes(
+            msgspec.json.encode({DATASET_NAME: {}})
+        )
+        (report_dir / "events.jsonl").write_bytes(b"")
+        scorer = _scorer(report_dir, dataset)
+        assert scorer.score() == (None, 0)
+        assert scorer.complete is False
 
 
 @pytest.mark.unit
@@ -223,3 +283,60 @@ class TestNormalizerResolution:
         report_dir = _stage(tmp_path / "r", {0: REFERENCES[0]})
         with pytest.raises(ValueError, match="english_spelling_normalizer"):
             _scorer(report_dir, dataset)._normalizer()
+
+
+@pytest.mark.unit
+class TestPreflight:
+    """The normalizer is resolved before the run, not after the perf phase."""
+
+    def test_preflight_resolves_the_default_source(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        seen: list[str] = []
+
+        def _from_pretrained(source, *a, **k):
+            seen.append(source)
+            return MagicMock(english_spelling_normalizer={"a": "b"})
+
+        monkeypatch.setattr(scoring.AutoTokenizer, "from_pretrained", _from_pretrained)
+        WERScorer.preflight({})
+        assert seen == [WERScorer.DEFAULT_NORMALIZER_SOURCE]
+
+    def test_preflight_honours_the_extras_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        seen: list[str] = []
+
+        def _from_pretrained(source, *a, **k):
+            seen.append(source)
+            return MagicMock(english_spelling_normalizer={"a": "b"})
+
+        monkeypatch.setattr(scoring.AutoTokenizer, "from_pretrained", _from_pretrained)
+        WERScorer.preflight({"normalizer_source": "/local/whisper"})
+        assert seen == ["/local/whisper"]
+
+    def test_preflight_raises_on_an_unusable_tokenizer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The whole point: this surfaces before any load is issued.
+        monkeypatch.setattr(
+            scoring.AutoTokenizer,
+            "from_pretrained",
+            lambda *a, **k: MagicMock(spec=[]),
+        )
+        with pytest.raises(ValueError, match="english_spelling_normalizer"):
+            WERScorer.preflight({})
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("hermetic_normalizer")
+class TestExtractorIsRejected:
+    def test_configured_extractor_is_an_error(self, tmp_path: Path, dataset):
+        # WER scores the transcript verbatim; an extractor would be ignored.
+        report_dir = _stage(tmp_path / "r", {0: REFERENCES[0]})
+        with pytest.raises(InputValidationError, match="extractor"):
+            _scorer(report_dir, dataset, extractor=PythonCodeExtractor)
+
+    def test_no_extractor_constructs(self, tmp_path: Path, dataset):
+        report_dir = _stage(tmp_path / "r", {0: REFERENCES[0]})
+        assert _scorer(report_dir, dataset).extractor is None

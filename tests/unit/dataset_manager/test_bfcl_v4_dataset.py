@@ -34,6 +34,10 @@ pytestmark = pytest.mark.unit
 
 _MODULE = "inference_endpoint.dataset_manager.predefined.bfcl_v4"
 
+#: Fetching and running the downloader script lives in the shared
+#: ``download_from_r2``, so that is where the network calls are patched.
+_DOWNLOAD_MODULE = "inference_endpoint.dataset_manager.dataset"
+
 
 def _dst(tmp_path: Path) -> Path:
     """Cache path the loader writes the full single-turn parquet to."""
@@ -97,7 +101,7 @@ class TestR2DownloadFallback:
         monkeypatch.delenv(BFCLv4.R2_DATASET_URI_ENV, raising=False)
 
         # Must short-circuit before touching the network.
-        with patch(f"{_MODULE}.requests.get") as get:
+        with patch(f"{_DOWNLOAD_MODULE}.requests.get") as get:
             assert BFCLv4._download_full_parquet_from_r2(_dst(tmp_path)) is False
             get.assert_not_called()
 
@@ -115,9 +119,11 @@ class TestR2DownloadSuccess:
         )
 
         with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
             patch(
-                f"{_MODULE}.subprocess.run",
+                f"{_DOWNLOAD_MODULE}.requests.get", return_value=_mock_requests_get()
+            ),
+            patch(
+                f"{_DOWNLOAD_MODULE}.subprocess.run",
                 side_effect=_fake_run_writing(dst, payload),
             ),
         ):
@@ -142,8 +148,10 @@ class TestR2DownloadSuccess:
 
         run = MagicMock(side_effect=_fake_run_writing(dst, payload))
         with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
-            patch(f"{_MODULE}.subprocess.run", run),
+            patch(
+                f"{_DOWNLOAD_MODULE}.requests.get", return_value=_mock_requests_get()
+            ),
+            patch(f"{_DOWNLOAD_MODULE}.subprocess.run", run),
         ):
             assert BFCLv4._download_full_parquet_from_r2(dst) is True
         # The env URI, not the constant, is the last positional arg passed to bash.
@@ -164,9 +172,11 @@ class TestR2DownloadSuccess:
         )
 
         with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
             patch(
-                f"{_MODULE}.subprocess.run",
+                f"{_DOWNLOAD_MODULE}.requests.get", return_value=_mock_requests_get()
+            ),
+            patch(
+                f"{_DOWNLOAD_MODULE}.subprocess.run",
                 side_effect=_fake_run_writing(nested, payload),
             ),
         ):
@@ -183,9 +193,11 @@ class TestR2DownloadFailures:
         monkeypatch.delenv(BFCLv4.R2_DATASET_URI_ENV, raising=False)
         # Real (unmocked) SHA pin; downloaded bytes won't match it.
         with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
             patch(
-                f"{_MODULE}.subprocess.run",
+                f"{_DOWNLOAD_MODULE}.requests.get", return_value=_mock_requests_get()
+            ),
+            patch(
+                f"{_DOWNLOAD_MODULE}.subprocess.run",
                 side_effect=_fake_run_writing(dst, b"WRONG-BYTES"),
             ),
             pytest.raises(ValueError, match="SHA-256 mismatch"),
@@ -203,8 +215,10 @@ class TestR2DownloadFailures:
             return MagicMock(returncode=0, stderr="")
 
         with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
-            patch(f"{_MODULE}.subprocess.run", side_effect=_run_noop),
+            patch(
+                f"{_DOWNLOAD_MODULE}.requests.get", return_value=_mock_requests_get()
+            ),
+            patch(f"{_DOWNLOAD_MODULE}.subprocess.run", side_effect=_run_noop),
             pytest.raises(FileNotFoundError),
         ):
             BFCLv4._download_full_parquet_from_r2(dst)
@@ -220,8 +234,10 @@ class TestR2DownloadFailures:
             return MagicMock(returncode=1, stderr="boom")
 
         with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
-            patch(f"{_MODULE}.subprocess.run", side_effect=_run_fail),
+            patch(
+                f"{_DOWNLOAD_MODULE}.requests.get", return_value=_mock_requests_get()
+            ),
+            patch(f"{_DOWNLOAD_MODULE}.subprocess.run", side_effect=_run_fail),
             pytest.raises(RuntimeError, match="R2 downloader failed"),
         ):
             BFCLv4._download_full_parquet_from_r2(dst)
@@ -240,8 +256,8 @@ class TestR2DownloadFailures:
         monkeypatch.setattr(BFCLv4, "R2_DATASET_URI", uri)
         monkeypatch.delenv(BFCLv4.R2_DATASET_URI_ENV, raising=False)
         with (
-            patch(f"{_MODULE}.requests.get") as get,
-            patch(f"{_MODULE}.subprocess.run") as run,
+            patch(f"{_DOWNLOAD_MODULE}.requests.get") as get,
+            patch(f"{_DOWNLOAD_MODULE}.subprocess.run") as run,
             pytest.raises(ValueError, match="untrusted URI"),
         ):
             BFCLv4._download_full_parquet_from_r2(dst)
