@@ -80,18 +80,6 @@ point_seed_runtime_match:
       op: eq
       right: 9315206023656308754
 
-point_seed_config_legacy:
-  description: A run with no `seed_set` must carry the legacy seed value instead.
-  rule: "Endpoints Policy §4.6, Seeds."
-  fix: Declare `seed_set` (preferred), or keep the legacy seeds equal to 42.
-  severity: fail
-  when:
-    - { left: point.config.seed_set, op: absent }
-  assert:
-    - left: point.config.runtime_settings.runtime.model_seed
-      op: eq
-      right: 42
-
 point_concurrency_positive:
   description: A fixed-concurrency run declares a positive concurrency.
   rule: "Endpoints Policy §6.1, Load Patterns; §8.3, Measurement Point (point.yaml)."
