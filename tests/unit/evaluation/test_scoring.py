@@ -23,7 +23,7 @@ import msgspec
 import pandas as pd
 import pytest
 from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
-from inference_endpoint.core.types import TextModelOutput
+from inference_endpoint.core.types import PromptData, TextModelOutput
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -40,8 +40,10 @@ from inference_endpoint.evaluation.scoring import (
     VBenchScorer,
     _calculate_hierarchical_f1,
     _create_pred_pad_category,
+    _IssuedKey,
     _match_hierarchical_paths,
     _parse_response_to_category,
+    guess_and_decode,
 )
 from pydantic import ValidationError
 
@@ -226,6 +228,69 @@ class TestShopifyCategoryF1Scorer:
                 dataset=mock_dataset,
                 report_dir=report_dir,
             )
+
+
+@pytest.mark.unit
+class TestGuessAndDecode:
+    @staticmethod
+    def _line(record: EventRecord) -> bytes:
+        encoder = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+        return encoder.encode(record) + b"\n"
+
+    def test_issued_line_decodes_only_key_fields(self):
+        line = self._line(
+            EventRecord(
+                event_type=SampleEventType.ISSUED,
+                sample_uuid="u1",
+                conversation_id="conv1__repeat_2",
+                turn=3,
+                data=PromptData(messages=({"role": "user", "content": "hello"},)),
+            )
+        )
+
+        assert guess_and_decode(line) == _IssuedKey(
+            sample_uuid="u1", conversation_id="conv1__repeat_2", turn=3
+        )
+
+    def test_complete_line_decodes_full_record(self):
+        record = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            sample_uuid="u1",
+            conversation_id="conv1__repeat_2",
+            turn=3,
+            data=TextModelOutput(output="done"),
+        )
+
+        assert guess_and_decode(self._line(record)) == record
+
+    def test_issued_line_with_data_past_1024_bytes_decodes_in_full(self):
+        conversation_id = "c" * 2000
+        line = self._line(
+            EventRecord(
+                event_type=SampleEventType.ISSUED,
+                sample_uuid="u1",
+                conversation_id=conversation_id,
+                turn=3,
+                data=PromptData(messages=({"role": "user", "content": "hello"},)),
+            )
+        )
+        assert line.find(b',"data":') > 1024
+
+        assert guess_and_decode(line) == _IssuedKey(
+            sample_uuid="u1", conversation_id=conversation_id, turn=3
+        )
+
+    def test_other_event_returns_none(self):
+        line = self._line(
+            EventRecord(
+                event_type=SampleEventType.RECV_FIRST,
+                sample_uuid="u1",
+                conversation_id="conv1",
+                turn=3,
+            )
+        )
+
+        assert guess_and_decode(line) is None
 
 
 @pytest.mark.unit
@@ -530,6 +595,139 @@ class TestAgenticInferenceInlineScorer:
             "missing": 1,
             "scored": 3,
         }
+
+    def test_issued_records_with_prompts_decode_only_their_keys(self, tmp_path):
+        """ISSUED lines carry the whole prompt after "data"; the scorer reads only
+        the fields before it, whatever the prompt holds, and still joins each
+        repeat's completion (or its failure) to the issued turn."""
+        dataset = AgenticInferenceDataset(
+            pd.DataFrame(
+                [
+                    {
+                        "conversation_id": "code1",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "run the tests",
+                    },
+                    {
+                        "conversation_id": "code1",
+                        "turn": 2,
+                        "role": "assistant",
+                        "tool_calls": [
+                            self._bash_tool_call("expected", "python -m pytest")
+                        ],
+                    },
+                ]
+            )
+        )
+        # A prompt that itself mentions the event-type and "data" markers.
+        prompt = PromptData(
+            messages=(
+                {
+                    "role": "user",
+                    "content": 'x,"data":"event_type":"sample.complete" ' * 500,
+                },
+            )
+        )
+        report_dir = tmp_path / "report"
+        self._write_report(
+            report_dir,
+            [
+                EventRecord(
+                    event_type=SampleEventType.ISSUED,
+                    sample_uuid="r1",
+                    conversation_id="code1",
+                    turn=1,
+                    data=prompt,
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="r1",
+                    conversation_id="code1",
+                    turn=1,
+                    data=TextModelOutput(
+                        tool_calls=[self._bash_tool_call("model", "python test.py")]
+                    ),
+                ),
+                EventRecord(
+                    event_type=SampleEventType.ISSUED,
+                    sample_uuid="r2",
+                    conversation_id="code1__repeat_2",
+                    turn=1,
+                    data=prompt,
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="r2",
+                    conversation_id="code1__repeat_2",
+                    turn=1,
+                ),
+            ],
+        )
+
+        score, repeats = AgenticInferenceInlineScorer(
+            "performance", dataset, report_dir
+        ).score()
+
+        assert (score, repeats) == (0.5, 2)
+        scores = json.loads((report_dir / "scores.json").read_text())
+        assert scores["turns"]["issued"] == 2
+        assert scores["turns"]["observed"] == 1
+
+    @pytest.mark.parametrize("late_field", ["sample_uuid", "conversation_id", "turn"])
+    def test_issued_line_in_another_field_order_is_decoded_in_full(
+        self, tmp_path, late_field
+    ):
+        """An ISSUED line with a key field after "data" falls back to decoding
+        the whole line."""
+        dataset = AgenticInferenceDataset(
+            pd.DataFrame(
+                [
+                    {
+                        "conversation_id": "sim_1",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "choose the next workflow action",
+                    },
+                    {
+                        "conversation_id": "sim_1",
+                        "turn": 2,
+                        "role": "assistant",
+                        "content": "expected workflow action",
+                        "intent_codes": ["I042"],
+                    },
+                ]
+            )
+        )
+        report_dir = tmp_path / "report"
+        self._write_report(
+            report_dir,
+            [
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="w1",
+                    conversation_id="sim_1",
+                    turn=1,
+                    data=TextModelOutput(output="intent: I042"),
+                ),
+            ],
+        )
+        fields = {"sample_uuid": '"w1"', "conversation_id": '"sim_1"', "turn": "1"}
+        early = "".join(
+            f'"{name}":{value},' for name, value in fields.items() if name != late_field
+        )
+        line = (
+            f'{{"event_type":"sample.issued",{early}"data":null,'
+            f'"{late_field}":{fields[late_field]}}}\n'
+        )
+        with (report_dir / "events.jsonl").open("a") as f:
+            f.write(line)
+
+        score, repeats = AgenticInferenceInlineScorer(
+            "performance", dataset, report_dir
+        ).score()
+
+        assert (score, repeats) == (1.0, 1)
 
 
 @pytest.mark.unit

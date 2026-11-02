@@ -62,6 +62,51 @@ from .extractor import (
 
 logger = logging.getLogger(__name__)
 
+# Every events.jsonl line starts with its event_type, so a line can be
+# classified from its leading bytes without decoding its payload.
+_EVENT_TYPE_PREFIX_BYTES = 256
+_ISSUED_MARKER = b'"event_type":"sample.issued"'
+_COMPLETE_MARKER = b'"event_type":"sample.complete"'
+_DATA_FIELD = b',"data":'
+_KEY_FIELDS = (b'"sample_uuid":', b'"conversation_id":', b'"turn":')
+
+
+class _IssuedKey(msgspec.Struct):
+    """The fields of an ISSUED record that the inline scorer reads."""
+
+    sample_uuid: str = ""
+    conversation_id: str = ""
+    turn: int | None = None
+
+
+_EVENT_DECODER = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+_ISSUED_DECODER = msgspec.json.Decoder(_IssuedKey)
+
+
+def guess_and_decode(line: bytes) -> EventRecord | _IssuedKey | None:
+    """Decode the ISSUED and COMPLETE events of one ``events.jsonl`` line.
+
+    The event type is guessed from the leading 1024 bytes, and other events return
+    ``None`` undecoded. An ISSUED line, which carries the whole prompt after
+    "data", decodes only the fields before it into an ``_IssuedKey``.
+
+    Raises:
+        msgspec.DecodeError: the line is not a valid event.
+    """
+    head = line[:_EVENT_TYPE_PREFIX_BYTES]
+    if _ISSUED_MARKER in head:
+        # EventRecord encodes "data" after the key fields, which is the basis for guessing.
+        end = line.find(_DATA_FIELD, 0, 4 * _EVENT_TYPE_PREFIX_BYTES)
+        if end != -1 and all(field in line[:end] for field in _KEY_FIELDS):
+            # guess successful, decode only front portion
+            return _ISSUED_DECODER.decode(line[:end] + b"}")
+        # guess failed, decode the whole line
+        return _ISSUED_DECODER.decode(line)
+    # complete event always need the whole line decoded
+    if _COMPLETE_MARKER in head:
+        return _EVENT_DECODER.decode(line)
+    return None
+
 
 class Scorer(ABC):
     """Scorers will read in a dataset and outputs from a log and compute an accuracy score.
@@ -175,12 +220,12 @@ class Scorer(ABC):
             raise FileNotFoundError(f"Events log file not found at {events_log_path}")
 
         decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
-        with events_log_path.open("r") as f:
+        with events_log_path.open("rb") as f:
             for line in f:
-                stripped = line.strip()
-                if not stripped:
+                # Skip other events (ISSUED lines carry the whole prompt) undecoded.
+                if _COMPLETE_MARKER not in line[:_EVENT_TYPE_PREFIX_BYTES]:
                     continue
-                record = decoder.decode(stripped)
+                record = decoder.decode(line)
                 if record.event_type == SampleEventType.COMPLETE:
                     yield record.sample_uuid, record.data
 
@@ -822,18 +867,14 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
         if not events_path.exists():
             raise FileNotFoundError(f"Events log file not found at {events_path}")
 
-        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
         uuid_to_key: dict[str, tuple[str, int, int]] = {}
         completed_by_uuid: dict[str, dict[str, Any] | None] = {}
         issued_turns: set[tuple[str, int, int]] = set()
         model_turns: dict[tuple[str, int, int], dict[str, Any] | None] = {}
-        with events_path.open() as f:
+        with events_path.open("rb") as f:
             for line_no, line in enumerate(f, 1):
-                stripped = line.strip()
-                if not stripped:
-                    continue
                 try:
-                    record = decoder.decode(stripped)
+                    record = guess_and_decode(line)
                 except msgspec.DecodeError as exc:
                     logger.warning(
                         "Skipping malformed event log line %d in %s: %s",
@@ -842,10 +883,7 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
                         exc,
                     )
                     continue
-                if record.event_type not in (
-                    SampleEventType.ISSUED,
-                    SampleEventType.COMPLETE,
-                ):
+                if record is None:
                     continue
                 if record.turn is None or not record.conversation_id:
                     continue
@@ -861,7 +899,7 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
                     continue
 
                 key = (conversation_id, repeat_id, turn)
-                if record.event_type == SampleEventType.ISSUED:
+                if isinstance(record, _IssuedKey):
                     uuid_to_key[record.sample_uuid] = key
                     issued_turns.add(key)
                     if record.sample_uuid in completed_by_uuid:
