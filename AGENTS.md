@@ -929,12 +929,9 @@ these during code review of AI-assisted PRs.
   to an exact version (`==`). After adding a dependency, run `pip-audit`
   (included in `dev` extras) to verify it has no known vulnerabilities. When
   adding dependencies, use `uv add <package>==<version>` to update both
-  `pyproject.toml` and `uv.lock` atomically, then run
-  `uv run pip-audit --ignore-vuln PYSEC-2026-3740` to check for vulnerabilities
-  (the ignored `nltk` advisory has no fixed release and its affected APIs are
-  unused; tracked in https://github.com/mlcommons/endpoints/issues/520). Note:
-  `[build-system] requires` is also pinned to exact versions for
-  reproducibility.
+  `pyproject.toml` and `uv.lock` atomically, then run `uv run pip-audit` to
+  check for vulnerabilities. Note: `[build-system] requires` is also pinned to
+  exact versions for reproducibility.
 - **Using `requests`/`aiohttp` for HTTP**: This project has its own HTTP client
   (`endpoint_client/http.py`) using `httptools`. AI defaults to `requests` or
   `aiohttp` — these should not appear in production code (test dependencies are

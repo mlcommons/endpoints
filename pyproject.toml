@@ -139,12 +139,16 @@ dev = [
     # [tool.uv].conflicts), these floors force uv to fork filelock/virtualenv:
     # patched here, pinned only inside the bfcl fork. Closes CVE-2025-68146 /
     # CVE-2026-22701 / CVE-2026-112907 / CVE-2026-112913 / CVE-2026-112940
-    # (filelock) and CVE-2026-22702 / CVE-2026-113713 (virtualenv).
+    # (filelock) and CVE-2026-22702 / CVE-2026-113713 / CVE-2026-115586
+    # (virtualenv).
     "filelock>=4.2.1",
-    "virtualenv==21.14.10",
+    "virtualenv==21.14.13",
     # pip is pulled in transitively (pip-audit -> pip-api -> pip); force past
     # PYSEC-2026-3721 (fixed in 26.2), which otherwise fails `uv run pip-audit`.
     "pip==26.2",
+    # msgpack is pulled in transitively (pip-audit -> cachecontrol -> msgpack);
+    # force past CVE-2026-114613 (fixed in 1.2.3).
+    "msgpack==1.2.3",
 ]
 test = [
     # Includes optional dependencies for full test coverage
@@ -181,10 +185,7 @@ rouge = [
     # NOTE: not self-contained at runtime - nltk needs the punkt/punkt_tab
     # corpora and evaluate.load("rouge") fetches its metric script from the HF
     # Hub, so an offline image must prefetch both.
-    # nltk advisory PYSEC-2026-3740 has no fixed release and is ignored in CI's
-    # pip-audit (affected APIs unused); tracked in
-    # https://github.com/mlcommons/endpoints/issues/520
-    "nltk==3.10.3",
+    "nltk==3.10.4",
     "evaluate==0.4.6",
     "rouge-score==0.1.2",
 ]
