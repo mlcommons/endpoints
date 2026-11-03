@@ -1424,6 +1424,68 @@ class TestBenchmarkSession:
         assert len(publisher.events_of_type(SampleEventType.RECV_FIRST)) == 3
 
     @pytest.mark.asyncio
+    async def test_late_chunk_drops_stamp_of_terminated_query(self):
+        """A chunk that arrives after a synthetic termination removes the stamp
+        recorded before it, since no QueryResult will pop it."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+        phase_issuer = PhaseIssuer(FakeDataset(1), issuer, publisher, lambda: False)
+        session._current_phase_issuer = phase_issuer
+        query_id = phase_issuer.issue(0)
+
+        session._handle_response(
+            StreamChunk(id=query_id, metadata={"first_chunk": True}), 100
+        )
+        phase_issuer.completed_uuids.add(query_id)
+        phase_issuer.uuid_to_conv_info.pop(query_id)
+        session._handle_response(StreamChunk(id=query_id, response_chunk="x"), 200)
+
+        assert session._last_chunk_ns == {}
+
+    @pytest.mark.asyncio
+    async def test_phase_end_drops_chunk_stamps_of_terminated_queries(self):
+        """A turn timeout after some chunks publishes a synthetic failure and no
+        QueryResult follows, so the phase end drops that query's stamp."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        issuer._loop = loop
+        session = BenchmarkSession(issuer, FakePublisher(), loop)
+
+        class TimeoutAfterChunkStrategy:
+            async def execute(self, phase_issuer) -> None:
+                query_id = phase_issuer.issue(0)
+                issuer.inject_response(
+                    StreamChunk(id=query_id, metadata={"first_chunk": True})
+                )
+                while query_id not in session._last_chunk_ns:
+                    await asyncio.sleep(0)
+                # The state changes of AgenticInferenceStrategy._handle_timeout.
+                phase_issuer.mark_inflight_complete()
+                phase_issuer.completed_uuids.add(query_id)
+                phase_issuer.uuid_to_conv_info.pop(query_id)
+
+            def on_query_complete(self, query_id: str) -> None:
+                pass
+
+        phase = PhaseConfig(
+            "perf",
+            _make_settings(n_samples=1),
+            FakeDataset(1),
+            strategy=TimeoutAfterChunkStrategy(),
+        )
+        session._recv_task = asyncio.create_task(session._receive_responses())
+        try:
+            await asyncio.wait_for(session._run_phase(phase), timeout=1.0)
+            assert session._last_chunk_ns == {}
+        finally:
+            issuer.shutdown()
+            await session._recv_task
+
+    @pytest.mark.asyncio
     async def test_handle_response_stamps_conversation_id_and_turn(self):
         """All event types inherit (conv_id, turn) seeded at issue time; streaming
         events use .get() so the entry survives for the terminal QueryResult pop."""

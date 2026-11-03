@@ -403,7 +403,8 @@ class BenchmarkSession:
         self._fatal_error: RuntimeError | None = None
         self._last_response_progress_ns: int | None = None
         # Handling stamp of each streaming response's latest chunk, so that its
-        # COMPLETE is never earlier than its own chunks. Popped at the result.
+        # COMPLETE is never earlier than its own chunks. Popped at the result;
+        # stamps of synthetically terminated queries are dropped at phase end.
         self._last_chunk_ns: dict[str, int] = {}
         # Liveness guard: a single re-arming timer, not a task. It exists only
         # while work is in flight, so the disabled and idle paths cost nothing.
@@ -486,6 +487,7 @@ class BenchmarkSession:
                 except asyncio.CancelledError:
                     pass
             self._disarm_endpoint_response_idle_timeout()
+            self._last_chunk_ns.clear()
             if self._stop_requested:
                 # Aborted run (Ctrl-C, transport closure, run watchdog): mark
                 # it BEFORE the terminal ENDED so the aggregator's ENDED-driven
@@ -581,6 +583,12 @@ class BenchmarkSession:
 
         if phase.drain_after:
             await self._drain_inflight(phase_issuer, phase.drain_timeout)
+        # A query terminated without a QueryResult (e.g. a turn timeout after
+        # some chunks) leaves a stamp that nothing else would pop.
+        for query_id in [
+            q for q in self._last_chunk_ns if q in phase_issuer.completed_uuids
+        ]:
+            del self._last_chunk_ns[query_id]
 
         if phase.phase_type == PhaseType.PERFORMANCE:
             phase_issuer.stop_performance_tracking()
@@ -842,6 +850,8 @@ class BenchmarkSession:
                 and resp.id not in phase_issuer.completed_uuids
             ):
                 self._last_chunk_ns[resp.id] = now_ns
+            else:
+                self._last_chunk_ns.pop(resp.id, None)
             self._publisher.publish(
                 EventRecord(
                     event_type=event_type,
