@@ -63,6 +63,9 @@ def client_opts(request):
     return {
         "workers": request.config.getoption("--roofline-client-workers"),
         "init_timeout": request.config.getoption("--roofline-init-timeout"),
+        "stream_include_usage": not request.config.getoption(
+            "--roofline-no-stream-include-usage"
+        ),
     }
 
 

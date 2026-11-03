@@ -39,6 +39,8 @@ from ..core.record import (
     SessionEventType,
 )
 from ..core.types import (
+    COMPLETION_TOKENS_KEY,
+    PROMPT_TOKENS_KEY,
     PhaseData,
     PhaseType,
     PromptData,
@@ -807,6 +809,14 @@ class BenchmarkSession:
                         ),
                         worker_id=(
                             worker_id if isinstance(worker_id, int) else msgspec.UNSET
+                        ),
+                        # put_server_usage, the only writer of these keys,
+                        # stores validated counts.
+                        prompt_tokens=resp.metadata.get(
+                            PROMPT_TOKENS_KEY, msgspec.UNSET
+                        ),
+                        completion_tokens=resp.metadata.get(
+                            COMPLETION_TOKENS_KEY, msgspec.UNSET
                         ),
                     )
                 )

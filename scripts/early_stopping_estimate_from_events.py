@@ -17,10 +17,19 @@ Replicated aggregator rules:
     completions after stop still count for rows that exist.
   - ttft_ns           = recv_first.ts - issued.ts
   - sample_latency_ns = complete.ts   - issued.ts
-  - tpot_ns           = (complete.ts - recv_first.ts) / tokens(text_after_first_chunk)
-                        (streaming only; token counts via the raw ``tokenizers`` backend
-                        with add_special_tokens=False, identical to
-                        ``token_metrics.encode_lengths``). Tool-call samples are skipped
+  - tpot_ns           = (complete.ts - recv_first.ts) / tokens after the first chunk
+                        (streaming only). The denominator follows the run's token-count
+                        basis, read by ``token_count_source_for_run`` from --summary
+                        when given, else from the event log's directory
+                        (--token-count-source overrides it):
+      server:           ``completion_tokens - 1`` from the COMPLETE record's usage
+                        (``classify_server_usage``, then LoadGen's rule, as the
+                        aggregator). Samples without usable usage, with
+                        completion_tokens <= 1 or a non-positive window are skipped.
+                        Tool-call samples are included. No tokenizer is needed.
+      client:           tokens(text_after_first_chunk) via the raw ``tokenizers``
+                        backend with add_special_tokens=False, identical to
+                        ``token_metrics.encode_lengths``. Tool-call samples are skipped
                         (their chat-template tokenization path is not replicated).
 
 Events are decoded with the product's own typed ``EventRecord`` (the exact wire types
@@ -35,7 +44,10 @@ usage:
       [--json <out.json>]                # write the summary AUGMENTED with
                                          # early_stopping_percentiles maps — exactly the
                                          # shape an ES-enabled run would have produced
-      [--tokenizer <hf-model-dir-or-tokenizer.json>]   # enables TPOT
+      [--token-count-source server|client]  # overrides the run's recorded basis;
+                                         # --json refuses one that differs from it
+                                         # (it would mislabel the TPOT maps)
+      [--tokenizer <hf-model-dir-or-tokenizer.json>]   # enables client-basis TPOT
       [--percentiles 50,90,95,99.9] [--confidence 0.99]      # stdout-analysis overrides
 """
 
@@ -44,6 +56,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 import msgspec
 import msgspec.json
@@ -60,7 +73,7 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import TextModelOutput
+from inference_endpoint.core.types import TextModelOutput, TokenCountSource
 from inference_endpoint.metrics.early_stopping import (
     CONFIDENCE,
     es_percentile_estimate,
@@ -69,6 +82,13 @@ from inference_endpoint.metrics.early_stopping import (
 from inference_endpoint.metrics.report import (
     SERIES_TO_SUMMARY_FIELD,
     place_early_stopping_percentiles,
+)
+from inference_endpoint.metrics.token_count_basis import (
+    TOKEN_COUNT_SOURCE_METAVAR,
+    RunBasisError,
+    ServerUsage,
+    read_server_usage,
+    replay_basis,
 )
 
 # mirror of the JSONL writer: msgspec.json.Encoder(enc_hook=EventType.encode_hook)
@@ -99,17 +119,31 @@ def extract_tpot_text(data) -> str | None:
     return data.text_after_first_chunk()
 
 
-def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[float]]:
+def compute_series(
+    events_path,
+    *,
+    count_tokens,
+    basis: TokenCountSource,
+    progress=False,
+) -> dict[str, list[float]]:
     """Stream the log and rebuild the {ttft_ns, tpot_ns, sample_latency_ns} series.
 
-    ``count_tokens``: callable(list[str]) -> list[int], or None to skip TPOT.
+    ``basis`` is the TPOT basis replayed on. SERVER: TPOT from the COMPLETE
+    record's usable ``completion_tokens`` (``read_server_usage``, as the
+    aggregator); ``count_tokens`` is then unused. Tracked ``TextModelOutput``
+    completions without usable usage are counted as missing usage (warned on
+    stderr), never tokenized.
+    CLIENT: ``count_tokens`` is callable(list[str]) -> list[int], or None to
+    skip TPOT.
     """
+    server_basis = basis is TokenCountSource.SERVER
     ttft: list[float] = []
     latency: list[float] = []
     tpot: list[float] = []
     rows: dict[str, list] = {}  # uuid -> [issued_ns, recv_first_ns]
     tracking = False
     tool_call_skipped = 0
+    missing_usage = 0
     malformed = 0
     batch_deltas: list[float] = []
     batch_texts: list[str] = []
@@ -122,7 +156,7 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
         batch_deltas.clear()
         batch_texts.clear()
 
-    with open(path, "rb") as f:
+    with open(events_path, "rb") as f:
         for i, line in enumerate(f):
             if progress and i and i % 200_000 == 0:
                 print(f"  ...{i} events", file=sys.stderr)
@@ -174,6 +208,21 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
                     if row is None:
                         continue
                     latency.append(ts - row[0])
+                    if server_basis:
+                        if isinstance(rec.data, TextModelOutput):
+                            usage, n = read_server_usage(
+                                rec.prompt_tokens, rec.completion_tokens, rec.data
+                            )
+                            if usage is ServerUsage.MISSING:
+                                missing_usage += 1
+                            if (
+                                n is not None
+                                and n > 1
+                                and row[1] is not None
+                                and ts - row[1] > 0
+                            ):
+                                tpot.append((ts - row[1]) / (n - 1))
+                        continue
                     if count_tokens is None or row[1] is None:
                         continue
                     text = extract_tpot_text(rec.data)
@@ -194,6 +243,12 @@ def compute_series(path, count_tokens=None, progress=False) -> dict[str, list[fl
     if tool_call_skipped:
         print(
             f"WARN: {tool_call_skipped} tool-call samples skipped for TPOT",
+            file=sys.stderr,
+        )
+    if missing_usage:
+        print(
+            f"WARN: {missing_usage} tracked samples returned no server token usage; "
+            "they are counted as missing (no TPOT), never tokenized",
             file=sys.stderr,
         )
     return {"ttft_ns": ttft, "tpot_ns": tpot, "sample_latency_ns": latency}
@@ -252,7 +307,18 @@ def main(argv=None):
         ),
     )
     ap.add_argument(
-        "--tokenizer", help="HF model dir (or tokenizer.json) — enables TPOT"
+        "--token-count-source",
+        type=TokenCountSource,
+        metavar=TOKEN_COUNT_SOURCE_METAVAR,
+        help=(
+            "token-count basis for TPOT (default: the run's own, from --summary or "
+            "the performance/result_summary.json beside the event log, else the "
+            "config.yaml beside it)"
+        ),
+    )
+    ap.add_argument(
+        "--tokenizer",
+        help="HF model dir (or tokenizer.json) — enables client-basis TPOT",
     )
     ap.add_argument(
         "--percentiles",
@@ -274,6 +340,8 @@ def main(argv=None):
         raise SystemExit(
             "FATAL: --json requires --summary (the augmented output IS the summary)"
         )
+    if args.summary and not Path(args.summary).is_file():
+        raise SystemExit(f"FATAL: --summary {args.summary} not found")
     values = {float(tok) for tok in args.percentiles.split(",")}
     if not all(0.0 < v < 100.0 for v in values):
         raise SystemExit(
@@ -293,17 +361,52 @@ def main(argv=None):
     if not 0.0 < args.confidence < 1.0:
         raise SystemExit(f"FATAL: confidence must be in (0, 1), got {args.confidence}")
 
-    counter = _make_counter(args.tokenizer) if args.tokenizer else None
-    if counter is None:
-        print("NOTE: no --tokenizer given -> TPOT skipped", file=sys.stderr)
+    try:
+        primary, basis = replay_basis(
+            Path(args.events).parent,
+            override=args.token_count_source,
+            summary_path=None if args.summary is None else Path(args.summary),
+        )
+    except RunBasisError as exc:
+        ap.error(str(exc))
+    if primary is None:
+        if args.json_out:
+            # The summary's own basis is unknown, so the chosen one cannot label it.
+            raise SystemExit(
+                "FATAL: --json augments the run's summary, whose token-count basis "
+                "could not be read; drop --json to replay on the chosen basis"
+            )
+        # The run's basis is unreadable; the one the user chose stands in.
+        primary = basis
+    # The summary is labelled with the run's basis: TPOT replayed on the other
+    # one is neither cross-checked against it nor written into it.
+    off_primary = basis is not primary
+    if off_primary and args.json_out:
+        raise SystemExit(
+            f"FATAL: --json augments the run's summary, which is on the "
+            f"{primary.value} token basis; it cannot carry {basis.value}-basis TPOT "
+            "estimates (drop --token-count-source or --json)"
+        )
+    print(f"NOTE: token basis: {basis.value}", file=sys.stderr)
+    counter = None
+    if basis is TokenCountSource.CLIENT:
+        counter = _make_counter(args.tokenizer) if args.tokenizer else None
+        if counter is None:
+            print("NOTE: no --tokenizer given -> TPOT skipped", file=sys.stderr)
 
-    series = compute_series(args.events, count_tokens=counter, progress=True)
+    series = compute_series(
+        args.events,
+        count_tokens=counter,
+        basis=basis,
+        progress=True,
+    )
     summary = None
     if args.summary:
         with open(args.summary) as f:
             summary = json.load(f)
     augmented = json.loads(json.dumps(summary)) if summary is not None else {}
 
+    print(f"token basis: {basis.value}")
     rows = []
     for name, values in series.items():
         if not values:
@@ -354,6 +457,12 @@ def main(argv=None):
                     f"  XCHECK count: ours={len(values)} "
                     f"n_samples_completed={completed}{note}"
                 )
+            if off_primary and name == "tpot_ns":
+                print(
+                    f"  XCHECK in-band: skipped (TPOT replayed on the {basis.value} "
+                    f"basis; the run reported {primary.value})"
+                )
+                continue
             _cross_check(summary, name, dict(esp))
             if metric:  # augment only metrics the run actually reported
                 augmented[field] = place_early_stopping_percentiles(

@@ -27,8 +27,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
-    MetricCounterKey,
     MetricsAggregatorService,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+    MetricCounterKey,
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     MetricsRegistry,
@@ -45,6 +47,8 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
+
+from tests.test_helpers import DEFAULT_SOURCE
 
 
 def _counters(registry: MetricsRegistry) -> dict[str, int | float]:
@@ -81,6 +85,7 @@ def _make_aggregator(
         publish_interval_s=0.25,
         sig_figs=3,
         n_histogram_buckets=10,
+        token_count_source=DEFAULT_SOURCE,
         streaming=streaming,
         drain_timeout_s=None,
     )

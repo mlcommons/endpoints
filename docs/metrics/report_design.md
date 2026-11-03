@@ -19,12 +19,15 @@ console and to `result_summary.json`.
 final_snapshot.json  (dict form of MetricsSnapshot)
         │
         ▼  json.loads(...)  → dict
-  Report.from_snapshot(snap, run_config=..., use_legacy_loadgen_qps_metrics=...)
+  Report.from_snapshot(snap, run_config=..., use_legacy_loadgen_qps_metrics=...,
+                       token_count_source=...)
         │
         ├── counters  → n_samples_issued/completed/failed, tracked_duration_ns,
-        │                legacy_loadgen_window_duration_ns, finish-reason counts
+        │                legacy_loadgen_window_duration_ns, finish-reason counts,
+        │                missing-usage and paired-OSL counters
         │
-        ├── for each series (ttft, tpot, latency, isl, osl):
+        ├── for each series (ttft, tpot, latency, isl, osl, and the other
+        │   basis's isl_<basis> / osl_<basis> / tpot_ns_<basis> siblings):
         │       _series_to_metric_dict(stat) → rollup dict
         │
         └── derive qps / tps / e2e_avg_interactivity once
@@ -79,10 +82,30 @@ Fields: `version`, `git_sha`, `test_started_at`,
 five rollup dicts (`ttft`, `tpot`, `latency`, `input_sequence_lengths`,
 `output_sequence_lengths`), `legacy_loadgen_window_duration_ns`, `qps`, `tps`,
 `e2e_avg_interactivity`, `finish_reason_counts`, `run_config`, and `accuracy`.
+Token-count fields: `token_count_source`, `n_samples_missing_usage`,
+`n_samples_missing_usage_empty_output`, `client_token_tasks_pending`,
+`other_basis` and `osl_paired`. `other_basis` holds the other basis's
+`input_sequence_lengths`, `output_sequence_lengths`, `tpot` and `tps`; `to_json`
+writes each flat under its `_<basis>` name (for example `tpot_server` beside a
+client primary, `tpot_client` beside a server primary).
 
-- `complete` = `state == "complete" and n_pending_tasks == 0` — `False` marks
-  partial async metrics (drain timeout, interrupt, or a live-tick fallback when
-  no final snapshot was found).
+- `complete` is decided by the primary basis (`token_count_source`). Both bases
+  require `state == "complete"`, valid counter ordering and no dropped samples
+  (`n_completed == n_issued`). A server primary also requires
+  `n_samples_missing_usage == 0`; a pending client tokenizer drain does not
+  affect it. A client primary requires `n_pending_tasks == 0` instead of the
+  usage check. `False` marks partial metrics (missing server usage, a
+  client-primary drain timeout, an interrupt, or a live-tick fallback when no
+  final snapshot was found); `incomplete_reason()` names which.
+- `token_count_source` is the primary basis of the headline `tpot`,
+  `input_sequence_lengths`, `output_sequence_lengths`, `tps`,
+  `e2e_avg_interactivity`, early-stopping maps and steady-state block. The
+  `other_basis` blocks and `osl_paired` are the other basis's siblings (`None`
+  when not collected). A block carries `"partial": true` when the other basis
+  missed samples: for a client other basis while
+  `client_token_tasks_pending > 0`, for a server other basis when
+  `n_samples_missing_usage > 0`. `other_basis.tps` is withheld (`None`) for a
+  partial basis, and `osl_paired` covers only the samples counted on both.
 - `qps`/`tps`/`e2e_avg_interactivity` are computed once in `from_snapshot` (see
   below) rather than as live properties, so the serialized report is
   self-complete.
@@ -92,32 +115,43 @@ five rollup dicts (`ttft`, `tpot`, `latency`, `input_sequence_lengths`,
 Methods: `display(fn, ...)` for console output with histograms;
 `to_json(save_to)` for `result_summary.json`.
 
-### `Report.from_snapshot(snap, *, run_config=None, use_legacy_loadgen_qps_metrics=True) → Report`
+### `Report.from_snapshot(snap, *, token_count_source, run_config=None, use_legacy_loadgen_qps_metrics=True) → Report`
 
 Splits the snapshot's `metrics` list into counters and series, then builds the
-`Report`.
+`Report`. `token_count_source` is the run's effective primary basis
+(`TokenCountSource.SERVER` or `.CLIENT`) and is required: the snapshot does not
+record it.
 
 Counter keys read: `tracked_samples_issued`, `tracked_samples_completed`,
-`tracked_samples_failed`, `tracked_duration_ns`,
+`tracked_samples_failed`, `tracked_samples_missing_usage`,
+`tracked_samples_missing_usage_empty_output`, `osl_paired_samples`,
+`osl_paired_client_tokens`, `osl_paired_server_tokens`, `tracked_duration_ns`,
 `legacy_loadgen_window_duration_ns`, and the `tracked_finish_reason_*` counters.
 Series read (snapshot key → report field, via `SERIES_TO_SUMMARY_FIELD`):
 `ttft_ns` → `ttft`, `tpot_ns` → `tpot`, `sample_latency_ns` → `latency`. The
 token-length series are mapped directly: `isl` → `input_sequence_lengths` and
-`osl` → `output_sequence_lengths`. Both report fields use the same full
+`osl` → `output_sequence_lengths`, with the other basis's siblings
+`isl_<basis>`, `osl_<basis>` and `tpot_ns_<basis>` filling `other_basis`
+(`input_sequence_lengths_<basis>`, `output_sequence_lengths_<basis>`,
+`tpot_<basis>` in `result_summary.json`). All report fields use the same full
 distribution shape: `total`, `min`, `max`, `median`, `avg`, `std_dev`,
 `percentiles`, and `histogram`.
 
-**Input sequence length (ISL).** The metrics aggregator records ISL at `ISSUED`,
-using `len(token_ids)` when a dataset provides pre-tokenized input and otherwise
-tokenizing the raw text prompt with the configured reference tokenizer. This
-records the workload's intended input distribution as early as possible.
-`input_sequence_lengths` is empty when no ISL values were recorded (for example,
-no tokenizer is available for text-only inputs).
+**Input sequence length (ISL).** The server ISL is the server's `prompt_tokens`,
+recorded at `COMPLETE` for successful samples, and needs no tokenizer. The
+tokenizer ISL is recorded at `ISSUED` for every tracked sample, using
+`len(token_ids)` when a dataset provides pre-tokenized input and otherwise
+tokenizing the raw text prompt with the configured reference tokenizer. Each is
+the headline `input_sequence_lengths` when its basis is primary and
+`input_sequence_lengths_<basis>` otherwise. Either block is empty when no ISL
+values were recorded (for example, no tokenizer is available for text-only
+inputs).
 
 Set `settings.metrics_isl: false` in YAML, or pass `--no-metrics-isl`, to skip
-ISL collection. This avoids all ISL tokenizer work and leaves
-`input_sequence_lengths` empty. OSL, TPOT, full-run OSL, and output-derived TPS
-reporting are unchanged.
+ISL collection. This avoids all ISL tokenizer work and leaves the tokenizer ISL
+block empty, whichever basis is primary. Server ISL is dropped as well, so
+`input_sequence_lengths` and its `_<basis>` sibling are both empty. OSL, TPOT,
+full-run OSL, and output-derived TPS are still reported.
 
 **QPS/TPS window selection.** The snapshot always carries both a native window
 (`tracked_duration_ns`) and the MLPerf LoadGen "completed" window
@@ -127,12 +161,43 @@ enabled (`use_legacy_loadgen_qps_metrics`), available, and there are ≥2
 completions (`QPS = (completed - 1) / window`). Otherwise both QPS and TPS fall
 back to the native window so they always share one window, and
 `legacy_loadgen_window_duration_ns` is left `None` so the serialized report
-records which view it holds. `tps` is `None` when no OSL was recorded.
+records which view it holds. `tps` is `None` when no OSL was recorded. With a
+server primary `tps` totals the server's `completion_tokens` and needs no
+tokenizer; `other_basis.tps` totals the other basis's OSL over the same window.
 
 **E2E average interactivity.** For failure-free runs, `e2e_avg_interactivity` is
-total output tokens divided by summed end-to-end sample latency in seconds. It
-is serialized in `result_summary.json` and displayed in the human-readable
-summary. The value is `None`/`N/A` when no OSL or positive sample-latency total
-is available, or when any tracked request failed. Failed responses contribute to
-`sample_latency_ns` but not OSL, so reporting the ratio in that case would
-combine different sample populations.
+total output tokens (on the primary basis) divided by summed end-to-end sample
+latency in seconds. It is serialized in `result_summary.json` and displayed in
+the human-readable summary. The value is `None`/`N/A` when no OSL or positive
+sample-latency total is available, or when any tracked request failed. Failed
+responses contribute to `sample_latency_ns` but not OSL, so reporting the ratio
+in that case would combine different sample populations.
+
+## Server vs client token counts
+
+Every headline token number is on the primary basis, and the other basis's
+counts are reported beside it with a `_<basis>` suffix (`*_client` beside a
+server primary, `*_server` beside a client primary). `display()` prints the
+primary basis's summary rows together, then an `Other token basis (<basis>)`
+heading over the `Token count source` line, `TPS (<basis>)`,
+`OSL paired (client - server)` (mean per-sample difference and ratio over the
+samples counted on both bases) and, when the other basis missed some samples,
+why. The `(<basis>)` sections (`TPOT`, `Input sequence lengths`,
+`Output sequence lengths` and the full-run block) follow the headline sections,
+with ` (partial)` appended to a section whose block covers only some samples.
+The headline section labels carry no basis, so tooling that parses them keeps
+working. The two bases differ systematically, so a nonzero gap is expected:
+
+| Difference                                   | Why                                                                                                                          |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Server OSL ≈ client OSL + 1                  | vLLM and SGLang count the EOS/stop token; the client never sees its text                                                     |
+| Server ISL > client ISL on chat text prompts | The server counts the chat template, BOS, the `system` message and image tokens; client text ISL counts the user string only |
+| Server TPOT lower on buffered first deltas   | The denominator `completion_tokens - 1` counts tokens generated before the first visible delta                               |
+| ISL populations differ                       | Server ISL covers successful samples (recorded at `COMPLETE`); client ISL covers all tracked samples (recorded at `ISSUED`)  |
+| First ISL for multimodal list prompts        | Client ISL is empty for list prompts, so the server ISL is the only ISL for them                                             |
+
+The server count does not depend on how a response is formatted (reasoning
+markers inline in `content` versus a separate `reasoning_content` field); the
+client tokenizer count does, and that dependence is the divergence the paired
+OSL comparison exposes (the gap changes between two representations of the same
+responses).

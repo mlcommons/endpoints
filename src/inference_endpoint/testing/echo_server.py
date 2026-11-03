@@ -25,6 +25,7 @@ import time
 import uuid
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from aiohttp import web
 
@@ -34,6 +35,21 @@ from inference_endpoint.openai.openai_types_gen import CreateChatCompletionReque
 from inference_endpoint.utils.logging import setup_logging
 
 RequestHandler = Callable[[web.Request], web.Response | Awaitable[web.Response]]
+
+
+def _include_usage(payload: dict[str, Any]) -> bool:
+    """Whether a request asks for a trailing usage frame in its stream.
+
+    Follows vLLM's truthiness rule: any truthy ``stream_options`` on a
+    non-streaming request is rejected, so ``stream_options: {}`` is accepted.
+
+    Raises:
+        ValueError: If ``stream_options`` is set without ``stream``.
+    """
+    stream_options = payload.get("stream_options")
+    if stream_options and not payload.get("stream"):
+        raise ValueError("Stream options can only be defined when `stream=True`.")
+    return bool((stream_options or {}).get("include_usage"))
 
 
 class HTTPServer:
@@ -59,11 +75,14 @@ class EchoServer(HTTPServer):
         port: int = 0,
         max_osl: int | None = None,
         request_handler: RequestHandler | None = None,
+        report_usage: bool = True,
     ):
         self.host = host
         self.port = port  # If 0, will auto-assign available port
         self.max_osl = max_osl
         self._request_handler = request_handler
+        # False models a server that never reports token usage.
+        self.report_usage = report_usage
         self._actual_port = None  # Store the actual port after binding
 
         self.app = None
@@ -92,6 +111,34 @@ class EchoServer(HTTPServer):
             int: The maximum length allowed for output sequences in the echo server.
         """
         return self.max_osl
+
+    def _usage(
+        self, prompt_tokens: int, completion_tokens: int
+    ) -> dict[str, int] | None:
+        """Build an OpenAI usage object, or None when usage is not reported."""
+        if not self.report_usage:
+            return None
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+
+    def _apply_max_osl(self, text: str) -> str:
+        """Truncate or repeat ``text`` to exactly ``max_osl`` characters."""
+        if self.max_osl is not None and len(text) > 0:
+            if len(text) > self.max_osl:
+                text = text[: self.max_osl]
+            else:
+                text = text * (self.max_osl // len(text) + 1)
+                text = text[: self.max_osl]
+        return text
+
+    @staticmethod
+    async def _read_json_payload(request: web.Request) -> dict[str, Any]:
+        if request.content_type == "application/json":
+            return await request.json()
+        return json.loads(await request.text())
 
     def get_response(self, request: str) -> str:
         """
@@ -177,19 +224,26 @@ class EchoServer(HTTPServer):
         self,
         id: str,
         request: web.Request,
-        completion_request: CreateChatCompletionRequest,
+        model: str,
         content: str,
+        *,
+        prompt_tokens: int,
+        include_usage: bool,
+        text_completion: bool = False,
     ) -> web.StreamResponse:
         """
-        Handle a streaming chat completion response using Server-Sent Events (SSE).
+        Handle a streaming completion response using Server-Sent Events (SSE).
 
-        Streams the response word by word, simulating an OpenAI-compatible chat completion endpoint. Creates an SSE-formatted stream with individual word chunks and a final completion marker.
+        Streams the response word by word, simulating an OpenAI-compatible endpoint. Creates an SSE-formatted stream with individual word chunks, a final finish chunk, an optional usage chunk (vLLM order) and the ``[DONE]`` marker.
 
         Args:
             id (str): Unique identifier for the streaming response.
             request (web.Request): The original web request.
-            completion_request (CreateChatCompletionRequest): The parsed chat completion request.
+            model (str): Model name echoed in every frame.
             content (str): The content to be streamed.
+            prompt_tokens (int): Prompt token count reported in the usage frame.
+            include_usage (bool): Whether the request asked for a usage frame. The frame is also suppressed when ``report_usage`` is False.
+            text_completion (bool): Frame as ``/v1/completions`` (``text_completion`` objects with ``text`` choices) instead of chat completion chunks.
 
         Returns:
             web.StreamResponse: A streaming HTTP response with chunked SSE data.
@@ -197,6 +251,25 @@ class EchoServer(HTTPServer):
         Raises:
             Any underlying exceptions that occur during streaming, which will be logged.
         """
+        object_type = "text_completion" if text_completion else "chat.completion.chunk"
+
+        def frame(choices: list[dict[str, Any]], **extra: Any) -> bytes:
+            chunk = {
+                "id": id,
+                "object": object_type,
+                "created": int(time.time()),
+                "model": model,
+                "choices": choices,
+                **extra,
+            }
+            return f"data: {json.dumps(chunk)}\n\n".encode()
+
+        def choice(text: str, finish_reason: str | None) -> dict[str, Any]:
+            if text_completion:
+                return {"index": 0, "text": text, "finish_reason": finish_reason}
+            delta = {"content": text} if text else {}
+            return {"index": 0, "delta": delta, "finish_reason": finish_reason}
+
         try:
             response = web.StreamResponse(
                 status=200,
@@ -213,36 +286,20 @@ class EchoServer(HTTPServer):
             words = raw_response.split() if raw_response else []
 
             # Send chunks
+            completion_tokens = 0
             for i, word in enumerate(words):
                 # Add space before word (except first)
                 chunk_content = f" {word}" if i > 0 else word
 
-                chunk_data = {
-                    "id": id,
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": str(completion_request.model.root),
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": chunk_content},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-
-                await response.write(f"data: {json.dumps(chunk_data)}\n\n".encode())
+                await response.write(frame([choice(chunk_content, None)]))
+                completion_tokens += len(chunk_content)
 
             # Send final chunk with finish_reason
-            final_chunk = {
-                "id": id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": str(completion_request.model.root),
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            }
+            await response.write(frame([choice("", "stop")]))
 
-            await response.write(f"data: {json.dumps(final_chunk)}\n\n".encode())
+            usage = self._usage(prompt_tokens, completion_tokens)
+            if include_usage and usage is not None:
+                await response.write(frame([], usage=usage))
             await response.write(b"data: [DONE]\n\n")
             return response
         except Exception as e:
@@ -270,11 +327,8 @@ class EchoServer(HTTPServer):
 
         # Get request body
         try:
-            if request.content_type == "application/json":
-                json_payload = await request.json()
-            else:
-                raw_payload = await request.text()
-                json_payload = json.loads(raw_payload)
+            json_payload = await self._read_json_payload(request)
+            include_usage = _include_usage(json_payload)
             completion_request = CreateChatCompletionRequest(**json_payload)
             raw_request = ""
             if completion_request.messages and len(completion_request.messages) > 0:
@@ -291,24 +345,19 @@ class EchoServer(HTTPServer):
             self.logger.debug(
                 f"Content of request: {raw_request} - response : {raw_response}"
             )
-            if self.max_osl is not None and len(raw_response) > 0:
-                # if max_osl is specified, it can be either larger or smaller than the length of the prompt
-                # if max_osl is larger, we can repeate the prompt until we reach the max_osl
-                if len(raw_response) > self.max_osl:
-                    raw_response = raw_response[: self.max_osl]
-                # if max_osl is smaller, we can truncate the prompt
-                else:
-                    raw_response = raw_response * (
-                        self.max_osl // len(raw_response) + 1
-                    )
-                    raw_response = raw_response[: self.max_osl]
+            raw_response = self._apply_max_osl(raw_response)
 
             # Check if this is a streaming request
             self.logger.debug(f"Streaming response: {completion_request.stream}\n")
             if completion_request.stream is True:
                 # Return SSE (Server-Sent Events) format for streaming
                 return await self._handle_streaming_response(
-                    id, request, completion_request, raw_response
+                    id,
+                    request,
+                    str(completion_request.model.root),
+                    raw_response,
+                    prompt_tokens=len(raw_request),
+                    include_usage=include_usage,
                 )
             else:
                 # Non-streaming: return QueryResult
@@ -320,12 +369,77 @@ class EchoServer(HTTPServer):
                     mode="json"
                 )
                 echo_response["id"] = id
+                echo_response["usage"] = self._usage(
+                    len(raw_request), len(raw_response)
+                )
                 self.logger.debug(f"Echo response (non-streaming): {echo_response}")
                 return web.json_response(echo_response, status=200)
 
         except Exception as e:
             # A catch-all exception handler to help debug the issue without bringing down the server
             self.logger.error(f"Error handling chat completions request: {e}")
+            return web.json_response(
+                {"error": f"error encountered : {str(e)}"},
+                status=400,
+            )
+
+    async def _handle_echo_completions_request(
+        self, request: web.Request
+    ) -> web.StreamResponse:
+        """
+        Handle an incoming HTTP request to the OpenAI text completions endpoint (``/v1/completions``).
+
+        Echoes the prompt back as the completion text: a ``str`` prompt is returned as-is and a token-ID list is joined with spaces. Returns either an SSE stream or a JSON ``text_completion`` body, with the same usage and ``stream_options`` behavior as the chat completions handler.
+
+        Raises:
+            ValueError: If the request payload has no prompt.
+        """
+        custom = await self._dispatch(request)
+        if custom is not None:
+            return custom
+
+        try:
+            json_payload = await self._read_json_payload(request)
+            include_usage = _include_usage(json_payload)
+            prompt = json_payload.get("prompt")
+            if prompt is None:
+                raise ValueError("Request must contain a prompt")
+            raw_request = (
+                prompt
+                if isinstance(prompt, str)
+                else " ".join(str(token) for token in prompt)
+            )
+            id = json_payload.get("id", str(uuid.uuid4()))
+            model = str(json_payload.get("model", ""))
+            raw_response = self._apply_max_osl(self.get_response(raw_request))
+
+            if json_payload.get("stream") is True:
+                return await self._handle_streaming_response(
+                    id,
+                    request,
+                    model,
+                    raw_response,
+                    prompt_tokens=len(prompt),
+                    include_usage=include_usage,
+                    text_completion=True,
+                )
+            return web.json_response(
+                {
+                    "id": id,
+                    "object": "text_completion",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {"index": 0, "text": raw_response, "finish_reason": "stop"}
+                    ],
+                    "usage": self._usage(len(prompt), len(raw_response)),
+                },
+                status=200,
+            )
+
+        except Exception as e:
+            # A catch-all exception handler to help debug the issue without bringing down the server
+            self.logger.error(f"Error handling completions request: {e}")
             return web.json_response(
                 {"error": f"error encountered : {str(e)}"},
                 status=400,
@@ -346,6 +460,7 @@ class EchoServer(HTTPServer):
         app.router.add_post(
             "/v1/chat/completions", self._handle_echo_chat_completions_request
         )
+        app.router.add_post("/v1/completions", self._handle_echo_completions_request)
         app.router.add_post("/echo", self._handle_echo_request)
 
     async def _start_server(self):
@@ -437,6 +552,11 @@ Examples:
         "--host", type=str, help="hostname/address to bind to", default="127.0.0.1"
     )
     parser.add_argument("--port", type=int, help="port to bind to", default=12345)
+    parser.add_argument(
+        "--no-usage",
+        action="store_true",
+        help="never report token usage (models a server without usage)",
+    )
 
     return parser
 
@@ -467,7 +587,9 @@ def main():
 
     server = None
     try:
-        server = EchoServer(host=args.host, port=args.port)
+        server = EchoServer(
+            host=args.host, port=args.port, report_usage=not args.no_usage
+        )
         server.start()
 
         # Wait for the server thread to finish

@@ -93,9 +93,11 @@ class TestSGLangAdapterIntegration:
         # Verify metadata
         assert result.metadata is not None
         assert "token_ids" in result.metadata
-        assert "n_tokens" in result.metadata
+        assert "completion_tokens" in result.metadata
         assert isinstance(result.metadata["token_ids"], list)
-        assert isinstance(result.metadata["n_tokens"], int)
+        assert isinstance(result.metadata["completion_tokens"], int)
+        assert result.metadata["prompt_tokens"] == len(input_tokens)
+        assert "n_tokens" not in result.metadata
 
     @pytest.mark.skip(
         reason="Running this test requires a running GPT-OSS server at localhost:30000."
@@ -136,16 +138,28 @@ class TestSGLangAdapterIntegration:
 
         assert result.metadata is not None
         assert "token_ids" in result.metadata
-        assert "n_tokens" in result.metadata
+        assert "completion_tokens" in result.metadata
         assert isinstance(result.metadata["token_ids"], list)
-        assert isinstance(result.metadata["n_tokens"], int)
+        assert isinstance(result.metadata["completion_tokens"], int)
+        assert result.metadata["prompt_tokens"] == len(input_tokens)
+        assert "n_tokens" not in result.metadata
 
         # Check that something was generated, but no more than max_new_tokens
-        assert 0 < result.metadata["n_tokens"] and result.metadata["n_tokens"] <= 100
+        assert (
+            0 < result.metadata["completion_tokens"]
+            and result.metadata["completion_tokens"] <= 100
+        )
 
-        # The token IDs in the result should be at most n_tokens because of retractions
+        # The token IDs in the result should be at most completion_tokens because of
+        # retractions
         if result.metadata["retraction_occurred"]:
-            assert len(result.metadata["token_ids"]) <= result.metadata["n_tokens"]
+            assert (
+                len(result.metadata["token_ids"])
+                <= result.metadata["completion_tokens"]
+            )
         else:
             # STOP token is not included in the response, but counts towards generated
-            assert len(result.metadata["token_ids"]) + 1 == result.metadata["n_tokens"]
+            assert (
+                len(result.metadata["token_ids"]) + 1
+                == result.metadata["completion_tokens"]
+            )

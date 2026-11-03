@@ -22,7 +22,12 @@ from unittest.mock import MagicMock
 import msgspec
 import pandas as pd
 import pytest
-from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
+from inference_endpoint.core.record import (
+    EventLogFormatError,
+    EventRecord,
+    EventType,
+    SampleEventType,
+)
 from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
@@ -1080,6 +1085,93 @@ class TestGetRawOutputs:
         frame = self._scorer(tmp_path).get_raw_outputs({"absent"})
         assert frame.empty
         assert list(frame.columns) == ["sample_uuid", "output"]
+
+    def test_iter_complete_outputs_reads_text_and_usage(self, tmp_path):
+        out = TextModelOutput(output="a b")
+        self._write_events(
+            tmp_path,
+            [
+                EventRecord(event_type=SampleEventType.ISSUED, sample_uuid="u1"),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="u1",
+                    data=out,
+                    prompt_tokens=2,
+                    completion_tokens=3,
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE, sample_uuid="u2", data=out
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="u3",
+                    prompt_tokens=2,
+                    completion_tokens=0,
+                ),
+            ],
+        )
+        scorer = self._scorer(tmp_path)
+
+        assert list(scorer.iter_complete_outputs(None)) == [
+            ("u1", "a b", 3),
+            ("u2", "a b", None),
+            ("u3", "", None),
+        ]
+        bounded = scorer.iter_complete_outputs({"u1", "u3"})
+        assert [uuid for uuid, *_ in bounded] == ["u1", "u3"]
+        # BFCL unpacks _iter_complete as (sample_uuid, data); the shape is kept.
+        assert [u for u, _ in scorer._iter_complete()] == ["u1", "u2", "u3"]
+
+    def test_events_reader_decodes_only_complete_lines(self, tmp_path):
+        """Only COMPLETE lines are decoded, so a corrupt line of another event
+        type cannot fail scoring."""
+        complete = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            sample_uuid="u1",
+            data=TextModelOutput(output="a"),
+        )
+        encoder = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+        (tmp_path / "events.jsonl").write_bytes(
+            b'{"event_type":"sample.issued",<<<not json>>>}\n'
+            + encoder.encode(complete)
+            + b"\n"
+        )
+
+        frame = self._scorer(tmp_path).get_raw_outputs()
+
+        assert frame.to_dict("records") == [{"sample_uuid": "u1", "output": "a"}]
+
+    def test_non_compact_log_fails_loudly(self, tmp_path):
+        complete = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            sample_uuid="u1",
+            data=TextModelOutput(output="a"),
+        )
+        encoder = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+        spaced = json.dumps(json.loads(encoder.encode(complete))).encode()
+        path = tmp_path / "events.jsonl"
+        path.write_bytes(b"\n" + spaced + b"\n")
+        scorer = self._scorer(tmp_path)
+
+        with pytest.raises(EventLogFormatError, match=str(path)):
+            scorer.get_raw_outputs()
+        with pytest.raises(EventLogFormatError, match="compact"):
+            list(scorer.iter_complete_outputs(None))
+
+    def test_compact_log_after_blank_lines_is_read(self, tmp_path):
+        complete = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            sample_uuid="u1",
+            data=TextModelOutput(output="a"),
+        )
+        encoder = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+        (tmp_path / "events.jsonl").write_bytes(
+            b"\n\n" + encoder.encode(complete) + b"\n"
+        )
+
+        frame = self._scorer(tmp_path).get_raw_outputs()
+
+        assert frame.to_dict("records") == [{"sample_uuid": "u1", "output": "a"}]
 
 
 @pytest.mark.unit

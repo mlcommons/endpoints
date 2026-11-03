@@ -3,22 +3,33 @@
 
 """Tests for ``inference_endpoint.metrics.steady_state_diagnostics``.
 
-Pins everything the detector owns: the plain-JSON event parse (wire shapes
-referenced from core/record.py + core/types.py), super-pass bucketing, TTFT/TPOT
-reconstruction via an injected token counter, the trend-detection algorithms, and
-the CoV table.
+Pins everything the detector owns: the event-log parse (wire shapes referenced
+from core/record.py + core/types.py), super-pass bucketing, TTFT/TPOT
+reconstruction via an injected token counter or the server usage, the
+trend-detection algorithms, and the CoV table.
 """
 
 import json
 
+import msgspec
 import pytest
+from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
+from inference_endpoint.core.types import TextModelOutput, TokenCountSource, basis_key
 from inference_endpoint.metrics import steady_state_diagnostics as mod
+from inference_endpoint.metrics.token_count_basis import ServerUsage
+
+from tests.test_helpers import LOGGED_SERVER_USAGE_CASES
 
 pytestmark = pytest.mark.unit
 
 
+def _line(record: dict) -> str:
+    """One event-log line, compact like the JSONL writer's."""
+    return json.dumps(record, separators=(",", ":"))
+
+
 def _ev(event_type, ts, uuid="", data=None):
-    return json.dumps(
+    return _line(
         {
             "event_type": event_type,
             "timestamp_ns": ts,
@@ -33,31 +44,70 @@ def _words(texts):
     return [len(t.split()) for t in texts]
 
 
+def _tokenized_series(path, superpass_size):
+    """Super-passes replayed on the client basis with the whitespace tokenizer."""
+    return mod.build_super_pass_series(
+        path, superpass_size, _words, basis=TokenCountSource.CLIENT
+    ).super_passes
+
+
+def _tokenized_run(path, **kwargs):
+    """``run`` on a client-basis run, one sample per super-pass."""
+    return mod.run(
+        path,
+        superpass_size=1,
+        count_tokens=_words,
+        basis=TokenCountSource.CLIENT,
+        primary=TokenCountSource.CLIENT,
+        **kwargs,
+    )
+
+
 # --------------------------------------------------------------------------- #
-# text_after_first_chunk — port of TextModelOutput.text_after_first_chunk over
-# the parsed JSON array [tag, output, reasoning?, tool_calls?].
+# text_after_first_chunk — TextModelOutput.text_after_first_chunk without the
+# tool calls; full_output_text — the whole output, tool calls as logged.
 # --------------------------------------------------------------------------- #
 
 
 def test_text_after_first_chunk_streaming_output_drops_first():
-    data = ["TextModelOutput", ["hello ", "world ", "again"]]
-    assert mod.text_after_first_chunk(data) == "world again"
+    output = TextModelOutput(output=("hello ", "world ", "again"))
+    assert mod.text_after_first_chunk(output) == "world again"
 
 
 def test_text_after_first_chunk_reasoning_first_keeps_all_output():
     # The first delta contains only reasoning, so content has an empty first entry.
-    data = ["TextModelOutput", ["", "out1 ", "out2"], ["think1 ", "think2 "]]
-    assert mod.text_after_first_chunk(data) == "think2 out1 out2"
+    output = TextModelOutput(
+        output=("", "out1 ", "out2"), reasoning=("think1 ", "think2 ")
+    )
+    assert mod.text_after_first_chunk(output) == "think2 out1 out2"
 
 
 def test_text_after_first_chunk_joined_output_follows_streamed_reasoning():
-    data = ["TextModelOutput", "out1 out2", ["think1 ", "think2 "]]
-    assert mod.text_after_first_chunk(data) == "think2 out1 out2"
+    output = TextModelOutput(output="out1 out2", reasoning=("think1 ", "think2 "))
+    assert mod.text_after_first_chunk(output) == "think2 out1 out2"
 
 
 def test_text_after_first_chunk_non_streaming_str_has_no_first_chunk():
-    data = ["TextModelOutput", "the whole answer"]
-    assert mod.text_after_first_chunk(data) == ""
+    output = TextModelOutput(output="the whole answer")
+    assert mod.text_after_first_chunk(output) == ""
+
+
+def test_text_after_first_chunk_leaves_out_tool_calls():
+    tool_calls = (({"index": 0, "function": {"name": "f"}},),)
+    output = TextModelOutput(output=("a ", "b"), tool_calls=tool_calls)
+    assert mod.text_after_first_chunk(output) == "b"
+
+
+def test_full_output_text_is_reasoning_output_then_logged_tool_calls():
+    tool_calls = [[{"index": 0, "function": {"name": "f", "arguments": "{}"}}]]
+    output = msgspec.json.decode(
+        msgspec.json.encode(
+            ["TextModelOutput", ["a ", "b"], ["r1 ", "r2 "], tool_calls]
+        ),
+        type=TextModelOutput,
+    )
+    assert mod.full_output_text(output) == "r1 r2 a b" + json.dumps(tool_calls)
+    assert mod.full_output_text(TextModelOutput(output="whole")) == "whole"
 
 
 # --------------------------------------------------------------------------- #
@@ -88,7 +138,7 @@ def test_build_super_pass_series_buckets_by_issue_order(tmp_path):
         _ev("session.stop_performance_tracking", 4000),
     ]
     path = _write_events(tmp_path, lines)
-    series = mod.build_super_pass_series(path, superpass_size=2, count_tokens=_words)
+    series = _tokenized_series(path, 2)
 
     assert len(series) == 2
     sp0, sp1 = series
@@ -111,13 +161,13 @@ def test_build_super_pass_series_records_e2e_latency(tmp_path):
         _ev("session.stop_performance_tracking", 4000),
     ]
     path = _write_events(tmp_path, lines)
-    series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
+    series = _tokenized_series(path, 4)
     assert list(series[0].latency_ns) == [2000.0]  # complete(3000) - issued(1000)
 
 
 def test_warm_turn_ttft_excludes_cold_first_turn(tmp_path):
     def evt(et, ts, uuid, turn, data=None):
-        return json.dumps(
+        return _line(
             {
                 "event_type": et,
                 "timestamp_ns": ts,
@@ -138,7 +188,7 @@ def test_warm_turn_ttft_excludes_cold_first_turn(tmp_path):
         _ev("session.stop_performance_tracking", 4000),
     ]
     path = _write_events(tmp_path, lines)
-    series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
+    series = _tokenized_series(path, 4)
     assert sorted(series[0].ttft_ns) == [50.0, 200.0]  # all turns
     assert list(series[0].ttft_warm_ns) == [50.0]  # turn 1 discarded
 
@@ -153,7 +203,7 @@ def test_build_super_pass_series_ignores_events_outside_tracking(tmp_path):
         _ev("session.stop_performance_tracking", 4000),
     ]
     path = _write_events(tmp_path, lines)
-    series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
+    series = _tokenized_series(path, 4)
     assert len(series) == 1
     assert series[0].n_issued == 1
 
@@ -292,13 +342,13 @@ def _synthetic_events(tmp_path, n, ttft_ns_fn):
 def test_run_result_structure(tmp_path):
     # ttft climbs steadily -> an upward drift the scan should surface.
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100 + 20 * i)
-    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
-    assert result["steady_state"].n_super_passes == 8
-    assert result["steady_state"].warmup == 1
-    assert result["drift"]["ttft_p50"]["mk_hamed_rao"] == "up"
+    result = _tokenized_run(path, warmup=1)
+    assert result.steady_state.n_super_passes == 8
+    assert result.steady_state.warmup == 1
+    assert result.drift["ttft_p50"]["mk_hamed_rao"] == "up"
     # CoV cells carry a pass/fail per bound and a gate flag. Admissibility gates on
     # TPOT only, so tpot_p50 is gated while ttft_p50 is now diagnostic.
-    cov = result["steady_state"].cov
+    cov = result.steady_state.cov
     assert cov["tpot_p50"].gated is True
     cell = cov["ttft_p50"]
     assert cell.gated is False
@@ -308,9 +358,9 @@ def test_run_result_structure(tmp_path):
 
 
 def test_text_after_first_chunk_empty_reasoning_str_output_is_first_chunk():
-    # reasoning=[] is falsy -> str output IS the sole first chunk -> excluded.
-    data = ["TextModelOutput", "the whole answer", []]
-    assert mod.text_after_first_chunk(data) == ""
+    # reasoning=() is falsy -> str output IS the sole first chunk -> excluded.
+    output = TextModelOutput(output="the whole answer", reasoning=())
+    assert mod.text_after_first_chunk(output) == ""
 
 
 def test_retried_sample_counts_ttft_once(tmp_path):
@@ -324,7 +374,7 @@ def test_retried_sample_counts_ttft_once(tmp_path):
         _ev("session.stop_performance_tracking", 5000),
     ]
     path = _write_events(tmp_path, lines)
-    series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
+    series = _tokenized_series(path, 4)
     assert list(series[0].ttft_ns) == [500.0]
 
 
@@ -340,8 +390,56 @@ def test_valid_json_line_missing_timestamp_is_skipped(tmp_path):
         _ev("session.stop_performance_tracking", 4000),
     ]
     path = _write_events(tmp_path, lines)
-    series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
+    series = _tokenized_series(path, 4)
     assert sum(sp.n_issued for sp in series) == 1  # only the well-formed sample
+
+
+def test_truncated_complete_line_is_skipped(tmp_path):
+    # The last line of a killed run can be a cut-off COMPLETE: both replays skip it.
+    cut = _conv_ev("sample.complete", 3100, "B", "c2", 1, ["TextModelOutput", ["x"]])
+    lines = [
+        _ev("session.start_performance_tracking", 0),
+        _conv_ev("sample.issued", 1000, "A", "c1", 1),
+        _conv_ev("sample.recv_first", 1500, "A", "c1", 1),
+        _conv_ev(
+            "sample.complete", 3000, "A", "c1", 1, ["TextModelOutput", ["a ", "b"]]
+        ),
+        _conv_ev("sample.issued", 1100, "B", "c2", 1),
+        cut[: len(cut) // 2],
+    ]
+    path = _write_events(tmp_path, lines)
+    (sp,) = _tokenized_series(path, 4)
+    assert (sp.n_issued, list(sp.latency_ns)) == (2, [2000.0])
+    natl = mod.build_trajectory_natl(path, _words, basis=TokenCountSource.CLIENT)
+    assert [t for t, _ in natl.pairs] == [3000]
+
+
+def test_replays_refuse_a_non_compact_complete_line(tmp_path, capsys):
+    # COMPLETE lines are found by their compact prefix; a spaced one fails loudly.
+    lines = [
+        _ev("session.start_performance_tracking", 0),
+        _conv_ev("sample.issued", 1000, "A", "c1", 1),
+        _conv_ev("sample.recv_first", 1500, "A", "c1", 1),
+        json.dumps(
+            json.loads(
+                _conv_ev("sample.complete", 3000, "A", "c1", 1, ["TextModelOutput"])
+            )
+        ),
+        _ev("session.stop_performance_tracking", 4000),
+    ]
+    path = _write_events(tmp_path, lines)
+    with pytest.raises(ValueError, match="compact"):
+        _tokenized_series(path, 1)
+    with pytest.raises(ValueError, match="compact"):
+        mod.build_trajectory_natl(path, _words, basis=TokenCountSource.CLIENT)
+    _summary(tmp_path, TokenCountSource.SERVER)
+    argv = [str(tmp_path), "--superpass-size", "1", "--warmup", "0"]
+    for profile in ([], ["--profile", "agentic"]):
+        with pytest.raises(SystemExit) as exc:
+            mod.main([*argv, *profile])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert f"{path}: a sample.complete line is not in the JSONL writer" in err
 
 
 def test_cov_pass_row_insufficient_window_is_inconclusive():
@@ -352,7 +450,7 @@ def test_cov_pass_row_insufficient_window_is_inconclusive():
 def test_run_rejects_negative_warmup(tmp_path):
     path = _synthetic_events(tmp_path, n=6, ttft_ns_fn=lambda i: 100.0)
     with pytest.raises(ValueError):
-        mod.run(path, superpass_size=1, count_tokens=_words, warmup=-1)
+        _tokenized_run(path, warmup=-1)
 
 
 def test_super_pass_tracks_timestamps(tmp_path):
@@ -367,7 +465,7 @@ def test_super_pass_tracks_timestamps(tmp_path):
         _ev("session.stop_performance_tracking", 4000),
     ]
     path = _write_events(tmp_path, lines)
-    series = mod.build_super_pass_series(path, superpass_size=4, count_tokens=_words)
+    series = _tokenized_series(path, 4)
     assert series[0].first_issue_ns == 1000  # earliest issue
     assert series[0].last_event_ns == 3000  # latest event (A's complete)
 
@@ -384,7 +482,7 @@ def test_window_elapsed_and_pooling(tmp_path):
         _ev("session.stop_performance_tracking", 20000),
     ]
     path = _write_events(tmp_path, lines)
-    series = mod.build_super_pass_series(path, superpass_size=1, count_tokens=_words)
+    series = _tokenized_series(path, 1)
     assert len(series) == 2
     # pooled ttft over both super-passes
     assert sorted(mod.pooled(series, 0, 2, "ttft_ns")) == [500.0, 500.0]
@@ -669,8 +767,8 @@ def test_adaptive_warmup_capped_at_max_frac():
 
 def test_run_auto_warmup_resolves_to_int(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100.0)
-    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup="auto")
-    assert isinstance(result["steady_state"].warmup, int)
+    result = _tokenized_run(path, warmup="auto")
+    assert isinstance(result.steady_state.warmup, int)
 
 
 def test_steady_state_flags_global_drift_after_first_plateau():
@@ -850,14 +948,13 @@ def test_soft_path_reports_first_plateau_even_when_short():
 
 def test_run_result_has_steady_state_block(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100.0)
-    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
-    assert "steady_state" in result
-    assert result["steady_state"].anomaly is not None
+    result = _tokenized_run(path, warmup=1)
+    assert result.steady_state.anomaly is not None
 
 
 def test_render_text_has_section_headers(tmp_path):
     path = _synthetic_events(tmp_path, n=8, ttft_ns_fn=lambda i: 100 + 20 * i)
-    result = mod.run(path, superpass_size=1, count_tokens=_words, warmup=1)
+    result = _tokenized_run(path, warmup=1)
     text = mod.render_text(result, cov_bounds=[0.03, 0.05, 0.08])
     assert "CoV" in text
     assert "drift (whole-run" in text
@@ -960,7 +1057,7 @@ def test_superpass_size_comes_from_the_performance_phase_start(tmp_path):
 
 
 def _conv_ev(et, ts, uuid, conv, turn=None, data=None):
-    return json.dumps(
+    return _line(
         {
             "event_type": et,
             "timestamp_ns": ts,
@@ -1007,7 +1104,9 @@ def test_build_trajectory_natl(tmp_path):
         _ev("session.stop_performance_tracking", 9_000_000_000),
     ]
     path = _write_events(tmp_path, lines)
-    pairs = mod.build_trajectory_natl(path, _words)
+    trajectory = mod.build_trajectory_natl(path, _words, basis=TokenCountSource.CLIENT)
+    assert trajectory.n_missing_usage is None  # the client basis never reads usage
+    pairs = trajectory.pairs
     # sorted by completion: c2 completes at 2e9, c1 at 3e9
     assert [round(n, 3) for _, n in pairs] == [2.0, 2.5]
     assert [t for t, _ in pairs] == [2_000_000_000, 3_000_000_000]
@@ -1029,3 +1128,404 @@ def test_build_natl_result_flat_and_varied():
     )
     assert r2["across_cov"] > 0.15
     assert r2["found"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Token-count basis: server usage from COMPLETE lines, the run-basis reader
+# --------------------------------------------------------------------------- #
+
+_ENCODER = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+
+
+def _logged(record: EventRecord) -> str:
+    """``record`` as the JSONL writer logs it."""
+    return _ENCODER.encode(record).decode()
+
+
+def _with_usage(line, completion_tokens, prompt_tokens=1):
+    rec = json.loads(line)
+    rec["prompt_tokens"] = prompt_tokens
+    rec["completion_tokens"] = completion_tokens
+    return _line(rec)
+
+
+def _summary(run_dir, primary):
+    """The run's ``result_summary.json``, recording ``primary`` as its basis."""
+    (run_dir / "performance").mkdir()
+    (run_dir / "performance" / "result_summary.json").write_text(
+        json.dumps({"token_count_source": primary.value})
+    )
+
+
+def test_server_replay_uses_completion_tokens(tmp_path):
+    path = _write_events(
+        tmp_path,
+        [
+            _ev("session.start_performance_tracking", 0),
+            _ev("sample.issued", 1000, "A"),
+            _ev("sample.recv_first", 1500, "A"),
+            _with_usage(
+                _ev("sample.complete", 3000, "A", ["TextModelOutput", ["a ", "b"]]), 4
+            ),
+            _ev("sample.issued", 1100, "B"),
+            _ev("sample.recv_first", 1300, "B"),
+            # completion_tokens <= 1: no TPOT
+            _with_usage(
+                _ev("sample.complete", 2100, "B", ["TextModelOutput", ["x "]]), 1
+            ),
+            _ev("sample.issued", 1200, "C"),
+            _ev("sample.recv_first", 1400, "C"),
+            # no usage: no TPOT
+            _ev("sample.complete", 2000, "C", ["TextModelOutput", ["p ", "q"]]),
+            _ev("session.stop_performance_tracking", 4000),
+        ],
+    )
+    replay = mod.build_super_pass_series(path, 4, None, basis=TokenCountSource.SERVER)
+    (sp,) = replay.super_passes
+    assert (list(sp.tpot_ns), list(sp.osl), sp.out_tokens, len(sp.latency_ns)) == (
+        [500.0],
+        [3.0],
+        3,
+        3,
+    )
+    assert replay.n_missing_usage == 1
+    with pytest.raises(ValueError, match="count_tokens"):
+        mod.build_super_pass_series(path, 4, None, basis=TokenCountSource.CLIENT)
+
+
+def test_build_trajectory_natl_server_basis(tmp_path):
+    out = ["TextModelOutput", ["a"]]
+    path = _write_events(
+        tmp_path,
+        [
+            _ev("session.start_performance_tracking", 0),
+            _conv_ev("sample.issued", 0, "a", "c1", 1),
+            _with_usage(
+                _conv_ev("sample.complete", 1_000_000_000, "a", "c1", 1, out), 3
+            ),
+            _conv_ev("sample.issued", 2_000_000_000, "b", "c1", 2),
+            _with_usage(
+                _conv_ev("sample.complete", 3_000_000_000, "b", "c1", 2, out), 5
+            ),
+            _conv_ev("sample.issued", 0, "d", "c2", 1),
+            # no usage: no tokens
+            _conv_ev("sample.complete", 2_000_000_000, "d", "c2", 1, out),
+            _ev("session.stop_performance_tracking", 9_000_000_000),
+        ],
+    )
+    assert mod.build_trajectory_natl(
+        path, None, basis=TokenCountSource.SERVER
+    ) == mod.ReplayTrajectory(
+        pairs=[(3_000_000_000, 4.0)], n_missing_usage=1, n_undecodable=0
+    )
+
+
+@pytest.mark.parametrize(
+    ("prompt", "completion", "output", "expected"),
+    [pytest.param(*case[1:], id=case[0]) for case in LOGGED_SERVER_USAGE_CASES],
+)
+def test_replay_missing_usage_matches_live_rule(
+    tmp_path, prompt, completion, output, expected
+):
+    """Both replays read usage by ``classify_server_usage``, as the aggregator does."""
+    complete = EventRecord(
+        event_type=SampleEventType.COMPLETE,
+        timestamp_ns=3000,
+        sample_uuid="A",
+        conversation_id="c1",
+        data=output,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+    )
+    path = _write_events(
+        tmp_path,
+        [
+            _ev("session.start_performance_tracking", 0),
+            _conv_ev("sample.issued", 1000, "A", "c1"),
+            _conv_ev("sample.recv_first", 1500, "A", "c1"),
+            _logged(complete),
+            _ev("session.stop_performance_tracking", 4000),
+        ],
+    )
+    series = mod.build_super_pass_series(path, 1, None, basis=TokenCountSource.SERVER)
+    natl = mod.build_trajectory_natl(path, None, basis=TokenCountSource.SERVER)
+    n_missing = int(expected is ServerUsage.MISSING)
+    assert (series.n_missing_usage, natl.n_missing_usage) == (n_missing, n_missing)
+    usable = expected is ServerUsage.USABLE
+    (sp,) = series.super_passes
+    assert list(sp.osl) == ([completion - 1] if usable else [])
+    latency_s = (3000 - 1000) / 1e9
+    assert natl.pairs == ([(3000, completion / latency_s)] if usable else [])
+
+
+def test_main_server_run_needs_no_tokenizer(tmp_path, monkeypatch):
+    lines = [_ev("session.start_performance_tracking", 0)]
+    for i in range(8):
+        t, u = 1000 * (i + 1), f"s{i}"
+        lines += [
+            _ev("sample.issued", t, u),
+            _ev("sample.recv_first", t + 100, u),
+            _with_usage(
+                _ev("sample.complete", t + 1100, u, ["TextModelOutput", ["a ", "b"]]),
+                11,
+            ),
+        ]
+    _write_events(tmp_path, [*lines, _ev("session.stop_performance_tracking", 20_000)])
+    _summary(tmp_path, TokenCountSource.SERVER)
+    monkeypatch.setattr(
+        mod, "_make_token_counter", lambda *a, **k: pytest.fail("tokenizer loaded")
+    )
+    argv = [
+        str(tmp_path),
+        "--superpass-size",
+        "2",
+        "--warmup",
+        "0",
+        "--no-min-duration",
+    ]
+    assert mod.main(argv) == 0
+    with pytest.raises(SystemExit):  # client override: no model/tokenizer resolvable
+        mod.main([*argv, "--token-count-source", TokenCountSource.CLIENT.value])
+
+
+def _missing_usage_events(tmp_path):
+    """Server run: A has usage; B (streamed) and C (non-streaming) do not; D errored."""
+    return _write_events(
+        tmp_path,
+        [
+            _ev("sample.issued", 10, "W"),  # untracked: never counted
+            _ev("sample.complete", 20, "W", ["TextModelOutput", ["w"]]),
+            _ev("session.start_performance_tracking", 0),
+            _ev("sample.issued", 1000, "A"),
+            _ev("sample.recv_first", 1500, "A"),
+            _with_usage(
+                _ev("sample.complete", 3000, "A", ["TextModelOutput", ["a ", "b"]]), 4
+            ),
+            _ev("sample.issued", 1100, "B"),
+            _ev("sample.recv_first", 1300, "B"),
+            _ev("sample.complete", 2100, "B", ["TextModelOutput", ["x ", "y"]]),
+            _ev("sample.issued", 1200, "C"),
+            _ev("sample.complete", 2000, "C", ["TextModelOutput", "whole answer"]),
+            _ev("sample.issued", 1300, "D"),
+            _ev("sample.complete", 1900, "D", None),
+            _ev("session.stop_performance_tracking", 4000),
+        ],
+    )
+
+
+def test_run_labels_the_basis_and_counts_missing_usage(tmp_path):
+    path = _missing_usage_events(tmp_path)
+    server = mod.run(
+        path,
+        superpass_size=1,
+        count_tokens=None,
+        warmup=0,
+        basis=TokenCountSource.SERVER,
+        primary=TokenCountSource.SERVER,
+    )
+    assert (server.basis, server.n_missing_usage) == (
+        TokenCountSource.SERVER,
+        2,
+    )
+    replay = mod.build_super_pass_series(path, 1, None, basis=TokenCountSource.SERVER)
+    tpot = [v for sp in replay.super_passes for v in sp.tpot_ns]
+    assert tpot == [500.0]  # missing usage is never filled in from a tokenizer
+    text = mod.render_text(server, cov_bounds=list(mod.DEFAULT_COV_BOUNDS))
+    assert text.splitlines()[0] == "token basis: server"
+    client = _tokenized_run(path, warmup=0)
+    # The client replay never reads usage, so it reports no missing-usage count.
+    assert (client.basis, client.n_missing_usage) == (
+        TokenCountSource.CLIENT,
+        None,
+    )
+    tokenized = mod.build_super_pass_series(
+        path, 1, _words, basis=TokenCountSource.CLIENT
+    )
+    assert tokenized.n_missing_usage is None
+
+
+def test_main_json_is_labelled_with_the_basis(tmp_path, capsys):
+    _missing_usage_events(tmp_path)
+    _summary(tmp_path, TokenCountSource.SERVER)
+    out = tmp_path / "ss.json"
+    argv = [str(tmp_path), "--superpass-size", "2", "--warmup", "0"]
+    assert mod.main([*argv, "--no-min-duration", "--json", str(out)]) == 0
+    blob = json.loads(out.read_text())
+    # Top level, beside the steady_state block (which stays summary-comparable).
+    assert (blob["token_count_source"], blob["n_missing_usage"]) == ("server", 2)
+    assert "token_count_source" not in blob["steady_state"]
+    assert "n_undecodable" not in blob
+    captured = capsys.readouterr()
+    assert captured.out.splitlines()[0] == "token basis: server"
+    assert "2 tracked samples returned no server token usage" in captured.err
+    assert "NATL and system TPS are understated" in captured.err
+    assert "could not be decoded" not in captured.err
+
+
+@pytest.mark.parametrize("primary", list(TokenCountSource))
+def test_main_json_names_the_verdict_by_basis(tmp_path, monkeypatch, capsys, primary):
+    """The verdict keeps its name on the run's basis; the other basis suffixes it."""
+    _missing_usage_events(tmp_path)
+    _summary(tmp_path, primary)
+    monkeypatch.setattr(mod, "_make_token_counter", lambda *a, **k: _words)
+    argv = [str(tmp_path), "--tokenizer", "words", "--superpass-size", "2"]
+    argv += ["--warmup", "0", "--no-min-duration"]
+    for override in (None, *TokenCountSource):
+        replayed = primary if override is None else override
+        flag = [] if override is None else ["--token-count-source", override.value]
+        out = tmp_path / f"{override}.json"
+        assert mod.main([*argv, *flag, "--json", str(out)]) == 0
+        blob = json.loads(out.read_text())
+        assert blob["token_count_source"] == replayed.value
+        assert basis_key("steady_state", replayed, primary=primary) in blob
+        assert basis_key("steady_state", replayed.other, primary=primary) not in blob
+    capsys.readouterr()  # drain
+
+
+def _usage_run(run_dir, *, usage: bool) -> None:
+    """A client-basis run whose COMPLETE lines carry server usage iff ``usage``."""
+    lines = [_ev("session.start_performance_tracking", 0)]
+    for i in range(8):
+        t, u = 1000 * (i + 1), f"s{i}"
+        complete = _ev(
+            "sample.complete", t + 1100 + 10 * i, u, ["TextModelOutput", ["a ", "b c"]]
+        )
+        lines += [
+            _ev("sample.issued", t, u),
+            _ev("sample.recv_first", t + 100, u),
+            _with_usage(complete, 7) if usage else complete,
+        ]
+    run_dir.mkdir()
+    _write_events(run_dir, [*lines, _ev("session.stop_performance_tracking", 20_000)])
+    _summary(run_dir, TokenCountSource.CLIENT)
+
+
+def test_client_primary_replay_identical_with_and_without_usage_keys(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(mod, "_make_token_counter", lambda *a, **k: _words)
+    blobs = []
+    for usage in (True, False):
+        run_dir = tmp_path / f"usage_{usage}"
+        _usage_run(run_dir, usage=usage)
+        out = run_dir / "ss.json"
+        argv = [str(run_dir), "--tokenizer", "words", "--superpass-size", "2"]
+        argv += ["--warmup", "0", "--no-min-duration", "--json", str(out)]
+        assert mod.main(argv) == 0
+        blobs.append(out.read_bytes())
+    assert blobs[0] == blobs[1]
+    assert json.loads(blobs[0])["steady_state"]["n_super_passes"] == 4
+    capsys.readouterr()  # drain
+
+
+def test_steady_state_cli_unreadable_summary_exits_with_hint(
+    tmp_path, monkeypatch, capsys
+):
+    _missing_usage_events(tmp_path)
+    (tmp_path / "performance").mkdir()
+    (tmp_path / "performance" / "result_summary.json").write_text("{not json")
+    monkeypatch.setattr(mod, "_make_token_counter", lambda *a, **k: _words)
+    argv = [str(tmp_path), "--tokenizer", "words", "--superpass-size", "2"]
+    argv += ["--warmup", "0", "--no-min-duration"]
+    with pytest.raises(SystemExit) as exc:
+        mod.main(argv)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "cannot read the token-count basis" in err
+    assert "pass --token-count-source" in err
+    # The hint holds: choosing the basis replays the run.
+    assert mod.main([*argv, "--token-count-source", TokenCountSource.SERVER.value]) == 0
+
+
+def test_main_natl_json_is_labelled_with_the_basis(tmp_path, capsys):
+    out_text = ["TextModelOutput", ["a"]]
+    _write_events(
+        tmp_path,
+        [
+            _ev("session.start_performance_tracking", 0),
+            _conv_ev("sample.issued", 0, "a", "c1", 1),
+            _with_usage(
+                _conv_ev("sample.complete", 1_000_000_000, "a", "c1", 1, out_text), 3
+            ),
+            _conv_ev("sample.issued", 0, "d", "c2", 1),
+            _conv_ev("sample.complete", 2_000_000_000, "d", "c2", 1, out_text),
+            _ev("session.stop_performance_tracking", 9_000_000_000),
+        ],
+    )
+    _summary(tmp_path, TokenCountSource.SERVER)
+    out = tmp_path / "natl.json"
+    assert mod.main([str(tmp_path), "--profile", "agentic", "--json", str(out)]) == 0
+    blob = json.loads(out.read_text())
+    assert (blob["token_count_source"], blob["n_missing_usage"]) == ("server", 1)
+    assert blob["n_trajectories"] == 1
+    captured = capsys.readouterr()
+    assert captured.out.splitlines()[0] == "token basis: server"
+    assert "1 tracked samples returned no server token usage" in captured.err
+
+
+def _undecodable(line):
+    """``line`` with a field of the wrong type: still a COMPLETE line, but one
+    the typed decode rejects."""
+    rec = json.loads(line)
+    rec["finish_reason"] = 5
+    return _line(rec)
+
+
+def _undecodable_events(tmp_path):
+    """Four tracked samples with usage; D's COMPLETE does not decode."""
+    lines = [_ev("session.start_performance_tracking", 0)]
+    for i, uuid in enumerate("ABCD"):
+        t = 1000 * (i + 1)
+        complete = _with_usage(
+            _conv_ev(
+                "sample.complete",
+                t + 600,
+                uuid,
+                f"c{i}",
+                1,
+                ["TextModelOutput", ["a ", "b"]],
+            ),
+            4,
+        )
+        lines += [
+            _conv_ev("sample.issued", t, uuid, f"c{i}", 1),
+            _conv_ev("sample.recv_first", t + 100, uuid, f"c{i}", 1),
+            _undecodable(complete) if uuid == "D" else complete,
+        ]
+    return _write_events(
+        tmp_path, [*lines, _ev("session.stop_performance_tracking", 9000)]
+    )
+
+
+@pytest.mark.parametrize("basis", list(TokenCountSource))
+def test_replays_count_undecodable_complete_lines(tmp_path, basis):
+    path = _undecodable_events(tmp_path)
+    count_tokens = None if basis is TokenCountSource.SERVER else _words
+    series = mod.build_super_pass_series(path, 4, count_tokens, basis=basis)
+    natl = mod.build_trajectory_natl(path, count_tokens, basis=basis)
+    assert (series.n_undecodable, natl.n_undecodable) == (1, 1)
+    (sp,) = series.super_passes
+    assert (len(sp.latency_ns), len(natl.pairs)) == (3, 3)
+
+
+@pytest.mark.parametrize("profile", ["concurrency", "agentic"])
+def test_main_warns_on_undecodable_lines_and_records_them(tmp_path, capsys, profile):
+    _undecodable_events(tmp_path)
+    _summary(tmp_path, TokenCountSource.SERVER)
+    out = tmp_path / "ss.json"
+    argv = [str(tmp_path), "--profile", profile, "--superpass-size", "2"]
+    argv += ["--warmup", "0", "--no-min-duration", "--json", str(out)]
+    assert mod.main(argv) == 0
+    assert json.loads(out.read_text())["n_undecodable"] == 1
+    err = capsys.readouterr().err
+    assert "WARNING: 1 sample.complete lines could not be decoded" in err
+
+
+def test_main_override_needs_no_archived_basis_note(tmp_path, capsys):
+    _missing_usage_events(tmp_path)
+    argv = [str(tmp_path), "--superpass-size", "2", "--warmup", "0"]
+    argv += ["--no-min-duration", "--token-count-source", "server"]
+    assert mod.main(argv) == 0
+    err = capsys.readouterr().err
+    assert "no token-count basis recorded" not in err
+    assert "[token basis: server]" in err

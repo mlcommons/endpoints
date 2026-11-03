@@ -74,6 +74,8 @@ try:
         _counter_read,
         _sse_event,
         build_non_streaming_response,
+        build_stream_tail,
+        requests_usage,
     )
 except ImportError:
     from max_throughput_server import (  # type: ignore[no-redef]
@@ -83,6 +85,8 @@ except ImportError:
         _counter_read,
         _sse_event,
         build_non_streaming_response,
+        build_stream_tail,
+        requests_usage,
     )
 
 # Shared counters (multiprocessing.Value for cross-process atomicity)
@@ -265,8 +269,12 @@ class VariableResponseProtocol(asyncio.Protocol):
             osl = int(rng.lognormvariate(self._osl_mu, self._osl_sigma))
             osl = max(self._osl_min, min(osl, self._osl_max))
 
+            # Streaming responses end with a usage frame only when the request
+            # sets stream_options.include_usage.
+            include_usage = self._stream and requests_usage(request.body)
+
             # Dispatch async handler (prevent GC before completion)
-            task = self._loop.create_task(self._handle_request(osl))
+            task = self._loop.create_task(self._handle_request(osl, include_usage))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
@@ -274,7 +282,7 @@ class VariableResponseProtocol(asyncio.Protocol):
             self._request = RequestParser()
             self._parser = httptools.HttpRequestParser(self._request)
 
-    async def _handle_request(self, osl: int):
+    async def _handle_request(self, osl: int, include_usage: bool):
         """Handle a single request with sampled timing."""
         transport = self.transport
         if transport is None or transport.is_closing():
@@ -319,7 +327,7 @@ class VariableResponseProtocol(asyncio.Protocol):
                 )
 
             if self._stream:
-                await self._handle_streaming(transport, osl, ttft, tpot)
+                await self._handle_streaming(transport, osl, ttft, tpot, include_usage)
             else:
                 await self._handle_non_streaming(transport, osl, ttft)
         except (RuntimeError, ConnectionError, OSError):
@@ -342,12 +350,15 @@ class VariableResponseProtocol(asyncio.Protocol):
         _counter_add(_resp_counter)
         _counter_add(_byte_counter, len(response))
 
-    async def _handle_streaming(self, transport, osl: int, ttft: float, tpot: float):
+    async def _handle_streaming(
+        self, transport, osl: int, ttft: float, tpot: float, include_usage: bool
+    ):
         """Stream chunks with TTFT + per-token TPOT delays.
 
         tpot is the simulated per-token generation time (seconds).
         stream_interval is chars per SSE event (≈ tokens).
         Actual inter-event delay = tpot × stream_interval.
+        include_usage adds the usage frame between the finish frame and [DONE].
         """
         interval = self._stream_interval
         num_events = math.ceil(osl / interval)
@@ -363,8 +374,7 @@ class VariableResponseProtocol(asyncio.Protocol):
             event = _sse_event(model, created, {"content": "x" * chars})
             chunks.append(_chunked(event))
 
-        finish = _sse_event(model, created, {}, "stop")
-        tail = _chunked(finish + b"data: [DONE]\n\n") + b"0\r\n\r\n"
+        tail = build_stream_tail(model, created, osl, include_usage=include_usage)
 
         # TTFT delay before first data
         if ttft > 0:
@@ -403,7 +413,7 @@ class VariableResponseProtocol(asyncio.Protocol):
             transport.write(chunk)
             total_bytes += len(chunk)
 
-        # Finish event + [DONE] sentinel + terminator
+        # Finish event, optional usage frame, [DONE] sentinel and terminator
         if not transport.is_closing():
             transport.write(tail)
             total_bytes += len(tail)

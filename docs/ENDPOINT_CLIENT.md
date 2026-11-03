@@ -300,6 +300,10 @@ class HTTPClientConfig(BaseModel):
     # When False (default), only first chunk per response (for TTFT measurement).
     stream_all_chunks: bool = False
 
+    # Ask streaming OpenAI requests for the final usage frame
+    # (stream_options.include_usage); disable for endpoints that reject it.
+    stream_include_usage: bool = True
+
     # CPU pinning plan for worker processes; None = no pinning
     cpu_affinity: AffinityPlan | None = None
 
@@ -1159,13 +1163,13 @@ per-instance state.
 
 **Public API:**
 
-| Method                                      | Async | Description                                                                                                                                             |
-| ------------------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dataset_transforms(model_params)`          | No    | Returns `list[Transform]` to shape dataset rows into `Query.data` dicts for this API format. Must include a `ColumnFilter` to strip extraneous columns. |
-| `encode_query(query)`                       | No    | Serialize `Query` to HTTP request body bytes (JSON via `msgspec.json.Encoder`)                                                                          |
-| `decode_response(response_bytes, query_id)` | No    | Deserialize HTTP response body to `QueryResult` (JSON via `msgspec.json.Decoder` with typed schema)                                                     |
-| `decode_sse_message(json_bytes)`            | No    | Extract content string from a single SSE JSON message                                                                                                   |
-| `parse_sse_chunk(buffer, end_pos)`          | No    | Extract all content strings from a buffer region. Default: regex `findall` → loop of `decode_sse_message` calls                                         |
+| Method                                      | Async | Description                                                                                                                                                                    |
+| ------------------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `dataset_transforms(model_params)`          | No    | Returns `list[Transform]` to shape dataset rows into `Query.data` dicts for this API format. Must include a `ColumnFilter` to strip extraneous columns.                        |
+| `encode_query(query, *, include_usage)`     | No    | Serialize `Query` to HTTP request body bytes (JSON via `msgspec.json.Encoder`); `include_usage` adds `stream_options` on streaming OpenAI requests                             |
+| `decode_response(response_bytes, query_id)` | No    | Deserialize HTTP response body to `QueryResult` (JSON via `msgspec.json.Decoder` with typed schema)                                                                            |
+| `decode_sse_message(json_bytes)`            | No    | Decode one SSE JSON message to the adapter-specific chunk passed to `add_chunk` (OpenAI adapters: `SSEChoice \| SSEMessage \| None`, see [openai/DESIGN.md](openai/DESIGN.md)) |
+| `parse_sse_chunk(buffer, end_pos)`          | No    | Decode every frame in a buffer region. Default: regex `findall` → loop of `decode_sse_message` calls, each in its own `try`                                                    |
 
 The base class defines
 `SSE_DATA_PATTERN: re.Pattern[bytes] = re.compile(rb"data:\s*(\{[^\n]+\})")` — a
@@ -1189,7 +1193,7 @@ per-request instances (they track state across chunks).
 | Method                                  | Async | Description                                                                                  |
 | --------------------------------------- | ----- | -------------------------------------------------------------------------------------------- |
 | `__init__(query_id, stream_all_chunks)` | No    | Initialize with request ID and chunk emission mode                                           |
-| `add_chunk(delta)`                      | No    | Process one SSE delta. Returns `StreamChunk` if content should be emitted, `None` otherwise. |
+| `add_chunk(delta)`                      | No    | Process one SSE frame. Returns `StreamChunk` if content should be emitted, `None` otherwise. |
 | `get_final_output()`                    | No    | Return complete accumulated result after stream ends                                         |
 
 **Chunk emission modes:**
@@ -1201,15 +1205,20 @@ per-request instances (they track state across chunks).
 
 The first emitted chunk carries `metadata={"first_chunk": True}` for TTFT
 measurement. The final `QueryResult` from `get_final_output()` carries
-`metadata={"final_chunk": True}`.
+`metadata={"final_chunk": True}`, plus `prompt_tokens` and `completion_tokens`
+(plain ints) when the server reported them. A usage frame never creates a
+`StreamChunk`; the session lifts the two counts onto the COMPLETE event record.
 
 ### 9.3 SSE Stream Parsing
 
 SSE streams deliver multiple JSON messages per network read. The parsing
-strategy combines regex extraction with batched exception handling to minimize
-per-message overhead.
+strategy combines regex extraction with a per-frame exception handler: a
+malformed frame is skipped on its own, so it cannot drop the other frames in the
+same read, including the trailing usage frame. On Python 3.11+ a `try` that does
+not raise costs nothing, so the per-frame handler adds no happy-path overhead.
+One warning is logged per read, never per frame.
 
-`TODO: Populate with ablation study results (regex vs line-by-line, try-per-iteration vs try-outside-loop, msgspec vs stdlib json)`
+`TODO: Populate with ablation study results (regex vs line-by-line, msgspec vs stdlib json)`
 
 **Pattern:**
 
@@ -1217,19 +1226,21 @@ per-message overhead.
 # Single-pass regex extraction over the raw SSE buffer — C-level findall,
 # avoids line-by-line splitting and per-line prefix checks.
 json_docs = SSE_DATA_PATTERN.findall(buffer[:end_pos])
-parsed_contents = []
+parsed = []
+n_bad = 0
 
-# try/except wraps entire loop rather than per-iteration: exception frame
-# setup has measurable overhead, so we amortize it across the batch.
-# Non-content SSE messages (role, finish_reason) raise on decode — expected.
-try:
-    for json_doc in json_docs:
+for json_doc in json_docs:
+    try:
         content = decode_sse_message(json_doc)
-        parsed_contents.append(content)
-except Exception:
-    pass
+    except (msgspec.DecodeError, msgspec.ValidationError):
+        n_bad += 1
+        continue
+    if content is not None:
+        parsed.append(content)
 
-return parsed_contents
+if n_bad:
+    logger.warning("skipping %d malformed SSE frame(s)", n_bad)
+return parsed
 ```
 
 **Design Choices:**
@@ -1237,9 +1248,9 @@ return parsed_contents
 | Choice                      | Implementation                             | Rationale                                                                                                                     |
 | --------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | Regex extraction            | Pre-compiled pattern with `findall()`      | Extracts all JSON documents in a single pass over the buffer using C-level regex iteration, avoiding line-by-line splitting   |
-| Exception handler placement | `try` wraps entire loop, not per-iteration | Python exception frame setup has measurable overhead; wrapping the entire batch shares that cost across all messages          |
+| Exception handler placement | `try` around each `decode_sse_message`     | Free when nothing raises (Python 3.11+); a bad frame cannot drop the usage frame that follows it                              |
 | Typed decoding              | `msgspec.json.Decoder` with schema         | Decodes JSON directly into typed Struct fields, skipping the intermediate `dict` allocation that stdlib `json.loads` produces |
-| Batch yield                 | Yields `list[str]` per network read        | Returns all parsed content from one network read as a single batch, reducing async suspend/resume cycles in the caller        |
+| Batch yield                 | Yields a `list` of frames per network read | Returns all parsed frames from one network read as a single batch, reducing async suspend/resume cycles in the caller         |
 
 ### 9.4 Implementations
 
@@ -1712,14 +1723,20 @@ serialization models to maintain.
 
 **Struct conventions:**
 
-| Convention           | Example                                             | Effect                                                                                                                                                                               |
-| -------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `kw_only=True`       | `class ChatCompletionRequest(Struct, kw_only=True)` | Named-field initialization maps naturally to JSON key-value pairs; prevents positional argument errors on schema evolution                                                           |
-| `omit_defaults=True` | `class Query(Struct, omit_defaults=True)`           | Fields at default value omitted from encoded output; reduces message size for messages with empty optional fields                                                                    |
-| `tag="..."`          | `class QueryResult(Struct, tag="query_result")`     | Enables union type discrimination during MessagePack deserialization on the IPC fan-in path                                                                                          |
-| `frozen=True`        | `class Query(Struct, frozen=True)`                  | All core IPC types and adapter types are frozen for immutability; also enables faster struct decoding via fixed memory offset attribute access                                       |
-| `gc=False`           | `class Query(Struct, gc=False)`                     | Exempts instances from garbage collector tracking; safe for Structs with only scalar/dict fields and no reference cycles. Reduces GC pause overhead                                  |
-| `array_like=True`    | `class Query(Struct, array_like=True)`              | Encodes as positional array instead of keyed object (e.g., `["id", {...}, {...}, 0.0]` vs `{"id": ..., "data": ...}`). ~6-50% size reduction and ~6-29% faster encode/decode for IPC |
+| Convention           | Example                                                   | Effect                                                                                                                                                                               |
+| -------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `kw_only=True`       | `class ChatCompletionRequest(Struct, kw_only=True)`       | Named-field initialization maps naturally to JSON key-value pairs; prevents positional argument errors on schema evolution                                                           |
+| `omit_defaults=True` | `class ChatCompletionRequest(Struct, omit_defaults=True)` | Fields at default value omitted from encoded output on keyed (JSON-object) Structs; no effect with `array_like=True` (see below)                                                     |
+| `tag="..."`          | `class QueryResult(Struct, tag="query_result")`           | Enables union type discrimination during MessagePack deserialization on the IPC fan-in path                                                                                          |
+| `frozen=True`        | `class Query(Struct, frozen=True)`                        | All core IPC types and adapter types are frozen for immutability; also enables faster struct decoding via fixed memory offset attribute access                                       |
+| `gc=False`           | `class Query(Struct, gc=False)`                           | Exempts instances from garbage collector tracking; safe for Structs with only scalar/dict fields and no reference cycles. Reduces GC pause overhead                                  |
+| `array_like=True`    | `class Query(Struct, array_like=True)`                    | Encodes as positional array instead of keyed object (e.g., `["id", {...}, {...}, 0.0]` vs `{"id": ..., "data": ...}`). ~6-50% size reduction and ~6-29% faster encode/decode for IPC |
+
+`omit_defaults` has no effect on an `array_like` Struct: a positional array
+always encodes every field. The core IPC types (`Query`, `QueryResult`,
+`StreamChunk`) carry the option for intent only, so never add fields to them;
+per-response data such as the server's token counts travels in
+`QueryResult.metadata`.
 
 **Encoder / Decoder patterns:**
 

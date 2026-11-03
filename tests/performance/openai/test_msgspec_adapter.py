@@ -82,7 +82,7 @@ def test_encode_query(benchmark, size_name, text):
     """Benchmark encode_query (Query -> HTTP bytes)."""
     query = make_query(text)
     benchmark.group = "msgspec_adapter_encode_query"
-    benchmark(OpenAIMsgspecAdapter.encode_query, query)
+    benchmark(OpenAIMsgspecAdapter.encode_query, query, include_usage=True)
 
 
 @pytest.mark.performance

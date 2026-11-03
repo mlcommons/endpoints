@@ -27,11 +27,39 @@ partial snapshot tagged `INTERRUPTED`.
 
 ## Token metrics pipeline
 
-ISL/OSL/TPOT may require tokenizer passes: ISL is emitted at `ISSUED` from
-pre-tokenized input IDs or raw prompt text, while OSL and TPOT are emitted from
-completion data. At high event rates a per-event dispatch model accumulates an
-unbounded backlog. The pipeline batches instead: **defer-to-flush** +
-**process-sharded encoding**.
+Both bases record every token series. The run's primary basis
+(`--token-count-source`, passed by the parent as the run's effective source)
+keeps the base names; the other basis appends `_<basis>` (`basis_key`):
+
+| Primary basis | `isl` / `osl` / `tpot_ns`              | `isl_<other>` / `osl_<other>` / `tpot_ns_<other>`  |
+| ------------- | -------------------------------------- | -------------------------------------------------- |
+| `server`      | server usage, from the COMPLETE record | `*_client`: tokenizer triggers                     |
+| `client`      | tokenizer triggers                     | `*_server`: server usage, from the COMPLETE record |
+
+**The server trigger** (`ServerUsageTrigger`) is synchronous and runs at
+COMPLETE. It reads `EventRecord.prompt_tokens` and `completion_tokens` (lifted
+by the session from the response metadata; `UNSET` when the server reported
+none), needs no tokenizer and no `TokenBatchQueue`, so it never enters
+`n_pending_tasks`. One `classify_server_usage` call per successful sample
+decides ISL, OSL and TPOT together. No server series records a value below 1:
+OSL skips `completion_tokens == 0`, and TPOT
+(`(complete - first chunk) / (completion_tokens - 1)`) skips
+`completion_tokens <= 1` and non-positive windows. A tracked successful sample
+whose COMPLETE has no usable usage, or reports 0 `completion_tokens` beside
+non-empty output (which OSL would otherwise skip silently), increments
+`tracked_samples_missing_usage` (and `..._empty_output` when it has no usage and
+empty output) on either primary basis; the first one logs a warning when the
+server basis is primary, else an info line. The tokenizer-side OSL trigger also
+counts, over samples that have both counts, `osl_paired_samples`,
+`osl_paired_client_tokens` and `osl_paired_server_tokens`.
+
+**Tokenizer triggers** may require tokenizer passes: ISL is emitted at `ISSUED`
+from pre-tokenized input IDs or raw prompt text, while OSL and TPOT are emitted
+from completion data. They record into the client-basis series, which are the
+headline series when the client basis is primary (`--no-metrics-isl` drops ISL
+on both bases). Only the primary basis's TPOT is a tail-latency series. At high
+event rates a per-event dispatch model accumulates an unbounded backlog. The
+pipeline batches instead: **defer-to-flush** + **process-sharded encoding**.
 
 ### Defer-to-flush (`TokenBatchQueue`)
 
@@ -90,17 +118,28 @@ only the drain-phase shard children span the machine, and they are idle until
 ### The `n_pending_tasks` contract
 
 `TokenBatchQueue.pending` (enqueued-but-not-recorded) is surfaced on every
-snapshot as `n_pending_tasks`. In the final snapshot:
+snapshot as `n_pending_tasks`. The contract follows the primary basis: with a
+client primary the queue holds the headline tokenizer work, with a server
+primary only the client-basis (`*_client`) work. In the final snapshot:
 
 - `state == complete && n_pending_tasks == 0` — clean run, exact series.
 - `state == complete && n_pending_tasks > 0` — **incomplete drain** (budget
-  exhausted or tokenizer failed); `Report` renders a warning. Failed items are
-  deliberately not removed from the count — under-reporting would rebadge an
-  incomplete drain as clean.
+  exhausted or tokenizer failed). With a client primary the headline series are
+  partial, `Report.complete` is `False` and the run fails. With a server primary
+  the headline series are unaffected; `Report` marks only the `*_client` blocks
+  partial (`client_token_tasks_pending`), logs a warning and the run still
+  passes. Failed items are deliberately not removed from the count —
+  under-reporting would rebadge an incomplete drain as clean.
+
+Missing server usage is a separate signal: it is counted by
+`tracked_samples_missing_usage`, independent of `n_pending_tasks`, on either
+primary basis; with a server primary any such sample makes `Report.complete`
+`False`, with a client primary it only marks the `*_server` blocks partial.
 
 ### Data flow
 
 ```
+COMPLETE event ─► ServerUsageTrigger.fire ─► registry.record()           [sync]
 COMPLETE event ─► trigger.fire ─► queue.enqueue(text, on_count)        [O(1)]
                                        │
   live loop (publish cadence) ─ flush(live) ─► in-process threads (rayon-capped)
@@ -110,16 +149,17 @@ COMPLETE event ─► trigger.fire ─► queue.enqueue(text, on_count)        [
 
 ## CLI
 
-| Flag                             | Default  | Purpose                                              |
-| -------------------------------- | -------- | ---------------------------------------------------- |
-| `--socket-dir` / `--socket-name` | required | EventRecord SUB socket                               |
-| `--metrics-socket`               | required | Snapshot PUB socket name                             |
-| `--metrics-output-dir`           | required | Directory for `final_snapshot.json`                  |
-| `--publish-interval`             | 0.25     | Live snapshot cadence (seconds)                      |
-| `--drain-timeout`                | `None`   | Positive tokenize budget; omitted waits indefinitely |
-| `--tokenizer`                    | none     | HF name or local path; unset disables token metrics  |
-| `--tokenizer-workers`            | `4`      | Live in-process threads (`0` = defer all to drain)   |
-| `--streaming`                    | off      | Register TTFT/chunk-delta/TPOT triggers              |
+| Flag                             | Default  | Purpose                                                  |
+| -------------------------------- | -------- | -------------------------------------------------------- |
+| `--socket-dir` / `--socket-name` | required | EventRecord SUB socket                                   |
+| `--metrics-socket`               | required | Snapshot PUB socket name                                 |
+| `--metrics-output-dir`           | required | Directory for `final_snapshot.json`                      |
+| `--publish-interval`             | 0.25     | Live snapshot cadence (seconds)                          |
+| `--drain-timeout`                | `None`   | Positive tokenize budget; omitted waits indefinitely     |
+| `--token-count-source`           | required | Primary token basis: `server` usage / `client` tokenizer |
+| `--tokenizer`                    | none     | HF name/path; unset disables client token metrics        |
+| `--tokenizer-workers`            | `4`      | Live in-process threads (`0` = defer all to drain)       |
+| `--streaming`                    | off      | Register TTFT/chunk-delta/TPOT triggers                  |
 
 ## References
 

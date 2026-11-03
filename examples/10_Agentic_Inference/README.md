@@ -180,15 +180,22 @@ the tail.
 > `performance/result_summary.json` is concurrency-dependent and must **not** be
 > used for the OSL accuracy requirement. Use
 > `output_sequence_lengths_full_run.output_sequence_lengths.avg` — the per-turn
-> mean over **all** turns (tail and dataset repeats included), computed with the
-> same token-counting rule as the window, which is invariant to concurrency. A
-> run is not valid for the OSL accuracy check when
-> `output_sequence_lengths_full_run` is `null`, **or** its `n_turns_counted` is
-> `0` (turns were scanned but none were countable), **or** its `partial` flag is
-> `true` (some turns were errored, undecodable, or missing a COMPLETE record —
-> so the mean is over a subset), **or** the report is not `complete`.
-> `report.txt` prints it as `OSL per-turn mean (accuracy, all turns)` and marks
-> a partial block `PARTIAL — NOT valid for the OSL accuracy gate`.
+> mean over **all** turns (tail and dataset repeats included), counted on the
+> same primary token basis as the window, which is invariant to concurrency.
+> With a server primary the block counts each turn's `completion_tokens`, with
+> no tokenizer needed, and when a tokenizer is configured it also carries the
+> tokenizer count as the sibling `output_sequence_lengths_client`. With a client
+> primary (`--token-count-source client`) the block counts with the tokenizer,
+> so a tokenizer is required, and carries the server count beside it as
+> `output_sequence_lengths_server`. A run is not valid for the OSL accuracy
+> check when `output_sequence_lengths_full_run` is `null`, **or** its
+> `n_turns_counted` is `0` (turns were scanned but none were countable), **or**
+> its `partial` flag is `true` (some turns were errored, undecodable, missing a
+> COMPLETE record, or — on the server basis — returned no usage or 0 tokens
+> beside output, so the mean is over a subset), **or** the report is not
+> `complete`. `report.txt` prints it as
+> `OSL per-turn mean (accuracy, all turns)` and marks a partial block
+> `PARTIAL — NOT valid for the OSL accuracy gate`.
 
 ### SWE-bench Accuracy
 

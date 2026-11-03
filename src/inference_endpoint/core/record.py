@@ -168,6 +168,33 @@ class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type:
     data: OUTPUT_TYPE | PromptData | ErrorData | PhaseData | None = None
     finish_reason: str | msgspec.UnsetType = msgspec.UNSET
     worker_id: int | msgspec.UnsetType = msgspec.UNSET
+    prompt_tokens: int | msgspec.UnsetType = msgspec.UNSET
+    completion_tokens: int | msgspec.UnsetType = msgspec.UNSET
+
+
+# ``event_type`` is EventRecord's first field, so in an ``events.jsonl`` line
+# (msgspec JSON) the marker sits in the leading bytes. A JSON string value
+# escapes its quotes, so the marker cannot occur inside one.
+_COMPLETE_LINE_MARKER: Final = b'"event_type":"sample.complete"'
+_MARKER_WINDOW: Final = 256
+
+
+def is_complete_line(line: bytes) -> bool:
+    """Whether one ``events.jsonl`` line holds a COMPLETE record.
+
+    Searches only the line's leading bytes, so a reader skips every other
+    record without decoding it or scanning its prompt and response payload.
+
+    Precondition: the line is compact msgspec JSON with ``event_type`` first,
+    as ``JSONLWriter`` writes it. Any other encoding (e.g. ``json.dumps``
+    with its default ``": "`` separator) never matches.
+    """
+    return line.find(_COMPLETE_LINE_MARKER, 0, _MARKER_WINDOW) != -1
+
+
+class EventLogFormatError(ValueError):
+    """An event log a reader cannot read without losing samples, such as one
+    not in the compact form ``is_complete_line`` requires."""
 
 
 class EventRecordCodec:

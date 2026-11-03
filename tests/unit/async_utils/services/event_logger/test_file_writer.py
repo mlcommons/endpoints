@@ -73,6 +73,30 @@ class TestJSONLWriter:
         assert "finish_reason" not in records[0]
         assert records[1]["finish_reason"] == "tool_calls"
 
+    def test_writes_server_usage_only_when_set(self, tmp_path):
+        writer = JSONLWriter(tmp_path / "events", flush_interval=1)
+        try:
+            writer.write(_record(SampleEventType.COMPLETE, uuid="s0", ts=1000))
+            writer.write(
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    timestamp_ns=2000,
+                    sample_uuid="s1",
+                    prompt_tokens=11,
+                    completion_tokens=3,
+                )
+            )
+        finally:
+            writer.close()
+
+        lines = (tmp_path / "events.jsonl").read_text().strip().split("\n")
+        records = [json.loads(line) for line in lines]
+        assert "prompt_tokens" not in records[0]
+        assert "completion_tokens" not in records[0]
+        assert (records[1]["prompt_tokens"], records[1]["completion_tokens"]) == (11, 3)
+        # Consumers scan the line prefix for the event type, so it stays first.
+        assert next(iter(records[1])) == "event_type"
+
     def test_record_roundtrip_fields(self, tmp_path):
         writer = JSONLWriter(tmp_path / "events", flush_interval=1)
         try:

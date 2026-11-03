@@ -35,6 +35,7 @@ import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator import (
     __main__ as agg_main,
 )
+from inference_endpoint.core.types import TokenCountSource
 
 
 @pytest.mark.unit
@@ -168,3 +169,33 @@ def test_drain_timeout_must_be_positive(value):
 @pytest.mark.unit
 def test_positive_drain_timeout_parses():
     assert agg_main._positive_float("0.25") == 0.25
+
+
+_ARGV = [
+    "--socket-dir",
+    "d",
+    "--socket-name",
+    "s",
+    "--metrics-socket",
+    "m",
+    "--metrics-output-dir",
+    "o",
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", list(TokenCountSource), ids=lambda s: s.value)
+def test_token_count_source_argv(source):
+    args = agg_main._build_parser().parse_args(
+        [*_ARGV, "--token-count-source", source.value]
+    )
+    assert args.token_count_source is source
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "extra", [[], ["--token-count-source", "both"]], ids=["absent", "unknown"]
+)
+def test_main_requires_token_count_source_flag(extra):
+    with pytest.raises(SystemExit):
+        agg_main._build_parser().parse_args([*_ARGV, *extra])

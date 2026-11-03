@@ -60,7 +60,7 @@ load_generator  ──►  EventPublisher (events PUB)
           json.loads(final_snapshot.json)  → dict
                           │
                           ▼
-        Report.from_snapshot(dict, run_config=...)
+        Report.from_snapshot(dict, run_config=..., token_count_source=...)
                           │
               ┌───────────┴───────────┐
               ▼                       ▼
@@ -76,12 +76,13 @@ live snapshot and the resulting `Report.complete` is `False`.
 
 ## Files
 
-| File                | Purpose                                                                                                            |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `report.py`         | `Report` Struct + `Report.from_snapshot(dict)`; console `display()` and `to_json()` serializer                     |
-| `metric.py`         | Metric target types (`Throughput`, `QueryLatency`, `TTFT`, `TPOT`) used by rulesets                                |
-| `early_stopping.py` | MLPerf LoadGen early-stopping percentile estimates (pure math); see [docs/early_stopping.md](../early_stopping.md) |
-| `results_plots.py`  | Standardized run-artifact plots (matplotlib-guarded); CLI: `scripts/plot_results.py`                               |
+| File                   | Purpose                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `report.py`            | `Report` Struct + `Report.from_snapshot(dict)`; console `display()` and `to_json()` serializer                     |
+| `metric.py`            | Metric target types (`Throughput`, `QueryLatency`, `TTFT`, `TPOT`) used by rulesets                                |
+| `early_stopping.py`    | MLPerf LoadGen early-stopping percentile estimates (pure math); see [docs/early_stopping.md](../early_stopping.md) |
+| `results_plots.py`     | Standardized run-artifact plots (matplotlib-guarded); CLI: `scripts/plot_results.py`                               |
+| `token_count_basis.py` | Usage classification rule, effective basis, and the run's basis (summary, else `config.yaml`) for post-run tools   |
 
 ## Public Interface
 
@@ -100,7 +101,10 @@ class Report(msgspec.Struct, frozen=True):
     n_samples_failed: int
     duration_ns: int | None
     state: str            # terminal SessionState string ("complete" / "interrupted")
-    complete: bool        # True iff state == "complete" AND n_pending_tasks == 0
+    complete: bool        # per the primary basis: server = state == "complete", valid
+                          # accounting, no drops AND n_samples_missing_usage == 0;
+                          # client = same, with n_pending_tasks == 0 instead of the
+                          # usage check
     ttft: dict            # per-metric rollup dicts (min/max/mean/percentiles/...)
     tpot: dict
     latency: dict
@@ -112,12 +116,21 @@ class Report(msgspec.Struct, frozen=True):
     finish_reason_counts: dict[str, int] = {}
     run_config: dict | None = None          # config (load pattern, warmup, RNG seeds)
     accuracy: list[dict] = []               # per-dataset accuracy, attached post-scoring
+    token_count_source: TokenCountSource    # primary basis of tpot/ISL/OSL/tps: SERVER or CLIENT
+    n_samples_missing_usage: int = 0        # successful tracked samples with no usable server usage
+    n_samples_missing_usage_empty_output: int = 0   # ... of which had empty output
+    client_token_tasks_pending: int = 0     # tokenizer tasks pending at the final snapshot
+    other_basis: OtherBasisMetrics          # the other basis's ISL/OSL/TPOT blocks and TPS
+    osl_paired: OslPaired | None = None     # OSL totals/mean diff/ratio over paired samples
 
     @classmethod
     def from_snapshot(
-        cls, snap: dict, *, run_config: dict | None = None,
+        cls, snap: dict, *, token_count_source: TokenCountSource,
+        run_config: dict | None = None,
         use_legacy_loadgen_qps_metrics: bool = True,
     ) -> "Report": ...
+
+    def incomplete_reason(self) -> str | None: ...   # cause of complete == False
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes: ...
     def display(self, ...) -> None: ...
@@ -139,15 +152,36 @@ defaults to `"interrupted"`). It derives headline throughput once:
   native window so they always share one window, and
   `legacy_loadgen_window_duration_ns` is left `None` so the serialized report
   honestly records which view it holds.
-- `tps` is additionally `None` when no OSL was recorded — i.e. no tokenizer is
-  configured (or the output is empty). OSL is captured on `COMPLETE` regardless
-  of streaming, so non-streaming runs still get a TPS when a tokenizer is
-  available.
-- For failure-free runs, `e2e_avg_interactivity` is total output tokens divided
-  by summed end-to-end sample latency in seconds. It is `None`/`N/A` when no OSL
-  or positive sample-latency total is available, or when any tracked request
-  failed. Failed responses contribute to `sample_latency_ns` but not OSL, so
-  reporting the ratio in that case would combine different sample populations.
+- `tps` is additionally `None` when no OSL was recorded (every output empty, or
+  a client primary has no tokenizer configured). OSL is captured on `COMPLETE`
+  regardless of streaming, so non-streaming runs still get a TPS. With a server
+  primary the OSL is the server's `completion_tokens`, so `tps` needs no
+  tokenizer. `other_basis.tps` is the other basis's TPS over the same window; it
+  is `None` whenever that basis is partial (for a client other basis,
+  `client_token_tasks_pending > 0`).
+- For failure-free runs, `e2e_avg_interactivity` is total output tokens (on the
+  primary basis) divided by summed end-to-end sample latency in seconds. It is
+  `None`/`N/A` when no OSL or positive sample-latency total is available, or
+  when any tracked request failed. Failed responses contribute to
+  `sample_latency_ns` but not OSL, so reporting the ratio in that case would
+  combine different sample populations.
+
+**Token-count basis.** The snapshot does not record where its token counts came
+from, so the caller passes the run's effective `token_count_source` as a
+required keyword (the primary basis). The headline `tpot`,
+`input_sequence_lengths`, `output_sequence_lengths`, `tps`,
+`e2e_avg_interactivity`, early-stopping maps and steady-state block are on the
+primary basis; the other basis fills `other_basis`, serialized flat under
+`_<basis>`-suffixed names (`tpot_server` beside a client primary, `tpot_client`
+beside a server primary), and `osl_paired` compares the two over samples counted
+on both. `complete` follows the primary basis: with a server primary it is
+`False` when any successful tracked sample reported no usage, and with a client
+primary when tokenization is still pending. `incomplete_reason()` names the
+cause (missing usage, a client-basis tokenizer drain, or an incomplete state).
+The other basis falling short leaves `complete` `True` and marks its blocks
+`"partial": true`. See
+[report_design.md](report_design.md#server-vs-client-token-counts) for the
+systematic differences between the two bases.
 
 **Accuracy** is not part of the metrics snapshot; `from_snapshot` leaves
 `accuracy` empty and the finalizer attaches per-dataset accuracy entries after
@@ -177,9 +211,9 @@ average interactivity, and `run_config`) so a valid run is fully described by
 its own artifact.
 
 **Honest incompleteness over crashes.** Every snapshot read defaults safely;
-drain-timeout and interrupted runs produce a `Report` with `complete=False` and
-an explicit indicator in `display()` rather than a partial success that looks
-clean.
+client-primary drain-timeout, server-primary missing-usage and interrupted runs
+produce a `Report` with `complete=False` and an explicit indicator in
+`display()` rather than a partial success that looks clean.
 
 ## Integration Points
 

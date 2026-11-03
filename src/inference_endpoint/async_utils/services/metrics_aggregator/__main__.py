@@ -26,12 +26,14 @@ from pathlib import Path
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
+from inference_endpoint.core.types import TokenCountSource
 from inference_endpoint.metrics.early_stopping import EarlyStoppingSpec
 from inference_endpoint.metrics.steady_state_diagnostics import PROFILES
+from inference_endpoint.metrics.token_count_basis import TOKEN_COUNT_SOURCE_METAVAR
 from inference_endpoint.utils.logging import setup_logging
 
-from .aggregator import MetricCounterKey, MetricsAggregatorService
-from .metrics_table import MetricsTable
+from .aggregator import MetricsAggregatorService
+from .metrics_table import MetricCounterKey, MetricsTable
 from .publisher import MetricsPublisher
 from .registry import MetricsRegistry
 from .snapshot import MetricsSnapshotCodec
@@ -111,7 +113,7 @@ def _make_sigterm_handler(
     return _on_sigterm, pending_tasks
 
 
-async def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Metrics aggregator service - subscribes to EventRecords and computes real-time metrics"
     )
@@ -175,7 +177,7 @@ async def main() -> None:
         "--tokenizer",
         type=str,
         default=None,
-        help="HuggingFace tokenizer name for ISL/OSL/TPOT (e.g. 'gpt2'). If not set, token metrics are disabled.",
+        help="HuggingFace tokenizer for client-basis ISL/OSL/TPOT (e.g. 'gpt2'). If not set, the client basis counts only pre-tokenized prompts; the server basis needs no tokenizer.",
     )
     parser.add_argument(
         "--tokenizer-workers",
@@ -230,7 +232,24 @@ async def main() -> None:
             "standalone detector re-runs use the same profile."
         ),
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--token-count-source",
+        type=TokenCountSource,
+        choices=list(TokenCountSource),
+        metavar=TOKEN_COUNT_SOURCE_METAVAR,
+        required=True,
+        help=(
+            "Primary token-count basis: its isl/osl/tpot_ns series keep the base "
+            "name and feed early stopping and steady state; the other basis "
+            "records into the same series suffixed _<basis>. The parent passes "
+            "the run's resolved source."
+        ),
+    )
+    return parser
+
+
+async def main() -> None:
+    args = _build_parser().parse_args()
     setup_logging(level="INFO")
 
     if args.tokenizer_workers < 0:
@@ -302,6 +321,7 @@ async def main() -> None:
                 shutdown_event=shutdown_event,
                 drain_timeout_s=args.drain_timeout,
                 steady_state_profile=args.steady_state_profile,
+                token_count_source=args.token_count_source,
             )
             aggregator.start()
 

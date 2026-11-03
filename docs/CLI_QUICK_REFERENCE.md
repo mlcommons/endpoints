@@ -130,6 +130,21 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--no-early-stopping` - opt out of the MLPerf early-stopping percentile
   estimates in `result_summary.json` (default: on; see
   [early_stopping.md](early_stopping.md))
+- `--token-count-source` (YAML `settings.token_count_source`) - Primary basis
+  for ISL/OSL/TPS/TPOT token counts: `server` (the endpoint's per-request
+  `usage`) or `client` (the local tokenizer). The other basis is reported beside
+  the primary one with a `_<basis>` suffix (`*_server` beside a client primary,
+  `*_client` beside a server primary). A server primary asks streaming requests
+  for usage and fails the run (exit 4) if a successful tracked sample returns
+  none, or 0 completion tokens beside non-empty output, so it needs an endpoint
+  that reports usage. A client primary needs a tokenizer; an endpoint that
+  cannot report usage works unchanged under it, with the `*_server` blocks
+  absent or partial. `api_type: videogen` always counts with `client`.
+- `--no-stream-include-usage` (YAML `settings.client.stream_include_usage`) -
+  stop asking streaming OpenAI requests for usage
+  (`stream_options.include_usage`; default: on), for endpoints that reject
+  `stream_options`. Not allowed with `--token-count-source server` on a
+  streaming OpenAI run.
 
 **Online-specific:**
 
@@ -332,6 +347,7 @@ settings:
     target_qps: 10.0
   client:
     num_workers: -1 # auto
+  token_count_source: client # Primary basis: server (endpoint usage) or client (local tokenizer)
 
 metrics:
   collect: ["throughput", "latency", "ttft", "tpot"]
