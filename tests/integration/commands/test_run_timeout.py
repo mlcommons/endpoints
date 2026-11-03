@@ -139,27 +139,32 @@ def test_run_timeout_produces_interrupted_report(
 
 
 @pytest.mark.integration
-def test_run_timeout_during_metrics_drain_interrupts(mock_http_echo_server, tmp_path):
-    """The watchdog stays armed through the metrics drain.
+def test_run_timeout_with_a_token_backlog_interrupts(mock_http_echo_server, tmp_path):
+    """A watchdog abort with a token-backlog drain pending still interrupts.
 
-    The session itself finishes quickly, but the aggregator is left with a
-    deliberately huge tokenization backlog (large prompts echoed back as
-    outputs, metrics_tokenizer_workers=0 so nothing tokenizes mid-run, and
-    the metrics drain unlimited). The watchdog must fire while the
-    aggregator drains, bound the graceful teardown, and surface the run as
-    INTERRUPTED with a non-zero exit.
+    The session issues large prompts at 5 QPS for a ~120 s workload, so only
+    the watchdog can end it on any runner (its budget comfortably exceeds
+    service + worker startup; an earlier fire aborts the launch instead,
+    covered by test_run_timeout_during_service_launch_aborts_promptly). Every
+    completed sample's ISL/OSL tokenization is deferred to the end-of-run
+    drain (metrics_tokenizer_workers=0), so the abort leaves a real backlog:
+    the aggregator must drain it into a state=interrupted final_snapshot.json
+    and run_benchmark must still surface the run as a timeout.
     """
     dataset_path = write_large_prompt_dataset(tmp_path, 100)
     config = _make_config(
         mock_http_echo_server.url,
         dataset_path,
         tmp_path / "report",
+        test_type=TestType.ONLINE,
+        load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=5),
         model_name=str(_CHAR_TOKENIZER_DIR),
         # Defer every ISL/OSL tokenization to the end-of-run drain.
-        # metrics_drain_timeout_s stays None (unlimited): only the run
-        # watchdog can end the drain.
+        # metrics_drain_timeout_s stays None (unlimited): the drain must chew
+        # the whole backlog the abort leaves behind.
         metrics_tokenizer_workers=0,
-        timeouts=Timeouts(run_timeout_s=2.5),
+        runtime=RuntimeConfig(n_samples_to_issue=600),
+        timeouts=Timeouts(run_timeout_s=6.0),
     )
     report_dir = tmp_path / "report"
 

@@ -1,0 +1,8 @@
+# This stub cohort's declared refs: exactly the node-scope facts its rows name
+# (`point.config.concurrency`, `point.config.offline`) plus how their absences
+# read. The rows' `derived.*`/`regions.*` refs name checker-owned roots and get
+# no entry here: `valid_refs.yaml` names node scopes only.
+point:
+  config:
+    concurrency: { type: int, required: true }
+    offline: { type: str, allowlist: [dedicated, elected, none], default: null }
