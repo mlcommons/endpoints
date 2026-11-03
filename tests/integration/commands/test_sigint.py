@@ -136,14 +136,34 @@ def _benchmark_proc(
 def _wait_services_ready(
     proc: subprocess.Popen, report_dir: Path, timeout_s: float = 60.0
 ) -> None:
-    """Block until the aggregator touches metrics/.ready (handlers installed);
-    the session starts issuing right after service readiness."""
+    """Block until the aggregator touches metrics/.ready (handlers installed).
+
+    Readiness precedes HTTP worker startup and the session's STARTED, so the
+    run may not be measuring yet; wait for ``_PERF_PHASE_STARTED`` for that.
+    """
     ready = report_dir / "metrics" / ".ready"
     deadline = time.monotonic() + timeout_s
     while not ready.exists():
         assert proc.poll() is None, "benchmark died before services came up"
         assert time.monotonic() < deadline, "services never became ready"
         time.sleep(0.1)
+
+
+# Logged by BenchmarkSession._run_phase right after the session publishes
+# STARTED; from here the aggregator is LIVE and publishes a snapshot every
+# 0.25 s (its default --publish-interval).
+_PERF_PHASE_STARTED = "Starting phase: performance"
+
+
+def _wait_for_log(
+    proc: subprocess.Popen, log_file: Path, needle: str, timeout_s: float = 60.0
+) -> None:
+    """Block until the benchmark's captured output contains ``needle``."""
+    deadline = time.monotonic() + timeout_s
+    while needle not in log_file.read_text(errors="replace"):
+        assert proc.poll() is None, f"benchmark exited before logging {needle!r}"
+        assert time.monotonic() < deadline, f"benchmark never logged {needle!r}"
+        time.sleep(0.05)
 
 
 def _iter_proc_cmdlines() -> Iterator[tuple[int, bytes]]:
@@ -221,7 +241,8 @@ def test_group_sigint_exits_gracefully(mock_http_echo_server, tmp_path):
         log_file,
     ) as proc:
         _wait_services_ready(proc, report_dir)
-        time.sleep(3.0)
+        _wait_for_log(proc, log_file, _PERF_PHASE_STARTED)
+        time.sleep(3.0)  # well inside the ~120 s performance phase
         os.killpg(proc.pid, signal.SIGINT)
         rc = proc.wait(timeout=60.0)
 
@@ -283,13 +304,18 @@ def test_sigint_grace_expiry_abandons_wedged_drain(mock_http_echo_server, tmp_pa
         interrupted_teardown_grace_s=3.0,
     )
 
+    log_file = tmp_path / "run.log"
     agg_pid: int | None = None
     try:
         with _benchmark_proc(
-            [_cli(), "benchmark", "from-config", "-c", str(config_path)]
+            [_cli(), "benchmark", "from-config", "-c", str(config_path)],
+            log_file=log_file,
         ) as proc:
             _wait_services_ready(proc, report_dir)
-            time.sleep(3.0)  # comfortably inside the ~120 s performance phase
+            # Without a live snapshot to fall back on, the SIGKILLed
+            # aggregator leaves nothing to build result_summary.json from.
+            _wait_for_log(proc, log_file, _PERF_PHASE_STARTED)
+            time.sleep(3.0)  # many publish ticks past STARTED
 
             agg_pid = _pid_of_child("metrics_aggregator", str(report_dir))
             assert agg_pid is not None, "aggregator child not found"
@@ -314,9 +340,12 @@ def test_sigint_grace_expiry_abandons_wedged_drain(mock_http_echo_server, tmp_pa
     # The SIGKILLed aggregator never wrote a terminal snapshot, so the report
     # was built from the last live pub/sub frame — the split-brain guard must
     # still land the summary as interrupted, never state:"live".
-    summary = json.loads(
-        (report_dir / "performance" / "result_summary.json").read_text()
+    summary_path = report_dir / "performance" / "result_summary.json"
+    assert summary_path.exists(), (
+        "no result_summary.json; run log tail:\n"
+        + log_file.read_text(errors="replace")[-4000:]
     )
+    summary = json.loads(summary_path.read_text())
     assert summary["state"] == "interrupted"
     assert summary["complete"] is False
     _assert_no_leftover_children(report_dir, "grace-expired abort")
@@ -410,13 +439,12 @@ settings:
     ) as proc:
         # The pipeline logs this line once the session has ENDED and the
         # aggregator drain wait begins — the divergence window.
-        deadline = time.monotonic() + 120.0
-        while "Waiting for services to finish processing" not in log_file.read_text(
-            errors="replace"
-        ):
-            assert proc.poll() is None, "benchmark exited before the drain"
-            assert time.monotonic() < deadline, "drain window never reached"
-            time.sleep(0.05)
+        _wait_for_log(
+            proc,
+            log_file,
+            "Waiting for services to finish processing",
+            timeout_s=120.0,
+        )
 
         os.kill(proc.pid, signal.SIGINT)  # main process only: aggregator unsignaled
         rc = proc.wait(timeout=120.0)
