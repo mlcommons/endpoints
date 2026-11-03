@@ -212,3 +212,4 @@ CLAUDE.local.md
 
 # Generated dataset cache (created by Dataset.get_dataloader())
 dataset_cache/
+.agents/devdocs/

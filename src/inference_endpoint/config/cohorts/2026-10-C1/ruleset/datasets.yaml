@@ -1,0 +1,56 @@
+# The 2026-10-C1 dataset catalog: the sets the checks name, and the §12 smallest
+# conforming acceptance count each one needs.
+#
+# Sources:
+#   - `min_queries`: the submission checker's `point_result.py` MIN_QUERY_COUNT
+#     table (mlcommons/endpoints-submission-cli), which transcribes the policy
+#     tables.
+#   - `dataset_type`: this round's own declaration of the phase that runs it.
+#
+# An accuracy set's per-model run shape (`unit_samples`, `num_repeats`) lives on
+# the model's `accuracy_datasets` tie in models.yaml: the same set can need a
+# different shape for a different model, so it cannot live on the dataset entry.
+# `agentic_combined` and `swe_bench` are the agentic gates' sets (models.yaml);
+# the checker publishes no §12 acceptance count for either.
+#
+# The document is the mapping `Catalog.from_directory` reads: each top-level key
+# is a dataset, each value a raw dict a `ruleset.datasets.<name>.<key>` row
+# addresses.
+
+cnn_dailymail:
+  dataset_type: accuracy
+  min_queries: 13368
+deepseek_r1_accuracy:
+  dataset_type: accuracy
+  min_queries: 4388
+aime25:
+  dataset_type: accuracy
+  min_queries: 30
+gpqa:
+  dataset_type: accuracy
+  min_queries: 198
+livecodebench:
+  dataset_type: accuracy
+  min_queries: 880
+math500:
+  dataset_type: accuracy
+  min_queries: 500
+mlperf_gpt_oss_accuracy:
+  dataset_type: accuracy
+  min_queries: 4395
+mlperf_gpt_oss_performance:
+  dataset_type: performance
+  min_queries: 6396
+open_orca:
+  dataset_type: performance
+  min_queries: 24576
+shopify_product_catalogue:
+  dataset_type: performance
+  min_queries: 48289
+shopify_product_catalogue_8k:
+  dataset_type: performance
+  min_queries: 8000
+agentic_combined:
+  dataset_type: performance
+swe_bench:
+  dataset_type: accuracy
