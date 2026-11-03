@@ -62,6 +62,7 @@ from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQConte
 from inference_endpoint.config.schema import LoadPatternType
 from inference_endpoint.metrics.report import Report
 from inference_endpoint.metrics.steady_state_diagnostics import profile_for_load_pattern
+from inference_endpoint.utils import trace
 
 if TYPE_CHECKING:
     from inference_endpoint.config.schema import BenchmarkConfig
@@ -275,6 +276,7 @@ class MetricsPipeline:
         self._launcher: ServiceLauncher | None = None
         self.publisher: EventPublisherService | None = None
         self.subscriber: MetricsSnapshotSubscriber | None = None
+        self.final_snapshot: dict[str, Any] | None = None
 
     async def __aenter__(self) -> MetricsPipeline:
         await self.start()
@@ -335,6 +337,24 @@ class MetricsPipeline:
             )
             self.subscriber.start()
             stack.callback(self._close_subscriber)
+            # -vvv: hand the dashboard the metrics-PUB address so it can open
+            # its own SUB (fresh live snapshots, immune to main-loop starvation).
+            trace.publish_metrics_addr(self.subscriber.connect_address)
+            # -vvv: snapshot sidecar tap — the FALLBACK live feed for the
+            # dashboard's LOADGEN panel, consumed only until the dashboard's own
+            # SUB connects. ``subscriber.latest`` advances on this loop, so a
+            # saturated run can starve it; the dashboard SUB above cannot be.
+            # It also carries the authoritative terminal snapshot, which
+            # trace.teardown() writes before closing the FIFO.
+            subscriber = self.subscriber
+            trace.start_snapshot_tap(
+                self._loop,
+                lambda: (
+                    snapshot_to_dict(subscriber.latest)
+                    if subscriber.latest is not None
+                    else None
+                ),
+            )
 
             self._launcher = ServiceLauncher(zmq_ctx)
             timeouts = self._config.settings.timeouts
@@ -444,6 +464,7 @@ class MetricsPipeline:
         else:
             logger.error("No metrics snapshot available; cannot build report")
 
+        self.final_snapshot = snap_dict
         report = (
             _build_report_from_snapshot(snap_dict, self._config)
             if snap_dict is not None

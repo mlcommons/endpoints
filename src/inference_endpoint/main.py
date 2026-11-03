@@ -42,7 +42,9 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
+from inference_endpoint.utils import trace
 from inference_endpoint.utils.logging import setup_logging
+from inference_endpoint.utils.trace import bootstrap as _bootstrap_trace
 
 logger = logging.getLogger(__name__)
 
@@ -64,13 +66,26 @@ def launcher(
             name="--verbose",
             alias="-v",
             count=True,
-            help="Verbosity level (-v info, -vv debug)",
+            help="Verbosity level (-v info, -vv debug, -vvv trace)",
         ),
     ] = 0,
 ):
     """Global options applied before any command."""
-    setup_logging(level="DEBUG" if verbose >= 2 else "INFO")
-    app(tokens)
+    # -vvv only spawns the trace pipeline (FIFO, dashboard subprocess,
+    # stdout/stderr redirect) for the `benchmark` subcommand. Other
+    # commands (info, init, probe, validate-yaml) cap the verbosity at
+    # DEBUG so the FIFO/dashboard/log-redirect path is skipped —
+    # running e.g. `inference-endpoint -vvv info` should print info,
+    # not hijack the terminal.
+    is_benchmark = bool(tokens) and tokens[0] == "benchmark"
+    setup_logging(level=_bootstrap_trace(verbose if is_benchmark else min(verbose, 2)))
+    try:
+        app(tokens)
+    finally:
+        # Guarantees FIFO/dir cleanup when the benchmark fails before
+        # reaching run_benchmark_async's own teardown (e.g. config /
+        # dataset / endpoint setup raises). Idempotent off-trace.
+        trace.cleanup()
 
 
 # Benchmark subcommands — lazy-loaded from commands/benchmark/cli.py
