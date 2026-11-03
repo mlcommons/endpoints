@@ -680,8 +680,8 @@ class BatchTokenizer:
                 if isinstance(result, Exception):
                     outcomes[index] = result
                     continue
-                rendered_texts.append((index, result[0])) # rendered text
-                offsets[index] = result[1] # offset
+                rendered_texts.append((index, result[0]))  # rendered text
+                offsets[index] = result[1]  # offset
             if rendered_texts:
                 for index, outcome in await self._count_indexed_texts_async(
                     rendered_texts, loop, live=live
