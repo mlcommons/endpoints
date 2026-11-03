@@ -24,6 +24,7 @@ the worker pool transport.
 from __future__ import annotations
 
 import logging
+import signal
 import subprocess
 import sys
 import time
@@ -104,20 +105,24 @@ class ServiceLauncher:
         )
 
         try:
-            for i, svc in enumerate(services):
-                cmd = [
-                    sys.executable,
-                    "-m",
-                    svc.module,
-                    *svc.args,
-                    "--readiness-path",
-                    readiness_path,
-                    "--readiness-id",
-                    str(i),
-                ]
-                logger.info("Launching service: %s (id=%d)", svc.module, i)
-                proc = subprocess.Popen(cmd)
-                self._procs.append(proc)
+            previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+            try:
+                for i, svc in enumerate(services):
+                    cmd = [
+                        sys.executable,
+                        "-m",
+                        svc.module,
+                        *svc.args,
+                        "--readiness-path",
+                        readiness_path,
+                        "--readiness-id",
+                        str(i),
+                    ]
+                    logger.info("Launching service: %s (id=%d)", svc.module, i)
+                    proc = subprocess.Popen(cmd)
+                    self._procs.append(proc)
+            finally:
+                signal.signal(signal.SIGINT, previous_sigint)
 
             await receiver.wait(timeout=timeout)
             logger.info("All %d services ready", len(services))
@@ -144,6 +149,35 @@ class ServiceLauncher:
             # If for some reason the reason for the exception is not a crashed subprocess,
             # re-raise the exception.
             raise
+
+    def terminate_all(self, timeout: float = 5.0) -> None:
+        """Terminate all managed subprocesses: SIGTERM then escalate to SIGKILL.
+
+        Sends SIGTERM first so subprocesses can flush final state (e.g. the
+        metrics aggregator writes ``INTERRUPTED`` ``final_snapshot.json`` in its
+        SIGTERM handler). After ``timeout`` seconds any process that has not
+        exited is killed unconditionally with SIGKILL.
+        """
+        for proc in self._procs:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except OSError as e:  # noqa: BLE001 — proc already exited between poll and terminate
+                    logger.debug("terminate pid=%d: %s", proc.pid, e)
+        deadline = time.monotonic() + timeout
+        for proc in self._procs:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired) as e:  # noqa: BLE001
+                    # OSError: proc already exited between kill and wait.
+                    # TimeoutExpired: proc is stuck in kernel D-state; log and
+                    # continue so remaining processes in _procs are still handled.
+                    logger.warning("Could not kill pid=%d: %s", proc.pid, e)
 
     def kill_all(self) -> None:
         """Kill all managed subprocesses."""

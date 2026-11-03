@@ -119,6 +119,14 @@ def parse_dataset_string(s: str) -> dict[str, object]:
         for seg in segments[:-1]:
             if seg not in target:
                 target[seg] = {}  # type: ignore[index]
+            elif not isinstance(target[seg], dict):
+                # e.g. 'parser=x,parser.prompt=y' — 'parser' is set as both a
+                # scalar and a nested key. Without this, target[seg] would be a
+                # str and the next assignment raises an uncaught TypeError.
+                raise ValueError(
+                    f"Conflicting option '{key}': '{seg}' is set both as a value "
+                    f"and as a nested key. Use one form for '{seg}'."
+                )
             target = target[seg]  # type: ignore[assignment]
         target[segments[-1]] = value  # type: ignore[index]
 

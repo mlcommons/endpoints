@@ -13,12 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""This module contains a code representation of the rules for the current round of MLPerf Inference.
+"""Code representation of the MLCommons benchmark rounds and their pinned seeds.
 
-These values are derived directly from the MLPerf Inference Policies document:
+The MLPerf Inference rounds derive from the MLPerf Inference Policies document:
 https://github.com/mlcommons/inference_policies/blob/master/inference_rules.adoc
+
+The MLPerf Endpoints seed sets come from a separate repository on an
+independent rotation; each block cites its own pinned upstream source.
 """
 
+import copy
 import random
 from dataclasses import dataclass, field
 from enum import Enum
@@ -26,7 +30,6 @@ from enum import Enum
 from .... import metrics
 from ...ruleset_base import BenchmarkSuiteRuleset
 from ...runtime_settings import RuntimeSettings
-from ...schema import SystemDefaults
 from ...user_config import UserConfig
 from . import models
 
@@ -108,6 +111,9 @@ class OptimizationPriority(Enum):
     LOW_LATENCY_INTERACTIVE = (
         "Strict latency constraint for Interactive sessions, TPOT > TTFT > throughput"
     )
+    EDGE_SINGLE_STREAM = (
+        "Single-stream edge serving (one in-flight request, -np 1), reasoning off"
+    )
 
 
 @dataclass(frozen=True)
@@ -184,16 +190,17 @@ class RoundRuleset(BenchmarkSuiteRuleset):
                     f"Invalid metric type: {mtype} for ruleset type {ruleset.__class__.__name__}"
                 )
 
-        min_duration_ms = ruleset.min_duration_ms_valid
-        if user_config.min_duration_ms is not None:
-            min_duration_ms = user_config.min_duration_ms
+        min_issue_duration_ms = ruleset.min_duration_ms_valid
+        if user_config.min_issue_duration_ms is not None:
+            min_issue_duration_ms = user_config.min_issue_duration_ms
 
-        max_duration_ms = ruleset.max_duration_ms_valid
-        if user_config.max_duration_ms is not None:
-            max_duration_ms = user_config.max_duration_ms
+        max_issue_duration_ms = ruleset.max_duration_ms_valid
+        if user_config.max_issue_duration_ms is not None:
+            max_issue_duration_ms = user_config.max_issue_duration_ms
         assert (
-            max_duration_ms is not None and max_duration_ms >= min_duration_ms
-        ), "Max duration must be greater than or equal to min duration"
+            max_issue_duration_ms is not None
+            and max_issue_duration_ms >= min_issue_duration_ms
+        ), "Max issue duration must be greater than or equal to min issue duration"
 
         n_samples_from_dataset = model.dataset.size
         if user_config.ds_subset_size:
@@ -210,10 +217,10 @@ class RoundRuleset(BenchmarkSuiteRuleset):
         return _RuntimeSettings(
             metric_target=metric_target
             if metric_target is not None
-            else SystemDefaults.DEFAULT_METRIC,
+            else metrics.Throughput(0.0),
             reported_metrics=reported_metrics,
-            min_duration_ms=min_duration_ms,
-            max_duration_ms=max_duration_ms,
+            min_issue_duration_ms=min_issue_duration_ms,
+            max_issue_duration_ms=max_issue_duration_ms,
             n_samples_from_dataset=n_samples_from_dataset,
             n_samples_to_issue=total_sample_count,
             min_sample_count=min_sample_count if min_sample_count is not None else 1,
@@ -269,4 +276,100 @@ _v5_1 = RoundRuleset(
 )
 
 
-CURRENT = _v5_1
+# v6.1 per-model latency targets are unchanged from v5.1 (they match the
+# current mlperf.conf); only the round RNG seeds rotate. Seeds are the
+# schedule_rng_seed / sample_index_rng_seed values from loadgen/mlperf.conf,
+# pinned to a specific upstream commit for traceability:
+# https://github.com/mlcommons/inference/blob/10f823448fd38bb739e52690efe8191c3a55412b/loadgen/mlperf.conf#L42-L43
+# qsl_rng_seed is intentionally not modeled: it only selects the load order of
+# the first-N working set, which the sample-index shuffle already covers.
+_v6_1 = RoundRuleset(
+    version="v6.1",
+    scheduler_rng_seed=16159082839903944936,
+    sample_index_rng_seed=2747215439041700203,
+    benchmark_rulesets={
+        # Keep the model-singleton keys; deep-copy only the per-model rules so
+        # v6.1's mutable leaves (e.g. reported_metrics) can't leak into v5.1.
+        model: copy.deepcopy(rules)
+        for model, rules in _v5_1.benchmark_rulesets.items()
+    },
+)
+
+
+# All known rounds, registered by version in the ruleset registry.
+ALL_ROUNDS = [_v5_1, _v6_1]
+
+CURRENT = _v6_1
+
+
+# --- Edge-Agentic (BFCL v4) ruleset ---
+#
+# Two-phase benchmark against a single served edge model (Qwen3.6-27B Q4_K_M,
+# single slot, reasoning off, ctx 32768, seed 42):
+#   * Accuracy gate — BFCL v4 single-turn (~995 samples); the pass/fail bound
+#     lives on the model (golden_accuracy + accuracy_target_settings).
+#   * Performance — agentic-coding replay with the inline online checker; reported
+#     via aggregate throughput. TTFT/TPOT are reported in the run report but are
+#     NOT gated here: this is the unoptimized reference baseline (stock llama.cpp
+#     Q4_K_M, no speculative decoding), so absolute latency is informational, not a
+#     target. A future round can add max_ttft/max_tpot caps once an optimized
+#     target exists. The "0 dropped turns" validity rule is enforced by the
+#     compliance checker, not encoded here.
+_edge_v0_1 = RoundRuleset(
+    version="edge-v0.1",
+    scheduler_rng_seed=42,
+    sample_index_rng_seed=42,
+    benchmark_rulesets={
+        models.Qwen3_6_27B: {
+            OptimizationPriority.EDGE_SINGLE_STREAM: PerModelRuleset(
+                min_duration_ms_valid=0,
+                max_duration_ms_valid=4 * 60 * 60 * 1000,  # 4 h safety cap
+                min_sample_count_valid=995,  # BFCL v4 single-turn accuracy gate
+                metric=metrics.Throughput,
+                reported_metrics=[metrics.Throughput],
+            )
+        },
+    },
+)
+
+EDGE_CURRENT = _edge_v0_1
+
+
+# --- MLPerf Endpoints v1.0 seed set ---
+#
+# Endpoints publishes its own seeds on its own rotation, independent of the
+# MLPerf Inference rounds above: a seed set per publication cohort, refreshed
+# every two cohorts, each set adoptable for four. A submission binds to one set
+# and keeps it for its full Pareto-update window. Values are transcribed
+# verbatim from cohort 2026-10-C1, set A, pinned to a specific upstream commit
+# so the transcription stays re-verifiable (the branch itself is mutable):
+# https://github.com/mlcommons/endpoints_policies/blob/5279b845b8492b02742a66d31cee09d9512f7e1d/seedset.yaml
+#
+# The cohort ID and set ID are both carried in the version string: `seed_sets`
+# is a list keyed by `id`, so a cohort may publish more than one set, and the
+# version is the registry key. A later cohort — or a second set within this
+# cohort — adds a sibling round rather than editing this one. Endpoints
+# characterizes a Pareto curve rather than gating per-model TTFT/TPOT, so there
+# are no per-model rulesets to declare: this round exists to pin seeds, and the
+# legacy per-model `apply_user_config` path correctly refuses it.
+#
+# The set also publishes a third seed, `model_seed: 9315206023656308754`, which
+# is not pinned here. Its purpose is undocumented: `model_seed` appears nowhere
+# in endpoints_rules.md or endpoints_submission_rules.md at the commit above —
+# only in seedset.yaml, which gives no definition. Submission rules §4.6 says
+# the set drives "request-issue / sample order, and the per-query salt"; this
+# round maps the first two, leaving the salt RNG unaccounted for. Pinning the
+# third seed awaits a definition from MLCommons of what it seeds.
+_endpoints_v1_0_2026_10_C1_A = RoundRuleset(
+    version="endpoints-v1.0-2026-10-C1-A",
+    scheduler_rng_seed=10487924139932647040,
+    sample_index_rng_seed=586478644936801402,
+    benchmark_rulesets={},
+)
+
+# Every published cohort stays registered: a submission binds to one set for
+# its full update window, so an older set must keep resolving after a newer
+# one is published. Add new sets here, do not replace.
+ENDPOINTS_ALL = [_endpoints_v1_0_2026_10_C1_A]
+
+ENDPOINTS_CURRENT = _endpoints_v1_0_2026_10_C1_A

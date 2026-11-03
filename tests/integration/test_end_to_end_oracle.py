@@ -130,8 +130,8 @@ async def test_load_generator_full_run_mock_http_oracle_server(
     rt_settings = RuntimeSettings(
         metrics.Throughput(5000),
         [metrics.Throughput(5000)],
-        min_duration_ms=0,
-        max_duration_ms=60_000,
+        min_issue_duration_ms=0,
+        max_issue_duration_ms=60_000,
         n_samples_from_dataset=n_samples,
         n_samples_to_issue=n_samples,
         min_sample_count=1,
@@ -158,8 +158,8 @@ async def _run_load_generator_full_run_url(url, dataset_path, hf_model_name):
     rt_settings = RuntimeSettings(
         metrics.Throughput(50),
         [metrics.Throughput(50)],
-        min_duration_ms=0,
-        max_duration_ms=60_000,
+        min_issue_duration_ms=0,
+        max_issue_duration_ms=60_000,
         n_samples_from_dataset=n_samples,
         n_samples_to_issue=n_samples,
         rng_sched=random.Random(1234),

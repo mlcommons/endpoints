@@ -26,6 +26,7 @@ import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -53,7 +54,11 @@ from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
-from .extractor import Extractor, PythonCodeExtractor
+from .accuracy_results import build_breakdown
+from .extractor import (
+    Extractor,
+    PythonCodeExtractor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +72,8 @@ class Scorer(ABC):
     PREDEFINED: ClassVar[dict[str, type["Scorer"]]] = {}
     SCORER_ID: ClassVar[str]
     REQUIRES_EXTRACTOR: ClassVar[bool] = True
+    SKIP_ENDPOINT_PHASE: ClassVar[bool] = False
+    """Whether scoring is performed externally instead of on endpoint outputs."""
 
     def __init_subclass__(
         cls,
@@ -106,6 +113,21 @@ class Scorer(ABC):
         """Return the list of registered scorer names."""
         return list(Scorer.PREDEFINED.keys())
 
+    @classmethod
+    def dataset_loader_kwargs(cls, extras: dict[str, Any]) -> dict[str, Any]:
+        """Return scorer-specific keyword arguments for dataset construction."""
+        return {}
+
+    @classmethod
+    def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
+        """Return an externally evaluated sample count, if the scorer has one."""
+        return None
+
+    @classmethod
+    def preflight(cls, extras: dict[str, Any]) -> None:
+        """Validate scorer dependencies before benchmark execution begins."""
+        return None
+
     def __init__(
         self,
         dataset_name: str,
@@ -124,6 +146,12 @@ class Scorer(ABC):
         )
         self.sample_index_map = self._load_sample_index_map()
 
+        # Whether the most recent score() covered every issued sample. Scorers
+        # that can return a partial headline number (e.g. LegacyMLPerfDeepSeekR1Scorer when
+        # the lcb-service container is unreachable) set this False so callers
+        # can distinguish a partial result from a complete one. Default True.
+        self.complete: bool = True
+
     def _load_sample_index_map(self):
         sample_index_map_path = self.report_dir / "sample_idx_map.json"
         if not sample_index_map_path.exists():
@@ -135,19 +163,18 @@ class Scorer(ABC):
             d = msgspec.json.decode(f.read())
             return d[self.dataset_name]  # Implicitly raises KeyError
 
-    def get_outputs(self):
-        """Read COMPLETE events from events.jsonl and extract response text.
+    def _iter_complete(self) -> Iterator[tuple[str, Any]]:
+        """Yield ``(sample_uuid, data)`` for each COMPLETE event in events.jsonl.
 
-        The EventLoggerService writes EventRecord objects serialized via msgspec.
-        We decode them using the EventRecord decoder and extract the response
-        text from TextModelOutput data.
+        The single events reader shared by ``get_raw_outputs`` and any scorer
+        that needs the structured event data (e.g. BFCL's ``tool_calls``). The
+        EventLoggerService writes EventRecord objects serialized via msgspec.
         """
         events_log_path = self.report_dir / "events.jsonl"
         if not events_log_path.exists():
             raise FileNotFoundError(f"Events log file not found at {events_log_path}")
 
         decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
-        outputs: list[dict[str, str]] = []
         with events_log_path.open("r") as f:
             for line in f:
                 stripped = line.strip()
@@ -155,11 +182,35 @@ class Scorer(ABC):
                     continue
                 record = decoder.decode(stripped)
                 if record.event_type == SampleEventType.COMPLETE:
-                    output_text = str(record.data) if record.data is not None else ""
-                    outputs.append(
-                        {"sample_uuid": record.sample_uuid, "output": output_text}
-                    )
-        return pd.DataFrame(outputs)
+                    yield record.sample_uuid, record.data
+
+    def get_raw_outputs(self, wanted_uuids: set[str] | None = None) -> pd.DataFrame:
+        """uuid -> the text the model generated (``str(TextModelOutput)``).
+
+        Identical for every scorer: the actual model output before any
+        scoring-specific transform. Used for OSL and response accounting.
+        ``wanted_uuids`` bounds the frame to a target population (one accuracy
+        dataset's issued samples) so finalize need not hold the whole run's
+        response-text corpus.
+        """
+        rows = [
+            {"sample_uuid": u, "output": str(d) if d is not None else ""}
+            for u, d in self._iter_complete()
+            if wanted_uuids is None or u in wanted_uuids
+        ]
+        # Fixed columns so an all-filtered (empty) frame still exposes
+        # "sample_uuid"/"output". Callers index those columns; a bare
+        # pd.DataFrame([]) is column-less and would KeyError, dropping response
+        # accounting for an all-missing phase — the exact masking the response
+        # counts exist to prevent.
+        return pd.DataFrame(rows, columns=["sample_uuid", "output"])
+
+    def get_scoring_outputs(self) -> pd.DataFrame:
+        """uuid -> the text to score. Base returns the raw model output; scorers
+        that must transform before scoring (e.g. BFCL serializes ``tool_calls``)
+        override this.
+        """
+        return self.get_raw_outputs()
 
     def match_sample_index(self, row: pd.Series) -> pd.Series:
         # Pandas Apply function to create a new 'sample_index' column
@@ -177,11 +228,26 @@ class Scorer(ABC):
             tuple[float | None, int]: The mean score and the number of repeats.
                 Returns None as the score if evaluation fails.
         """
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
 
         # Outputs are for all samples, not just the target dataset
         valid_uuids = self.sample_index_map.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        # Denominator is the number of samples *issued* for this dataset
+        # (``sample_index_map``, written at issue time), not the number that
+        # produced a COMPLETE event. Samples lost to a drain-timeout or crash are
+        # absent from ``df``; counting them as failures — dividing the summed
+        # per-sample scores by the issued total — keeps a partial run from
+        # reporting an accuracy inflated over only the surviving subset.
+        issued = len(self.sample_index_map)
+        if issued == 0:
+            return None, 0
+        n_repeats = issued // self.dataset.num_samples()
+        if df.empty:
+            # Nothing completed for this dataset: every issued sample failed.
+            # 0 correct / issued == 0.0, never ``mean([]) == NaN`` (invalid JSON).
+            return 0.0, n_repeats
 
         # Match to sample index from dataset
         df = df.apply(self.match_sample_index, axis=1)
@@ -203,12 +269,34 @@ class Scorer(ABC):
             order
         ]
 
-        scores = []
-        for i in range(len(empirical)):
-            scores.append(self.score_single_sample(empirical[i], ground_truths[i]))
+        scores = [
+            self.score_single_sample(empirical[i], ground_truths[i])
+            for i in range(len(empirical))
+        ]
 
-        n_repeats = len(scores) // self.dataset.num_samples()
-        return np.mean(scores), n_repeats
+        # ``float(...)`` yields a native Python float, not a numpy scalar, so the
+        # score serializes cleanly into accuracy_results.json.
+        mean = float(np.sum(scores)) / issued
+        return (mean if np.isfinite(mean) else None), n_repeats
+
+    def score_breakdown(self) -> dict[str, Any] | None:
+        """Optional structured detail accompanying the scalar ``score()``.
+
+        Most scorers report only the scalar mean from ``score()``. Scorers with a
+        multi-metric result (e.g. per-subset / per-category accuracy) cache that
+        breakdown and return it here, so ``accuracy_results.json``, compliance,
+        plotting, and publishing read a typed dict without ``score()`` widening
+        its scalar return contract. Returns ``None`` when there is no extra detail.
+        """
+        return None
+
+
+def _exact_match(value: str, ground_truth: str) -> float:
+    """pass@1 / exact-match: ``1.0`` if ``value == ground_truth`` else ``0.0``.
+
+    Used by :class:`PassAt1Scorer` for per-sample match semantics.
+    """
+    return 1.0 if value == ground_truth else 0.0
 
 
 class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
@@ -223,7 +311,7 @@ class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
     """
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
-        return 1.0 if value == ground_truth else 0.0
+        return _exact_match(value, ground_truth)
 
 
 class StringMatchScorer(Scorer, scorer_id="string_match"):
@@ -270,7 +358,7 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         )
 
     def score(self) -> tuple[float, int]:
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
 
         # Outputs are for all samples, not just the target dataset
         valid_uuids = self.sample_index_map.keys()
@@ -316,6 +404,77 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         # TODO: return only rouge1 for now to align with other scorers
         # Return the rest of the metrics later
         return result, 1
+
+
+def _uv_subproject_env(project_path: os.PathLike | str) -> dict[str, str]:
+    """Env for ``uv run --project <project_path>`` pinned to the subproject's OWN
+    ``.venv``.
+
+    Without this, an inherited ``UV_PROJECT_ENVIRONMENT`` (the dev image sets it
+    to ``/opt/venv``) redirects ``uv`` to the parent environment instead of the
+    isolated subproject venv - defeating the whole out-of-process isolation.
+    Mirrors how ``setup_eval.sh`` provisioned it (``UV_PROJECT_ENVIRONMENT=$(pwd)/.venv``).
+    """
+    return {**os.environ, "UV_PROJECT_ENVIRONMENT": str(Path(project_path) / ".venv")}
+
+
+def _lcb_ws_evaluate(
+    url: str, codes_dict: dict[str, list[str]], timeout_sec: int
+) -> dict | None:
+    """Evaluate extracted code via the lcb-service WebSocket (synchronous).
+
+    Sends ``{codes_dict, timeout_sec}`` and consumes progress frames until a
+    terminal ``completed`` (returns ``result`` = ``{total_samples, results}``)
+    or ``error``. Returns None on any failure so callers can fall back. Kept as
+    a module function so both LiveCodeBenchScorer and LegacyMLPerfDeepSeekR1Scorer (which
+    grades its livecodebench subset out-of-band) share one client.
+    """
+    if websocket is None:
+        logger.warning(
+            "websocket-client not installed; cannot reach lcb-service. "
+            "Install with: pip install websocket-client"
+        )
+        return None
+    try:
+        ws = websocket.create_connection(
+            url, timeout=7200, ping_interval=30, ping_timeout=10
+        )
+    except (OSError, websocket.WebSocketException) as e:
+        logger.warning("lcb-service WebSocket connect failed (%s): %s", url, e)
+        return None
+    total = sum(len(c) for c in codes_dict.values())
+    pbar = tqdm(total=total, desc="LCB Evaluation", unit="sample")
+    try:
+        ws.send(
+            msgspec.json.encode(
+                {"codes_dict": codes_dict, "timeout_sec": timeout_sec}
+            ).decode("utf-8")
+        )
+        while True:
+            message = ws.recv()
+            if not message:
+                return None
+            data = msgspec.json.decode(message)
+            status = data.get("status")
+            if status == "progress":
+                pbar.n = data.get("completed_samples", 0)
+                pbar.refresh()
+            elif status == "completed":
+                pbar.n = total
+                pbar.refresh()
+                return data.get("result")
+            elif status == "error":
+                logger.error("lcb-service evaluation error: %s", data.get("error"))
+                return None
+    except Exception as e:  # noqa: BLE001 - network/protocol failure -> fall back
+        logger.warning("lcb-service WebSocket evaluation failed: %s", e)
+        return None
+    finally:
+        pbar.close()
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001 - ignore close errors
+            pass
 
 
 class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline"):
@@ -885,111 +1044,6 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
             "This method should not be called. Use the score() method instead, which invokes lcb_runner."
         )
 
-    def _evaluate_via_websocket(self, codes_dict: dict[str, list[str]]) -> dict | None:
-        """Attempt to evaluate via WebSocket service (synchronous).
-
-        Configured for long-running connections (minutes to hours) with:
-        - Extended timeouts for send/receive operations
-        - Automatic ping/pong for connection keep-alive
-        - Proper error handling for network interruptions
-
-        Returns:
-            dict with evaluation results, or None if connection failed
-        """
-        if websocket is None:
-            print(
-                "Warning: websocket-client package not installed, falling back to subprocess"
-            )
-            print("Install with: pip install websocket-client")
-            return None
-
-        try:
-            # Create WebSocket connection with settings for long-running operations
-            # Timeout is set high for long evaluations (hours), but recv() will return
-            # as soon as data is available (not blocking for the full timeout)
-            ws = websocket.create_connection(
-                self.lcb_websocket_url,
-                timeout=7200,  # 2 hours connection timeout
-                ping_interval=30,  # Send ping every 30 seconds to keep connection alive
-                ping_timeout=10,  # Wait 10 seconds for pong response
-            )
-
-            # Setup progress tracking
-            total_samples = sum(len(codes) for codes in codes_dict.values())
-            pbar = None
-
-            try:
-                # Send evaluation request
-                request = {
-                    "codes_dict": codes_dict,
-                    "timeout_sec": self.timeout,
-                }
-                ws.send(msgspec.json.encode(request).decode("utf-8"))
-
-                print(f"Connected to WebSocket service: {self.lcb_websocket_url}")
-                print(
-                    f"Evaluating {len(codes_dict)} questions ({total_samples} samples)..."
-                )
-                pbar = tqdm(
-                    total=total_samples,
-                    desc="LCB Evaluation",
-                    unit="sample",
-                )
-
-                # Process responses
-                while True:
-                    try:
-                        message = ws.recv()
-                        if not message:
-                            # Connection closed cleanly
-                            break
-
-                        data = msgspec.json.decode(message)
-                        status = data.get("status")
-
-                        if status == "started":
-                            # Initial message, progress bar already initialized
-                            pass
-
-                        elif status == "progress":
-                            completed = data.get("completed_samples", 0)
-                            # Update progress bar to current position
-                            pbar.n = completed
-                            pbar.refresh()
-
-                        elif status == "completed":
-                            pbar.n = total_samples
-                            pbar.refresh()
-                            return data.get("result")
-
-                        elif status == "error":
-                            error_msg = data.get("error", "Unknown error")
-                            print(f"WebSocket evaluation error: {error_msg}")
-                            return None
-
-                    except websocket.WebSocketTimeoutException:
-                        # This shouldn't happen with ping/pong, but handle gracefully
-                        print("WebSocket timeout - connection lost")
-                        return None
-
-                # If we exit the loop without returning, something went wrong
-                return None
-
-            finally:
-                # Ensure progress bar is always closed
-                if pbar:
-                    pbar.close()
-
-                # Close WebSocket connection
-                try:
-                    ws.close()
-                except Exception:
-                    pass  # Ignore errors on close
-
-        except (ConnectionRefusedError, OSError, Exception) as e:
-            print(f"WebSocket connection failed: {e}, falling back to subprocess")
-            return None
-
     def _evaluate_via_subprocess(self, df: pd.DataFrame) -> float | None:
         """Evaluate via subprocess (fallback method).
 
@@ -1096,7 +1150,7 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
             tuple[float | None, int]: The pass@1 score and the number of repeats.
             Returns None as the score if evaluation fails.
         """
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
 
         # Outputs are for all samples, not just the target dataset
         valid_uuids = self.sample_index_map.keys()
@@ -1132,8 +1186,10 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
             for _, row in df.iterrows():
                 codes_dict[row["question_id"]].append(row["extracted_code"])
 
-            # Attempt WebSocket evaluation (synchronous)
-            result = self._evaluate_via_websocket(codes_dict)
+            # Attempt WebSocket evaluation (synchronous) via the shared client.
+            result = _lcb_ws_evaluate(
+                self.lcb_websocket_url, dict(codes_dict), self.timeout
+            )
 
             if result is not None:
                 # Successfully evaluated via WebSocket
@@ -1217,7 +1273,7 @@ def _match_hierarchical_paths(
         # Pair 1: intersection=3, pred_len=3, true_len=3
         # Pair 2: intersection=2 (stops at "Dress" != "Polo"), pred_len=3, true_len=3
         # HP = (3+2)/(3+3) = 5/6,  HR = (3+2)/(3+3) = 5/6
-        # F1 = 2*(5/6)*(5/6) / (5/6+5/6) = 5/6 ≈ 0.833
+        # F1 = 2*(5/6)*(5/6) / (5/6+5/6) = 5/6 ~ 0.833
 
     Args:
         predicted_path: Categories predicted by the VLM.
@@ -1317,7 +1373,7 @@ class ShopifyCategoryF1Scorer(Scorer, scorer_id="shopify_category_f1"):
         )
 
     def score(self) -> tuple[float, int]:
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
 
         valid_uuids = self.sample_index_map.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
@@ -1369,7 +1425,7 @@ _DEFAULT_VBENCH_PROJECT_PATH = (
 
 _VBENCH_PROJECT_PATH_ENV = "VBENCH_PROJECT_PATH"
 
-# Filenames in `vbench_standard` mode key on the prompt verbatim — VBench looks
+# Filenames in `vbench_standard` mode key on the prompt verbatim - VBench looks
 # the filename's prompt-prefix up in vbench_full_info.json. We can therefore
 # only reshape unsafe characters, not replace the prompt with a UUID. Slashes
 # and `..` are turned into `_`; null bytes / control chars are rejected.
@@ -1411,17 +1467,17 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
     `{prompt}-{index}.mp4`, and VBench looks each prompt up in its
     bundled `vbench_full_info.json`. Prompts are passed through
     `_sanitize_prompt_for_filename` first to keep the staged path inside
-    `staged_dir`; VBench's prompt lookup tolerates the same `/`→`_`
+    `staged_dir`; VBench's prompt lookup tolerates the same `/`->`_`
     replacement applied here.
 
     The scorer reads each sample's video path from response_output (the
     VideoGenAdapter mirrors `video_path` into `TextModelOutput.output`)
-    and the prompt from `dataset.dataframe[ground_truth_column]` — the
+    and the prompt from `dataset.dataframe[ground_truth_column]` - the
     prompt is the VBench input, not a comparison target, so callers should
     set `ground_truth_column: prompt` in `accuracy_config`.
 
     Returns `(None, n_repeats)` when no successful video was produced or
-    when scoring fails to yield a usable per-dimension number — matching
+    when scoring fails to yield a usable per-dimension number - matching
     `LiveCodeBenchScorer` and the `Scorer.score()` contract.
     """
 
@@ -1472,7 +1528,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
     ) -> Path:
         """Resolve the VBench subproject path.
 
-        Lookup order: explicit ctor arg → ``$VBENCH_PROJECT_PATH`` env var →
+        Lookup order: explicit ctor arg -> ``$VBENCH_PROJECT_PATH`` env var ->
         editable-checkout fallback. The env var lets wheel-installed users
         point at a synced subproject without patching source.
         """
@@ -1510,7 +1566,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
             # strict=True surfaces missing/unmounted sources here, not as an
             # opaque decord read failure inside VBench 30 minutes later.
             resolved_src = src.resolve(strict=True)
-            dst = staged_dir / f"{safe_prompt}-{idx}{src.suffix or '.mp4'}"
+            dst = staged_dir / f"{safe_prompt}-{idx}.mp4"
             dst.symlink_to(resolved_src)
 
     def _run_vbench_subprocess(
@@ -1551,6 +1607,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
                 stderr=subprocess.STDOUT,
                 text=True,
                 timeout=self.subprocess_timeout_s,
+                env=_uv_subproject_env(self.vbench_project_path),
             )
         except subprocess.TimeoutExpired as e:
             partial = (
@@ -1599,12 +1656,12 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         return scores
 
     def score(self) -> tuple[float | None, int]:
-        df = self.get_outputs()
+        df = self.get_scoring_outputs()
         valid_uuids = self.sample_index_map.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
-        # Drop failed queries: Scorer.get_outputs() emits "" when record.data
+        # Drop failed queries: Scorer.get_raw_outputs() emits "" when record.data
         # is None (workers set response_output=None on error). Passing "" to
-        # _stage_videos would Path("").resolve() → cwd and symlink the repo
+        # _stage_videos would Path("").resolve() -> cwd and symlink the repo
         # root as a "video", corrupting the entire VBench run. Failed samples
         # still count toward the denominator via n_total below.
         n_total = len(df)
@@ -1658,3 +1715,433 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         per_dim_scores = self._extract_per_dim_scores(results)
         mean_score = float(np.mean(per_dim_scores))
         return mean_score, n_repeats
+
+
+class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"):
+    """MLPerf DeepSeek-R1 combined-subset accuracy scorer.
+
+    The MLPerf DeepSeek-R1 accuracy dataset is an ensemble of five subsets
+    (``aime``, ``math500``, ``gpqa``, ``mmlu_pro``, ``livecodebench``), each
+    parsed and graded differently. The official MLCommons ``eval_accuracy.py``
+    routes each sample by its ``dataset`` column, then reports an aggregate
+    ``exact_match`` (mean per-sample 100/0) plus ``tokens_per_sample``.
+
+    That evaluator pulls in pinned/heavy deps (``transformers`` plus the
+    ``prm800k`` math grader and ``LiveCodeBench`` code executor submodules)
+    that are incompatible with the parent benchmark env, so - exactly like
+    ``VBenchScorer`` - it runs out-of-process via ``uv run --project`` against
+    the isolated subproject at
+    ``src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/``
+    (a uv subproject, excluded from the parent wheel). The parent process never
+    imports the evaluator.
+
+    This scorer builds the DataFrame the evaluator expects - ``model_output``
+    (the full raw generation, including the ``<think>`` trace, taken verbatim
+    from the COMPLETE event), ``ground_truth``, ``dataset`` (the subset id),
+    and ``question`` - writes it to a temp parquet, and shells out to
+    ``deepseek_eval_runner.py``. Output token lengths are computed inside the
+    subproject with the DeepSeek tokenizer so ``tokens_per_sample`` matches the
+    MLPerf token accounting.
+
+    Returns ``(exact_match, n_repeats)`` where ``exact_match`` is on the same
+    0-100 scale as the MLPerf golden accuracy (81.3582), or ``(None, n)`` if
+    no successful output was produced or the subprocess fails to yield a
+    usable number - matching the ``Scorer.score()`` contract.
+
+    Reads the subset id from ``dataset.dataframe[subset_column]`` (default
+    column ``dataset``) and the per-sample question from ``question_column``
+    (default ``question``); both are passed through ``accuracy_config.extras``.
+    """
+
+    REQUIRES_EXTRACTOR: ClassVar[bool] = False
+    DEFAULT_SUBPROCESS_TIMEOUT_S: ClassVar[int] = 4 * 60 * 60
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] | None = None,
+        ground_truth_column: str | None = "ground_truth",
+        subset_column: str = "dataset",
+        question_column: str = "question",
+        tokenizer_path: str = "deepseek-ai/DeepSeek-R1",
+        deepseek_eval_project_path: os.PathLike | None = None,
+        uv_executable: str = "uv",
+        subprocess_timeout_s: int | None = None,
+        lcb_subset: str = "livecodebench",
+        lcb_websocket_port: int | None = 13835,
+        lcb_timeout: int = 60,
+    ):
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=extractor,
+            ground_truth_column=ground_truth_column,
+        )
+        self._breakdown: dict[str, Any] | None = None
+        self.subset_column = subset_column
+        self.question_column = question_column
+        self.tokenizer_path = tokenizer_path
+        self.uv_executable = uv_executable
+        # LiveCodeBench executes untrusted code, which the in-process MLCommons
+        # executor can't sandbox. When a port is set, the livecodebench subset
+        # is graded out-of-band against the lcb-service WebSocket container
+        # (ws://localhost:<port>/evaluate); the rest go through the subprocess.
+        # If the socket is unreachable, livecodebench is left UNSCORED and the
+        # run is marked incomplete (it is never graded in-process). With no port
+        # configured, grading LCB in-process requires an explicit ALLOW_LCB_LOCAL=1.
+        self.lcb_subset = lcb_subset
+        self.lcb_timeout = lcb_timeout
+        self.lcb_websocket_url = (
+            f"ws://localhost:{lcb_websocket_port}/evaluate"
+            if lcb_websocket_port is not None
+            else None
+        )
+        self.project_path = self._resolve_project_path(deepseek_eval_project_path)
+        self.subprocess_timeout_s = (
+            subprocess_timeout_s
+            if subprocess_timeout_s is not None
+            else self.DEFAULT_SUBPROCESS_TIMEOUT_S
+        )
+        runner = self.project_path / "deepseek_eval_runner.py"
+        if not runner.exists():
+            raise FileNotFoundError(
+                f"deepseek_eval_runner.py not found at {runner}. "
+                f"Run `uv sync` and `bash setup_eval.sh` in the accuracy "
+                f"subproject, or set $DEEPSEEK_EVAL_PROJECT_PATH to the "
+                f"synced subproject path."
+            )
+
+    @staticmethod
+    def _resolve_project_path(explicit: os.PathLike | None) -> Path:
+        """Resolve the DeepSeek eval subproject path.
+
+        Lookup order: explicit ctor arg -> ``$DEEPSEEK_EVAL_PROJECT_PATH`` env
+        var -> editable-checkout fallback. The env var lets wheel-installed
+        users point at a synced subproject without patching source.
+        """
+        if explicit is not None:
+            return Path(explicit)
+        from_env = os.environ.get("DEEPSEEK_EVAL_PROJECT_PATH")
+        if from_env:
+            return Path(from_env)
+        return Path(__file__).resolve().parent / "legacy_mlperf_deepseek_r1"
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "DeepSeek-R1 scoring requires batch processing; call score() instead."
+        )
+
+    def _run_eval_subprocess(
+        self, input_parquet: Path, out_json: Path, external_subsets: str = ""
+    ) -> None:
+        """Invoke deepseek_eval_runner.py via ``uv run --project <subproject>``.
+
+        Captures stdout+stderr into ``report_dir/deepseek_eval_subprocess.log``
+        and, on non-zero exit, raises with the tail of the captured log so the
+        real failure (missing submodule, tokenizer download, code-exec error)
+        isn't lost. ``external_subsets`` (comma-separated) are tokenized but not
+        graded by the runner - the caller grades them out-of-band.
+        """
+        cmd = [
+            self.uv_executable,
+            "run",
+            "--project",
+            str(self.project_path),
+            "python",
+            str(self.project_path / "deepseek_eval_runner.py"),
+            "--input",
+            str(input_parquet),
+            "--output",
+            str(out_json),
+            "--tokenizer",
+            self.tokenizer_path,
+        ]
+        if external_subsets:
+            cmd += ["--external-subsets", external_subsets]
+        log_path = self.report_dir / "deepseek_eval_subprocess.log"
+        try:
+            completed = subprocess.run(
+                cmd,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=self.subprocess_timeout_s,
+                env=_uv_subproject_env(self.project_path),
+            )
+        except subprocess.TimeoutExpired as e:
+            partial = (
+                e.stdout
+                if isinstance(e.stdout, str)
+                else (e.stdout or b"").decode("utf-8", errors="replace")
+            )
+            log_path.write_text(partial)
+            raise RuntimeError(
+                f"DeepSeek eval subprocess timed out after "
+                f"{self.subprocess_timeout_s}s; see {log_path} for partial output."
+            ) from e
+
+        log_path.write_text(completed.stdout or "")
+        if completed.returncode != 0:
+            tail = "\n".join((completed.stdout or "").splitlines()[-50:])
+            raise RuntimeError(
+                f"DeepSeek eval subprocess exited with code "
+                f"{completed.returncode}; full log at {log_path}. "
+                f"Last 50 lines:\n{tail}"
+            )
+
+    def _score_lcb_via_container(self, lcb_df: pd.DataFrame) -> tuple[int, int] | None:
+        """Grade the livecodebench rows against the lcb-service WebSocket.
+
+        Extracts the python block from each ``model_output`` and keys it by
+        question id (the ``ground_truth``), then evaluates via the container.
+        Returns ``(passed, total)`` or None if the service is unreachable (so
+        score() can fall back to the in-process path).
+        """
+        if self.lcb_websocket_url is None:
+            raise ValueError(
+                "lcb_websocket_url must be configured to score LCB via container"
+            )
+        codes_dict: dict[str, list[str]] = defaultdict(list)
+        for _, row in lcb_df.iterrows():
+            code = PythonCodeExtractor.extract(
+                str(row["model_output"]), default="# FAILED TO EXTRACT CODE"
+            )
+            codes_dict[str(row["ground_truth"])].append(
+                code or "# FAILED TO EXTRACT CODE"
+            )
+        result = _lcb_ws_evaluate(
+            self.lcb_websocket_url, dict(codes_dict), self.lcb_timeout
+        )
+        if result is None:
+            return None
+        total_samples = int(result.get("total_samples", 0))
+        per_problem = result.get("results", {})
+        if not per_problem and total_samples:
+            logger.error(
+                "lcb-service evaluated %d samples but returned an empty summary",
+                total_samples,
+            )
+            return None
+        passed = sum(sum(code_passed) for code_passed in per_problem.values())
+        return int(passed), total_samples
+
+    def score(self) -> tuple[float | None, int]:
+        df = self.get_scoring_outputs()
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        n_total = len(df)
+        num_samples = self.dataset.num_samples()
+        n_repeats = n_total // num_samples if num_samples else 0
+
+        # Failed queries log "" (Scorer.get_raw_outputs() emits "" when
+        # record.data is None). They are graded as incorrect by the evaluator
+        # but still count toward the denominator, so keep them in.
+        if df.empty:
+            logger.warning(
+                "LegacyMLPerfDeepSeekR1Scorer: no outputs to score; returning None score."
+            )
+            self.complete = False
+            return None, n_repeats
+
+        df = df.apply(self.match_sample_index, axis=1)
+        order = df["sample_index"].to_numpy().astype(int)
+
+        ref = self.dataset.dataframe
+        if ref is None:
+            raise RuntimeError(f"Dataset {self.dataset} has no dataframe loaded")
+        for col in (self.ground_truth_column, self.subset_column, self.question_column):
+            if col not in ref.columns:
+                raise ValueError(
+                    f"Column {col!r} not found in dataset {self.dataset}; "
+                    f"available: {list(ref.columns)}"
+                )
+
+        eval_df = pd.DataFrame(
+            {
+                "model_output": df["output"].astype(str).to_numpy(),
+                "ground_truth": ref[self.ground_truth_column].to_numpy()[order],
+                "dataset": ref[self.subset_column].to_numpy()[order],
+                "question": ref[self.question_column].to_numpy()[order],
+            }
+        )
+
+        scratch = self.report_dir / "deepseek_eval"
+        scratch.mkdir(parents=True, exist_ok=True)
+        input_parquet = scratch / f"{self.dataset_name}_outputs.parquet"
+        out_json = scratch / f"{self.dataset_name}_results.json"
+        eval_df.to_parquet(input_parquet, index=False)
+
+        n_lcb = int((eval_df["dataset"].astype(str) == self.lcb_subset).sum())
+        use_container = self.lcb_websocket_url is not None and n_lcb > 0
+
+        if not use_container:
+            # Refuse to grade untrusted livecodebench code in-process without the
+            # sandboxed container, unless explicitly opted in. (n_lcb == 0 is
+            # safe: no LCB rows means no untrusted code to execute.)
+            if n_lcb > 0 and os.environ.get("ALLOW_LCB_LOCAL") != "1":
+                raise RuntimeError(
+                    "livecodebench rows present but no lcb-service container is "
+                    "configured (set lcb_websocket_port). Refusing to execute "
+                    "untrusted model-generated code in-process; configure the "
+                    "container, or set ALLOW_LCB_LOCAL=1 to override."
+                )
+            # No LCB rows (or explicit opt-in): grade every subset in-process.
+            self._run_eval_subprocess(input_parquet, out_json)
+            results = msgspec.json.decode(out_json.read_bytes())
+            exact_match = results.get("exact_match")
+            if exact_match is None:
+                logger.warning(
+                    "LegacyMLPerfDeepSeekR1Scorer: subprocess produced no exact_match; "
+                    "returning None score. See %s",
+                    out_json,
+                )
+                self.complete = False
+                return None, n_repeats
+            # The runner reports complete=False if any subset failed to grade.
+            self.complete = bool(results.get("complete", True))
+            self._cache_breakdown(results)
+            return float(exact_match), n_repeats
+
+        # Grade the text subsets in the subprocess and the livecodebench subset
+        # against the lcb-service container, then merge into one 5-subset number
+        # so no follow-up scorer is needed.
+        self._run_eval_subprocess(
+            input_parquet, out_json, external_subsets=self.lcb_subset
+        )
+        results = msgspec.json.decode(out_json.read_bytes())
+        per_dataset = results.get("per_dataset", {})
+
+        # Aggregate every text subset the runner graded. Track whether any
+        # failed so a partial run is never reported as a complete score.
+        text_correct = 0
+        text_n = 0
+        text_complete = True
+        for sub, d in per_dataset.items():
+            if sub == self.lcb_subset:
+                continue
+            em = d.get("exact_match")
+            n = int(d.get("num_samples", 0))
+            if em is None:  # subset failed to grade (status != "ok")
+                text_complete = False
+                continue
+            # `em` is a per-subset mean of strictly-binary (0/100) per-sample
+            # scores, so round(em/100*n) recovers the exact integer correct
+            # count. If a future MLCommons subset emits fractional/partial
+            # credit, sum raw per-sample counts from the runner instead.
+            text_correct += round(em / 100.0 * n)
+            text_n += n
+
+        lcb_scored = self._score_lcb_via_container(
+            eval_df[eval_df["dataset"].astype(str) == self.lcb_subset]
+        )
+        # Preserve the runner's external LCB entry (it carries tokens_per_sample).
+        lcb_entry = dict(per_dataset.get(self.lcb_subset, {}))
+        if lcb_scored is None:
+            # Container unreachable: leave livecodebench UNSCORED. Do NOT re-run
+            # the in-process executor - it can't sandbox runaway model code and
+            # needs a ~21 GB dataset load. Launch the lcb-service container (see
+            # src/inference_endpoint/evaluation/livecodebench/README.md) and re-run.
+            logger.warning(
+                "LegacyMLPerfDeepSeekR1Scorer: lcb-service unreachable at %s; livecodebench "
+                "left unscored (reporting %d text samples only, run marked "
+                "incomplete). Launch the lcb-service container (see "
+                "evaluation/livecodebench/README.md) and re-run to score LCB.",
+                self.lcb_websocket_url,
+                text_n,
+            )
+            lcb_passed = 0
+            lcb_total = 0
+            lcb_entry["exact_match"] = None
+            lcb_entry["status"] = "unscored"
+            lcb_ok = False
+        else:
+            lcb_passed, lcb_total = lcb_scored
+            lcb_entry["exact_match"] = (
+                100.0 * lcb_passed / lcb_total if lcb_total else None
+            )
+            lcb_entry["num_samples"] = lcb_total
+            lcb_entry["status"] = "lcb-service"
+            lcb_ok = lcb_total > 0
+
+        total_n = text_n + lcb_total
+        combined = 100.0 * (text_correct + lcb_passed) / total_n if total_n else None
+
+        # The headline number is only valid if it covers every issued sample;
+        # a failed text subset or a diverging LCB count silently shrinks total_n.
+        expected_n = len(eval_df)
+        complete = bool(
+            combined is not None and text_complete and lcb_ok and total_n == expected_n
+        )
+        if combined is not None and lcb_ok and total_n != expected_n:
+            logger.warning(
+                "LegacyMLPerfDeepSeekR1Scorer: scored %d of %d samples (LCB count diverged "
+                "from the issued rows); marking the result incomplete.",
+                total_n,
+                expected_n,
+            )
+
+        self.complete = complete
+        per_dataset[self.lcb_subset] = lcb_entry
+        results["per_dataset"] = per_dataset
+        results["exact_match"] = combined
+        results["evaluated_samples"] = total_n
+        results["complete"] = complete
+        out_json.write_bytes(msgspec.json.encode(results))
+        logger.info(
+            "LegacyMLPerfDeepSeekR1Scorer: combined exact_match=%s (text %d/%d + LCB %d/%d, complete=%s)",
+            f"{combined:.4f}" if combined is not None else "None",
+            text_correct,
+            text_n,
+            lcb_passed,
+            lcb_total,
+            complete,
+        )
+
+        if combined is None:
+            return None, n_repeats
+        self._cache_breakdown(results)
+        return float(combined), n_repeats
+
+    def _cache_breakdown(self, results: dict[str, Any]) -> None:
+        """Cache a per-subset breakdown from the runner's per-subset results.
+
+        Subset ``exact_match`` values are already on the 0-100 scale, so they map
+        straight onto ``subset_scores``. Subsets that failed to grade
+        (``exact_match is None``) are omitted. The headline accuracy is the entry's
+        scalar ``score`` (this scorer's :meth:`score` return), so it is not
+        duplicated in the block.
+        """
+        per_dataset = results.get("per_dataset") or {}
+        subset_scores: dict[str, float] = {}
+        for sub, d in per_dataset.items():
+            if not isinstance(d, dict):
+                continue
+            em = d.get("exact_match")
+            if em is not None:
+                subset_scores[sub] = float(em)
+        total_samples = int(
+            results.get("evaluated_samples") or results.get("num_samples") or 0
+        )
+        self._breakdown = build_breakdown(
+            subset_scores=subset_scores,
+            total_samples=total_samples,
+            complete=self.complete,
+        )
+
+    def score_breakdown(self) -> dict[str, Any] | None:
+        """Per-subset accuracy breakdown cached by :meth:`score` (BFCL-shaped).
+
+        ``None`` until :meth:`score` runs, or if scoring produced no usable
+        result.
+        """
+        return self._breakdown
+
+
+# Late import registers the extracted scorer without introducing a cycle.
+from .swe_bench_scorer import SWEBenchScorer as SWEBenchScorer  # noqa: E402

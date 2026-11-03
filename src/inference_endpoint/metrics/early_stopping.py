@@ -1,0 +1,325 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""MLPerf-style early-stopping percentile estimate.
+
+Ports the MLPerf LoadGen early-stopping binomial test (``loadgen/early_stopping.cc``,
+``results.cc``) so a tail-latency percentile (p99 TTFT/TPOT for LLM Server, p90 for
+SingleStream) can be reported as a *conservative, confidence-backed* estimate instead of the
+raw empirical value. This mirrors LoadGen's SingleStream estimate: given ``n`` sorted latencies
+and target percentile ``p``, report ``sorted[n - t]`` — the t-th highest sample, where ``t`` is
+the largest tolerable over-latency count whose binomial-confidence bound still holds (t - 1
+samples are discarded above the estimate). The estimate is always >= the empirical percentile
+and the true p-percentile is <= it at confidence ``c``.
+
+The regularized incomplete beta uses a continued fraction (Numerical Recipes ``betai``); it
+equals LoadGen's Gauss-hypergeometric ``beta_regularized`` but converges in tens of iterations.
+
+Percentile convention: every product surface (spec, estimates, grid targets, report keys,
+script CLI) speaks the report-grid convention — 0-100, e.g. ``99.9`` — matching
+``DEFAULT_PERCENTILES``, ``np.percentile``, and the summary's ``percentiles`` keys. Only the
+LoadGen-parity kernel (``find_min_passing`` / ``_odds`` / ``_discard_count``) keeps LoadGen's
+own fraction domain (0-1); the single conversion happens inside ``es_percentile_estimate``,
+unrounded — the same ``/100`` ``np.percentile`` applies internally, so grid parity is exact.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Final
+
+__all__ = [
+    "CONFIDENCE",
+    "ES_MIN_PERCENTILE",
+    "TOLERANCE",
+    "EarlyStoppingResult",
+    "EarlyStoppingSpec",
+    "es_percentile_estimate",
+    "es_targets_from_grid",
+    "find_min_passing",
+]
+
+# LoadGen hardcodes confidence c = 0.99 and tolerance d = 0.0 (results.cc:157-158). They are
+# algorithm constants, not knobs: lowering c or raising d weakens the certified claim (d > 0
+# certifies percentile p - d instead of p). Exposed only as defaulted arguments on the pure
+# math for parity tests.
+CONFIDENCE: Final[float] = 0.99
+TOLERANCE: Final[float] = 0.0
+
+# ES runs for every percentile the series' report grid shows at or above the median. The
+# estimate is a tail certification (a conservative upper confidence bound), so below-median
+# grid entries (p25/p10/...) are not meaningful gates and are skipped. Deriving from the grid
+# keeps one source of truth: whatever percentiles a series reports, ES covers. Grid
+# convention (0-100), like every percentile surface in this module.
+ES_MIN_PERCENTILE: Final[float] = 50.0
+
+
+def es_targets_from_grid(grid_percentiles: Iterable[float | str]) -> dict[str, float]:
+    """{report-grid key: percentile} for every grid entry in the ES domain.
+
+    Keys are ``str()`` of the ORIGINAL grid entries and the map preserves the
+    grid's own order (descending in the default grid), so the compact map
+    overlays the ``percentiles`` grid 1:1 in naming and ordering. Accepts the
+    entries as numbers (registry grids) or strings (summary-JSON keys — an int
+    grid entry ``99`` keys as ``"99"`` either way). Values stay in the grid
+    convention (0-100) — no conversion, no rounding. Entries below the median
+    are skipped (an ES estimate is a tail certification) and ``>= 100`` is
+    excluded — p100 is outside the binomial test's domain and would otherwise
+    crash the terminal snapshot.
+    """
+    targets: dict[str, float] = {}
+    for p in grid_percentiles:
+        value = float(p)
+        if ES_MIN_PERCENTILE <= value < 100.0:
+            targets[str(p)] = value
+    return targets
+
+
+@dataclass(frozen=True, slots=True)
+class EarlyStoppingSpec:
+    """Resolved early-stopping parameters used by the aggregator.
+
+    ``percentiles=None`` (the default) derives the target set from each series' own
+    report grid via ``es_targets_from_grid``; explicit tuples (grid convention,
+    0-100) are for tests and offline analysis only — the config surface is a
+    single ``enabled`` flag.
+    """
+
+    percentiles: tuple[float, ...] | None = None
+    confidence: float = CONFIDENCE
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued-fraction kernel of the regularized incomplete beta.
+
+    Numerical Recipes 3rd ed. §6.4 (``betacf``), evaluated with the modified Lentz
+    algorithm: each loop iteration applies one even-numbered and one odd-numbered CF
+    term, and stops when the running product changes by less than ``eps``.
+
+    Magic numbers:
+      - ``eps = 3e-16``: relative-convergence threshold, ~1.4x double-precision machine
+        epsilon (2.22e-16) — one step above the noise floor, so the loop stops as soon
+        as further terms cannot change the result.
+      - ``fpmin = 1e-300``: substituted for near-zero intermediate denominators (Lentz's
+        guard against division blow-up); any positive value far below the smallest
+        normal double (~2.2e-308) times a typical term works.
+      - ``400``: iteration cap. For the boundary searches at very large n (a ~ b ~ n/2
+        with x near the mean — the p50/p75 targets at tens of millions of samples)
+        Lentz needs ~O(sqrt(a)) iterations and CAN hit this cap, returning a truncated
+        value whose error near the distribution midpoint grows with n (order 1e-4 at
+        a = b = 5e6 and worse beyond — do NOT reuse ``_betai`` standalone where
+        midpoint accuracy matters). Truncation is safe HERE because every decision
+        compares odds against 1 - c (~0.01), far from the slow-converging midpoint:
+        ``find_min_passing`` returns identical answers with cap 400 vs 20000 on the
+        LoadGen references (459/44/661). Returned rather than raised — this runs on
+        the terminal-snapshot path, where an exception would cost the final report.
+    """
+    eps, fpmin = 3e-16, 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    d = fpmin if abs(d) < fpmin else d
+    d = 1.0 / d
+    h = d
+    for m in range(1, 400):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = fpmin if abs(d) < fpmin else d
+        c = 1.0 + aa / c
+        c = fpmin if abs(c) < fpmin else c
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = fpmin if abs(d) < fpmin else d
+        c = 1.0 + aa / c
+        c = fpmin if abs(c) < fpmin else c
+        d = 1.0 / d
+        de = d * c
+        h *= de
+        if abs(de - 1.0) < eps:
+            break
+    return h
+
+
+def _betai(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta I_x(a, b).
+
+    Numerical Recipes 3rd ed. §6.4 (``betai``). Numerically equal to LoadGen's
+    ``beta_regularized(x, a, b)`` (``loadgen/early_stopping.cc:42-45``, computed there
+    from the Gauss hypergeometric 2F1 series, ``:25-35``) but converges in tens of CF
+    iterations instead of thousands of series terms.
+
+    ``ln_bt`` is log(x^a * (1-x)^b / B(a, b)) via ``lgamma`` so the prefactor cannot
+    overflow for large a/b. The ``x < (a + 1) / (a + b + 2)`` test is NR's symmetry
+    split: evaluate the continued fraction on whichever side of the identity
+    I_x(a, b) = 1 - I_{1-x}(b, a) converges fastest.
+    """
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    ln_bt = (
+        math.lgamma(a + b)
+        - math.lgamma(a)
+        - math.lgamma(b)
+        + a * math.log(x)
+        + b * math.log(1.0 - x)
+    )
+    bt = math.exp(ln_bt)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def _odds(h: int, t: int, p: float, d: float) -> float:
+    """LoadGen ``odds()`` (``loadgen/early_stopping.cc:47-58``).
+
+    P(<= t over-latency among h + t Bernoulli trials | over-latency rate = 1 - p + d),
+    computed via the binomial-CDF <-> incomplete-beta identity: that probability equals
+    I_{p-d}(h, t + 1).
+    """
+    return _betai(h, 1 + t, p - d)
+
+
+def _validate_domain(p: float, d: float, c: float) -> None:
+    # p >= 1 makes _odds identically 1.0 (the doubling search would never terminate);
+    # c >= 1 makes the target 0.0 (only reachable via float underflow). Reject both.
+    if not 0.0 < p < 1.0:
+        raise ValueError(f"percentile must be in (0, 1), got {p}")
+    if not 0.0 < c < 1.0:
+        raise ValueError(f"confidence must be in (0, 1), got {c}")
+    if not 0.0 <= d < p:
+        raise ValueError(f"tolerance must be in [0, percentile), got {d}")
+
+
+def find_min_passing(
+    t: int, p: float, d: float = TOLERANCE, c: float = CONFIDENCE
+) -> int:
+    """Minimum ``h`` such that ``_odds(h, t, p, d) < 1 - c``.
+
+    LoadGen's ``MinPassingQueriesFinder`` (``loadgen/early_stopping.cc:62-114``): the
+    smallest number of under-latency queries that, alongside ``t`` over-latency queries,
+    lets you conclude at confidence ``c`` that the true p-percentile meets the bound.
+    The pass test is strict (``odds < 1 - c``), matching LoadGen's boundary handling
+    (``early_stopping.cc:70``). ``_odds`` is monotonically decreasing in ``h``, so
+    exponential bracketing followed by binary search finds the boundary exactly.
+    """
+    _validate_domain(p, d, c)
+    target = 1.0 - c
+    lo, hi = 1, 2
+    while _odds(hi, t, p, d) >= target:
+        hi *= 2
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if _odds(mid, t, p, d) < target:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
+def _discard_count(n: int, p: float, d: float, c: float) -> int:
+    """Largest ``t >= 1`` with ``n >= find_min_passing(t) + t``; 0 below the floor.
+
+    This is the LoadGen SingleStream estimate construction (``results.cc:162-226``):
+    find the largest over-latency budget ``t`` the run of ``n`` queries can still
+    absorb — the t-th highest value is then a c-confidence upper bound on the true
+    p-percentile, with the ``t - 1`` samples above it discarded. Same
+    exponential-bracket + binary-search shape as ``find_min_passing`` (the passing
+    margin ``n - (find_min_passing(t) + t)`` is monotone in ``t``).
+    """
+    if find_min_passing(1, p, d, c) + 1 > n:
+        return 0
+    lo, hi = 1, 2
+    while find_min_passing(hi, p, d, c) + hi <= n:
+        hi *= 2
+    while lo < hi - 1:
+        mid = (lo + hi) // 2
+        if find_min_passing(mid, p, d, c) + mid <= n:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+@dataclass(frozen=True, slots=True)
+class EarlyStoppingResult:
+    """Result of an early-stopping percentile estimate.
+
+    ``estimate`` is None when there are too few samples to make any claim
+    (``n < find_min_passing(1) + 1``); ``min_queries`` is that floor. ``discarded``
+    is the number of samples strictly above the reported estimate (the estimate
+    itself is the ``discarded + 1``-th highest sample).
+    """
+
+    percentile: float
+    confidence: float
+    n: int
+    estimate: float | None
+    empirical: float | None
+    min_queries: int
+    discarded: int
+
+    def as_dict(self) -> dict[str, float | int | bool | None]:
+        return {
+            "percentile": self.percentile,
+            "confidence": self.confidence,
+            "n": self.n,
+            "estimate": None if self.estimate is None else float(self.estimate),
+            "empirical": None if self.empirical is None else float(self.empirical),
+            "sufficient": self.estimate is not None,
+            "min_queries": self.min_queries,
+            "discarded": self.discarded,
+        }
+
+
+def es_percentile_estimate(
+    sorted_latencies: Sequence[float],
+    percentile: float,
+    confidence: float = CONFIDENCE,
+) -> EarlyStoppingResult:
+    """Conservative early-stopping estimate over an ascending-sorted latency series.
+
+    ``percentile`` uses the grid convention (0-100, e.g. ``99.9``). Values below 1 are
+    rejected rather than computed: a fraction-style ``0.99`` would silently mean the
+    sub-1% percentile p0.99, never a tail-certification target, and this single
+    chokepoint is what keeps the registry's explicit-override path and the post-hoc
+    script's ``--percentiles`` agreeing on the domain. The single conversion to the
+    kernel's fraction domain happens here, unrounded — the same ``/100``
+    ``np.percentile`` applies internally, so the ``empirical`` value can never
+    diverge from the report grid's ``method="lower"`` entry.
+    """
+    if not 1.0 <= percentile < 100.0:
+        hint = f" — did you mean {percentile * 100}?" if 0.0 < percentile < 1.0 else ""
+        raise ValueError(
+            f"percentile uses the grid convention (0-100) and must be in [1, 100), "
+            f"got {percentile}{hint}"
+        )
+    fraction = percentile / 100.0
+    n = len(sorted_latencies)
+    min_queries = find_min_passing(1, fraction, TOLERANCE, confidence) + 1
+    # Same order statistic as the report's percentile grid (np.percentile with
+    # method="lower": index floor(p*(n-1))).
+    emp_idx = int(fraction * (n - 1)) if n else 0
+    empirical = sorted_latencies[emp_idx] if n else None
+    if n < min_queries:
+        return EarlyStoppingResult(
+            percentile, confidence, n, None, empirical, min_queries, 0
+        )
+    t = _discard_count(n, fraction, TOLERANCE, confidence)
+    # The estimate is the t-th highest sample, so the number of samples actually
+    # discarded (strictly above the reported value) is t - 1; at the floor
+    # (t == 1) nothing is discarded.
+    return EarlyStoppingResult(
+        percentile,
+        confidence,
+        n,
+        sorted_latencies[n - t],
+        empirical,
+        min_queries,
+        t - 1,
+    )

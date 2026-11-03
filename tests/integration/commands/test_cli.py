@@ -196,8 +196,66 @@ def test_online_cli_no_crash(tokens):
         pass  # clean rejection (e.g. missing required arg) is fine
 
 
+def _parsed_config(tokens: list[str]):
+    """Parse without executing and return the bound BenchmarkConfig."""
+    _command, bound, *_ = app.parse_args(tokens)
+    for value in bound.arguments.values():
+        if hasattr(value, "settings"):
+            return value
+    raise AssertionError(f"no config bound from {tokens}")
+
+
+@pytest.mark.integration
+def test_early_stopping_flag_binds_independently_of_warmup():
+    """`enabled` exists on both WarmupConfig (flattened: bare `--enabled`) and
+    EarlyStoppingConfig (namespaced). If EarlyStoppingConfig ever gets flattened
+    too (the decorator-theft regression class), the two silently double-bind and
+    `--no-early-stopping` flips warmup instead — a wrong-config bug with no parse
+    error. Pin that each flag reaches only its own model."""
+    base = [
+        "benchmark",
+        "online",
+        "--endpoints",
+        "http://localhost:9",
+        "--model",
+        "m",
+        "--dataset",
+        "tests/assets/datasets/dummy_1k.jsonl,parser.prompt=text_input",
+        "--load-pattern",
+        "poisson",
+        "--target-qps",
+        "1",
+    ]
+    cfg = _parsed_config(base + ["--no-early-stopping"])
+    assert cfg.settings.early_stopping.enabled is False
+    assert cfg.settings.warmup.enabled is False  # warmup default, untouched
+    cfg = _parsed_config(base + ["--enabled"])  # warmup's flattened flag
+    assert cfg.settings.warmup.enabled is True
+    assert cfg.settings.early_stopping.enabled is True  # ES default, untouched
+
+
+@pytest.mark.integration
+def test_warmup_drain_requires_prefixed_flag(capsys):
+    base = [
+        "benchmark",
+        "offline",
+        "--endpoints",
+        "http://localhost:9",
+        "--model",
+        "m",
+        "--dataset",
+        "tests/assets/datasets/dummy_1k.jsonl,parser.prompt=text_input",
+    ]
+    with pytest.raises(SystemExit) as exc_info:
+        _parsed_config(base + ["--drain"])
+    assert exc_info.value.code == 1
+    assert 'Unknown option: "--drain"' in capsys.readouterr().err
+    cfg = _parsed_config(base + ["--warmup-drain"])
+    assert cfg.settings.warmup.drain is True
+
+
 # ---------------------------------------------------------------------------
-# E2E: CLI tokens → echo server → results.json
+# E2E: CLI tokens → echo server → performance/result_summary.json
 # One test per execution mode: offline, poisson, concurrency.
 # ---------------------------------------------------------------------------
 
@@ -221,7 +279,7 @@ def _run(tokens: list[str]):
 
 
 def _bench(url, ds, tmp_path, *extra):
-    """Run a benchmark via CLI and return parsed results.json."""
+    """Run a benchmark via CLI and return parsed performance/result_summary.json."""
     _run(
         [
             *extra,
@@ -236,11 +294,11 @@ def _bench(url, ds, tmp_path, *extra):
             *_FAST,
         ]
     )
-    return json.loads((tmp_path / "results.json").read_text())
+    return json.loads((tmp_path / "performance" / "result_summary.json").read_text())
 
 
 class TestE2E:
-    """Full CLI → benchmark execution → echo server → results.json."""
+    """Full CLI → benchmark execution → echo server → result_summary.json."""
 
     @pytest.mark.integration
     def test_offline(self, mock_http_echo_server, ds_dataset_path, tmp_path):
@@ -251,13 +309,14 @@ class TestE2E:
             tmp_path,
             "benchmark",
             "offline",
-            "--duration",
-            "0",
             "--streaming",
             "off",
         )
-        assert r["results"]["total"] > 0
-        assert r["results"]["successful"] > 0
+        assert r["n_samples_issued"] > 0
+        assert r["n_samples_completed"] > 0
+        # default-on ES must land in a real run's summary — the config ->
+        # aggregator-args plumbing in execute.py has no other end-to-end guard.
+        assert "early_stopping_percentiles" in r["latency"]
 
     @pytest.mark.integration
     def test_poisson(self, mock_http_echo_server, ds_dataset_path, tmp_path):
@@ -272,10 +331,10 @@ class TestE2E:
             "poisson",
             "--target-qps",
             "50",
-            "--duration",
-            "2000",
+            "--num-samples",
+            "100",
         )
-        assert r["results"]["total"] > 0
+        assert r["n_samples_issued"] > 0
 
     @pytest.mark.integration
     def test_concurrency(self, mock_http_echo_server, ds_dataset_path, tmp_path):
@@ -290,10 +349,10 @@ class TestE2E:
             "concurrency",
             "--concurrency",
             "4",
-            "--duration",
-            "2000",
+            "--num-samples",
+            "40",
         )
-        assert r["results"]["total"] > 0
+        assert r["n_samples_issued"] > 0
 
     # Verbosity dimension across every load pattern. -vvv runs as a subprocess
     # because its bootstrap redirects the process's own stdout/stderr to a
@@ -305,7 +364,7 @@ class TestE2E:
         "mode",
         [
             pytest.param(
-                ["offline", "--duration", "0", "--streaming", "off"], id="offline"
+                ["offline", "--num-samples", "40", "--streaming", "off"], id="offline"
             ),
             pytest.param(
                 [
@@ -314,8 +373,8 @@ class TestE2E:
                     "poisson",
                     "--target-qps",
                     "50",
-                    "--duration",
-                    "2000",
+                    "--num-samples",
+                    "40",
                 ],
                 id="poisson",
             ),
@@ -326,8 +385,8 @@ class TestE2E:
                     "concurrency",
                     "--concurrency",
                     "4",
-                    "--duration",
-                    "2000",
+                    "--num-samples",
+                    "40",
                 ],
                 id="concurrency",
             ),
@@ -363,8 +422,10 @@ class TestE2E:
             cwd=Path(__file__).resolve().parents[3],
         )
         assert proc.returncode == 0, proc.stderr[-3000:]
-        # results.json is written regardless of the -vvv stdout redirect.
-        results = json.loads((tmp_path / "results.json").read_text())
-        assert results["results"]["total"] > 0
+        # result_summary.json is written regardless of the -vvv stdout redirect.
+        results = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert results["n_samples_issued"] > 0
         # Bootstrap announces the trace channel on the pre-redirect stderr.
         assert ("trace:" in proc.stderr) == (verbose == "-vvv")

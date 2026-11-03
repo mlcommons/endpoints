@@ -1,16 +1,26 @@
 # Evaluation — Design Spec
 
-> Scores model responses against ground-truth answers after an accuracy benchmark run; extracts answers from raw response text and supports LiveCodeBench code-execution evaluation via an external sandboxed server.
+> Scores model responses against ground-truth answers after an accuracy
+> benchmark run; extracts answers from raw response text and supports
+> LiveCodeBench code-execution evaluation via an external sandboxed server.
 
-**Component specs:** [async_utils](../async_utils/DESIGN.md) · [commands](../commands/DESIGN.md) · [config](../config/DESIGN.md) · [core](../core/DESIGN.md) · [dataset_manager](../dataset_manager/DESIGN.md) · [endpoint_client](../endpoint_client/DESIGN.md) · **evaluation** · [load_generator](../load_generator/DESIGN.md) · [metrics](../metrics/DESIGN.md) · [openai](../openai/DESIGN.md) · [plugins](../plugins/DESIGN.md) · [profiling](../profiling/DESIGN.md) · [sglang](../sglang/DESIGN.md) · [testing](../testing/DESIGN.md) · [utils](../utils/DESIGN.md)
+**Component specs:** [async_utils](../async_utils/DESIGN.md) ·
+[commands](../commands/DESIGN.md) · [config](../config/DESIGN.md) ·
+[core](../core/DESIGN.md) · [dataset_manager](../dataset_manager/DESIGN.md) ·
+[endpoint_client](../endpoint_client/DESIGN.md) · **evaluation** ·
+[load_generator](../load_generator/DESIGN.md) · [metrics](../metrics/DESIGN.md)
+· [openai](../openai/DESIGN.md) · [plugins](../plugins/DESIGN.md) ·
+[profiling](../profiling/DESIGN.md) · [sglang](../sglang/DESIGN.md) ·
+[testing](../testing/DESIGN.md) · [utils](../utils/DESIGN.md)
 
 ---
 
 ## Overview
 
-`evaluation/` scores model responses against ground-truth answers for accuracy benchmarks.
-It is invoked after a benchmark run that collected responses (i.e. `--mode acc` or `--mode both`).
-Today that orchestration happens in `commands/benchmark/execute.py`, not in `metrics/`.
+`evaluation/` scores model responses against ground-truth answers for accuracy
+benchmarks. It is invoked after a benchmark run that collected responses (i.e.
+`--mode acc` or `--mode both`). Today that orchestration happens in
+`commands/benchmark/execute.py`, not in `metrics/`.
 
 ## Responsibilities
 
@@ -35,16 +45,17 @@ accuracy summary written into benchmark results
 
 ## Files
 
-| File             | Purpose                                                           |
-| ---------------- | ----------------------------------------------------------------- |
-| `extractor.py`   | Extracts model answer from raw text (regex, boxed-answer parsing) |
-| `scoring.py`     | Compares extracted answer to ground truth label                   |
-| `livecodebench/` | LiveCodeBench-specific code execution pipeline                    |
+| File             | Purpose                                                                                                                                      |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extractor.py`   | Extracts model answer from raw text (regex, boxed-answer parsing)                                                                            |
+| `scoring.py`     | Compares extracted answer to ground truth label                                                                                              |
+| `bfcl_v4_*.py`   | BFCL v4 function-calling eval: `bfcl_v4_execution.py`, `bfcl_v4_scorer.py`, `bfcl_v4_metrics.py`, and the multi-turn `runner`/`scorer`/`cli` |
+| `livecodebench/` | LiveCodeBench-specific code execution pipeline                                                                                               |
 
 ## LiveCodeBench
 
-LiveCodeBench requires a sandboxed code execution server. The `livecodebench/` subdirectory
-contains the server implementation and a Dockerfile. See
+LiveCodeBench requires a sandboxed code execution server. The `livecodebench/`
+subdirectory contains the server implementation and a Dockerfile. See
 `src/inference_endpoint/evaluation/livecodebench/README.md` for setup
 instructions.
 
@@ -60,37 +71,46 @@ Files:
 
 The scorer registry in `evaluation/scoring.py` currently includes:
 
-| Method                | Description                                                    |
-| --------------------- | -------------------------------------------------------------- |
-| `pass_at_1`           | Exact-match style scoring; also used by the LiveCodeBench path |
-| `string_match`        | Whitespace-trimmed string equality                             |
-| `rouge`               | ROUGE-based text generation scoring                            |
-| `code_bench_scorer`   | LiveCodeBench code-execution scoring                           |
-| `shopify_category_f1` | Shopify category F1 evaluation                                 |
+| Method                      | Description                                                    |
+| --------------------------- | -------------------------------------------------------------- |
+| `pass_at_1`                 | Exact-match style scoring; also used by the LiveCodeBench path |
+| `string_match`              | Whitespace-trimmed string equality                             |
+| `rouge`                     | ROUGE-based text generation scoring                            |
+| `code_bench_scorer`         | LiveCodeBench code-execution scoring                           |
+| `shopify_category_f1`       | Shopify category F1 evaluation                                 |
+| `agentic_inference_inline`  | Inline scoring for agentic multi-turn inference                |
+| `vbench`                    | VBench video-generation accuracy (WAN 2.2 T2V)                 |
+| `bfcl_v4`                   | BFCL v4 function-calling accuracy                              |
+| `legacy_mlperf_deepseek_r1` | MLPerf DeepSeek-R1 combined multi-subset accuracy              |
 
-The scoring configuration used by benchmark execution is specified per accuracy dataset under
-`datasets[].accuracy_config`, including `accuracy_config.eval_method`,
-`accuracy_config.extractor`, and optional `accuracy_config.ground_truth`.
+The registry (`Scorer.PREDEFINED`) is auto-populated from `Scorer` subclasses
+via `__init_subclass__`.
+
+The scoring configuration used by benchmark execution is specified per accuracy
+dataset under `datasets[].accuracy_config`, including
+`accuracy_config.eval_method`, `accuracy_config.extractor`, and optional
+`accuracy_config.ground_truth`.
 
 ## Design Decisions
 
 **Extraction is separate from scoring**
 
-Model responses for tasks like GPQA often embed the answer in verbose reasoning text. Extraction
-(finding the answer in the text) and scoring (comparing the answer) are separate concerns.
-Different datasets may share a scoring method but require different extraction logic.
+Model responses for tasks like GPQA often embed the answer in verbose reasoning
+text. Extraction (finding the answer in the text) and scoring (comparing the
+answer) are separate concerns. Different datasets may share a scoring method but
+require different extraction logic.
 
 **LiveCodeBench requires an external service**
 
-Code execution cannot be done safely in-process. The evaluation server runs in a Docker container
-with resource limits. This is a deliberate architecture choice — not a shortcut — and is
-documented prominently in the dataset README.
+Code execution cannot be done safely in-process. The evaluation server runs in a
+Docker container with resource limits. This is a deliberate architecture choice
+— not a shortcut — and is documented prominently in the dataset README.
 
 ## Integration Points
 
-| Component                          | Role                                                   |
-| ---------------------------------- | ------------------------------------------------------ |
-| `commands/benchmark/execute.py`    | Builds scorer/extractor configs and runs scoring       |
-| `dataset_manager/predefined/`      | Provides ground truth labels alongside prompts         |
-| `evaluation/livecodebench/`        | Provides external execution path for LiveCodeBench     |
-| `results.json` / benchmark reports | Receives computed accuracy summary during finalization |
+| Component                        | Role                                                   |
+| -------------------------------- | ------------------------------------------------------ |
+| `commands/benchmark/execute.py`  | Builds scorer/extractor configs and runs scoring       |
+| `dataset_manager/predefined/`    | Provides ground truth labels alongside prompts         |
+| `evaluation/livecodebench/`      | Provides external execution path for LiveCodeBench     |
+| `accuracy/accuracy_results.json` | Receives computed accuracy summary during finalization |

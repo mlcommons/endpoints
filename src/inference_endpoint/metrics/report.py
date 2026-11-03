@@ -17,17 +17,73 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import msgspec.json
+import msgspec.structs
 
+from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
+    MetricCounterKey,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
+    build_token_series_dict,
+)
+from inference_endpoint.evaluation.accuracy_results import (
+    samples_weighted_average_accuracy,
+)
+from inference_endpoint.metrics.steady_state_diagnostics import SteadyState
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
+
+# Aggregator series name -> result_summary.json field. Single source of truth for the
+# summary's latency sections: ``Report.from_snapshot`` builds its fields from this, and
+# ``scripts/early_stopping_estimate_from_events.py`` uses it to key its post-hoc output the same way.
+SERIES_TO_SUMMARY_FIELD: Final[dict[str, str]] = {
+    "ttft_ns": "ttft",
+    "tpot_ns": "tpot",
+    "sample_latency_ns": "latency",
+}
+
+
+logger = logging.getLogger(__name__)
+
+
+def place_early_stopping_percentiles(
+    metric_dict: dict[str, Any], esp: dict[str, float | None]
+) -> dict[str, Any]:
+    """Return ``metric_dict`` with the ES map directly after ``percentiles``.
+
+    Single source of the map's position in every summary-shaped dict — used by
+    the report builder and by ``scripts/early_stopping_estimate_from_events.py``
+    when augmenting a historical ``result_summary.json``. Replaces any existing
+    placement; appends at the end if the dict has no ``percentiles`` key.
+    """
+    out: dict[str, Any] = {}
+    for key, value in metric_dict.items():
+        if key == "early_stopping_percentiles":
+            continue
+        out[key] = value
+        if key == "percentiles":
+            out["early_stopping_percentiles"] = esp
+    if "early_stopping_percentiles" not in out:
+        out["early_stopping_percentiles"] = esp
+    return out
+
+
+_FINISH_REASON_COUNTERS = (
+    MetricCounterKey.TRACKED_FINISH_REASON_STOP,
+    MetricCounterKey.TRACKED_FINISH_REASON_LENGTH,
+    MetricCounterKey.TRACKED_FINISH_REASON_TOOL_CALLS,
+    MetricCounterKey.TRACKED_FINISH_REASON_CONTENT_FILTER,
+    MetricCounterKey.TRACKED_FINISH_REASON_FUNCTION_CALL,
+    MetricCounterKey.TRACKED_FINISH_REASON_OTHER,
+)
 
 
 def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
@@ -44,7 +100,10 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
     """
     count = stat.get("count", 0)
     if count == 0:
-        return {}
+        # No data -> no rollups, but an enabled-ES empty series still self-describes
+        # (all-null map) in the summary instead of looking feature-off.
+        esp = stat.get("early_stopping_percentiles")
+        return {"early_stopping_percentiles": esp} if esp is not None else {}
 
     total = stat.get("total", 0)
     sum_sq = stat.get("sum_sq", 0)
@@ -84,7 +143,7 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
         median = (s_min + s_max) / 2
 
     histogram = stat.get("histogram", [])
-    return {
+    metric: dict[str, Any] = {
         "total": total,
         "min": s_min,
         "max": s_max,
@@ -97,11 +156,54 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
             "counts": [c for _, c in histogram],
         },
     }
+    # Early-stopping estimate map — present only when the feature is enabled
+    # (COMPLETE snapshots for TTFT/TPOT/latency); sits right after `percentiles`.
+    early_stopping_percentiles = stat.get("early_stopping_percentiles")
+    if early_stopping_percentiles is not None:
+        metric = place_early_stopping_percentiles(metric, early_stopping_percentiles)
+    return metric
+
+
+def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
+    """Build a series rollup (same shape as the perf ``output_sequence_lengths``
+    block) from raw integer values, off the hot path.
+
+    Delegates the token-series construction to the aggregator's
+    ``build_token_series_dict`` — the single source of the HDR bounds / sig-figs /
+    bucket count — then applies the same ``_series_to_metric_dict`` shaping the
+    perf report uses, so an accuracy-phase OSL block is byte-for-byte the same
+    shape (avg/min/max/median/std_dev/percentiles/histogram) as the performance
+    one. Returns ``{}`` when ``values`` is empty.
+    """
+    return _series_to_metric_dict(build_token_series_dict(values))
 
 
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
+
+
+def _steady_state_of(snap: dict) -> SteadyState | None:
+    """Decode the steady-state verdict from a snapshot dict.
+
+    ``final_snapshot.json`` is read with ``json.loads``, so the verdict arrives
+    as plain dicts and must be converted.
+
+    A schema mismatch is dropped rather than raised because the verdict is a
+    diagnostic. Dropping it makes the absence visible. Raising would suppress
+    the report, and coercing could print a plausible wrong number.
+    """
+    raw = snap.get("steady_state")
+    if raw is None:
+        return None
+    try:
+        return msgspec.convert(raw, type=SteadyState)
+    except msgspec.ValidationError:
+        logger.warning(
+            "Steady-state verdict did not match the expected schema; dropping it",
+            exc_info=True,
+        )
+        return None
 
 
 class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
@@ -111,6 +213,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     git_sha: str | None
     test_started_at: int
     n_samples_issued: int
+    # Terminal responses; failed samples are a subset of this count.
     n_samples_completed: int
     n_samples_failed: int
     duration_ns: int | None
@@ -119,10 +222,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # without re-parsing the source dict, and so JSON round-trips don't
     # depend on Report importing the SessionState enum.
     state: str
-    # True iff state=="complete" AND n_pending_tasks==0. False signals
-    # partial async metrics — drain timed out (state=="complete",
-    # n_pending_tasks>0), the run was interrupted (state=="interrupted"),
-    # or no final snapshot was found and we fell back to a live tick.
+    # True iff the aggregator completed, no metrics work remains, and every
+    # issued sample reached a terminal outcome with valid counter ordering.
+    # False signals dropped samples, partial async metrics, an interrupted run,
+    # or a live-snapshot fallback.
     complete: bool
 
     # Per-metric rollup dicts (output of _series_to_metric_dict)
@@ -130,6 +233,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     tpot: dict[str, Any]
     latency: dict[str, Any]
     output_sequence_lengths: dict[str, Any]
+    input_sequence_lengths: dict[str, Any]
     # Legacy MLPerf LoadGen Server "completed" window (poisson only): first
     # issued request -> completion of the last-issued request
     # (final_query_all_samples_done_time analog; see mlcommons/inference
@@ -145,26 +249,67 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # tokenizer unavailable).
     qps: float | None = None
     tps: float | None = None
+    e2e_avg_interactivity: float | None = None
+    finish_reason_counts: dict[str, int] = msgspec.field(default_factory=dict)
 
-    # RNG seeds for this run (scheduler/dataloader/warmup, from config). Carried
-    # so result_summary.json is self-validating: a reproducible run is identified
-    # by its seeds. These are config, not a measured metric, so the from_snapshot
-    # caller supplies them rather than reading them from the metrics snapshot.
-    seeds: dict[str, int] | None = None
+    # Run configuration (load_pattern, warmup, and the scheduler/dataloader RNG
+    # seeds), from config. Carried so result_summary.json is self-describing and a
+    # valid run is identified by its settings. Config, not a measured metric, so
+    # the from_snapshot caller supplies it rather than reading it from the metrics
+    # snapshot. (Resolved/effective runtime settings — sample count + ordering,
+    # which can differ per audit phase — are deferred to a follow-up.)
+    run_config: dict[str, Any] | None = None
+
+    # Per-dataset accuracy entries (one per scored dataset), attached after
+    # scoring in finalize_benchmark. Accuracy is not in the metrics snapshot, so
+    # from_snapshot leaves this empty; runs without configured scoring keep it
+    # empty. Each entry carries score + sample counts and, for multi-subset
+    # scorers, a BFCL-shaped breakdown. Display-only.
+    accuracy: list[dict[str, Any]] = msgspec.field(default_factory=list)
+
+    # OSL over EVERY completed turn, including turns issued after the
+    # performance window closed. ``output_sequence_lengths`` above covers only
+    # the window, whose length depends on concurrency — so it is not
+    # comparable across Pareto points, while this block is. Same token-counting
+    # rule (``extract_tokenization_input``) on both. Attached at finalize; None
+    # only when the block was skipped (no tokenizer, or an unreadable/missing
+    # performance sample map). A run that scanned turns but counted none returns
+    # a block with ``n_turns_counted == 0``. ``partial`` is True when any turn was
+    # errored, undecodable, or missing (a perf UUID with no COMPLETE record) — the
+    # mean is then over a subset. A run is invalid for the OSL accuracy gate when
+    # this is None OR ``n_turns_counted == 0`` OR ``partial`` OR not complete.
+    # Carries ``output_sequence_lengths``/``n_turns_counted``/``n_empty``/
+    # ``n_errors``/``n_undecodable``/``n_missing``/``partial``.
+    # See mlcommons/endpoints#500.
+    output_sequence_lengths_full_run: dict[str, Any] | None = None
+
+    # Steady-window verdict carried on the metrics snapshot. None when
+    # collection was off or the collected series do not describe the run. Kept in
+    # ``to_json`` (unlike ``accuracy``), so it reaches result_summary.json.
+    steady_state: SteadyState | None = None
+
+    @property
+    def n_samples_succeeded(self) -> int:
+        return max(0, self.n_samples_completed - self.n_samples_failed)
+
+    @property
+    def n_samples_dropped(self) -> int:
+        return max(0, self.n_samples_issued - self.n_samples_completed)
 
     @classmethod
     def from_snapshot(
         cls,
         snap: dict[str, Any],
         *,
-        seeds: dict[str, int] | None = None,
+        run_config: dict[str, Any] | None = None,
         use_legacy_loadgen_qps_metrics: bool = True,
     ) -> Report:
         """Build a Report from a snapshot dict.
 
-        ``seeds`` (optional) carries the run's RNG seeds from config into the
-        report so result_summary.json is self-validating; it is keyword-only
-        because it is config, not part of the metrics snapshot.
+        ``run_config`` (optional, keyword-only) carries the run's configuration
+        (load_pattern, warmup, and the scheduler/dataloader RNG seeds) into the
+        report so result_summary.json is self-describing; it is config, not part
+        of the metrics snapshot.
 
         Input is the dict form produced by
         ``inference_endpoint.async_utils.services.metrics_aggregator.snapshot
@@ -206,14 +351,18 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         def _series_dict(key: str) -> dict[str, Any]:
             stat = series.get(key)
-            if stat is None or stat.get("count", 0) == 0:
-                return {}
-            return _series_to_metric_dict(stat)
+            # count==0 handling lives in _series_to_metric_dict, which preserves
+            # the all-null early_stopping_percentiles map for enabled-but-empty
+            # series — short-circuiting here would silently drop it.
+            return _series_to_metric_dict(stat) if stat is not None else {}
 
         version_info = get_version_info()
         raw_duration_ns = _counter("tracked_duration_ns")
         duration_ns = raw_duration_ns if raw_duration_ns > 0 else None
+        n_issued = _counter("tracked_samples_issued")
+        n_failed = _counter("tracked_samples_failed")
         n_completed = _counter("tracked_samples_completed")
+        isl = _series_dict("isl")
         osl = _series_dict("osl")
 
         # Legacy MLPerf LoadGen Server "completed" window (poisson only): first
@@ -250,39 +399,116 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             qps = None
             tps = None
 
+        total_sample_latency_ns = series.get("sample_latency_ns", {}).get("total", 0)
+        # OSL is recorded only for successful responses, while sample latency
+        # includes every terminal request. Without a success-correlated latency
+        # sum, any tracked failure would make the two sides cover different
+        # samples, so omit the derived metric instead of publishing a biased
+        # ratio.
+        e2e_avg_interactivity = (
+            osl.get("total", 0) / (total_sample_latency_ns / 1e9)
+            if osl and total_sample_latency_ns > 0 and n_failed == 0
+            else None
+        )
+
         # Default missing state to "interrupted" — a malformed / partial
         # snapshot dict is treated as worst-case (run did not reach a
         # clean completion). Drives complete=False and the interrupted
         # indicator in display().
         state = snap.get("state", "interrupted")
         n_pending_tasks = snap.get("n_pending_tasks", 0)
+        finish_reason_prefix = "tracked_finish_reason_"
+        finish_reason_counts = {
+            reason.value.removeprefix(finish_reason_prefix): int(
+                counters.get(reason.value, 0)
+            )
+            for reason in _FINISH_REASON_COUNTERS
+        }
 
+        accounting_valid = 0 <= n_failed <= n_completed <= n_issued
         return cls(
             version=str(version_info.get("version", "unknown")),
             git_sha=version_info.get("git_sha"),
             test_started_at=0,  # TODO: surface session_started_ns via snapshot
-            n_samples_issued=_counter("tracked_samples_issued"),
+            n_samples_issued=n_issued,
             n_samples_completed=n_completed,
-            n_samples_failed=_counter("tracked_samples_failed"),
+            n_samples_failed=n_failed,
             duration_ns=duration_ns,
             state=state,
-            complete=(state == "complete" and n_pending_tasks == 0),
-            ttft=_series_dict("ttft_ns"),
-            tpot=_series_dict("tpot_ns"),
-            latency=_series_dict("sample_latency_ns"),
+            complete=(
+                state == "complete"
+                and n_pending_tasks == 0
+                and accounting_valid
+                and n_completed == n_issued
+            ),
+            **{
+                field: _series_dict(series)
+                for series, field in SERIES_TO_SUMMARY_FIELD.items()
+            },
+            input_sequence_lengths=isl,
             output_sequence_lengths=osl,
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
             tps=tps,
-            seeds=seeds,
+            e2e_avg_interactivity=e2e_avg_interactivity,
+            finish_reason_counts=finish_reason_counts,
+            run_config=run_config,
+            steady_state=_steady_state_of(snap),
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
-        json_bytes = msgspec.json.format(msgspec.json.encode(self), indent=2)
+        # result_summary.json is the performance report — accuracy lives only in
+        # the dedicated accuracy report (accuracy/accuracy_results.json). The
+        # accuracy field stays on the struct so report.txt / the console summary
+        # still render it; it is just dropped from this serialized perf summary.
+        payload = msgspec.structs.asdict(self)
+        payload["n_samples_succeeded"] = self.n_samples_succeeded
+        payload["n_samples_dropped"] = self.n_samples_dropped
+        payload.pop("accuracy")
+        json_bytes = msgspec.json.format(msgspec.json.encode(payload), indent=2)
         if save_to is not None:
             with Path(save_to).open("wb") as f:
                 f.write(json_bytes)
         return json_bytes
+
+    def _display_steady_state(self, fn: Callable[[str], None], newline: str) -> None:
+        """Render the actionable steady-window summary, if there is a verdict.
+
+        The full verdict stays in result_summary.json: histograms, CoV table,
+        and trend detail. The terminal display prints only the numbers a reader
+        acts on.
+        """
+        ss = self.steady_state
+        if ss is None:
+            return
+        if not ss.found:
+            fn(f"Steady state: not found ({ss.reason}){newline}")
+            return
+        window, tps = ss.window, ss.tps
+        if window is None or tps is None:
+            return
+        held_s = (window.end_ns - window.start_ns) / 1e9
+        fn(
+            f"Steady state: super-passes {window.sp_lo}..."
+            f"{window.sp_hi - 1} (post-warmup), "
+            f"{window.n_samples} samples over {held_s:.0f}s{newline}"
+        )
+        fn(
+            f"  Steady TPS: {tps.system:.2f} system, "
+            f"{tps.per_user:.2f} per user{newline}"
+        )
+        if ss.drifting_up:
+            fn(
+                f"  WARNING: {', '.join(ss.drifting_up)} drifting up over the "
+                f"rest of the run{newline}"
+            )
+        if ss.anomaly.detected:
+            fn(
+                f"  ANOMALY: level shift at super-pass "
+                f"{ss.anomaly.change_point_sp}, TPOT "
+                f"{ss.anomaly.delta_pct:+.1f}% toward end of run"
+                f"{newline}"
+            )
 
     def display(
         self,
@@ -304,15 +530,21 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         fn(f"Version: {self.version}{newline}")
         if self.git_sha:
             fn(f"Git SHA: {self.git_sha}{newline}")
-        if self.seeds:
-            seed_str = ", ".join(f"{k}={v}" for k, v in self.seeds.items())
-            fn(f"Seeds: {seed_str}{newline}")
+        if self.run_config:
+            fn(f"Run config:{newline}")
+            for section, params in self.run_config.items():
+                if isinstance(params, dict):
+                    inner = ", ".join(f"{k}={v}" for k, v in params.items())
+                    fn(f"  {section}: {inner}{newline}")
+                else:
+                    fn(f"  {section}: {params}{newline}")
         if self.test_started_at > 0:
             approx = monotime_to_datetime(self.test_started_at)
             fn(f"Test started at: {approx.strftime('%Y-%m-%d %H:%M:%S')}{newline}")
         fn(f"Total samples issued: {self.n_samples_issued}{newline}")
-        fn(f"Total samples completed: {self.n_samples_completed}{newline}")
+        fn(f"Total samples succeeded: {self.n_samples_succeeded}{newline}")
         fn(f"Total samples failed: {self.n_samples_failed}{newline}")
+        fn(f"Total samples dropped: {self.n_samples_dropped}{newline}")
         if self.duration_ns is not None:
             fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds{newline}")
         else:
@@ -325,6 +557,109 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         if (tps := self.tps) is not None:
             fn(f"TPS: {tps:.2f}{newline}")
+        else:
+            fn(f"TPS: N/A{newline}")
+
+        if (interactivity := self.e2e_avg_interactivity) is not None:
+            fn(f"E2E average interactivity: {interactivity:.2f} tokens/s{newline}")
+        else:
+            fn(f"E2E average interactivity: N/A{newline}")
+
+        self._display_steady_state(fn, newline)
+
+        if self.accuracy:
+            fn(f"Accuracy:{newline}")
+            for entry in self.accuracy:
+                name = entry.get("dataset_name", "?")
+                score = entry.get("score")
+                if score is None:
+                    score_str = "N/A"
+                elif isinstance(score, bool):
+                    score_str = str(score)
+                elif isinstance(score, int | float):
+                    score_str = f"{score:.4g}"
+                else:
+                    score_str = str(score)
+                unit = entry.get("unit_samples")
+                repeats = entry.get("num_repeats")
+                total = entry.get("total_samples")
+                dur = entry.get("duration_s")
+                dur_str = (
+                    f", duration={dur:.2f}s" if isinstance(dur, int | float) else ""
+                )
+                fn(
+                    f"  {name}: {score_str} "
+                    f"(unit={unit}, repeats={repeats}, total={total}{dur_str}){newline}"
+                )
+                rc = entry.get("response_counts")
+                if isinstance(rc, dict):
+                    fn(
+                        f"    responses: {rc.get('scored', 0)}/{rc.get('issued', 0)} "
+                        f"scored ({rc.get('empty', 0)} empty, "
+                        f"{rc.get('missing', 0)} missing){newline}"
+                    )
+                osl = entry.get("output_sequence_lengths")
+                if isinstance(osl, dict):
+                    fn(
+                        f"    output tokens (avg/min/max): "
+                        f"{osl.get('avg', 0):.1f}/{osl.get('min')}/{osl.get('max')}"
+                        f"{newline}"
+                    )
+                breakdown = entry.get("breakdown")
+                if isinstance(breakdown, dict):
+                    for sub, sub_score in (
+                        breakdown.get("subset_scores") or {}
+                    ).items():
+                        fn(f"    {sub}: {sub_score:.2f}%{newline}")
+                if entry.get("complete") is False:
+                    fn(f"    (incomplete){newline}")
+            avg = samples_weighted_average_accuracy(self.accuracy)
+            if avg is not None:
+                fn(f"  Average: {avg:.4g}{newline}")
+            if any("osl_tokenize_s" in e for e in self.accuracy):
+                osl_tok = sum(e.get("osl_tokenize_s", 0.0) for e in self.accuracy)
+                fn(f"  OSL tokenization: {osl_tok:.3g}s{newline}")
+
+        fr = self.output_sequence_lengths_full_run
+        n_counted = (fr or {}).get("n_turns_counted", 0)
+        if fr and n_counted > 0:
+            osl = fr.get("output_sequence_lengths", {})
+            fn(
+                f"  OSL per-turn mean (accuracy, all turns): "
+                f"{osl.get('avg', 0):.1f} tokens over {n_counted} turns "
+                f"({fr.get('n_empty', 0)} empty, {fr.get('n_errors', 0)} errored, "
+                f"{fr.get('n_undecodable', 0)} undecodable, "
+                f"{fr.get('n_missing', 0)} missing){newline}"
+            )
+            if fr.get("partial"):
+                fn(
+                    f"    (PARTIAL — dropped/missing turns; "
+                    f"NOT valid for the OSL accuracy gate){newline}"
+                )
+            if not self.complete:
+                fn(
+                    f"    (run incomplete — NOT valid for the OSL accuracy gate){newline}"
+                )
+        elif fr:
+            # Block present but no countable turns — do not print a fake 0.0 mean.
+            fn(
+                f"  OSL per-turn mean (accuracy): no countable turns "
+                f"({fr.get('n_empty', 0)} empty, {fr.get('n_errors', 0)} errored, "
+                f"{fr.get('n_undecodable', 0)} undecodable, "
+                f"{fr.get('n_missing', 0)} missing){newline}"
+            )
+        elif self.output_sequence_lengths and self.complete:
+            # A complete performance run (windowed OSL present) but no full-run
+            # block: the accuracy OSL field is missing, so the run is not usable
+            # for that gate.
+            fn(
+                f"  OSL per-turn mean (accuracy): not computed "
+                f"(no tokenizer or unreadable sample map){newline}"
+            )
+        elif not self.complete:
+            fn(
+                f"  OSL per-turn mean (accuracy): not computed — run incomplete{newline}"
+            )
 
         if summary_only:
             fn(f"----------------- End of Summary -----------------{newline}")
@@ -336,7 +671,18 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             ("TTFT", self.ttft, "ms", 1e-6),
             ("TPOT", self.tpot, "ms", 1e-6),
             ("Latency", self.latency, "ms", 1e-6),
+            ("Input sequence lengths", self.input_sequence_lengths, "tokens", 1.0),
+            # Label deliberately unchanged: existing tooling parses report.txt
+            # by section name. The full-run block is added alongside it.
             ("Output sequence lengths", self.output_sequence_lengths, "tokens", 1.0),
+            (
+                "Output sequence lengths (full run, all turns)",
+                (self.output_sequence_lengths_full_run or {}).get(
+                    "output_sequence_lengths", {}
+                ),
+                "tokens",
+                1.0,
+            ),
         ]:
             if not metric_dict:
                 continue
@@ -376,6 +722,7 @@ def _display_metric(
             return "N/A"
         return f"{v * scale_factor:.2f}"
 
+    # .get(): an empty-but-ES-carrying metric dict has no rollups/histogram.
     for name, key in [
         ("Min", "min"),
         ("Max", "max"),
@@ -383,11 +730,12 @@ def _display_metric(
         ("Avg.", "avg"),
         ("Std Dev.", "std_dev"),
     ]:
-        fn(f"  {name}: {_scaled(metric_dict[key])} {unit}{newline}")
+        fn(f"  {name}: {_scaled(metric_dict.get(key))} {unit}{newline}")
 
     fn(f"\n  Histogram:{newline}")
-    buckets = metric_dict["histogram"]["buckets"]
-    counts = metric_dict["histogram"]["counts"]
+    histogram = metric_dict.get("histogram") or {"buckets": [], "counts": []}
+    buckets = histogram["buckets"]
+    counts = histogram["counts"]
 
     if buckets:
         bucket_strs = [
@@ -405,3 +753,11 @@ def _display_metric(
     fn(f"\n  Percentiles:{newline}")
     for p, val in metric_dict.get("percentiles", {}).items():
         fn(f"  {p:>6}: {_scaled(val)} {unit}{newline}")
+
+    es_map = metric_dict.get("early_stopping_percentiles")
+    if es_map:
+        fn(
+            f"\n  Early-stopping percentile estimates (N/A = insufficient samples):{newline}"
+        )
+        for k, v in es_map.items():
+            fn(f"  {k:>6}: {_scaled(v)} {unit}{newline}")

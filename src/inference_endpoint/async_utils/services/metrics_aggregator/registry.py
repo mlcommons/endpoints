@@ -36,12 +36,25 @@ import logging
 import math
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from typing import Final
 
 import numpy as np
 from hdrh.histogram import HdrHistogram
+from inference_endpoint.metrics.early_stopping import (
+    EarlyStoppingSpec,
+    es_percentile_estimate,
+    es_targets_from_grid,
+)
 
-from .snapshot import CounterStat, MetricsSnapshot, MetricStat, SeriesStat, SessionState
+from .snapshot import (
+    CounterStat,
+    MetricsSnapshot,
+    MetricStat,
+    SeriesStat,
+    SessionState,
+    _metric_to_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +149,7 @@ class SeriesSampler(MetricSampler):
         "_min",
         "_max",
         "_warned_clamp",
+        "_es_spec",
     )
 
     def __init__(
@@ -148,11 +162,13 @@ class SeriesSampler(MetricSampler):
         n_histogram_buckets: int,
         percentiles: tuple[float, ...],
         dtype: type,
+        es_spec: EarlyStoppingSpec | None = None,
     ) -> None:
         if dtype not in _ARRAY_TYPECODE:
             raise ValueError(f"Unsupported series dtype: {dtype!r}")
         self.name = name
         self._dtype = dtype
+        self._es_spec = es_spec
         # HDR low must be >=1; a bound of 0 is rejected by the C library.
         self._hdr_low = max(int(hdr_low), 1)
         self._hdr_high = int(hdr_high)
@@ -216,11 +232,66 @@ class SeriesSampler(MetricSampler):
 
     # -- snapshot construction --------------------------------------------
 
+    def _es_estimates(self, sorted_values) -> dict[str, float | None] | None:
+        # Percentile targets come from this series' own report grid (>= median)
+        # unless the spec pins an explicit tuple (tests / offline analysis). The
+        # snapshot carries only the compact {grid_key: estimate-or-None} map; the
+        # rich detail (empirical/n/min_queries/discarded) is INFO-logged here and
+        # recomputable offline via scripts/early_stopping_estimate_from_events.py.
+        if self._es_spec is None:
+            return None
+        spec = self._es_spec
+        try:
+            return self._compute_es_estimates(sorted_values, spec)
+        except Exception:
+            # Best-effort by design: this runs inside publish_final's
+            # build_snapshot, where an exception would cost the ENTIRE final
+            # report (the publisher's finalized guard makes retries no-ops).
+            logger.exception(
+                "%s: early-stopping computation failed; omitting the map", self.name
+            )
+            return None
+
+    def _compute_es_estimates(
+        self, sorted_values, spec: EarlyStoppingSpec
+    ) -> dict[str, float | None]:
+        if spec.percentiles is not None:  # explicit override: tests / offline analysis
+            # Descending, deduped on the parsed value so 99 and 99.0 are one target
+            # (the rule the post-hoc script applies to its --percentiles fallback);
+            # the first spelling wins the key, so an int override still keys "99".
+            seen: dict[float, str] = {}
+            for p in sorted(spec.percentiles, reverse=True):
+                seen.setdefault(float(p), str(p))
+            targets = {key: value for value, key in seen.items()}
+        else:
+            targets = es_targets_from_grid(self._percentiles)
+        results = {
+            key: es_percentile_estimate(sorted_values, f, spec.confidence)
+            for key, f in targets.items()
+        }
+        logger.info(
+            "%s early-stopping detail (confidence %s): %s",
+            self.name,
+            spec.confidence,
+            "; ".join(
+                f"p{key}: estimate={r.estimate} empirical={r.empirical} n={r.n} "
+                f"min_queries={r.min_queries} discarded={r.discarded}"
+                for key, r in results.items()
+            ),
+        )
+        return {
+            key: (None if r.estimate is None else float(r.estimate))
+            for key, r in results.items()
+        }
+
     def build_stat(self, *, exact: bool) -> SeriesStat:
         if self._count == 0:
             # No data → no histogram. Edges are dynamic and only meaningful
             # once min/max are observed; consumers should treat an empty
-            # histogram as "no data yet".
+            # histogram as "no data yet". Early stopping still self-describes
+            # (n=0, sufficient=false) — an empty target series must not look
+            # like the feature was disabled.
+            early_stopping_percentiles = self._es_estimates(()) if exact else None
             return SeriesStat(
                 name=self.name,
                 count=0,
@@ -230,6 +301,7 @@ class SeriesSampler(MetricSampler):
                 sum_sq=self._dtype(),
                 percentiles={str(p): 0.0 for p in self._percentiles},
                 histogram=[],
+                early_stopping_percentiles=early_stopping_percentiles,
             )
 
         if exact:
@@ -282,6 +354,12 @@ class SeriesSampler(MetricSampler):
     def _exact_stat(self) -> SeriesStat:
         np_dtype = _NUMPY_DTYPE[self._dtype]
         arr = np.frombuffer(self._raw, dtype=np_dtype)
+        # Sort ONCE, in place, and share the sorted array across the percentile
+        # grid, the histogram, and the early-stopping estimates. In-place is safe:
+        # this is the terminal COMPLETE path, recording has ended, and none of the
+        # consumers care about arrival order — while a sorted copy would double the
+        # peak memory for multi-million-sample runs.
+        arr.sort()
         # method="lower" returns observed values (not interpolated) so
         # percentiles round-trip through int dtypes cleanly.
         perc_values = np.percentile(arr, self._percentiles, method="lower")
@@ -307,6 +385,11 @@ class SeriesSampler(MetricSampler):
             for i in range(len(edges) - 1)
         ]
 
+        # Early-stopping estimates (COMPLETE path only): conservative confidence-backed
+        # bound per configured percentile, all off one sorted raw array. Cold path —
+        # the sort is one-time at run end and each estimate is a few beta evaluations.
+        early_stopping_percentiles = self._es_estimates(arr)
+
         return SeriesStat(
             name=self.name,
             count=self._count,
@@ -316,6 +399,7 @@ class SeriesSampler(MetricSampler):
             sum_sq=float(self._sum_sq),
             percentiles=perc_dict,
             histogram=histogram,
+            early_stopping_percentiles=early_stopping_percentiles,
         )
 
 
@@ -324,7 +408,7 @@ class SeriesSampler(MetricSampler):
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_PERCENTILES: Final[tuple[float, ...]] = (
+DEFAULT_PERCENTILES: Final[tuple[float, ...]] = (
     99.9,
     99.0,
     97.0,
@@ -343,23 +427,24 @@ _DEFAULT_PERCENTILES: Final[tuple[float, ...]] = (
 class MetricsRegistry:
     """Central registry of all counter and series samplers."""
 
-    def __init__(self) -> None:
+    def __init__(self, early_stopping: EarlyStoppingSpec | None = None) -> None:
         self._counters: dict[str, CounterSampler] = {}
         self._series: dict[str, SeriesSampler] = {}
         self._seen_names: set[str] = set()
+        # Optional early-stopping spec; applied to series registered tail_latency=True.
+        self._early_stopping = early_stopping
         # Monotonic snapshot emit counter; surfaced on the wire as
         # MetricsSnapshot.counter for diagnostic use by consumers.
         self._counter: int = 0
 
     # -- registration -----------------------------------------------------
 
-    def register_counter(self, name: str, dtype: type = int) -> CounterSampler:
+    def register_counter(self, name: str, dtype: type = int) -> None:
         if name in self._seen_names:
             raise ValueError(f"Metric name already registered: {name}")
         sampler = CounterSampler(name, dtype=dtype)
         self._counters[name] = sampler
         self._seen_names.add(name)
-        return sampler
 
     def register_series(
         self,
@@ -369,9 +454,10 @@ class MetricsRegistry:
         hdr_high: int,
         sig_figs: int = 3,
         n_histogram_buckets: int = 30,
-        percentiles: tuple[float, ...] = _DEFAULT_PERCENTILES,
+        percentiles: tuple[float, ...] = DEFAULT_PERCENTILES,
         dtype: type = int,
-    ) -> SeriesSampler:
+        tail_latency: bool = False,
+    ) -> None:
         """Register a new series.
 
         ``percentiles`` MUST include ``50.0`` (or ``50``) — median is a
@@ -399,10 +485,10 @@ class MetricsRegistry:
             n_histogram_buckets=n_histogram_buckets,
             percentiles=percentiles,
             dtype=dtype,
+            es_spec=self._early_stopping if tail_latency else None,
         )
         self._series[name] = sampler
         self._seen_names.add(name)
-        return sampler
 
     # -- hot path ---------------------------------------------------------
     # Direct dict lookup, no isinstance dispatch — these are called once per
@@ -421,7 +507,11 @@ class MetricsRegistry:
     # -- snapshot ---------------------------------------------------------
 
     def build_snapshot(
-        self, *, state: SessionState, n_pending_tasks: int
+        self,
+        *,
+        state: SessionState,
+        n_pending_tasks: int,
+        steady_state: dict | None = None,
     ) -> MetricsSnapshot:
         # Exact (raw-values) computation is reserved for the COMPLETE snapshot;
         # live and draining snapshots use the cheap HDR path.
@@ -438,6 +528,7 @@ class MetricsRegistry:
             state=state,
             n_pending_tasks=n_pending_tasks,
             metrics=metrics,
+            steady_state=steady_state,
         )
 
     # -- introspection (mostly for tests) --------------------------------
@@ -447,3 +538,46 @@ class MetricsRegistry:
 
     def has_series(self, name: str) -> bool:
         return name in self._series
+
+
+# ---------------------------------------------------------------------------
+# Token-count series (OSL / ISL)
+# ---------------------------------------------------------------------------
+
+# Canonical parameters for a token-count series, shared by the aggregator's live
+# OSL/ISL series and the finalize-side accuracy OSL so both emit an identical
+# block from one source. The HDR bounds size the live/HDR percentile view; the
+# exact (raw-array) path used for COMPLETE snapshots and accuracy OSL ignores them
+# and derives histogram edges from the observed range.
+TOKEN_HDR_LOW: Final[int] = 1
+TOKEN_HDR_HIGH: Final[int] = 10_000_000  # 10M tokens
+TOKEN_SERIES_SIG_FIGS: Final[int] = 3
+TOKEN_SERIES_HISTOGRAM_BUCKETS: Final[int] = 30
+
+
+def build_token_series_dict(
+    values: Iterable[int],
+    *,
+    sig_figs: int = TOKEN_SERIES_SIG_FIGS,
+    n_histogram_buckets: int = TOKEN_SERIES_HISTOGRAM_BUCKETS,
+) -> dict:
+    """Build a token-count series stat dict (exact) from raw ``values``.
+
+    Records ``values`` into a ``SeriesSampler`` configured identically to the
+    aggregator's OSL/ISL series, then materializes the exact-path stat (sort +
+    np.percentile/np.histogram over the observed range) in the same dict shape
+    ``snapshot_to_dict`` produces — so the finalize-side accuracy OSL block
+    matches the perf one without duplicating the construction. Off the hot path.
+    """
+    sampler = SeriesSampler(
+        "osl",
+        hdr_low=TOKEN_HDR_LOW,
+        hdr_high=TOKEN_HDR_HIGH,
+        sig_figs=sig_figs,
+        n_histogram_buckets=n_histogram_buckets,
+        percentiles=DEFAULT_PERCENTILES,
+        dtype=int,
+    )
+    for v in values:
+        sampler.record(v)
+    return _metric_to_dict(sampler.build_stat(exact=True))

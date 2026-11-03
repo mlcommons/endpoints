@@ -114,3 +114,22 @@ class TestQueryStatus:
         assert QueryStatus.COMPLETED.value == "completed"
         assert QueryStatus.FAILED.value == "failed"
         assert QueryStatus.CANCELLED.value == "cancelled"
+
+
+class TestTextModelOutputChunks:
+    """text_after_first_chunk() is the TPOT token denominator (metrics aggregator
+    and the post-hoc early-stopping script) — pin its chunk-selection semantics."""
+
+    def test_streamed_output_drops_first_chunk(self) -> None:
+        assert (
+            TextModelOutput(output=("a", "b c", "d")).text_after_first_chunk() == "b cd"
+        )
+
+    def test_single_chunk_and_nonstreaming_have_no_post_first_text(self) -> None:
+        assert TextModelOutput(output=("only",)).text_after_first_chunk() == ""
+        assert TextModelOutput(output="full text").text_after_first_chunk() == ""
+
+    def test_streamed_fields_share_the_first_chunk(self) -> None:
+        # Both fields contributed to the first delta; exclude both first entries.
+        out = TextModelOutput(output=("o1", "o2"), reasoning=("r1", "r2"))
+        assert out.text_after_first_chunk() == "r2o2"

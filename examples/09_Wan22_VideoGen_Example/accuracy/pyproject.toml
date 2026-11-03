@@ -19,11 +19,21 @@
 name = "wan22-vbench-accuracy"
 version = "0.1.0"
 description = "Isolated VBench accuracy environment for the WAN 2.2 example."
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "vbench==0.1.5",
+    "decord2==3.4.0",
 ]
 
 [tool.uv]
 # Script-runner env: no build, no install of this project itself.
 package = false
+
+# vbench==0.1.5 declares decord as a dep, but decord 0.6.0 has no aarch64
+# wheel. decord2==3.4.0 is a drop-in fork that installs under the same
+# `decord` module namespace and ships wheels for both x86_64 and aarch64
+# (Python 3.11+). This override removes the vbench-transitive decord entry
+# from resolution so the resolver picks decord2 instead.
+override-dependencies = [
+    "decord ; sys_platform == 'never'",
+]

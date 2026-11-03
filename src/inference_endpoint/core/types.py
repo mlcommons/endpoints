@@ -122,7 +122,13 @@ class TextModelOutput(
     """Structured output from a text model.
 
     Supports main output, optional reasoning (e.g. chain-of-thought), and tool calls.
-    Each field may be a string (non-streaming) or tuple of strings (streaming chunks).
+    Text fields are strings for non-streaming responses or tuples for streaming.
+    Entry zero in every streamed field belongs to the same first meaningful delta.
+    Fields that start later use an empty first entry ("" for text, () for tools).
+    Remaining entries hold the tail; text entries may be aggregated. Tool calls
+    are a flat tuple for non-streaming or a tuple of delta batches for streaming.
+    A str output beside streamed reasoning is the joined-content layout of
+    existing event logs; all of that output follows the first delta.
 
     AT-RISK (gc=False): Has mutable container field `tool_calls`. Any change that
     mutates `tool_calls` after construction or stores cyclic references in it
@@ -182,38 +188,13 @@ class TextModelOutput(
         For non-streaming (str fields), there is no "first chunk" concept so
         this returns an empty string.
 
-        Streamed tool-call chunks are merged after dropping the first tool-call
-        chunk when the response starts with a pure tool-call delta.
+        All streamed fields exclude entry zero, including tool-call batches.
         """
-        parts: list[str] = []
-        if self.reasoning:
-            if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
-                parts.extend(self.reasoning[1:])
-            # str reasoning: single chunk, skip entirely (it IS the first chunk)
-        if self.output:
-            if isinstance(self.output, str):
-                # Non-streaming: if reasoning was present and was the first chunk,
-                # include the full output. Otherwise no first chunk to skip.
-                if parts or (self.reasoning and isinstance(self.reasoning, tuple)):
-                    parts.append(self.output)
-            elif isinstance(self.output, tuple):
-                if parts or self.reasoning:
-                    # First chunk was in reasoning; include all output chunks.
-                    parts.extend(self.output)
-                elif len(self.output) > 1:
-                    # No reasoning; first chunk is output[0], skip it.
-                    parts.extend(self.output[1:])
-        tool_calls = self.tool_calls
-        if (
-            tool_calls
-            and isinstance(tool_calls[0], list | tuple)
-            and not (self.output or self.reasoning)
-        ):
-            tool_calls = tool_calls[1:]
-        merged_tool_calls = merge_tool_calls(tool_calls)
-        if merged_tool_calls:
-            parts.append(msgspec.json.encode(list(merged_tool_calls)).decode())
-        return "".join(parts)
+        content, reasoning, tool_calls = self.as_message_parts_after_first_chunk()
+        text = (reasoning or "") + content
+        if tool_calls:
+            text += msgspec.json.encode(list(tool_calls)).decode()
+        return text
 
     def as_message_parts(
         self,
@@ -236,38 +217,23 @@ class TextModelOutput(
     def as_message_parts_after_first_chunk(
         self,
     ) -> tuple[str, str | None, TOOL_CALLS_TYPE | None]:
-        """Return message parts emitted after the first stream chunk."""
-        reasoning_after: str | None = None
-        if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
-            reasoning_after = "".join(self.reasoning[1:])
-
-        # has_reasoning_tail: reasoning[1:] is non-empty (mirrors `parts` logic in text_after_first_chunk)
-        has_reasoning_tail = reasoning_after is not None
-
-        content_after = ""
-        if self.output:
-            if isinstance(self.output, str):
-                # Include if reasoning is any non-empty tuple (it was the first chunk)
-                if has_reasoning_tail or (
-                    self.reasoning and isinstance(self.reasoning, tuple)
-                ):
-                    content_after = self.output
-            elif isinstance(self.output, tuple):
-                if has_reasoning_tail or self.reasoning:
-                    # First chunk was in reasoning; include all output chunks.
-                    content_after = "".join(self.output)
-                elif len(self.output) > 1:
-                    # No reasoning; first chunk is output[0], skip it.
-                    content_after = "".join(self.output[1:])
-
-        tool_calls = self.tool_calls
-        if (
-            tool_calls
-            and isinstance(tool_calls[0], list | tuple)
-            and not (self.output or self.reasoning)
-        ):
-            tool_calls = tool_calls[1:]
-        return content_after, reasoning_after, merge_tool_calls(tool_calls)
+        """Drop the aligned first entry in each streamed field for TPOT."""
+        if isinstance(self.output, tuple):
+            content = "".join(self.output[1:])
+        elif isinstance(self.reasoning, tuple) and self.reasoning:
+            # Joined-content layout of existing event logs (see class docstring).
+            content = self.output
+        else:
+            content = ""
+        reasoning = (
+            "".join(self.reasoning[1:]) or None
+            if isinstance(self.reasoning, tuple)
+            else None
+        )
+        tool_calls = None
+        if self.tool_calls and isinstance(self.tool_calls[0], list | tuple):
+            tool_calls = merge_tool_calls(self.tool_calls[1:])
+        return content, reasoning, tool_calls
 
 
 OUTPUT_TYPE = TextModelOutput
@@ -284,17 +250,32 @@ class PromptData(
 ):  # type: ignore[call-arg]
     """Prompt input data attached to ISSUED events for ISL computation.
 
-    Exactly one of ``text`` or ``token_ids`` should be set:
+    AT-RISK (gc=False): Has mutable container fields ``messages``, ``tools``,
+    and ``chat_template_kwargs``. Any change that introduces cyclic references
+    must be audited; if cycles become possible, remove ``gc=False``.
+
+    Exactly one of ``text``, ``token_ids``, or ``messages`` should be set:
     - ``text``: raw prompt string (OpenAI path) — requires tokenization for ISL.
     - ``token_ids``: pre-tokenized token ID list (SGLang/Harmonize path) — ISL is len().
+    - ``messages``: structured chat history rendered with the model's template.
 
     Attributes:
         text: Raw prompt string. Set when the adapter sends text prompts.
         token_ids: Pre-computed token IDs. Set when the adapter pre-tokenizes (e.g. SGLang).
+        messages: Structured messages sent to a chat-completions endpoint.
+        tools: Tool declarations accompanying ``messages``.
+        chat_template_kwargs: Model-specific arguments used to render ``messages``.
+        chat_template: Per-request template used to render ``messages``.
+        tool_choice: Tool-selection mode passed to the chat template.
     """
 
     text: str | None = None
     token_ids: tuple[int, ...] | None = None
+    messages: tuple[dict[str, Any], ...] | None = None
+    tools: tuple[dict[str, Any], ...] | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
+    chat_template: str | None = None
+    tool_choice: str | dict[str, Any] | None = None
 
 
 class ErrorData(
@@ -323,6 +304,52 @@ class ErrorData(
             if self.error_message
             else self.error_type
         )
+
+
+class PhaseType(str, Enum):
+    """Phase types control tracking and reporting behavior.
+
+    This lives in core because ``PhaseData`` carries it over the metrics wire.
+    The metrics aggregator and standalone detector need it, and importing it
+    from the load generator would pull that import graph into the metrics
+    subprocess.
+    """
+
+    PERFORMANCE = "performance"
+    ACCURACY = "accuracy"
+    WARMUP = "warmup"
+
+
+class PhaseData(
+    msgspec.Struct,
+    tag=True,
+    kw_only=True,
+    frozen=True,
+    omit_defaults=True,
+    array_like=True,
+    gc=False,
+):  # type: ignore[call-arg]
+    """Data carried by a ``PHASE_START`` event.
+
+    All fields are scalar, so ``gc=False`` is safe.
+
+    ``num_turns`` has the same meaning for single-turn and agentic workloads:
+    turns issued in one pass over the dataset. A turn is a sample. Single-turn
+    workloads report the sample count for a pass. Agentic workloads report every
+    turn across every conversation. ``num_trajectories`` carries the conversation
+    count, so mean turns per trajectory is derivable.
+
+    Attributes:
+        phase_type: Which phase this is.
+        drain_after: Whether in-flight requests are drained before the next phase.
+        num_turns: Turns (samples) issued in one pass over the dataset.
+        num_trajectories: Conversations, for agentic workloads; 0 otherwise.
+    """
+
+    phase_type: PhaseType
+    drain_after: bool
+    num_turns: int
+    num_trajectories: int = 0
 
 
 class Query(

@@ -31,6 +31,7 @@ from typing import ClassVar, Final
 import msgspec
 import msgspec.msgpack
 from inference_endpoint.core.record import TOPIC_FRAME_SIZE
+from inference_endpoint.metrics.steady_state_diagnostics import SteadyState
 
 
 class SessionState(str, Enum):
@@ -45,19 +46,19 @@ class SessionState(str, Enum):
     LIVE        → run in progress; tick task publishing live HDR-derived stats.
     DRAINING    → ``SessionEventType.ENDED`` has been received; the aggregator
                   is tokenizing the buffered samples (bounded by the
-                  ``--drain-timeout`` budget — schema default 0 = unlimited). Tick task
-                  continues at this stage, still HDR-derived; no new events
+                  ``--drain-timeout`` budget, i.e.
+                  ``settings.timeouts.metrics_drain_timeout_s``: None or an
+                  omitted flag = unlimited). The tick task continues at this
+                  stage, still HDR-derived; no new events
                   will arrive.
     COMPLETE    → terminal clean state. The ``publish_final()`` snapshot
                   written from the ``ENDED`` path. Percentiles and histograms
                   are exact (computed from raw values).
-    INTERRUPTED → terminal interrupted state. The ``publish_final()`` snapshot
-                  written from a signal handler (SIGTERM / SIGINT) before
-                  ``ENDED`` arrived. Stats are best-effort partial captures of
-                  whatever the aggregator had at signal time — drain didn't
-                  complete and raw values may be missing late samples.
-                  Distinguishes "user killed the run" from "clean shutdown";
-                  Report renders this with a clear interrupted indicator.
+    INTERRUPTED → terminal interrupted state: the session's INTERRUPTED
+                  marker preceded ``ENDED``, or the service received SIGTERM
+                  during abnormal pipeline teardown. SIGINT itself is ignored;
+                  the parent's ENDED path is authoritative for ^C. Stats are
+                  best-effort partial captures.
 
     Transitions are forward-only:
         INITIALIZE → LIVE → DRAINING → {COMPLETE | INTERRUPTED}
@@ -119,6 +120,12 @@ class SeriesStat(
     sum_sq: int | float
     percentiles: dict[str, float]
     histogram: list[tuple[tuple[float, float], int]]
+    # Early-stopping percentile estimates (COMPLETE snapshots only, when enabled):
+    # compact {grid key (str of the grid entry): estimate-or-None} map mirroring
+    # ``percentiles``; None value = insufficient samples for that percentile.
+    # Optional trailing field so the array_like wire format stays
+    # backward-compatible. None field = not computed.
+    early_stopping_percentiles: dict[str, float | None] | None = None
 
 
 # Tagged union: msgspec dispatches on the ``tag`` literal at decode time.
@@ -160,6 +167,12 @@ class MetricsSnapshot(
         metrics:          Tagged union of ``CounterStat`` and ``SeriesStat``,
                           ordered counters-first then series, registration
                           order within each.
+        steady_state:     Steady-window verdict from
+                          ``metrics/steady_state_diagnostics.py``. Present only
+                          on the terminal snapshot when collection was enabled
+                          and the series describe the run.
+
+    ``array_like=True`` makes field order the wire format. Append fields only.
     """
 
     counter: int
@@ -167,6 +180,7 @@ class MetricsSnapshot(
     state: SessionState
     n_pending_tasks: int
     metrics: list[MetricStat]
+    steady_state: SteadyState | None = None
 
 
 # 4-byte topic to match TOPIC_FRAME_SIZE-prefix protocol used by the
@@ -209,6 +223,21 @@ def _scrub_nonfinite(v):
     return v
 
 
+def _scrub_deep(value):
+    """Scrub non-finite floats from a nested structure.
+
+    The steady-state verdict is not built field by field like the rest of the
+    snapshot. One non-finite float inside it would make
+    ``json.dumps(..., allow_nan=False)`` raise. Then ``final_snapshot.json``
+    would not be written.
+    """
+    if isinstance(value, dict):
+        return {k: _scrub_deep(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_scrub_deep(v) for v in value]
+    return _scrub_nonfinite(value)
+
+
 def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
     """Convert a wire ``MetricsSnapshot`` to its dict form.
 
@@ -223,13 +252,18 @@ def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
         "state": snap.state.value,
         "n_pending_tasks": snap.n_pending_tasks,
         "metrics": [_metric_to_dict(m) for m in snap.metrics],
+        "steady_state": _scrub_deep(
+            None
+            if snap.steady_state is None
+            else msgspec.to_builtins(snap.steady_state)
+        ),
     }
 
 
 def _metric_to_dict(m: MetricStat) -> dict:
     if isinstance(m, CounterStat):
         return {"type": "counter", "name": m.name, "value": _scrub_nonfinite(m.value)}
-    return {
+    series: dict = {
         "type": "series",
         "name": m.name,
         "count": m.count,
@@ -238,14 +272,22 @@ def _metric_to_dict(m: MetricStat) -> dict:
         "max": _scrub_nonfinite(m.max),
         "sum_sq": _scrub_nonfinite(m.sum_sq),
         "percentiles": {k: _scrub_nonfinite(v) for k, v in m.percentiles.items()},
-        # Histogram tuples → JSON arrays. Consumers reading the dict can
-        # iterate the two-element ranges directly without coercion.
-        # Bucket edges are floats from log-spacing — scrub for safety.
-        "histogram": [
-            [[_scrub_nonfinite(rng[0]), _scrub_nonfinite(rng[1])], c]
-            for rng, c in m.histogram
-        ],
     }
+    if m.early_stopping_percentiles is not None:
+        # Placed directly after the percentiles grid it overlays. Estimates come
+        # from the raw value array — scrub like every other numeric field so
+        # json.dumps(..., allow_nan=False) cannot raise.
+        series["early_stopping_percentiles"] = {
+            k: _scrub_nonfinite(v) for k, v in m.early_stopping_percentiles.items()
+        }
+    # Histogram tuples → JSON arrays. Consumers reading the dict can
+    # iterate the two-element ranges directly without coercion.
+    # Bucket edges are floats from log-spacing — scrub for safety.
+    series["histogram"] = [
+        [[_scrub_nonfinite(rng[0]), _scrub_nonfinite(rng[1])], c]
+        for rng, c in m.histogram
+    ]
+    return series
 
 
 class MetricsSnapshotCodec:

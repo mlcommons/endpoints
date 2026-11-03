@@ -1384,7 +1384,8 @@ def main() -> None:
     )
     parser.add_argument(
         "-d",
-        "--duration",
+        "--duration-s",
+        dest="duration",
         type=float,
         default=5.0,
         help="Benchmark duration in seconds (default: 5)",

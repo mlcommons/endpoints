@@ -1,0 +1,10 @@
+{
+  "backend": "tokenizers",
+  "bos_token": "<s>",
+  "eos_token": "</s>",
+  "model_max_length": 1000000000000000019884624838656,
+  "pad_token": "<pad>",
+  "tokenizer_class": "TokenizersBackend",
+  "unk_token": "<unk>",
+  "chat_template": "{% if tools %}<|tools|>{% for tool in tools %}{{ tool | tojson }}{% endfor %}<|/tools|>\n{% endif %}{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}{% if message.reasoning_content %}\n<think>{{ message.reasoning_content }}</think>{% endif %}{% if message.tool_calls %}{% for tc in message.tool_calls %}\n<tool_call>{{ tc.function.name }}({{ tc.function.arguments | tojson }})</tool_call>{% endfor %}{% endif %}<|im_end|>\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+}

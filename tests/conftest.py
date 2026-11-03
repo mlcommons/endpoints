@@ -49,6 +49,48 @@ sys.path.insert(0, src_path)
 pytest_plugins = ["src.inference_endpoint.profiling.pytest_profiling_plugin"]
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """CLI knobs for the E2E performance tests (tests/performance/commands).
+
+    Registered here (not in tests/performance/conftest.py) because options
+    must live in an initial conftest — ``testpaths = ["tests"]`` guarantees
+    this file is loaded for every invocation, so ``-m performance`` from the
+    repo root sees the flags too.
+    """
+    group = parser.getgroup("roofline", "E2E performance test knobs")
+    group.addoption(
+        "--roofline-server-workers",
+        type=int,
+        default=4,
+        help="MaxThroughputServer stub worker processes (default: 4)",
+    )
+    group.addoption(
+        "--roofline-stream-interval",
+        type=int,
+        default=10,
+        help=(
+            "Characters per SSE event in the streaming stub response; the "
+            "stub's output_length is 160 chars, so 10 means 16 events per "
+            "response (default: 10)"
+        ),
+    )
+    group.addoption(
+        "--roofline-client-workers",
+        type=int,
+        default=None,
+        help="Override the benchmark client --workers (default: auto)",
+    )
+    group.addoption(
+        "--roofline-init-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Override --client.worker-initialization-timeout seconds "
+            "(useful in containers where cpu_affinity is restricted)"
+        ),
+    )
+
+
 @pytest.fixture
 def sample_config() -> dict[str, Any]:
     """Sample configuration for testing."""
@@ -442,8 +484,8 @@ def max_throughput_runtime_settings(random_seed):
     return RuntimeSettings(
         metrics.Throughput(100),
         reported_metrics=[],
-        min_duration_ms=1000,
-        max_duration_ms=1000,
+        min_issue_duration_ms=1000,
+        max_issue_duration_ms=1000,
         n_samples_from_dataset=100,
         n_samples_to_issue=100,
         min_sample_count=100,
@@ -470,8 +512,8 @@ def poisson_runtime_settings(random_seed, target_qps):
     return RuntimeSettings(
         metric_target=metrics.Throughput(target_qps),
         reported_metrics=[],
-        min_duration_ms=10_000,
-        max_duration_ms=15_000,
+        min_issue_duration_ms=10_000,
+        max_issue_duration_ms=15_000,
         n_samples_from_dataset=100,
         n_samples_to_issue=5000,
         min_sample_count=100,
@@ -486,8 +528,8 @@ def concurrency_runtime_settings(random_seed, target_concurrency):
     return RuntimeSettings(
         metric_target=None,
         reported_metrics=[],
-        min_duration_ms=1000,
-        max_duration_ms=10_000,
+        min_issue_duration_ms=1000,
+        max_issue_duration_ms=10_000,
         n_samples_from_dataset=100,
         n_samples_to_issue=target_concurrency * 10,
         min_sample_count=100,

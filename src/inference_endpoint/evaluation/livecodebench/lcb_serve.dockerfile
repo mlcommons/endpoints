@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
 ## -----------------------------------------------------
-FROM dhi.io/python:3.14-debian13-sfw-dev AS build-stage
+# Mirrors LiveCodeBench's own Python version (README: `uv venv --python 3.11`).
+FROM dhi.io/python:3.11-debian13-sfw-dev AS build-stage
 
 
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -32,7 +33,7 @@ RUN chmod 444 -R /opt/LiveCodeBench_Datasets/*
 RUN chmod 555 /opt/LiveCodeBench_Datasets
 
 ## -----------------------------------------------------
-FROM dhi.io/python:3.14-debian13 AS runtime-stage
+FROM dhi.io/python:3.11-debian13 AS runtime-stage
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -40,13 +41,18 @@ ENV PATH="/app/venv/bin:$PATH"
 
 WORKDIR /app
 
-# enroot/pyxis (no-Docker SLURM clusters) start every container through
-# `/bin/sh`; this distroless runtime has none, so the container fails with
-# "enroot-switchroot: failed to execute: /bin/sh: No such file or directory".
-# Add a static (musl) busybox as /bin/sh so the image also runs under pyxis;
-# `docker run` is unaffected. COPY-only — there is no shell here to RUN with.
-# busybox:*-musl is multi-arch, so the buildx --platform builds still resolve.
+# enroot/pyxis starts containers through /bin/sh (switchroot); nv-sflow's srun
+# operator wraps every task in `bash -c` (hardcoded in srun.py). This distroless
+# runtime base has neither, so add a static busybox as /bin/sh, then create
+# /bin/bash as a thin sh-wrapper via RUN (valid once /bin/sh exists above).
+# busybox:*-musl is multi-arch so buildx --platform builds still resolve.
+# NOTE: do NOT copy busybox as /bin/bash — busybox-musl omits the bash applet
+# and fails with "bash: applet not found" when invoked under that name.
 COPY --from=busybox:1.37.0-musl /bin/busybox /bin/sh
+COPY --chmod=755 <<'EOF' /bin/bash
+#!/bin/sh
+exec /bin/sh "$@"
+EOF
 
 COPY --from=build-stage --chmod=0555 /app/venv /app/venv
 COPY --from=build-stage --chmod=0555 /opt/LiveCodeBench_Datasets /opt/LiveCodeBench_Datasets
@@ -56,7 +62,19 @@ COPY generate.py /app/lib/generate.py
 COPY _server.py /app/server.py
 
 # Make lcb_serve.py available as a module
-ENV PYTHONPATH="/app:${PYTHONPATH}"
+ENV PYTHONPATH="/app"
+
+# OCI image metadata: a static title/description that self-identifies this image (the
+# LiveCodeBench evaluator service, distinct from the endpoints client image), plus
+# provenance (source, and the endpoints repo commit via the ENDPOINTS_SHA build-arg).
+# Recorded as config LABELs (not manifest annotations) so they survive the
+# oci-mediatypes=false push and show in `docker inspect`. Declared after the COPYs so a new
+# SHA only rebuilds this metadata layer, never the expensive dataset-generation stage above.
+ARG ENDPOINTS_SHA=unknown
+LABEL org.opencontainers.image.title="lcb-service" \
+      org.opencontainers.image.description="LiveCodeBench evaluation service: a WebSocket judge (port 13835) that runs model-generated code against the LiveCodeBench dataset (release_v6, baked in). Used by the endpoints client's code_bench_scorer." \
+      org.opencontainers.image.source="https://github.com/mlcommons/endpoints" \
+      org.opencontainers.image.revision="${ENDPOINTS_SHA}"
 
 # Launch the WebSocket server with long-running connection support
 # Default port 13835

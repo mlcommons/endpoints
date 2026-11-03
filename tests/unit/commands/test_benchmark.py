@@ -16,18 +16,22 @@
 """Tests for benchmark CLI models, config building, and command handlers."""
 
 import asyncio
+import dataclasses
 import io
 import json
+import logging
 import random
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error as urllib_error
 
+import inference_endpoint.commands.benchmark.execute as execute_mod
 import pandas as pd
 import pytest
 from inference_endpoint.commands.benchmark.cli import (
+    _run,
     benchmark_app,
     from_config,
     offline,
@@ -36,20 +40,27 @@ from inference_endpoint.commands.benchmark.cli import (
 from inference_endpoint.commands.benchmark.execute import (
     AccuracyConfiguration,
     BenchmarkContext,
+    BenchmarkResult,
     ResponseCollector,
     _build_phases,
+    _load_datasets,
+    _run_benchmark_async,
+    finalize_benchmark,
+    setup_benchmark,
+)
+from inference_endpoint.commands.benchmark.profiling import (
+    ProfileController,
     _derive_profile_urls,
     _post_profile,
     _render_profile_status,
-    _run_benchmark_async,
-    _write_profiling_section,
-    setup_benchmark,
+    write_profiling_section,
 )
+from inference_endpoint.commands.benchmark.watchdog import SigintGovernor
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
+    AgenticInferenceConfig,
     BenchmarkConfig,
     DatasetType,
-    DrainConfig,
     LoadPattern,
     LoadPatternType,
     OfflineSettings,
@@ -60,7 +71,11 @@ from inference_endpoint.config.schema import (
     StreamingMode,
     TestMode,
     TestType,
+    Timeouts,
     WarmupConfig,
+)
+from inference_endpoint.config.schema import (
+    Dataset as DatasetConfig,
 )
 from inference_endpoint.config.schema import (
     OfflineBenchmarkConfig as OfflineConfig,
@@ -69,14 +84,33 @@ from inference_endpoint.config.schema import (
     OnlineBenchmarkConfig as OnlineConfig,
 )
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import APIType, PhaseType, QueryResult
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.dataset_manager.predefined.swe_bench import SWEBench
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
-from inference_endpoint.evaluation.scoring import Scorer
-from inference_endpoint.exceptions import InputValidationError, SetupError
+from inference_endpoint.evaluation.scoring import (
+    AgenticInferenceInlineScorer,
+    Scorer,
+    SWEBenchScorer,
+)
+from inference_endpoint.exceptions import (
+    CLIError,
+    DatasetValidationError,
+    ExecutionError,
+    InputValidationError,
+    SetupError,
+)
 from inference_endpoint.load_generator.sample_order import create_sample_order
-from inference_endpoint.load_generator.session import PhaseType
+from inference_endpoint.load_generator.session import (
+    EndpointResponseIdleTimeoutError,
+    PhaseResult,
+    SessionResult,
+)
 from inference_endpoint.metrics.metric import Throughput
+from inference_endpoint.metrics.report import Report
 from pydantic import ValidationError
 
 TEMPLATE_DIR = (
@@ -87,12 +121,130 @@ TEMPLATE_DIR = (
     / "templates"
 )
 
+
+# Test-only scorers registered with leading-underscore IDs so TestScorerMethodSync excludes them.
+
+
+class _SelfContainedScorer(Scorer, scorer_id="_test_skip_endpoint_phase"):
+    SKIP_ENDPOINT_PHASE = True
+
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+    def score(self):
+        return 1.0, 1
+
+
+class _ExternalCountScorer(Scorer, scorer_id="_test_external_sample_count"):
+    SKIP_ENDPOINT_PHASE = True
+
+    @classmethod
+    def external_sample_count(cls, extras):
+        return 2
+
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+    def score(self):
+        return 1.0, 1
+
+
+class _FailingPreflightScorer(Scorer, scorer_id="_test_failing_preflight"):
+    @classmethod
+    def preflight(cls, extras):
+        raise SetupError("mock preflight failure")
+
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+
+class _OrdinaryAccuracyScorer(Scorer, scorer_id="_test_ordinary_accuracy"):
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+    def score(self):
+        return 0.5, 1
+
+
+class _InlinePerformanceScorer(Scorer, scorer_id="_test_inline_performance"):
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+    def score(self):
+        (self.report_dir / "scores.json").write_text('{"score": 1.0}')
+        return 1.0, 1
+
+
 # Reusable minimal config kwargs
 _OFFLINE_KWARGS = {
     "endpoint_config": {"endpoints": ["http://test:8000"]},
     "model_params": {"name": "test-model"},
     "datasets": [{"path": "test.jsonl"}],
 }
+
+
+def _make_loaded_dataset(n: int = 3, *, column: str = "prompt") -> Dataset:
+    ds = Dataset(pd.DataFrame({column: [f"q{i}" for i in range(n)]}))
+    ds.load()
+    return ds
+
+
+def _make_benchmark_context(
+    config: BenchmarkConfig,
+    report_dir: Path,
+    *,
+    test_mode: TestMode = TestMode.PERF,
+    dataloader: Dataset | None = None,
+    rt_settings: RuntimeSettings | None = None,
+    eval_configs: list[AccuracyConfiguration] | None = None,
+) -> BenchmarkContext:
+    dataloader = dataloader or _make_loaded_dataset()
+    rt_settings = rt_settings or RuntimeSettings(
+        metric_target=Throughput(10.0),
+        reported_metrics=[Throughput(10.0)],
+        min_issue_duration_ms=0,
+        max_issue_duration_ms=None,
+        n_samples_from_dataset=dataloader.num_samples(),
+        n_samples_to_issue=None,
+        min_sample_count=1,
+        rng_sched=random.Random(0),
+        rng_sample_index=random.Random(0),
+        load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+    )
+    return BenchmarkContext(
+        config=config,
+        test_mode=test_mode,
+        report_dir=report_dir,
+        tokenizer_name=None,
+        dataloader=dataloader,
+        rt_settings=rt_settings,
+        total_samples=dataloader.num_samples(),
+        eval_configs=eval_configs or [],
+    )
+
+
+def _make_benchmark_result(
+    report_dir: Path, phase: PhaseResult | None = None
+) -> BenchmarkResult:
+    phase = phase or PhaseResult(
+        name="performance",
+        phase_type=PhaseType.PERFORMANCE,
+        uuid_to_index={"uuid-0": 0, "uuid-1": 1, "uuid-2": 2},
+        issued_count=3,
+        start_time_ns=0,
+        end_time_ns=1_000_000_000,
+    )
+    return BenchmarkResult(
+        session=SessionResult(
+            session_id="test",
+            phase_results=[phase],
+            start_time_ns=0,
+            end_time_ns=1_000_000_000,
+        ),
+        collector=ResponseCollector(),
+        report=None,
+        tmpfs_dir=report_dir / "tmpfs",
+    )
 
 
 class TestCLIConfigModels:
@@ -121,15 +273,13 @@ class TestCLIConfigModels:
         config = cls(**_OFFLINE_KWARGS, **extra_kwargs)
         assert config.type == expected_type
         assert config.model_params.streaming == expected_streaming
-        assert config.settings.runtime.min_duration_ms == 600000
+        assert config.settings.runtime.n_samples_to_issue is None
 
     @pytest.mark.unit
     def test_num_samples_override(self):
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
-            settings=OfflineSettings(
-                runtime=RuntimeConfig(min_duration_ms=0, n_samples_to_issue=100)
-            ),
+            settings=OfflineSettings(runtime=RuntimeConfig(n_samples_to_issue=100)),
         )
         assert config.settings.runtime.n_samples_to_issue == 100
 
@@ -141,29 +291,50 @@ class TestCLIConfigModels:
                 datasets=[{"path": "test.jsonl"}],
             )
 
-
-class TestDurationSuffix:
-    """Test duration suffix parsing (600s, 10m, 600000ms, plain int)."""
-
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        "value, expected_ms",
+        "accuracy_config, expected_workers",
         [
-            ("600s", 600000),
-            ("10m", 600000),
-            ("600000ms", 600000),
-            ("600000", 600000),
-            (600000, 600000),
-            ("0.5m", 30000),
-            ("1.5s", 1500),
+            ({"eval_method": "swe_bench_scorer"}, 32),
+            (
+                {
+                    "eval_method": "swe_bench_scorer",
+                    "extras": {"workers": None},
+                },
+                32,
+            ),
+            (
+                {
+                    "eval_method": "swe_bench_scorer",
+                    "extras": {"workers": 5},
+                },
+                5,
+            ),
         ],
     )
-    def test_duration_suffix(self, value, expected_ms):
-        config = OfflineConfig(
-            **_OFFLINE_KWARGS,
-            settings=OfflineSettings(runtime=RuntimeConfig(min_duration_ms=value)),
+    def test_concurrency_injection_into_swe_bench_extras(
+        self, accuracy_config, expected_workers
+    ):
+        """target_concurrency is forwarded as workers into swe_bench_scorer extras."""
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": accuracy_config,
+                },
+                {"type": "performance", "path": "tests/assets/datasets/dummy_1k.jsonl"},
+            ],
+            settings={
+                "load_pattern": {"type": "concurrency", "target_concurrency": 32}
+            },
         )
-        assert config.settings.runtime.min_duration_ms == expected_ms
+        acc_ds = next(d for d in config.datasets if d.type == DatasetType.ACCURACY)
+        assert acc_ds.accuracy_config is not None
+        assert acc_ds.accuracy_config.extras is not None
+        assert acc_ds.accuracy_config.extras.get("workers") == expected_workers
 
 
 class TestDatasetParsing:
@@ -215,6 +386,210 @@ class TestDatasetParsing:
         if acc_eval_method:
             assert ds.accuracy_config is not None
             assert ds.accuracy_config.eval_method == acc_eval_method
+
+    @pytest.mark.unit
+    def test_malformed_dataset_string_raises_parse_error(self):
+        """A malformed --dataset string surfaces as DatasetParseError, not a
+        DatasetValidationError with a vestigial Reason. 'badoption' (no '=')
+        raises inside the field validator, which pydantic wraps — exercising the
+        `except ValidationError` arm of _run."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.exceptions import DatasetParseError
+
+        config = OfflineConfig(**_OFFLINE_KWARGS | {"datasets": []})
+        with pytest.raises(DatasetParseError, match="Invalid --dataset"):
+            cli._run(config, ["data.csv,badoption"], TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_dataset_string_raw_valueerror_raises_parse_error(self):
+        """A bare ValueError from with_updates (not wrapped by pydantic) also
+        surfaces as DatasetParseError — covering _run's second `except` arm."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.exceptions import DatasetParseError
+
+        config = MagicMock()
+        config.datasets = []
+        config.with_updates.side_effect = ValueError("raw parse failure")
+        with pytest.raises(DatasetParseError, match="Invalid --dataset"):
+            cli._run(config, ["x.jsonl"], TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_scalar_then_dotted_key_collision_raises_parse_error(self):
+        """A scalar option shadowed by a dotted one (parser=x,parser.prompt=y)
+        must surface as DatasetParseError, not an uncaught TypeError → exit-1
+        traceback. parse_dataset_string raises ValueError, which _run wraps."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.exceptions import DatasetParseError
+
+        config = OfflineConfig(**_OFFLINE_KWARGS | {"datasets": []})
+        with pytest.raises(DatasetParseError, match="Invalid --dataset"):
+            cli._run(config, ["d.jsonl,parser=x,parser.prompt=y"], TestMode.PERF)
+
+
+@pytest.mark.unit
+class TestRunAuditErrorPropagation:
+    """run_audit must not mask a phase's typed CLI error as a generic
+    ExecutionError. An unsaltable warmup makes setup_benchmark raise
+    DatasetValidationError (InputValidationError → exit 2); in the audit.only
+    path that must propagate, not become ExecutionError (exit 4)."""
+
+    def test_phase_input_validation_error_propagates(self, monkeypatch, tmp_path):
+        from inference_endpoint.commands import audit as audit_mod
+        from inference_endpoint.config.schema import DatasetType
+        from inference_endpoint.exceptions import DatasetValidationError
+
+        spec = MagicMock(label="reference", test_mode=TestMode.PERF)
+        fake_test = MagicMock()
+        fake_test.plan_runs.return_value = [spec]
+        monkeypatch.setattr(audit_mod, "get_audit_test", lambda _test: fake_test)
+
+        def _raise_validation(*args, **kwargs):
+            raise DatasetValidationError(
+                DatasetValidationError.Reason.INPUT_TOKENS_SHADOWING, "sample 0"
+            )
+
+        monkeypatch.setattr(audit_mod, "setup_benchmark", _raise_validation)
+
+        config = MagicMock()
+        config.audit = MagicMock()
+        config.datasets = [MagicMock(type=DatasetType.PERFORMANCE)]
+        config.with_updates.return_value = MagicMock()
+
+        # Not recast to ExecutionError — the typed validation error propagates.
+        with pytest.raises(DatasetValidationError):
+            audit_mod.run_audit(config, tmp_path)
+
+
+@pytest.mark.unit
+class TestLoadDatasetsSaltValidation:
+    """_load_datasets validates salt-compatibility at dataset-load time — before
+    any worker/aggregator subprocess is spawned — when warmup salt is enabled.
+    """
+
+    def _config(self, tmp_path: Path, warmup: WarmupConfig) -> OfflineConfig:
+        ds = tmp_path / "perf.jsonl"
+        ds.write_text('{"prompt": "hello world"}\n{"prompt": "second prompt"}\n')
+        return OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"path": str(ds)}],
+            settings=OfflineSettings(
+                client=HTTPClientConfig(
+                    num_workers=1, warmup_connections=0, max_connections=10
+                ),
+                warmup=warmup,
+            ),
+        )
+
+    @patch.object(Dataset, "validate_saltable")
+    def test_validates_when_warmup_salt_enabled(self, mock_validate, tmp_path):
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=True))
+        _load_datasets(config, tmp_path, TestMode.PERF)
+        mock_validate.assert_called_once()
+
+    @patch.object(Dataset, "validate_saltable")
+    def test_skips_validation_when_warmup_disabled(self, mock_validate, tmp_path):
+        config = self._config(tmp_path, WarmupConfig(enabled=False, salt=True))
+        _load_datasets(config, tmp_path, TestMode.PERF)
+        mock_validate.assert_not_called()
+
+    @patch.object(Dataset, "validate_saltable")
+    def test_skips_validation_when_salt_off(self, mock_validate, tmp_path):
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=False))
+        _load_datasets(config, tmp_path, TestMode.PERF)
+        mock_validate.assert_not_called()
+
+    def test_warns_when_warmup_enabled_without_salt(self, tmp_path, caplog):
+        """Warmup without salt primes the server cache with verbatim prompts,
+        risking an understated measured phase — surface it as a warning."""
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=False))
+        with caplog.at_level(logging.WARNING):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+        assert any(
+            "warmup is enabled without salt" in r.message.lower()
+            for r in caplog.records
+        )
+
+    def test_no_warning_when_warmup_salt_enabled(self, tmp_path, caplog):
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=True))
+        with caplog.at_level(logging.WARNING):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+        assert not any(
+            "warmup is enabled without salt" in r.message.lower()
+            for r in caplog.records
+        )
+
+    def test_unsaltable_perf_dataset_raises_before_spawn(self, tmp_path):
+        """Real validation (unpatched) rejects a non-saltable perf dataset at
+        load time — an int 'prompt' cannot be salted."""
+        ds = tmp_path / "perf.jsonl"
+        ds.write_text('{"prompt": 1}\n{"prompt": 2}\n')
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"path": str(ds)}],
+            settings=OfflineSettings(
+                client=HTTPClientConfig(
+                    num_workers=1, warmup_connections=0, max_connections=10
+                ),
+                warmup=WarmupConfig(enabled=True, salt=True),
+            ),
+        )
+        with pytest.raises(DatasetValidationError, match=r"sample 0\b"):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+
+    def test_online_unsaltable_perf_dataset_raises(self, tmp_path):
+        """The salt check is load-pattern agnostic — online runs validate too."""
+        ds = tmp_path / "perf.jsonl"
+        ds.write_text('{"prompt": 1}\n')
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"path": str(ds)}],
+            settings=OnlineSettings(
+                load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=10),
+                client=HTTPClientConfig(
+                    num_workers=1, warmup_connections=0, max_connections=10
+                ),
+                warmup=WarmupConfig(enabled=True, salt=True),
+            ),
+        )
+        with pytest.raises(DatasetValidationError, match=r"sample 0\b"):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+
+    def test_accuracy_only_skips_salt_validation(self, tmp_path):
+        """TestMode.ACC never loads the perf dataset, so an unsaltable perf
+        dataset with warmup salt on must NOT be validated (dataloader is None).
+        Guards against a refactor validating a None dataloader."""
+        perf = tmp_path / "perf.jsonl"
+        perf.write_text('{"prompt": 1}\n')  # unsaltable — would raise if validated
+        fake_acc_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {"type": "performance", "path": str(perf)},
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+            settings=OfflineSettings(
+                client=HTTPClientConfig(
+                    num_workers=1, warmup_connections=0, max_connections=10
+                ),
+                warmup=WarmupConfig(enabled=True, salt=True),
+            ),
+        )
+        with (
+            patch.object(SWEBenchScorer, "preflight"),
+            patch.object(SWEBench, "generate", return_value=fake_acc_df),
+        ):
+            perf_loader, _ = _load_datasets(config, tmp_path, TestMode.ACC)
+        assert perf_loader is None
 
 
 class TestCommandHandlers:
@@ -307,6 +682,105 @@ class TestCommandHandlers:
         assert lp.use_legacy_loadgen_qps_metrics is False
 
     @pytest.mark.unit
+    def test_metrics_isl_cli_default_and_disable(self):
+        """``--no-metrics-isl`` reaches Settings while the default stays on."""
+        base = [
+            "offline",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+        ]
+        _, bound, _ = benchmark_app.parse_args(base, exit_on_error=False)
+        assert bound.arguments["config"].settings.metrics_isl is True
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--no-metrics-isl"], exit_on_error=False
+        )
+        assert bound.arguments["config"].settings.metrics_isl is False
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--endpoint-response-idle-timeout", "300"),
+            ("--timeouts.endpoint-response-idle-timeout-s", "600"),
+        ],
+    )
+    def test_endpoint_response_idle_timeout_cli_spellings(self, flag, value):
+        _, bound, _ = benchmark_app.parse_args(
+            [
+                "offline",
+                "--endpoints",
+                "http://h:80",
+                "--model",
+                "m",
+                "--dataset",
+                "d.jsonl",
+                flag,
+                value,
+            ],
+            exit_on_error=False,
+        )
+        config = bound.arguments["config"]
+        assert config.settings.timeouts.endpoint_response_idle_timeout_s == float(value)
+
+    @pytest.mark.unit
+    def test_warmup_salt_flag_default_and_negative(self):
+        """warmup.salt defaults off; --warmup-salt enables it; --no-warmup-salt
+        (the flag the salt-validation remediation message points to) disables
+        it."""
+        base = [
+            "offline",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+        ]
+        _, bound, _ = benchmark_app.parse_args(base, exit_on_error=False)
+        assert bound.arguments["config"].settings.warmup.salt is False
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--warmup-salt"], exit_on_error=False
+        )
+        assert bound.arguments["config"].settings.warmup.salt is True
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--no-warmup-salt"], exit_on_error=False
+        )
+        assert bound.arguments["config"].settings.warmup.salt is False
+
+    @pytest.mark.unit
+    def test_steady_state_flag_default_and_both_forms_parse(self):
+        """Both `--steady-state` and `--no-steady-state` must parse.
+
+        The field carries an explicit `name=`, not an `alias=`: an alias also
+        exposes the field name, and a bare `--enabled` collides with every other
+        flattened single-field option model.
+        """
+        base = [
+            "offline",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+        ]
+        for args, expected in (
+            ([], False),
+            (["--steady-state"], True),
+            (["--no-steady-state"], False),
+        ):
+            _, bound, _ = benchmark_app.parse_args([*base, *args], exit_on_error=False)
+            settings = bound.arguments["config"].settings
+            assert settings.steady_state.enabled is expected
+
+    @pytest.mark.unit
     def test_loadgen_flag_serialized_only_for_poisson(self):
         """``use_legacy_loadgen_qps_metrics`` is dropped from the serialized
         form for non-poisson patterns (so it does not pollute their YAML
@@ -337,8 +811,45 @@ datasets:
         config_file.write_text(yaml_content)
         from_config(config=config_file, timeout=42.0, mode=TestMode.BOTH)
         called_config, called_mode = mock_run.call_args[0]
-        assert called_config.timeout == 42.0
+        assert called_config.settings.timeouts.run_timeout_s == 42.0
         assert called_mode == TestMode.BOTH
+
+    @pytest.mark.unit
+    def test_from_config_rejects_non_positive_timeout(self, tmp_path):
+        yaml_content = """
+type: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "test.jsonl"
+"""
+        config_file = tmp_path / "test.yaml"
+        config_file.write_text(yaml_content)
+        # Timeouts.run_timeout_s is gt=0; a bad --timeout must be a clean
+        # input error (exit 2), not a raw pydantic traceback.
+        with pytest.raises(InputValidationError, match="must be greater than zero"):
+            from_config(config=config_file, timeout=0.0)
+
+    @pytest.mark.unit
+    @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
+    def test_from_config_report_dir_override(self, mock_run, tmp_path):
+        yaml_content = """
+type: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "test.jsonl"
+"""
+        config_file = tmp_path / "cfg.yaml"
+        config_file.write_text(yaml_content)
+        override_dir = tmp_path / "reports"
+        from_config(config=config_file, report_dir=override_dir)
+        called_config, _ = mock_run.call_args[0]
+        assert called_config.report_dir == override_dir
 
     @pytest.mark.unit
     def test_from_config_bad_yaml(self, tmp_path):
@@ -361,7 +872,7 @@ datasets:
   - path: "test.jsonl"
 submission_ref:
   model: "test-model"
-  ruleset: "test"
+  ruleset: "mlperf-inference-v6.1"
 """
         config_file = tmp_path / "sub.yaml"
         config_file.write_text(yaml_content)
@@ -433,6 +944,299 @@ endpoint_config:
             )
 
 
+class TestAccuracyOnlyDataset:
+    """Test that datasets with ACCURACY_ONLY=True are rejected as perf datasets."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("dataset_name", ["swe_bench", "swe_bench::verified"])
+    def test_swe_bench_as_perf_raises(self, tmp_path, dataset_name):
+        fake_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "problem_statement": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"name": dataset_name}],
+        )
+        with (
+            patch.object(SWEBench, "generate", return_value=fake_df),
+            pytest.raises(InputValidationError, match="accuracy-only"),
+        ):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_preflight_error_propagates(self, tmp_path):
+        """A scorer whose preflight() raises SetupError must stop _load_datasets."""
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"prompt": "hello"}\n')
+        fake_acc_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {"type": "performance", "path": str(dummy_jsonl)},
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+        )
+        with (
+            patch.object(SWEBench, "generate", return_value=fake_acc_df),
+            patch.object(
+                execute_mod,
+                "_resolve_accuracy_components",
+                return_value=(_FailingPreflightScorer, None),
+            ),
+            pytest.raises(SetupError, match="mock preflight failure"),
+        ):
+            _load_datasets(config, tmp_path, TestMode.ACC)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("datasets, expected_scorer, expected_type, expected_accuracy_datasets"),
+        [
+            (
+                [
+                    {
+                        "type": "performance",
+                    },
+                    {
+                        "name": "swe_bench",
+                        "type": "accuracy",
+                        "accuracy_config": {
+                            "eval_method": "swe_bench_scorer",
+                            "num_repeats": 2,
+                            "extras": {"subset": "unknown"},
+                        },
+                    },
+                ],
+                None,
+                None,
+                0,
+            ),
+            (
+                [
+                    {
+                        "type": "performance",
+                        "accuracy_config": {
+                            "eval_method": "swe_bench_scorer",
+                            "num_repeats": 2,
+                        },
+                    },
+                ],
+                None,
+                None,
+                0,
+            ),
+            (
+                [
+                    {
+                        "type": "performance",
+                        "accuracy_config": {"eval_method": "agentic_inference_inline"},
+                    },
+                ],
+                AgenticInferenceInlineScorer,
+                DatasetType.PERFORMANCE,
+                0,
+            ),
+            (
+                [
+                    {
+                        "type": "performance",
+                    },
+                    {
+                        "type": "accuracy",
+                        "accuracy_config": {
+                            "eval_method": "string_match",
+                            "extractor": "identity_extractor",
+                            "ground_truth": "answer",
+                        },
+                    },
+                ],
+                Scorer.get("string_match"),
+                DatasetType.ACCURACY,
+                1,
+            ),
+        ],
+    )
+    def test_perf_mode_skips_only_external_scorers(
+        self,
+        tmp_path,
+        datasets,
+        expected_scorer,
+        expected_type,
+        expected_accuracy_datasets,
+    ):
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"text_input": "hello"}\n')
+        resolved_datasets = []
+        for dataset in datasets:
+            if dataset["type"] == "performance":
+                resolved = {
+                    "type": "performance",
+                    "path": str(dummy_jsonl),
+                    "parser": {"prompt": "text_input"},
+                }
+                if accuracy_config := dataset.get("accuracy_config"):
+                    resolved["accuracy_config"] = accuracy_config
+                resolved_datasets.append(resolved)
+            else:
+                resolved = {
+                    **dataset,
+                    "path": str(dummy_jsonl),
+                    "parser": {"prompt": "text_input"},
+                }
+                resolved_datasets.append(resolved)
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=resolved_datasets,
+        )
+
+        with (
+            patch.object(SWEBenchScorer, "preflight") as mock_preflight,
+            patch.object(SWEBench, "generate") as mock_generate,
+        ):
+            _, eval_configs = _load_datasets(config, tmp_path, TestMode.PERF)
+        mock_preflight.assert_not_called()
+        mock_generate.assert_not_called()
+
+        # eval_configs holds both real accuracy datasets and the inline entry a
+        # performance dataset's accuracy_config produces, so count by dataset_type
+        # rather than length -- an inline perf scorer is not an accuracy dataset.
+        acc_eval_configs = [
+            ec for ec in eval_configs if ec.dataset_type == DatasetType.ACCURACY
+        ]
+        assert len(acc_eval_configs) == expected_accuracy_datasets
+        assert len(eval_configs) == (1 if expected_scorer is not None else 0)
+        if expected_scorer is not None:
+            assert eval_configs[0].scorer is expected_scorer
+            assert eval_configs[0].dataset_type == expected_type
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("test_mode", [TestMode.ACC, TestMode.BOTH])
+    def test_accuracy_modes_load_accuracy_dataset_and_preflight(
+        self, tmp_path, test_mode
+    ):
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"text_input": "hello"}\n')
+        fake_acc_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "type": "performance",
+                    "path": str(dummy_jsonl),
+                    "parser": {"prompt": "text_input"},
+                },
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+        )
+
+        with (
+            patch.object(SWEBenchScorer, "preflight") as mock_preflight,
+            patch.object(SWEBench, "generate", return_value=fake_acc_df),
+        ):
+            _, eval_configs = _load_datasets(config, tmp_path, test_mode)
+
+        mock_preflight.assert_called_once_with({})
+        assert len(eval_configs) == 1
+        assert eval_configs[0].scorer is SWEBenchScorer
+
+    @pytest.mark.unit
+    def test_swe_bench_loader_validates_subset_and_split(self, tmp_path):
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"text_input": "hello"}\n')
+        captured: dict[str, str] = {}
+
+        def fake_generate(
+            *,
+            datasets_dir,
+            subset="verified",
+            split="test",
+            force=False,
+        ):
+            captured["subset"] = subset
+            captured["split"] = split
+            return pd.DataFrame(
+                [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
+            )
+
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "type": "performance",
+                    "path": str(dummy_jsonl),
+                    "parser": {"prompt": "text_input"},
+                },
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {
+                        "eval_method": "swe_bench_scorer",
+                        "extras": {"subset": "lite", "split": "dev"},
+                    },
+                },
+            ],
+        )
+
+        with (
+            patch.object(SWEBenchScorer, "preflight", return_value=None),
+            patch.object(SWEBench, "generate", side_effect=fake_generate),
+        ):
+            _load_datasets(config, tmp_path, TestMode.ACC)
+
+        assert captured == {"subset": "lite", "split": "dev"}
+
+        accuracy_config = config.datasets[1].accuracy_config
+        assert accuracy_config is not None
+        invalid_accuracy_config = accuracy_config.model_copy(
+            update={"extras": {"subset": "unknown"}}
+        )
+        invalid_config = config.model_copy(
+            update={
+                "datasets": [
+                    config.datasets[0],
+                    config.datasets[1].model_copy(
+                        update={"accuracy_config": invalid_accuracy_config}
+                    ),
+                ]
+            }
+        )
+        with pytest.raises(
+            InputValidationError,
+            match=(
+                r"Dataset 'swe_bench': invalid accuracy_config\.extras for "
+                r"scorer 'swe_bench_scorer': Unknown SWE-bench subset"
+            ),
+        ):
+            _load_datasets(invalid_config, tmp_path, TestMode.ACC)
+
+    @pytest.mark.unit
+    def test_external_scorer_rejects_num_repeats_greater_than_one(self):
+        with pytest.raises(
+            InputValidationError, match=r"accuracy_config\.num_repeats must be 1"
+        ):
+            execute_mod._validate_accuracy_config_for_scorer(
+                _SelfContainedScorer,
+                "external_accuracy",
+                SimpleNamespace(num_repeats=2),
+            )
+
+
 class TestYAMLTemplateValidation:
     """Validate all bundled YAML templates parse correctly."""
 
@@ -464,7 +1268,7 @@ class TestWarmupConfig:
         cfg = WarmupConfig()
         assert cfg.enabled is False
         assert cfg.n_requests is None
-        assert cfg.salt is True
+        assert cfg.salt is False
         assert cfg.drain is False
 
     @pytest.mark.unit
@@ -532,80 +1336,15 @@ settings:
         assert warmup.n_requests is None
 
 
-class TestDrainConfig:
-    """Tests for DrainConfig schema model."""
-
-    @pytest.mark.unit
-    def test_defaults(self):
-        cfg = DrainConfig()
-        assert cfg.warmup_timeout_s == 240.0
-        assert cfg.performance_timeout_s == 240.0
-        assert cfg.accuracy_timeout_s is None
-        assert cfg.metrics_drain_timeout_s == 0.0
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "field",
-        ["warmup_timeout_s", "performance_timeout_s", "accuracy_timeout_s"],
-    )
-    @pytest.mark.parametrize("value", [0, -1.0])
-    def test_timeout_must_be_positive_or_none(self, field, value):
-        with pytest.raises(ValidationError):
-            DrainConfig(**{field: value})
-
-    @pytest.mark.unit
-    def test_metrics_drain_timeout_zero_is_valid(self):
-        cfg = DrainConfig(metrics_drain_timeout_s=0)
-        assert cfg.metrics_drain_timeout_s == 0.0
-
-    @pytest.mark.unit
-    def test_metrics_drain_timeout_negative_rejected(self):
-        with pytest.raises(ValidationError):
-            DrainConfig(metrics_drain_timeout_s=-1.0)
-
-    @pytest.mark.unit
-    def test_extra_fields_rejected(self):
-        with pytest.raises(ValidationError):
-            DrainConfig(unknown_field=1)
-
-    @pytest.mark.unit
-    def test_yaml_roundtrip(self, tmp_path):
-        yaml_content = """
-type: "offline"
-model_params:
-  name: "test-model"
-endpoint_config:
-  endpoints: ["http://test:8000"]
-datasets:
-  - path: "test.jsonl"
-settings:
-  drain:
-    warmup_timeout_s: 12.5
-    performance_timeout_s: 30.0
-    accuracy_timeout_s: null
-    metrics_drain_timeout_s: 300.0
-"""
-        config_file = tmp_path / "drain.yaml"
-        config_file.write_text(yaml_content)
-        config = BenchmarkConfig.from_yaml_file(config_file)
-        drain = config.settings.drain
-        assert drain.warmup_timeout_s == 12.5
-        assert drain.performance_timeout_s == 30.0
-        assert drain.accuracy_timeout_s is None
-        assert drain.metrics_drain_timeout_s == 300.0
-
-
 class TestAggregatorArgs:
     """Tests that metrics aggregator subprocess args are correctly forwarded."""
 
     def _make_ctx(self, config, tmp_path):
-        import random
-
         rt = RuntimeSettings(
             metric_target=Throughput(10.0),
             reported_metrics=[Throughput(10.0)],
-            min_duration_ms=0,
-            max_duration_ms=None,
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=1,
             n_samples_to_issue=None,
             min_sample_count=1,
@@ -630,7 +1369,7 @@ class TestAggregatorArgs:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "timeout_s, expected_flag",
-        [(120.0, "120.0"), (0.0, "0.0"), (60.0, "60.0")],
+        [(120.0, "120.0"), (None, None)],
     )
     async def test_drain_timeout_forwarded_to_aggregator_args(
         self, tmp_path, timeout_s, expected_flag
@@ -638,7 +1377,7 @@ class TestAggregatorArgs:
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(
-                drain=DrainConfig(metrics_drain_timeout_s=timeout_s)
+                timeouts=Timeouts(metrics_drain_timeout_s=timeout_s)
             ),
         )
         ctx = self._make_ctx(config, tmp_path)
@@ -654,16 +1393,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -675,20 +1414,24 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(KeyboardInterrupt):
-                await _run_benchmark_async(ctx, loop)
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
 
         aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
         args = aggregator_cfg.args
-        assert "--drain-timeout" in args
-        idx = args.index("--drain-timeout")
-        assert args[idx + 1] == expected_flag
+        if expected_flag is None:
+            # None = unlimited: the flag is omitted; the aggregator's own
+            # default (no --drain-timeout) is also unlimited.
+            assert "--drain-timeout" not in args
+        else:
+            idx = args.index("--drain-timeout")
+            assert args[idx + 1] == expected_flag
 
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_tokenizer_and_workers_forwarded_from_schema(self, tmp_path):
         """The benchmark forwards --tokenizer and --tokenizer-workers; the
         workers value comes from the schema default
-        (drain.metrics_tokenizer_workers), the single source of truth."""
+        (settings.metrics_tokenizer_workers), the single source of truth."""
         config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
         ctx = self._make_ctx(config, tmp_path)
         ctx.tokenizer_name = "gpt2"
@@ -704,16 +1447,16 @@ class TestAggregatorArgs:
 
         with (
             patch(
-                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
             ) as MockZMQ,
             patch(
-                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
             ) as MockPub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
             ) as MockSub,
             patch(
-                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
             ) as MockLauncher,
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
@@ -725,15 +1468,514 @@ class TestAggregatorArgs:
 
             loop = asyncio.get_event_loop()
             with pytest.raises(KeyboardInterrupt):
-                await _run_benchmark_async(ctx, loop)
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
 
         aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
         args = aggregator_cfg.args
         idx = args.index("--tokenizer")
         assert args[idx + 1] == "gpt2"
         idx = args.index("--tokenizer-workers")
-        expected = str(config.settings.drain.metrics_tokenizer_workers)
+        expected = str(config.settings.metrics_tokenizer_workers)
         assert args[idx + 1] == expected
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "metrics_isl, expected_flag",
+        [(True, "--metrics-isl"), (False, "--no-metrics-isl")],
+    )
+    async def test_metrics_isl_forwarded_to_aggregator_args(
+        self, tmp_path, metrics_isl, expected_flag
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(metrics_isl=metrics_isl),
+        )
+        ctx = self._make_ctx(config, tmp_path)
+
+        captured: list = []
+
+        async def _capture_launch(service_configs, *, timeout):
+            captured.extend(service_configs)
+            raise KeyboardInterrupt("stop after launch")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(KeyboardInterrupt):
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+        aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
+        args = aggregator_cfg.args
+        assert expected_flag in args
+        # Exactly one spelling of the flag is emitted.
+        assert sum(a.endswith("metrics-isl") for a in args) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_tmpfs_dir_cleaned_up_on_mid_run_crash(self, tmp_path, monkeypatch):
+        """If _run_benchmark_async raises before returning a BenchmarkResult,
+        the tmpfs directory it created must not leak."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        fixed_uuid = MagicMock()
+        fixed_uuid.hex = "deadbeef"
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.execute.uuid.uuid4",
+            lambda: fixed_uuid,
+        )
+
+        async def _capture_launch(service_configs, *, timeout):
+            raise RuntimeError("simulated mid-run crash")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="simulated mid-run crash"):
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+        shm = Path("/dev/shm")
+        tmpfs_base = shm if shm.exists() else Path(tempfile.gettempdir())
+        tmpfs_dir = tmpfs_base / "benchmark_cli_benchmark_deadbeef"
+        assert not tmpfs_dir.exists()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_setup_failure_after_launch_kills_services(self, tmp_path):
+        """A setup failure *after* the services launch but *before* session.run
+        must kill the aggregator/event-logger subprocesses, not orphan them.
+
+        The graceful drain (which waits for the services to self-exit on ENDED)
+        is only reached once session.run runs; a failure before it never sends
+        ENDED, and with drain-timeout defaulting to unlimited the services would
+        otherwise linger. Here launch succeeds and _create_issuer then raises, so
+        the run never drains — MetricsPipeline.__aexit__ sees the publisher still
+        set and kills the services (terminate_all).
+        """
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None  # services are now "running"
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(side_effect=RuntimeError("setup boom")),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="setup boom"):
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+        # __aexit__ kills the services (drain never ran) → launcher.terminate_all();
+        # called exactly once, and never for a clean run.
+        MockLauncher.return_value.terminate_all.assert_called_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_setup_error_after_launch_aborts_exactly_once(self, tmp_path):
+        """A SetupError after launch never drains, so MetricsPipeline.__aexit__
+        kills the services exactly once — terminate_all() runs a single time (there is
+        one teardown path now, not an explicit abort plus a finally abort).
+        """
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(side_effect=SetupError("connect boom")),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(SetupError, match="connect boom"):
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+        # The setup-error path never drains, so __aexit__ kills the services once.
+        MockLauncher.return_value.terminate_all.assert_called_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_http_client_shut_down_on_setup_error_after_create_issuer(
+        self, tmp_path
+    ):
+        """A setup error AFTER _create_issuer (client already created) but before
+        session.run must still shut the HTTP client down — otherwise its worker
+        subprocesses leak (the session finally that used to own the shutdown is
+        never reached on this path)."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        mock_client = MagicMock()
+        mock_client.shutdown_async = AsyncMock()
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(return_value=(MagicMock(), mock_client)),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_agentic_strategy",
+                side_effect=RuntimeError("setup boom after client create"),
+            ),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="setup boom"):
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+        # Client was created; the run failed before the session finally, so the
+        # outer finally must have shut it down (idempotent, called once here).
+        mock_client.shutdown_async.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("drain_kwargs", "expected_error", "expected_match"),
+        [
+            pytest.param(
+                {"side_effect": RuntimeError("drain boom")},
+                RuntimeError,
+                "drain boom",
+                id="drain-raises",
+            ),
+            pytest.param(
+                {"return_value": None},
+                ExecutionError,
+                "without a usable metrics report",
+                id="drain-returns-no-report",
+            ),
+        ],
+    )
+    async def test_clean_run_drain_failure_propagates(
+        self, tmp_path, drain_kwargs, expected_error, expected_match
+    ):
+        """A clean session must fail if draining raises or yields no report."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+        mock_client = MagicMock()
+        mock_client.shutdown_async = AsyncMock()
+        mock_session = MagicMock()
+        mock_session.run = AsyncMock(return_value=MagicMock())  # clean success
+        mock_session.stop_requested = False  # nothing aborted this session
+
+        loop = asyncio.get_event_loop()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(return_value=(MagicMock(), mock_client)),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_agentic_strategy",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.BenchmarkSession",
+                return_value=mock_session,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_phases",
+                return_value=[],
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline."
+                "MetricsPipeline.drain_and_build_report",
+                new=AsyncMock(**drain_kwargs),
+            ),
+            # The perf run reaches the SIGINT handler on the clean path; patch it
+            # out so the test doesn't touch real process signal state.
+            patch.object(loop, "add_signal_handler"),
+            patch.object(loop, "remove_signal_handler"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            with pytest.raises(expected_error, match=expected_match):
+                await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_error_drains_and_returns_partial_result(
+        self, tmp_path
+    ):
+        """A liveness failure must preserve the drained report for finalization."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        async def _launch_ok(service_configs, *, timeout):
+            return None
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+        mock_client = MagicMock()
+        mock_client.shutdown_async = AsyncMock()
+        mock_session = MagicMock()
+        mock_session.run = AsyncMock(
+            side_effect=EndpointResponseIdleTimeoutError("endpoint stalled")
+        )
+        report = MagicMock()
+        drain = AsyncMock(return_value=report)
+        loop = asyncio.get_event_loop()
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._create_issuer",
+                new=AsyncMock(return_value=(MagicMock(), mock_client)),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_agentic_strategy",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.BenchmarkSession",
+                return_value=mock_session,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._build_phases",
+                return_value=[],
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.pipeline."
+                "MetricsPipeline.drain_and_build_report",
+                new=drain,
+            ),
+            patch.object(loop, "add_signal_handler"),
+            patch.object(loop, "remove_signal_handler"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _launch_ok
+
+            bench = await _run_benchmark_async(ctx, loop, sigint=SigintGovernor())
+
+        assert bench.stall_error == "endpoint stalled"
+        assert bench.report is report
+        assert bench.session.phase_results == []
+        drain.assert_awaited_once()
+        mock_client.shutdown_async.assert_awaited_once()
+
+
+class TestAccuracyOnlyDatasetLoading:
+    """`--accuracy-only` must skip the performance dataset even when the config
+    carries one, so a single combined config can run accuracy on its own."""
+
+    def _config_with_perf_and_acc(self):
+        return OfflineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "datasets": [
+                    {"path": "perf.jsonl", "type": "performance"},
+                    {
+                        "path": "acc.jsonl",
+                        "type": "accuracy",
+                        "accuracy_config": {
+                            "eval_method": "pass_at_1",
+                            "ground_truth": "gt",
+                        },
+                    },
+                ]
+            }
+        )
+
+    @pytest.mark.unit
+    def test_accuracy_only_skips_performance_dataset(self, tmp_path):
+        config = self._config_with_perf_and_acc()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "DataLoaderFactory.create_loader",
+                return_value=MagicMock(),
+            ) as mock_create,
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "_resolve_accuracy_components",
+                return_value=(Scorer.get("pass_at_1"), None),
+            ),
+        ):
+            dataloader, eval_configs = _load_datasets(config, tmp_path, TestMode.ACC)
+
+        assert dataloader is None
+        assert len(eval_configs) == 1
+        # Only the accuracy dataset is loaded; the perf dataset is never touched.
+        assert mock_create.call_count == 1
+        # No inline "performance" eval is registered in accuracy-only mode.
+        assert all(ec.dataset_name != "performance" for ec in eval_configs)
+
+    @pytest.mark.unit
+    def test_default_run_loads_performance_dataset(self, tmp_path):
+        config = self._config_with_perf_and_acc()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "DataLoaderFactory.create_loader",
+                return_value=MagicMock(),
+            ) as mock_create,
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "_resolve_accuracy_components",
+                return_value=(Scorer.get("pass_at_1"), None),
+            ),
+        ):
+            dataloader, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
+
+        assert dataloader is not None
+        assert len(eval_configs) == 1
+        # Both the perf and accuracy datasets are loaded.
+        assert mock_create.call_count == 2
 
 
 class TestBuildPhases:
@@ -744,8 +1986,8 @@ class TestBuildPhases:
         return RuntimeSettings(
             metric_target=Throughput(10.0),
             reported_metrics=[Throughput(10.0)],
-            min_duration_ms=600000,
-            max_duration_ms=None,
+            min_issue_duration_ms=600000,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=5,
             n_samples_to_issue=None,
             min_sample_count=1,
@@ -770,7 +2012,6 @@ class TestBuildPhases:
             dataloader=dataloader,
             rt_settings=rt_settings,
             total_samples=dataloader.num_samples(),
-            accuracy_datasets=[],
             eval_configs=[],
         )
 
@@ -795,6 +2036,36 @@ class TestBuildPhases:
 
         assert len(phases) == 1
         assert phases[0].phase_type == PhaseType.PERFORMANCE
+
+    @pytest.mark.unit
+    def test_agentic_routing_headers_propagate_to_performance_phase(
+        self, base_rt_settings, simple_dataset
+    ):
+        routing_headers = ["X-Session-ID", "X-SMG-Routing-Key"]
+        config = OnlineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "datasets": [
+                    DatasetConfig(
+                        path="agentic.jsonl",
+                        agentic_inference=AgenticInferenceConfig(
+                            routing_headers=routing_headers
+                        ),
+                    )
+                ],
+                "settings": OnlineSettings(
+                    load_pattern=LoadPattern(
+                        type=LoadPatternType.AGENTIC_INFERENCE,
+                        target_concurrency=8,
+                    )
+                ),
+            }
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+
+        phases = _build_phases(ctx)
+
+        assert phases[0].routing_headers == tuple(routing_headers)
 
     @pytest.mark.unit
     def test_warmup_enabled_produces_two_phases(self, base_rt_settings, simple_dataset):
@@ -834,7 +2105,8 @@ class TestBuildPhases:
         assert warmup_rt.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
 
     @pytest.mark.unit
-    def test_warmup_phase_min_duration_is_zero(self, base_rt_settings, simple_dataset):
+    def test_warmup_phase_no_duration_target(self, base_rt_settings, simple_dataset):
+        """Warmup never inherits the perf run's duration sizing."""
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
@@ -842,10 +2114,10 @@ class TestBuildPhases:
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
         phases = _build_phases(ctx)
 
-        assert phases[0].runtime_settings.min_duration_ms == 0
+        assert phases[0].runtime_settings.min_issue_duration_ms is None
 
     @pytest.mark.unit
-    def test_warmup_phase_no_max_duration(self, base_rt_settings, simple_dataset):
+    def test_warmup_phase_no_max_issue_duration(self, base_rt_settings, simple_dataset):
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
@@ -853,7 +2125,7 @@ class TestBuildPhases:
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
         phases = _build_phases(ctx)
 
-        assert phases[0].runtime_settings.max_duration_ms is None
+        assert phases[0].runtime_settings.max_issue_duration_ms is None
 
     @pytest.mark.unit
     def test_warmup_n_requests_propagated(self, base_rt_settings, simple_dataset):
@@ -880,7 +2152,7 @@ class TestBuildPhases:
         assert phases[0].runtime_settings.n_samples_to_issue is None
 
     @pytest.mark.unit
-    def test_warmup_defaults_uses_salt(self, base_rt_settings, simple_dataset):
+    def test_warmup_defaults_no_salt(self, base_rt_settings, simple_dataset):
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
@@ -888,7 +2160,8 @@ class TestBuildPhases:
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
         phases = _build_phases(ctx)
 
-        assert phases[0].dataset._salt_rng is not None
+        assert phases[0].dataset._salt_rng is None
+        assert phases[0].dataset is simple_dataset
 
     @pytest.mark.unit
     def test_warmup_without_salt_uses_raw_dataloader(
@@ -989,10 +2262,10 @@ class TestBuildPhases:
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(
-                drain=DrainConfig(
-                    warmup_timeout_s=7.0,
-                    performance_timeout_s=15.0,
-                    accuracy_timeout_s=45.0,
+                timeouts=Timeouts(
+                    warmup_drain_timeout_s=7.0,
+                    performance_drain_timeout_s=15.0,
+                    accuracy_drain_timeout_s=45.0,
                 ),
                 warmup=WarmupConfig(enabled=True, drain=True),
             ),
@@ -1019,6 +2292,172 @@ class TestBuildPhases:
 
         acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
         assert acc.drain_timeout is None
+
+    @pytest.mark.unit
+    def test_accuracy_phase_inherits_perf_concurrency(
+        self, base_rt_settings, simple_dataset
+    ):
+        """When the perf phase runs CONCURRENCY, the accuracy phase mirrors the
+        same fixed concurrency instead of bursting at MAX_THROUGHPUT."""
+        rt = dataclasses.replace(
+            base_rt_settings,
+            load_pattern=LoadPattern(
+                type=LoadPatternType.CONCURRENCY, target_concurrency=7
+            ),
+        )
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, rt, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+        phases = _build_phases(ctx)
+
+        acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
+        assert acc.runtime_settings.load_pattern is not None
+        assert acc.runtime_settings.load_pattern.type == LoadPatternType.CONCURRENCY
+        assert acc.runtime_settings.load_pattern.target_concurrency == 7
+
+    @pytest.mark.unit
+    def test_accuracy_phase_inherits_perf_poisson(
+        self, base_rt_settings, simple_dataset
+    ):
+        """POISSON perf: accuracy mirrors the same POISSON config (target_qps)."""
+        rt = dataclasses.replace(
+            base_rt_settings,
+            load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=10.0),
+        )
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, rt, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+        phases = _build_phases(ctx)
+
+        acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
+        assert acc.runtime_settings.load_pattern is not None
+        assert acc.runtime_settings.load_pattern.type == LoadPatternType.POISSON
+        assert acc.runtime_settings.load_pattern.target_qps == 10.0
+
+    @pytest.mark.unit
+    def test_accuracy_phase_max_throughput_when_perf_offline(
+        self, base_rt_settings, simple_dataset
+    ):
+        """Offline (MAX_THROUGHPUT) perf leaves accuracy at MAX_THROUGHPUT."""
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+        phases = _build_phases(ctx)
+
+        acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
+        assert acc.runtime_settings.load_pattern is not None
+        assert acc.runtime_settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
+
+    @pytest.mark.unit
+    def test_accuracy_phase_max_throughput_when_perf_agentic(
+        self, base_rt_settings, simple_dataset
+    ):
+        """AGENTIC_INFERENCE can't drive a non-agentic accuracy dataset, so the
+        accuracy phase falls back to MAX_THROUGHPUT instead of crashing."""
+        rt = dataclasses.replace(
+            base_rt_settings,
+            load_pattern=LoadPattern(
+                type=LoadPatternType.AGENTIC_INFERENCE, target_concurrency=8
+            ),
+        )
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, rt, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+        phases = _build_phases(ctx)
+
+        acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
+        assert acc.runtime_settings.load_pattern is not None
+        assert acc.runtime_settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
+
+    @pytest.mark.unit
+    def test_accuracy_phase_max_throughput_when_perf_none(
+        self, base_rt_settings, simple_dataset
+    ):
+        """A missing perf load pattern falls back to MAX_THROUGHPUT for accuracy."""
+        rt = dataclasses.replace(base_rt_settings, load_pattern=None)
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, rt, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+        phases = _build_phases(ctx)
+
+        acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
+        assert acc.runtime_settings.load_pattern is not None
+        assert acc.runtime_settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
+
+    @pytest.mark.unit
+    def test_accuracy_issuer_logs_load_mode(
+        self, base_rt_settings, simple_dataset, caplog
+    ):
+        """The accuracy issuer logs which load mode it will run in."""
+        rt = dataclasses.replace(
+            base_rt_settings,
+            load_pattern=LoadPattern(
+                type=LoadPatternType.CONCURRENCY, target_concurrency=4
+            ),
+        )
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, rt, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+
+        with caplog.at_level(
+            logging.INFO, logger="inference_endpoint.commands.benchmark.execute"
+        ):
+            _build_phases(ctx)
+
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "load mode" in m and "concurrency" in m and "4" in m for m in msgs
+        ), msgs
+
+    @pytest.mark.unit
+    def test_accuracy_issuer_logs_poisson_when_perf_poisson(
+        self, base_rt_settings, simple_dataset, caplog
+    ):
+        """POISSON perf logs the inherited poisson mode with its target_qps and
+        must NOT emit a target_concurrency suffix (the concurrency-only branch)."""
+        rt = dataclasses.replace(
+            base_rt_settings,
+            load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=10.0),
+        )
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, rt, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+
+        with caplog.at_level(
+            logging.INFO, logger="inference_endpoint.commands.benchmark.execute"
+        ):
+            _build_phases(ctx)
+
+        msgs = [r.getMessage() for r in caplog.records]
+        load_mode_msgs = [m for m in msgs if "load mode" in m]
+        assert load_mode_msgs, msgs
+        assert any(
+            "poisson" in m and "target_qps=10.0" in m for m in load_mode_msgs
+        ), load_mode_msgs
+        assert all(
+            "target_concurrency" not in m for m in load_mode_msgs
+        ), load_mode_msgs
+
+    @pytest.mark.unit
+    def test_skip_endpoint_phase_omits_accuracy_phase(
+        self, base_rt_settings, simple_dataset
+    ):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        ctx.eval_configs = [
+            AccuracyConfiguration(
+                scorer=_SelfContainedScorer,
+                extractor=None,
+                dataset_name="acc",
+                dataset=simple_dataset,
+                report_dir=Path("/tmp"),
+                ground_truth_column=None,
+                num_repeats=1,
+            )
+        ]
+        phases = _build_phases(ctx)
+
+        assert all(p.phase_type != PhaseType.ACCURACY for p in phases)
 
     @pytest.mark.unit
     def test_warmup_uses_independent_rng_instances(
@@ -1057,8 +2496,8 @@ class TestBuildPhases:
             return RuntimeSettings(
                 metric_target=Throughput(10.0),
                 reported_metrics=[Throughput(10.0)],
-                min_duration_ms=0,
-                max_duration_ms=None,
+                min_issue_duration_ms=0,
+                max_issue_duration_ms=None,
                 n_samples_from_dataset=simple_dataset.num_samples(),
                 n_samples_to_issue=None,
                 min_sample_count=1,
@@ -1099,13 +2538,272 @@ class TestBuildPhases:
         )
 
 
+class TestFinalizeBenchmark:
+    def _make_eval_config(self, scorer, dataset, report_dir: Path):
+        return AccuracyConfiguration(
+            scorer=scorer,
+            extractor=None,
+            dataset_name="external_accuracy",
+            dataset=dataset,
+            report_dir=report_dir,
+            ground_truth_column=None,
+            num_repeats=1,
+        )
+
+    @pytest.mark.unit
+    def test_perf_mode_skips_external_scorers_only(self, tmp_path):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        dataset = _make_loaded_dataset()
+        ctx = _make_benchmark_context(
+            config=config,
+            report_dir=tmp_path,
+            test_mode=TestMode.PERF,
+            dataloader=dataset,
+            eval_configs=[
+                AccuracyConfiguration(
+                    scorer=_InlinePerformanceScorer,
+                    extractor=None,
+                    dataset_name="performance",
+                    dataset=dataset,
+                    report_dir=tmp_path,
+                    ground_truth_column=None,
+                    num_repeats=1,
+                    dataset_type=DatasetType.PERFORMANCE,
+                ),
+                AccuracyConfiguration(
+                    scorer=_OrdinaryAccuracyScorer,
+                    extractor=None,
+                    dataset_name="accuracy",
+                    dataset=dataset,
+                    report_dir=tmp_path,
+                    ground_truth_column=None,
+                    num_repeats=1,
+                    dataset_type=DatasetType.ACCURACY,
+                ),
+                AccuracyConfiguration(
+                    scorer=_SelfContainedScorer,
+                    extractor=None,
+                    dataset_name="external_performance",
+                    dataset=dataset,
+                    report_dir=tmp_path,
+                    ground_truth_column=None,
+                    num_repeats=1,
+                    dataset_type=DatasetType.PERFORMANCE,
+                ),
+            ],
+        )
+
+        bench = _make_benchmark_result(tmp_path)
+        bench.session.phase_results.append(
+            PhaseResult(
+                name="accuracy",
+                phase_type=PhaseType.ACCURACY,
+                uuid_to_index={"accuracy-0": 0, "accuracy-1": 1, "accuracy-2": 2},
+                issued_count=3,
+                start_time_ns=1_000_000_000,
+                end_time_ns=2_000_000_000,
+            )
+        )
+        with patch.object(
+            _SelfContainedScorer,
+            "score",
+            side_effect=AssertionError("external scorer should not run in PERF"),
+        ):
+            finalize_benchmark(ctx, bench)
+
+        assert json.loads((tmp_path / "scores.json").read_text()) == {"score": 1.0}
+        results = json.loads(
+            (tmp_path / "accuracy" / "accuracy_results.json").read_text()
+        )
+        assert {
+            entry["dataset_name"]: entry["score"]
+            for entry in results["accuracy_scores"]
+        } == {
+            "performance": 1.0,
+            "accuracy": 0.5,
+        }
+
+    @pytest.mark.unit
+    def test_skip_endpoint_phase_scorer_gets_empty_sample_idx_map(self, tmp_path):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        dataset = _make_loaded_dataset()
+        ctx = _make_benchmark_context(
+            config=config,
+            report_dir=tmp_path,
+            test_mode=TestMode.ACC,
+            dataloader=dataset,
+            eval_configs=[
+                self._make_eval_config(_SelfContainedScorer, dataset, tmp_path)
+            ],
+        )
+
+        finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+        idx_map = json.loads((tmp_path / "sample_idx_map.json").read_text())
+        assert idx_map["performance"] == {"uuid-0": 0, "uuid-1": 1, "uuid-2": 2}
+        assert idx_map["external_accuracy"] == {}
+        results = json.loads(
+            (tmp_path / "accuracy" / "accuracy_results.json").read_text()
+        )
+        assert results["accuracy_scores"][0]["dataset_name"] == "external_accuracy"
+        assert results["accuracy_scores"][0]["score"] == 1.0
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(("dataset_size", "expected"), [(3, 2), (1, 1)])
+    def test_skip_endpoint_phase_scorer_reports_external_sample_count(
+        self, tmp_path, dataset_size, expected
+    ):
+        """External sample counts are bounded by the loaded dataset."""
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        dataset = _make_loaded_dataset(dataset_size)
+        ctx = _make_benchmark_context(
+            config=config,
+            report_dir=tmp_path,
+            test_mode=TestMode.ACC,
+            dataloader=dataset,
+            eval_configs=[
+                self._make_eval_config(_ExternalCountScorer, dataset, tmp_path)
+            ],
+        )
+
+        finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
+
+        results = json.loads(
+            (tmp_path / "accuracy" / "accuracy_results.json").read_text()
+        )
+        assert results["accuracy_scores"][0]["dataset_name"] == "external_accuracy"
+        assert results["accuracy_scores"][0]["unit_samples"] == expected
+        assert results["accuracy_scores"][0]["total_samples"] == expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("abort_field", "abort_value", "snapshot_state"),
+        [
+            ("run_timed_out", True, "complete"),
+            ("user_interrupted", True, "live"),
+            ("stall_error", "endpoint stalled", "complete"),
+            (None, None, "interrupted"),
+        ],
+    )
+    def test_aborted_run_never_scores_or_writes_complete_artifacts(
+        self, tmp_path, monkeypatch, abort_field, abort_value, snapshot_state
+    ):
+        """Split-brain guard: an aborted run must never ship artifacts under
+        any non-interrupted state. "complete": the aggregator finalized before
+        the abort landed (watchdog late, or ^C after the session's terminal
+        ENDED). "live": the teardown grace SIGKILLed a wedged aggregator, so
+        the report was built from the last live pub/sub snapshot.
+        result_summary.json must land complete:false / state:interrupted, and
+        partial accuracy data must never be scored."""
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = self._make_report(state=snapshot_state)
+        if abort_field is not None:
+            setattr(bench, abort_field, abort_value)
+        score_accuracy = MagicMock()
+        monkeypatch.setattr(execute_mod, "score_accuracy", score_accuracy)
+
+        finalize_benchmark(ctx, bench)
+
+        score_accuracy.assert_not_called()
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["complete"] is False
+        assert summary["state"] == "interrupted"
+
+    @pytest.mark.unit
+    def test_sigint_during_scoring_invalidates_run(self, tmp_path, monkeypatch):
+        """^C in the finalization window: the run becomes invalid.
+
+        The measurement completed (no abort flag) and the governor's
+        KeyboardInterrupt lands mid-scoring. A user abort makes the whole run
+        invalid: the interrupt must propagate (main.py exits 130) and the
+        finally must persist the report as interrupted/complete:false — the
+        metrics stay in the file as partial diagnostics, never as a
+        submittable result. An ordinary scoring *failure* (Exception) keeps
+        the completed report; only a user abort invalidates it.
+        """
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = self._make_report(state="complete")
+        monkeypatch.setattr(
+            execute_mod,
+            "score_accuracy",
+            MagicMock(side_effect=KeyboardInterrupt),
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            finalize_benchmark(ctx, bench)
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["complete"] is False
+        assert summary["state"] == "interrupted"
+
+    @staticmethod
+    def _make_report(state: str) -> Report:
+        return Report.from_snapshot(
+            {
+                "counter": 1,
+                "timestamp_ns": 12345,
+                "state": state,
+                "n_pending_tasks": 0,
+                "metrics": [
+                    {
+                        "type": "counter",
+                        "name": "tracked_samples_completed",
+                        "value": 3,
+                    },
+                    {"type": "counter", "name": "tracked_samples_issued", "value": 3},
+                    {
+                        "type": "counter",
+                        "name": "tracked_duration_ns",
+                        "value": 1_000_000_000,
+                    },
+                    {"type": "counter", "name": "tracked_samples_failed", "value": 0},
+                ],
+            }
+        )
+
+
+class TestRunBenchmarkStallOutcome:
+    """An endpoint stall must finalize artifacts before the run fails."""
+
+    @pytest.mark.unit
+    def test_stall_finalizes_then_raises(self, tmp_path, monkeypatch):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config, tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        bench.stall_error = "endpoint stalled"
+        finalize = MagicMock()
+
+        monkeypatch.setattr(execute_mod, "setup_benchmark", MagicMock(return_value=ctx))
+        monkeypatch.setattr(
+            execute_mod, "run_benchmark_async", MagicMock(return_value=bench)
+        )
+        monkeypatch.setattr(execute_mod, "finalize_benchmark", finalize)
+
+        with pytest.raises(ExecutionError, match="endpoint stalled"):
+            execute_mod.run_benchmark(config, TestMode.PERF)
+
+        # The raise happens only after finalize wrote the standard artifacts;
+        # reaching pytest.raises without this call would mean the stall
+        # propagated before finalization (the pre-fix behavior).
+        finalize.assert_called_once_with(ctx, bench)
+
+
 class TestScorerMethodSync:
     """Ensure ScorerMethod enum stays in sync with the scorer registry."""
 
     @pytest.mark.unit
     def test_scorer_enum_matches_registry(self):
         enum_values = {m.value for m in ScorerMethod}
-        registry_keys = set(Scorer.PREDEFINED.keys())
+        # Exclude test-only scorers (ids starting with "_")
+        registry_keys = {k for k in Scorer.PREDEFINED if not k.startswith("_")}
         assert enum_values == registry_keys, (
             f"ScorerMethod enum out of sync with Scorer registry.\n"
             f"  In enum only: {enum_values - registry_keys}\n"
@@ -1221,8 +2919,8 @@ class TestSetupBenchmarkTokenizer:
         return RuntimeSettings(
             metric_target=Throughput(10.0),
             reported_metrics=[Throughput(10.0)],
-            min_duration_ms=0,
-            max_duration_ms=None,
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=1,
             n_samples_to_issue=None,
             min_sample_count=1,
@@ -1271,7 +2969,7 @@ class TestSetupBenchmarkTokenizer:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
+                return_value=(_simple_dataset, []),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -1296,7 +2994,7 @@ class TestSetupBenchmarkTokenizer:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
+                return_value=(_simple_dataset, []),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -1320,7 +3018,7 @@ class TestSetupBenchmarkTokenizer:
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
+                return_value=(_simple_dataset, []),
             ),
             patch(
                 "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
@@ -1330,6 +3028,400 @@ class TestSetupBenchmarkTokenizer:
             ctx = setup_benchmark(config, TestMode.PERF)
 
         assert ctx.tokenizer_name is None
+
+
+class TestSetupBenchmark:
+    """Tests for setup-time config normalization and sample accounting."""
+
+    @pytest.fixture()
+    def _base_patches(self):
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.pin_loadgen",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.config.schema.BenchmarkConfig.to_yaml_file",
+                return_value=None,
+            ),
+        ):
+            yield
+
+    @pytest.fixture()
+    def _simple_dataset(self):
+        ds = Dataset(pd.DataFrame({"prompt": ["q0"]}))
+        ds.load()
+        return ds
+
+    @pytest.fixture()
+    def _rt_settings(self):
+        return RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=None,
+            n_samples_from_dataset=1,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+
+    def _setup(self, config, test_mode, loaded_datasets, rt_settings):
+        with (
+            patch.object(execute_mod, "_check_tokenizer_exists", return_value=True),
+            patch.object(execute_mod, "_load_datasets", return_value=loaded_datasets),
+            patch.object(RuntimeSettings, "from_config", return_value=rt_settings),
+        ):
+            return setup_benchmark(config, test_mode)
+
+    @pytest.mark.unit
+    def test_accuracy_only_normalizes_client_and_target_concurrency(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://x"]},
+            model_params={"name": "test-model"},
+            settings=OnlineSettings(
+                load_pattern=LoadPattern(
+                    type=LoadPatternType.CONCURRENCY, target_concurrency=10
+                ),
+                client=HTTPClientConfig(
+                    num_workers=4, warmup_connections=0, max_connections=8
+                ),
+            ),
+            report_dir=str(tmp_path),
+        )
+        ctx = self._setup(
+            config,
+            TestMode.ACC,
+            (_simple_dataset, []),
+            _rt_settings,
+        )
+
+        assert ctx.config.settings.client.num_workers == 1
+        assert ctx.config.settings.client.max_connections == 1
+        assert ctx.config.settings.load_pattern.target_concurrency == 1
+
+    @pytest.mark.unit
+    def test_accuracy_only_setup_validates_with_non_default_api_type(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        """A non-default endpoint api_type (propagated into the client via
+        _propagate_client_api_type's with_updates) must survive the ACC-mode
+        client normalization re-validation without errors."""
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://x"], "api_type": "sglang"},
+            model_params={"name": "test-model"},
+            settings=OnlineSettings(
+                load_pattern=LoadPattern(
+                    type=LoadPatternType.CONCURRENCY, target_concurrency=10
+                ),
+                client=HTTPClientConfig(
+                    num_workers=4, warmup_connections=0, max_connections=8
+                ),
+            ),
+            report_dir=str(tmp_path),
+        )
+        ctx = self._setup(
+            config,
+            TestMode.ACC,
+            (_simple_dataset, []),
+            _rt_settings,
+        )
+
+        assert ctx.config.settings.client.num_workers == 1
+        assert ctx.config.endpoint_config.api_type == APIType.SGLANG
+        assert ctx.config.settings.client.api_type == APIType.SGLANG
+
+    @pytest.mark.unit
+    def test_perf_run_leaves_target_concurrency_untouched(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://x"]},
+            model_params={"name": "test-model"},
+            settings=OnlineSettings(
+                load_pattern=LoadPattern(
+                    type=LoadPatternType.CONCURRENCY, target_concurrency=10
+                ),
+                client=HTTPClientConfig(
+                    num_workers=4, warmup_connections=0, max_connections=8
+                ),
+            ),
+            report_dir=str(tmp_path),
+        )
+        ctx = self._setup(
+            config,
+            TestMode.PERF,
+            (_simple_dataset, []),
+            _rt_settings,
+        )
+
+        assert ctx.config.settings.client.num_workers == 4
+        assert ctx.config.settings.load_pattern.target_concurrency == 10
+
+    @pytest.mark.unit
+    def test_accuracy_dataset_named_performance_is_counted_by_type(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OfflineConfig(**_OFFLINE_KWARGS, report_dir=str(tmp_path))
+        accuracy_dataset = Dataset(pd.DataFrame({"prompt": ["q0", "q1"]}), repeats=2)
+        accuracy_dataset.load()
+        eval_config = AccuracyConfiguration(
+            scorer=Scorer.get("pass_at_1"),
+            extractor=None,
+            dataset_name="performance",
+            dataset=accuracy_dataset,
+            report_dir=tmp_path,
+            ground_truth_column=None,
+            num_repeats=2,
+            dataset_type=DatasetType.ACCURACY,
+        )
+
+        ctx = self._setup(
+            config,
+            TestMode.BOTH,
+            (_simple_dataset, [eval_config]),
+            _rt_settings,
+        )
+
+        assert ctx.total_samples == 5
+
+    @pytest.mark.unit
+    def test_agentic_trajectory_repeats_are_included_in_total_samples(
+        self, tmp_path, _base_patches
+    ):
+        dataset = AgenticInferenceDataset(
+            pd.DataFrame(
+                [
+                    {
+                        "conversation_id": "c1",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "c1 first user turn",
+                    },
+                    {
+                        "conversation_id": "c1",
+                        "turn": 2,
+                        "role": "assistant",
+                        "content": "c1 assistant turn",
+                    },
+                    {
+                        "conversation_id": "c1",
+                        "turn": 3,
+                        "role": "user",
+                        "content": "c1 second user turn",
+                    },
+                    {
+                        "conversation_id": "c2",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "c2 only user turn",
+                    },
+                    {
+                        "conversation_id": "c3",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "c3 first user turn",
+                    },
+                    {
+                        "conversation_id": "c3",
+                        "turn": 2,
+                        "role": "assistant",
+                        "content": "c3 first assistant turn",
+                    },
+                    {
+                        "conversation_id": "c3",
+                        "turn": 3,
+                        "role": "user",
+                        "content": "c3 second user turn",
+                    },
+                    {
+                        "conversation_id": "c3",
+                        "turn": 4,
+                        "role": "assistant",
+                        "content": "c3 second assistant turn",
+                    },
+                    {
+                        "conversation_id": "c3",
+                        "turn": 5,
+                        "role": "user",
+                        "content": "c3 third user turn",
+                    },
+                ]
+            )
+        )
+        # fake dataset, 3 trajectory:
+        # traj1: user1 -> assistant1 -> user2 ==== totally 2 issued samples
+        # traj2: user1 ==== totally 1 issued sample
+        # traj3: user1 -> assistant1 -> user2 -> assistant2 -> user3 ==== totally 3 issued samples
+        dataset.load()
+        load_pattern = LoadPattern(
+            type=LoadPatternType.AGENTIC_INFERENCE, target_concurrency=2
+        )
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://x"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "name": "agentic",
+                    "type": "performance",
+                    "path": "unused.jsonl",
+                    "agentic_inference": {"num_trajectories_to_issue": 5},
+                }
+            ],
+            settings=OnlineSettings(load_pattern=load_pattern),
+            report_dir=str(tmp_path),
+        )
+        rt_settings = RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=None,
+            n_samples_from_dataset=6,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            # Seed 5 produces c1, c2, c3 for each sequential dataset pass.
+            rng_sample_index=random.Random(5),
+            load_pattern=load_pattern,
+        )
+
+        ctx = self._setup(
+            config,
+            TestMode.PERF,
+            (dataset, []),
+            rt_settings,
+        )
+
+        # One complete pass contributes 2 + 1 + 3 = 6 client-turn samples.
+        # Issuing five trajectories repeats c1 and c2, adding 2 + 1 more.
+        assert ctx.total_samples == 9
+
+
+class TestReportConfigSecretRedaction:
+    @pytest.mark.unit
+    @pytest.mark.parametrize("test_mode", [TestMode.PERF, TestMode.ACC])
+    def test_report_config_redacts_secrets_without_mutating_runtime(
+        self, tmp_path, test_mode
+    ):
+        endpoint_key = "sentinel-endpoint-key"
+        service_token = "sentinel-service-token"
+        config = OfflineConfig(
+            endpoint_config={
+                "endpoints": ["http://endpoint:8000"],
+                "api_key": endpoint_key,
+            },
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "path": "unused.jsonl",
+                    "accuracy_config": {
+                        "eval_method": "swe_bench_scorer",
+                        "extras": {
+                            "swebench_service_url": "http://service:18080",
+                            "swebench_service_auth_token": service_token,
+                        },
+                    },
+                }
+            ],
+            report_dir=str(tmp_path),
+        )
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.pin_loadgen",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                return_value=False,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(None, []),
+            ),
+        ):
+            ctx = setup_benchmark(config, test_mode)
+
+        persisted = (tmp_path / "config.yaml").read_text()
+        assert endpoint_key not in persisted
+        assert service_token not in persisted
+        assert persisted.count("<redacted>") >= 2
+        assert ctx.config.endpoint_config.api_key == endpoint_key
+        assert (
+            ctx.config.datasets[0].accuracy_config.extras["swebench_service_auth_token"]
+            == service_token
+        )
+
+
+class TestSetupBenchmarkExternalSampleCountLogging:
+    """setup_benchmark logs declared external counts for self-contained scorers."""
+
+    @pytest.mark.unit
+    def test_logs_external_sample_count_for_skip_endpoint_phase_scorer(
+        self, tmp_path, caplog
+    ):
+        dataset = Dataset(pd.DataFrame({"prompt": ["q0"]}))
+        dataset.load()
+        config = OfflineConfig(**_OFFLINE_KWARGS, report_dir=str(tmp_path))
+        rt_settings = RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_issue_duration_ms=0,
+            max_issue_duration_ms=None,
+            n_samples_from_dataset=1,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        eval_configs = [
+            AccuracyConfiguration(
+                scorer=_ExternalCountScorer,
+                extractor=None,
+                dataset_name="external_accuracy",
+                dataset=dataset,
+                report_dir=tmp_path,
+                ground_truth_column=None,
+                num_repeats=1,
+            )
+        ]
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.pin_loadgen",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.config.schema.BenchmarkConfig.to_yaml_file",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                return_value=False,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(dataset, eval_configs),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
+                return_value=rt_settings,
+            ),
+            caplog.at_level("INFO"),
+        ):
+            setup_benchmark(config, TestMode.ACC)
+
+        assert any(
+            "external_accuracy" in message
+            and "1 instances evaluated externally" in message
+            for message in caplog.messages
+        )
 
 
 class TestProfilingHelpers:
@@ -1363,7 +3455,7 @@ class TestProfilingHelpers:
         resp = MagicMock()
         resp.__enter__.return_value.status = 200
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             return_value=resp,
         ):
             rec = _post_profile("http://h/start_profile")
@@ -1376,7 +3468,7 @@ class TestProfilingHelpers:
     def test_post_profile_http_error(self):
         err = urllib_error.HTTPError("http://h", 404, "Not Found", {}, None)
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             side_effect=err,
         ):
             rec = _post_profile("http://h/start_profile")
@@ -1386,7 +3478,7 @@ class TestProfilingHelpers:
     @pytest.mark.unit
     def test_post_profile_connection_failure_never_raises(self):
         with patch(
-            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            "inference_endpoint.commands.benchmark.profiling.urllib_request.urlopen",
             side_effect=OSError("refused"),
         ):
             rec = _post_profile("http://h/start_profile")
@@ -1427,7 +3519,7 @@ class TestProfilingHelpers:
             ],
         }
         buf = io.StringIO()
-        _write_profiling_section(buf, payload)
+        write_profiling_section(buf, payload)
         text = buf.getvalue()
         assert "Profiling" in text
         assert "http://h/start_profile" in text
@@ -1435,3 +3527,379 @@ class TestProfilingHelpers:
         assert "Trigger span" in text
         # Mirrors what finalize_benchmark dumps to profiling.json
         assert json.loads(json.dumps(payload))["engine"] == "vllm"
+
+    @pytest.mark.unit
+    def test_controller_start_then_stop_maps_indices(self):
+        """start() posts each /start_profile; stop() posts /stop_profile only for
+        the starts that returned 200, mapped by the same index, tagging stop_reason."""
+
+        def _fake_post(url):
+            # b's /start_profile fails (500); everything else succeeds.
+            status = 500 if url == "http://b/start_profile" else 200
+            return {
+                "url": url,
+                "status": status,
+                "error": None,
+                "sent_at_ns": 1,
+                "sent_at_iso": "x",
+            }
+
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+            side_effect=_fake_post,
+        ):
+            ctrl = ProfileController(
+                ProfilerEngine.VLLM, ["http://a/v1", "http://b/v1"], None
+            )
+            ctrl.start()
+            ctrl.stop(completed_normally=True)
+
+        payload = ctrl.payload()
+        assert payload["engine"] == "vllm"
+        assert [s["url"] for s in payload["starts"]] == [
+            "http://a/start_profile",
+            "http://b/start_profile",
+        ]
+        # Only a's start returned 200 → only a's stop fires; b (500) is skipped.
+        assert [s["url"] for s in payload["stops"]] == ["http://a/stop_profile"]
+        assert payload["stops"][0]["stop_reason"] == "phase_end"
+
+    @pytest.mark.unit
+    def test_controller_stop_reason_abort_when_not_completed(self):
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+            side_effect=lambda url: {
+                "url": url,
+                "status": 200,
+                "error": None,
+                "sent_at_ns": 1,
+                "sent_at_iso": "x",
+            },
+        ):
+            ctrl = ProfileController(ProfilerEngine.VLLM, ["http://a/v1"], None)
+            ctrl.start()
+            ctrl.stop(completed_normally=False)
+        assert ctrl.payload()["stops"][0]["stop_reason"] == "abort"
+
+    @pytest.mark.unit
+    def test_controller_disabled_is_noop(self):
+        """engine=None → no URLs derived, start/stop do nothing, payload is None."""
+        ctrl = ProfileController(None, ["http://a/v1"], None)
+        ctrl.start()
+        ctrl.stop(completed_normally=True)
+        assert ctrl.payload() is None
+
+    @pytest.mark.unit
+    def test_controller_stop_without_start_posts_nothing(self):
+        """stop() before any start() records nothing (empty _starts, early return)."""
+        with patch(
+            "inference_endpoint.commands.benchmark.profiling._post_profile",
+        ) as mock_post:
+            ctrl = ProfileController(ProfilerEngine.VLLM, ["http://a/v1"], None)
+            ctrl.stop(completed_normally=True)
+        mock_post.assert_not_called()
+        assert ctrl.payload()["stops"] == []
+
+
+class _OverrideTestBase:
+    """Shared helpers for the two end-to-end ``_load_datasets`` override classes
+    below (parametrized over the chat vs text-completions adapter)."""
+
+    # Subclasses set these:
+    api_type: str = ""
+    max_tokens_key: str = ""  # static column name AddStaticColumns adds
+
+    def _write_jsonl(self, path: Path, rows: list[dict]) -> None:
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    def _prompt_rows(self, prompt: str, ground_truth: str | None = None) -> list[dict]:
+        """Adapter-shaped row. Chat adapter wants a 'prompt' column; the
+        completions adapter wants pre-tokenized 'input_tokens' (so the
+        Harmonize transform early-exits and we avoid the HF tokenizer
+        dependency in unit tests)."""
+        row: dict = {"prompt": prompt}
+        if self.api_type == "openai_completions":
+            row = {"input_tokens": [1, 2, 3, 4]}
+        if ground_truth is not None:
+            row["ground_truth"] = ground_truth
+        return [row]
+
+    def _build_config(
+        self,
+        perf_path: Path,
+        acc_path: Path,
+        acc_override: dict | None,
+        perf_override: dict | None = None,
+    ) -> BenchmarkConfig:
+        return BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "test-model", "max_new_tokens": 1024},
+            endpoint_config={
+                "endpoints": ["http://localhost:8000"],
+                "api_type": self.api_type,
+            },
+            datasets=[
+                {
+                    "name": "perf",
+                    "type": "performance",
+                    "path": str(perf_path),
+                    **(
+                        {"generation_config_override": perf_override}
+                        if perf_override
+                        else {}
+                    ),
+                },
+                {
+                    "name": "acc",
+                    "type": "accuracy",
+                    "path": str(acc_path),
+                    "accuracy_config": {
+                        "eval_method": "pass_at_1",
+                        "ground_truth": "ground_truth",
+                        "extractor": "boxed_math_extractor",
+                    },
+                    **(
+                        {"generation_config_override": acc_override}
+                        if acc_override
+                        else {}
+                    ),
+                },
+            ],
+        )
+
+    def _write_fixture(self, tmp_path: Path) -> tuple[Path, Path]:
+        perf_path = tmp_path / "perf.jsonl"
+        acc_path = tmp_path / "acc.jsonl"
+        self._write_jsonl(perf_path, self._prompt_rows("perf-prompt"))
+        self._write_jsonl(acc_path, self._prompt_rows("acc-prompt", ground_truth="42"))
+        return perf_path, acc_path
+
+    @pytest.mark.unit
+    def test_override_propagates_to_loaded_rows(self, tmp_path):
+        """Override on accuracy dataset → its rows get the overridden value;
+        unmodified perf dataset keeps the global 1024."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        config = self._build_config(
+            perf_path,
+            acc_path,
+            acc_override={
+                "temperature": 0.2,
+                "seed": 7,
+                "max_new_tokens": 32768,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        )
+        perf_ds, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
+        assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
+        assert eval_configs[0].dataset.load_sample(0)[self.max_tokens_key] == 32768
+        assert eval_configs[0].model_params.max_new_tokens == 32768
+        assert eval_configs[0].model_params.temperature == 0.2
+        assert eval_configs[0].model_params.seed == 7
+        assert eval_configs[0].model_params.chat_template_kwargs == {
+            "enable_thinking": False
+        }
+        assert eval_configs[0].endpoint_config is config.endpoint_config
+
+    @pytest.mark.unit
+    def test_no_override_inherits_global(self, tmp_path):
+        """Without overrides, both datasets use the global model_params."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        config = self._build_config(perf_path, acc_path, acc_override=None)
+        perf_ds, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
+        assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
+        assert eval_configs[0].dataset.load_sample(0)[self.max_tokens_key] == 1024
+
+    @pytest.mark.unit
+    def test_perf_dataset_override_also_honored(self, tmp_path):
+        """Symmetric check: overrides on the performance entry also flow
+        through (relevant for MLPerf-style perf with shorter max_new_tokens)."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        config = self._build_config(
+            perf_path,
+            acc_path,
+            acc_override={"max_new_tokens": 32768},
+            perf_override={"max_new_tokens": 10240},
+        )
+        perf_ds, eval_configs = _load_datasets(config, tmp_path, TestMode.BOTH)
+        assert perf_ds.load_sample(0)[self.max_tokens_key] == 10240
+        assert eval_configs[0].dataset.load_sample(0)[self.max_tokens_key] == 32768
+        assert eval_configs[0].model_params.max_new_tokens == 32768
+
+    @pytest.mark.unit
+    def test_invalid_override_value_raises_at_construction(self, tmp_path):
+        """A value-level invalidity (e.g. non-numeric temperature) is caught at
+        config construction (parse time) when BenchmarkConfig merges + revalidates
+        each dataset's effective params, so a bad override is rejected before any
+        setup side effects rather than mid-run."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        with pytest.raises(ValidationError):
+            self._build_config(perf_path, acc_path, acc_override={"temperature": "hot"})
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("key", ["name", "streaming", "tokenizer_name"])
+    def test_metrics_decoupled_override_rejected_at_construction(self, tmp_path, key):
+        """Per-run/identity keys are rejected end-to-end at BenchmarkConfig
+        construction (not just on the Dataset submodel), so a per-dataset value
+        can never reach setup and desync the single global tokenizer/aggregator."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        with pytest.raises(ValidationError, match="not honored per-dataset"):
+            self._build_config(perf_path, acc_path, acc_override={key: "whatever"})
+
+    @pytest.mark.unit
+    def test_completion_control_override_gated_by_api_type(self, tmp_path):
+        """A completion-only control (min_new_tokens) in a per-dataset override is
+        gated by api_type exactly like top-level model_params: rejected at
+        construction for non-completions APIs, accepted for openai_completions."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        if self.api_type == "openai_completions":
+            cfg = self._build_config(
+                perf_path, acc_path, acc_override={"min_new_tokens": 5}
+            )
+            assert cfg is not None
+        else:
+            with pytest.raises(ValidationError, match="openai_completions"):
+                self._build_config(
+                    perf_path, acc_path, acc_override={"min_new_tokens": 5}
+                )
+
+
+class TestLoadDatasetsGenerationConfigOverrideChat(_OverrideTestBase):
+    """End-to-end ``_load_datasets`` check against the OpenAI **chat**
+    completions adapter, which emits ``max_completion_tokens``."""
+
+    api_type = "openai"
+    max_tokens_key = "max_completion_tokens"
+
+
+class TestLoadDatasetsGenerationConfigOverrideCompletions(_OverrideTestBase):
+    """End-to-end ``_load_datasets`` check against the OpenAI **text**
+    completions adapter (``/v1/completions``), which emits ``max_tokens``.
+
+    This is the headline target of PR #344 — MLPerf-style runs use
+    ``api_type: openai_completions`` for pre-tokenized inputs — so an
+    integration test on this code path is essential. Rows carry pre-baked
+    ``input_tokens`` so the adapter's ``Harmonize()`` transform early-exits
+    and the test stays free of HF tokenizer downloads."""
+
+    api_type = "openai_completions"
+    max_tokens_key = "max_tokens"
+
+
+def _audit_cli_config(tmp_path, *, only: bool) -> MagicMock:
+    """A config double for cli._run with an audit: block configured."""
+    config = MagicMock()
+    config.datasets = [object()]  # non-empty → _run skips CLI dataset injection
+    config.audit = MagicMock(only=only)
+    config.report_dir = str(tmp_path)
+    config.with_updates.return_value = config
+    return config
+
+
+def _failing_audit(cfg, base_report_dir):
+    result = MagicMock()
+    result.passed = False
+    result.test_id = "output_caching_test"
+    result.details = {"reason": "caching detected"}
+    return result
+
+
+class TestRunBenchmarkAuditDispatch:
+    """cli._run's benchmark→audit orchestration (upstream MLPerf order)."""
+
+    @pytest.mark.unit
+    def test_keyboard_interrupt_skips_audit(self, monkeypatch, tmp_path):
+        """A Ctrl-C during the main run must not start the audit."""
+        config = _audit_cli_config(tmp_path, only=False)
+
+        def _interrupt(cfg, mode):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_benchmark", _interrupt
+        )
+        audit_spy = MagicMock()
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_audit", audit_spy
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            _run(config, [], TestMode.PERF)
+        audit_spy.assert_not_called()
+
+    @pytest.mark.unit
+    def test_main_run_before_audit_against_shared_report_dir(
+        self, monkeypatch, tmp_path
+    ):
+        """Main run executes before the audit (upstream MLPerf order),
+        sharing one report_dir."""
+        config = _audit_cli_config(tmp_path, only=False)
+        call_order = []
+
+        def _run_audit(cfg, base_report_dir):
+            call_order.append(("audit", cfg, base_report_dir))
+            result = MagicMock()
+            result.passed = True
+            return result
+
+        def _run_benchmark(cfg, mode):
+            call_order.append(("benchmark", cfg, mode))
+            return tmp_path
+
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_audit", _run_audit
+        )
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_benchmark", _run_benchmark
+        )
+
+        _run(config, [], TestMode.PERF)
+
+        assert [c[0] for c in call_order] == ["benchmark", "audit"]
+        _, benchmark_cfg, _ = call_order[0]
+        _, audit_cfg, audit_report_dir = call_order[1]
+        assert audit_report_dir == tmp_path / "audit"
+        assert audit_cfg is benchmark_cfg is config
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "only", [False, True], ids=["after-main-run", "audit-only"]
+    )
+    def test_audit_fail_raises_cli_error(self, monkeypatch, tmp_path, only):
+        """A failing (not crashed) audit maps to CLIError (exit 1) — both
+        after a passing main run and standalone via audit.only."""
+        config = _audit_cli_config(tmp_path, only=only)
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_audit", _failing_audit
+        )
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_benchmark",
+            MagicMock(return_value=tmp_path),
+        )
+
+        with pytest.raises(CLIError):
+            _run(config, [], TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_audit_only_skips_main_run(self, monkeypatch, tmp_path):
+        """audit.only runs the audit standalone — the main benchmark is skipped."""
+        config = _audit_cli_config(tmp_path, only=True)
+        audit_calls = []
+
+        def _run_audit(cfg, base_report_dir):
+            audit_calls.append(base_report_dir)
+            result = MagicMock()
+            result.passed = True
+            return result
+
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_audit", _run_audit
+        )
+        benchmark_spy = MagicMock()
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.cli.run_benchmark", benchmark_spy
+        )
+
+        _run(config, [], TestMode.PERF)
+
+        benchmark_spy.assert_not_called()
+        assert audit_calls == [tmp_path / "audit"]

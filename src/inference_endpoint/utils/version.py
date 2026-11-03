@@ -17,30 +17,62 @@
 
 import subprocess
 from functools import lru_cache
+from pathlib import Path
 
 from .. import __version__
 
 
+def _resolve_repo_root() -> Path:
+    """Repo root of this source checkout, anchored to the module location.
+
+    ``src/inference_endpoint/utils/version.py`` -> ``parents[3]`` is the repo root.
+    Falls back to the filesystem root when the package lives in a shallower tree
+    (e.g. an installed wheel copied to ``/inference_endpoint``) so import never
+    crashes; get_git_sha's toplevel guard then yields None, not a foreign SHA.
+    """
+    parents = Path(__file__).resolve().parents
+    return parents[3] if len(parents) > 3 else parents[-1]
+
+
+_REPO_ROOT = _resolve_repo_root()
+
+
 @lru_cache(maxsize=1)
 def get_git_sha() -> str | None:
-    """Get the current git commit SHA.
+    """Get the git commit SHA of the endpoints source checkout.
+
+    The query is anchored to this package's own location (``_REPO_ROOT``) rather
+    than the process working directory, so the SHA reflects the endpoints repo
+    even when the CLI is launched from an unrelated repo.
 
     Returns:
-        The short git SHA (7 chars) or None if not in a git repo or git unavailable.
+        The short git SHA (at least 7 chars; git lengthens it if a 7-char
+        prefix is ambiguous), or None if the package is not in a git checkout
+        (e.g. an installed wheel) or git is unavailable.
     """
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--short=7", "HEAD"],
+            ["git", "rev-parse", "--show-toplevel", "--short=7", "HEAD"],
             capture_output=True,
             text=True,
             timeout=1.0,
             check=False,
+            cwd=_REPO_ROOT,
         )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return None
+        if result.returncode != 0:
+            return None
+        lines = result.stdout.splitlines()
+        if len(lines) != 2:
+            return None
+        toplevel, sha = lines
+        # Only trust the SHA if the discovered repo IS this source tree. Guards against
+        # an installed wheel nested inside an unrelated repo reporting a foreign SHA —
+        # a wrong provenance SHA is worse than None.
+        if Path(toplevel).resolve() != _REPO_ROOT:
+            return None
+        return sha.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 @lru_cache(maxsize=1)

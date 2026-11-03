@@ -96,7 +96,7 @@ def _offline_config(
         model_params=ModelParams(name="test-model", streaming=StreamingMode.OFF),
         datasets=[ConfigDataset(path=str(dataset_path), type=DatasetType.PERFORMANCE)],
         settings=OfflineSettings(
-            runtime=RuntimeConfig(min_duration_ms=0, n_samples_to_issue=n_perf_samples),
+            runtime=RuntimeConfig(n_samples_to_issue=n_perf_samples),
             load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
             client=_MINIMAL_CLIENT,
             warmup=warmup,

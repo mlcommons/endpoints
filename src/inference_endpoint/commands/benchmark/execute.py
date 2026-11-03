@@ -19,6 +19,10 @@ Phases:
     1. setup_benchmark()        — load tokenizer, dataset, config (no IO)
     2. run_benchmark_async()    — HTTP client + async BenchmarkSession
     3. finalize_benchmark()     — accuracy scoring, results JSON
+
+Cohesive sub-concerns live in sibling modules: profiler triggers (``profiling``),
+timeout/signal policy (``watchdog``), accuracy scoring (``accuracy``), and the
+ZMQ/metrics/event-logger service lifecycle (``pipeline``).
 """
 
 from __future__ import annotations
@@ -29,7 +33,6 @@ import logging
 import os
 import random
 import shutil
-import signal
 import tempfile
 import time
 import uuid
@@ -38,30 +41,35 @@ from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TextIO
-from urllib import error as urllib_error
-from urllib import request as urllib_request
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
-import msgspec
 import msgspec.json
+import msgspec.structs
 from huggingface_hub import model_info
 from tqdm import tqdm
 from transformers.utils import logging as transformers_logging
 
-from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.loop_manager import LoopManager
-from inference_endpoint.async_utils.services.launcher import (
-    ServiceConfig,
-    ServiceLauncher,
+from inference_endpoint.commands.benchmark.accuracy import (
+    AccuracyConfiguration,
+    effective_external_sample_count,
+    score_accuracy,
+    write_accuracy_results,
 )
-from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
-    snapshot_to_dict,
+from inference_endpoint.commands.benchmark.full_run_osl import full_run_osl_for_report
+from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
+from inference_endpoint.commands.benchmark.profiling import (
+    ProfileController,
+    write_profiling_section,
 )
-from inference_endpoint.async_utils.services.metrics_aggregator.subscriber import (
-    MetricsSnapshotSubscriber,
+from inference_endpoint.commands.benchmark.watchdog import (
+    RunWatchdog,
+    SigintGovernor,
+    _PerfPhaseTimeout,
+    sigint_policy,
 )
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.compliance import AuditRunSpec
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -69,12 +77,11 @@ from inference_endpoint.config.schema import (
     DatasetType,
     LoadPattern,
     LoadPatternType,
-    ProfilerEngine,
     StreamingMode,
     TestMode,
     TestType,
 )
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import PhaseType, QueryResult
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -92,16 +99,20 @@ from inference_endpoint.exceptions import (
 )
 from inference_endpoint.load_generator.agentic_inference_strategy import (
     AgenticInferenceStrategy,
+    expected_agentic_sample_count,
 )
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
+    EndpointResponseIdleTimeoutError,
     PhaseConfig,
-    PhaseType,
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
 from inference_endpoint.utils import trace
+
+if TYPE_CHECKING:
+    from inference_endpoint.async_utils.event_publisher import EventPublisherService
 
 transformers_logging.set_verbosity_error()
 
@@ -113,6 +124,17 @@ def _default_report_path() -> Path:
     return Path(
         f"{tempfile.gettempdir()}/reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
+
+
+def resolve_report_dir(config: BenchmarkConfig) -> Path:
+    """Resolve the run's report directory, defaulting to a timestamped path.
+
+    Exposed so callers that need the report dir before invoking
+    ``setup_benchmark`` (e.g. to share one directory tree across multiple
+    runs against the same config) resolve it identically rather than
+    duplicating the default-path logic.
+    """
+    return Path(config.report_dir) if config.report_dir else _default_report_path()
 
 
 class ResponseCollector:
@@ -150,18 +172,11 @@ class BenchmarkResult:
     # settings.profiling.engine is set; None otherwise. Rendered into
     # report.txt and a sibling profiling.json by finalize_benchmark.
     profiling: dict[str, Any] | None = None
-
-
-@dataclass
-class AccuracyConfiguration:
-    scorer: type[Scorer]
-    extractor: type[Extractor] | None
-    dataset_name: str
-    dataset: Dataset
-    report_dir: Path
-    ground_truth_column: str | None
-    num_repeats: int
-    extras: dict[str, Any] = field(default_factory=dict)
+    run_timed_out: bool = False
+    user_interrupted: bool = False
+    # Endpoint response idle timeout message when the endpoint stalled; the run still drains
+    # and finalizes its artifacts, then run_benchmark fails with this message.
+    stall_error: str | None = None
 
 
 @dataclass
@@ -175,16 +190,20 @@ class BenchmarkContext:
     test_mode: TestMode
     report_dir: Path
     tokenizer_name: str | None
-    dataloader: Dataset
-    rt_settings: RuntimeSettings
+    dataloader: Dataset | None
+    rt_settings: RuntimeSettings | None
     total_samples: int
-    accuracy_datasets: list[Dataset] = field(default_factory=list)
     eval_configs: list[AccuracyConfiguration] = field(default_factory=list)
     affinity_plan: AffinityPlan | None = None
 
     @property
     def collect_responses(self) -> bool:
         return self.test_mode in (TestMode.ACC, TestMode.BOTH)
+
+    @property
+    def accuracy_only(self) -> bool:
+        """TestMode.ACC is the single source of truth for accuracy-only runs."""
+        return self.test_mode == TestMode.ACC
 
     @property
     def benchmark_mode(self) -> TestType | None:
@@ -271,21 +290,40 @@ def _resolve_accuracy_components(
     return scorer_cls, extractor_cls
 
 
+def _validate_accuracy_config_for_scorer(
+    scorer_cls: type[Scorer],
+    dataset_name: str,
+    accuracy_config: Any,
+) -> None:
+    """Reject repeats for scorers that own one external evaluation run."""
+    if scorer_cls.SKIP_ENDPOINT_PHASE and accuracy_config.num_repeats != 1:
+        raise InputValidationError(
+            f"Dataset '{dataset_name}' uses scorer '{scorer_cls.SCORER_ID}'; "
+            "accuracy_config.num_repeats must be 1 because the scorer runs "
+            "externally once per benchmark."
+        )
+
+
 def _load_datasets(
-    config: BenchmarkConfig, report_dir: Path
-) -> tuple[Dataset, list[Dataset], list[AccuracyConfiguration]]:
-    """Load performance and accuracy datasets. Returns (perf_loader, acc_datasets, eval_configs)."""
-    # Get dataset - from CLI or from config
-    # TODO: Dataset Logic is not yet fully implemented
+    config: BenchmarkConfig,
+    report_dir: Path,
+    test_mode: TestMode,
+) -> tuple[Dataset | None, list[AccuracyConfiguration]]:
+    """Load performance and accuracy datasets. Returns (perf_loader, eval_configs)."""
+    accuracy_only = test_mode == TestMode.ACC
     accuracy_cfgs = [ds for ds in config.datasets if ds.type == DatasetType.ACCURACY]
     performance_cfgs = [
         ds for ds in config.datasets if ds.type == DatasetType.PERFORMANCE
     ]
 
-    if not performance_cfgs:
+    if accuracy_only:
+        if not accuracy_cfgs:
+            raise InputValidationError(
+                "--accuracy-only requires at least one accuracy dataset"
+            )
+    elif not performance_cfgs:
         raise InputValidationError("At least one performance dataset required")
 
-    accuracy_datasets: list[Dataset] = []
     eval_configs: list[AccuracyConfiguration] = []
 
     # Pack the evaluation parameters for each accuracy dataset
@@ -294,11 +332,35 @@ def _load_datasets(
             acc_cfg.name, acc_cfg.accuracy_config
         )
         assert acc_cfg.accuracy_config is not None
+        if test_mode == TestMode.PERF and scorer_cls.SKIP_ENDPOINT_PHASE:
+            continue
+
+        _validate_accuracy_config_for_scorer(
+            scorer_cls, acc_cfg.name, acc_cfg.accuracy_config
+        )
+        extras = acc_cfg.accuracy_config.extras or {}
+        try:
+            loader_kwargs = scorer_cls.dataset_loader_kwargs(extras)
+        except InputValidationError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - scorer hook validates user input
+            raise InputValidationError(
+                f"Dataset '{acc_cfg.name}': invalid accuracy_config.extras for "
+                f"scorer '{scorer_cls.SCORER_ID}': {exc}"
+            ) from exc
 
         ds = DataLoaderFactory.create_loader(
-            acc_cfg, num_repeats=acc_cfg.accuracy_config.num_repeats
+            acc_cfg,
+            num_repeats=acc_cfg.accuracy_config.num_repeats,
+            **loader_kwargs,
         )
-        accuracy_datasets.append(ds)
+        # Value/api-type validity of the override is already enforced at config
+        # construction (BenchmarkConfig validates each dataset's effective params),
+        # so this cannot raise for a validated config.
+        ds_model_params = acc_cfg.effective_generation_config(config.model_params)
+        ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
+        logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
+        scorer_cls.preflight(extras)
         # TODO add tests and defaults
         eval_configs.append(
             AccuracyConfiguration(
@@ -310,62 +372,135 @@ def _load_datasets(
                 acc_cfg.accuracy_config.ground_truth,
                 acc_cfg.accuracy_config.num_repeats,
                 acc_cfg.accuracy_config.extras or {},
+                model_params=ds_model_params,
+                endpoint_config=config.endpoint_config,
+                dataset_type=DatasetType.ACCURACY,
             )
         )
-        ds.load(
-            api_type=config.endpoint_config.api_type, model_params=config.model_params
-        )
-        logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
     if not accuracy_cfgs:
         logger.info("No separate accuracy datasets provided")
-    if len(performance_cfgs) > 1:
-        raise InputValidationError("Multiple performance datasets not supported")
 
-    perf_cfg = performance_cfgs[0]
-    try:
-        dataloader = DataLoaderFactory.create_loader(perf_cfg)
-        dataloader.load(
-            api_type=config.endpoint_config.api_type, model_params=config.model_params
-        )
-        logger.info(f"Loaded {dataloader.num_samples()} samples")
-    except FileNotFoundError as e:
-        raise InputValidationError(
-            f"Dataset file not found: {performance_cfgs[0].path}"
-        ) from e
-    except Exception as e:
-        raise SetupError(f"Failed to load dataset: {e}") from e
-
-    if perf_cfg.accuracy_config is not None:
-        accuracy_config = perf_cfg.accuracy_config
-        if accuracy_config.num_repeats != 1:
+    dataloader: Dataset | None = None
+    # --accuracy-only skips the performance dataset entirely (including its inline
+    # accuracy scorer), so a single config carrying both a performance and an
+    # accuracy dataset can run accuracy on its own.
+    if performance_cfgs and not accuracy_only:
+        if len(performance_cfgs) > 1:
+            raise InputValidationError("Multiple performance datasets not supported")
+        perf_cfg = performance_cfgs[0]
+        perf_base_name = perf_cfg.name.split("::")[0]
+        perf_cls = Dataset.PREDEFINED.get(perf_base_name)
+        if perf_cls is not None and perf_cls.ACCURACY_ONLY:
             raise InputValidationError(
-                f"Dataset '{perf_cfg.name}' is a performance dataset; "
-                "accuracy_config.num_repeats must be 1 because scoring runs on "
-                "already-issued performance outputs"
+                f"Dataset '{perf_cfg.name}' is accuracy-only and cannot be used "
+                "as a performance dataset. Use a different dataset (e.g. 'random') "
+                "for the performance phase."
             )
-        scorer_cls, extractor_cls = _resolve_accuracy_components(
-            perf_cfg.name, accuracy_config
+        # Override validity is enforced at config construction (see accuracy loop).
+        perf_model_params = perf_cfg.effective_generation_config(config.model_params)
+        try:
+            dataloader = DataLoaderFactory.create_loader(perf_cfg)
+            dataloader.load(
+                api_type=config.endpoint_config.api_type,
+                model_params=perf_model_params,
+            )
+            logger.info(f"Loaded {dataloader.num_samples()} samples")
+        except FileNotFoundError as e:
+            raise InputValidationError(
+                f"Dataset file not found: {perf_cfg.path}"
+            ) from e
+        except Exception as e:
+            raise SetupError(f"Failed to load dataset: {e}") from e
+
+        # Fail fast on a warmup dataset that salt cannot bust — at load time,
+        # before any worker/aggregator subprocess is spawned. with_salt() runs
+        # the same check later; this earlier call is deliberate (not redundant),
+        # so an invalid dataset aborts before the subprocess fan-out.
+        warmup = config.settings.warmup
+        if warmup.enabled:
+            if warmup.salt:
+                dataloader.validate_saltable()
+            else:
+                logger.warning(
+                    "Warmup is enabled without salt (--warmup-salt): warmup "
+                    "prompts are issued verbatim, so the server may serve the "
+                    "measured phase from a warm KV/prefix cache and understate "
+                    "latency. Enable --warmup-salt on text-'prompt' datasets to "
+                    "bust the cache."
+                )
+
+        if perf_cfg.accuracy_config is not None:
+            accuracy_config = perf_cfg.accuracy_config
+            scorer_cls, extractor_cls = _resolve_accuracy_components(
+                perf_cfg.name, accuracy_config
+            )
+            if not (test_mode == TestMode.PERF and scorer_cls.SKIP_ENDPOINT_PHASE):
+                if accuracy_config.num_repeats != 1:
+                    raise InputValidationError(
+                        f"Dataset '{perf_cfg.name}' is a performance dataset; "
+                        "accuracy_config.num_repeats must be 1 because scoring runs "
+                        "on already-issued performance outputs"
+                    )
+                scorer_cls.preflight(accuracy_config.extras or {})
+
+                eval_configs.append(
+                    AccuracyConfiguration(
+                        scorer_cls,
+                        extractor_cls,
+                        "performance",
+                        dataloader,
+                        report_dir,
+                        accuracy_config.ground_truth,
+                        accuracy_config.num_repeats,
+                        accuracy_config.extras or {},
+                        model_params=perf_model_params,
+                        endpoint_config=config.endpoint_config,
+                        dataset_type=DatasetType.PERFORMANCE,
+                    )
+                )
+
+    return dataloader, eval_configs
+
+
+def setup_benchmark(
+    config: BenchmarkConfig,
+    test_mode: TestMode,
+    audit_run_spec: AuditRunSpec | None = None,
+) -> BenchmarkContext:
+    """Load tokenizer, dataset, create scheduler, setup report dir.
+
+    ``audit_run_spec``, when set, overrides the issue count and sample order
+    for a compliance-audit phase (see ``commands/audit.py:run_audit``).
+    """
+    # Accuracy-only runs force single-stream (1 worker / 1 connection) for
+    # deterministic sample ordering. Bake it into the config here — before CPU
+    # affinity, report_dir/config.yaml persistence, and RuntimeSettings — so the
+    # written config.yaml matches what actually runs. The compliance gate reads
+    # config.yaml and asserts single_stream; without this it would fail a valid
+    # accuracy-only run whose source config declared multiple workers.
+    if test_mode == TestMode.ACC:
+        settings_update: dict[str, Any] = {
+            "client": config.settings.client.with_updates(
+                num_workers=1, max_connections=1
+            )
+        }
+        # The compliance single_stream gate also reads
+        # load_pattern.target_concurrency when it is set. Normalize it to 1 so a
+        # combined config that declares concurrency > 1 does not fail single_stream
+        # on an accuracy-only run whose client is already forced to one connection.
+        load_pattern = config.settings.load_pattern
+        if (
+            load_pattern.target_concurrency is not None
+            and load_pattern.target_concurrency != 1
+        ):
+            settings_update["load_pattern"] = load_pattern.model_copy(
+                update={"target_concurrency": 1}
+            )
+        config = config.with_updates(
+            settings=config.settings.model_copy(update=settings_update)
         )
 
-        eval_configs.append(
-            AccuracyConfiguration(
-                scorer_cls,
-                extractor_cls,
-                "performance",
-                dataloader,
-                report_dir,
-                accuracy_config.ground_truth,
-                accuracy_config.num_repeats,
-                accuracy_config.extras or {},
-            )
-        )
-
-    return dataloader, accuracy_datasets, eval_configs
-
-
-def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkContext:
-    """Load tokenizer, dataset, create scheduler, setup report dir."""
     # CPU affinity
     affinity_plan = (
         pin_loadgen(config.settings.client.num_workers)
@@ -374,11 +509,9 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     )
 
     # Report directory
-    report_dir = (
-        Path(config.report_dir) if config.report_dir else _default_report_path()
-    )
+    report_dir = resolve_report_dir(config)
     report_dir.mkdir(parents=True, exist_ok=True)
-    config.to_yaml_file(report_dir / "config.yaml")
+    config.to_yaml_file(report_dir / "config.yaml", redact_secrets=True)
 
     # Tokenizer check (light API call, no download)
     model_name = config.model_params.name
@@ -402,23 +535,64 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     )
 
     # Datasets
-    dataloader, accuracy_datasets, eval_configs = _load_datasets(config, report_dir)
+    dataloader, eval_configs = _load_datasets(config, report_dir, test_mode)
 
-    # Setup runtime settings using factory method
-    rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
+    rt_settings: RuntimeSettings | None = None
+    total_samples = 0
+    if dataloader is not None:
+        rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
+        if audit_run_spec is not None:
+            rt_settings = dataclass_replace(
+                rt_settings,
+                n_samples_to_issue=audit_run_spec.n_samples,
+                sample_order=audit_run_spec.sample_order,
+            )
+        total_samples = rt_settings.total_samples_to_issue()
+        # WAR (TODO: clean up the logic of agentic issue mode and single issue mode)
+        # calculate the correct number of samples to issue for agentic inference dataset
+        if isinstance(dataloader, AgenticInferenceDataset):
+            perf_ds_cfg = next(
+                (d for d in config.datasets if d.type == DatasetType.PERFORMANCE),
+                None,
+            )
+            agentic_cfg = (
+                perf_ds_cfg.agentic_inference if perf_ds_cfg is not None else None
+            )
+            assert dataloader.conversation_metadata is not None
+            total_samples = expected_agentic_sample_count(
+                dataloader.conversation_metadata,
+                (
+                    agentic_cfg.num_trajectories_to_issue
+                    if agentic_cfg is not None
+                    else None
+                ),
+                rt_settings.rng_sample_index,
+            )
 
-    # Calculate and display expected sample count
-    total_samples = rt_settings.total_samples_to_issue()
-    if accuracy_datasets:
-        total_samples += sum(ds.num_samples() * ds.repeats for ds in accuracy_datasets)
+    total_samples += sum(
+        ec.dataset.num_samples() * ec.dataset.repeats
+        for ec in eval_configs
+        if not ec.scorer.SKIP_ENDPOINT_PHASE and ec.dataset_type == DatasetType.ACCURACY
+    )
 
     collect_responses = test_mode in (TestMode.ACC, TestMode.BOTH)
     logger.info(
         f"Mode: {test_mode}, Target QPS: {config.settings.load_pattern.target_qps}, Responses: {collect_responses}"
     )
-    logger.info(
-        f"Min Duration: {rt_settings.min_duration_ms / 1000:.1f}s, Expected samples: {total_samples}"
-    )
+    if rt_settings is not None:
+        logger.info(f"Expected samples: {total_samples}")
+    else:
+        logger.info(f"Accuracy-only mode, Expected samples: {total_samples}")
+    for ec in eval_configs:
+        if ec.scorer.SKIP_ENDPOINT_PHASE:
+            n = effective_external_sample_count(ec)
+            if n is not None:
+                logger.info(
+                    "Accuracy dataset '%s' (%s): %d instances evaluated externally",
+                    ec.dataset_name,
+                    ec.scorer.SCORER_ID,
+                    n,
+                )
 
     return BenchmarkContext(
         config=config,
@@ -428,7 +602,6 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
         dataloader=dataloader,
         rt_settings=rt_settings,
         total_samples=total_samples,
-        accuracy_datasets=accuracy_datasets,
         eval_configs=eval_configs,
         affinity_plan=affinity_plan,
     )
@@ -440,54 +613,78 @@ def _build_phases(
 ) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
-    drain_cfg = ctx.config.settings.drain
+    timeouts = ctx.config.settings.timeouts
 
-    # Warmup phase (optional, before performance)
-    warmup_cfg = ctx.config.settings.warmup
-    if warmup_cfg.enabled:
-        warmup_dataset: Dataset = (
-            ctx.dataloader.with_salt(random.Random(warmup_cfg.warmup_random_seed + 2))
-            if warmup_cfg.salt
-            else ctx.dataloader
+    if ctx.dataloader is not None and ctx.rt_settings is not None:
+        perf_dataset = next(
+            dataset
+            for dataset in ctx.config.datasets
+            if dataset.type == DatasetType.PERFORMANCE
         )
-        warmup_rt = dataclass_replace(
-            ctx.rt_settings,
-            min_duration_ms=0,
-            max_duration_ms=None,
-            n_samples_from_dataset=ctx.dataloader.num_samples(),
-            n_samples_to_issue=warmup_cfg.n_requests,
-            min_sample_count=1,
-            rng_sched=random.Random(warmup_cfg.warmup_random_seed),
-            rng_sample_index=random.Random(warmup_cfg.warmup_random_seed + 1),
-            load_pattern=ctx.rt_settings.load_pattern,
+        routing_headers = (
+            perf_dataset.agentic_inference.routing_headers
+            if perf_dataset.agentic_inference is not None
+            else ()
         )
+        warmup_cfg = ctx.config.settings.warmup
+        if warmup_cfg.enabled:
+            warmup_dataset: Dataset = (
+                ctx.dataloader.with_salt(
+                    random.Random(warmup_cfg.warmup_random_seed + 2)
+                )
+                if warmup_cfg.salt
+                else ctx.dataloader
+            )
+            warmup_rt = dataclass_replace(
+                ctx.rt_settings,
+                min_issue_duration_ms=None,
+                max_issue_duration_ms=None,
+                n_samples_from_dataset=ctx.dataloader.num_samples(),
+                n_samples_to_issue=warmup_cfg.n_requests,
+                min_sample_count=1,
+                rng_sched=random.Random(warmup_cfg.warmup_random_seed),
+                rng_sample_index=random.Random(warmup_cfg.warmup_random_seed + 1),
+                load_pattern=ctx.rt_settings.load_pattern,
+            )
+            phases.append(
+                PhaseConfig(
+                    "warmup",
+                    warmup_rt,
+                    warmup_dataset,
+                    PhaseType.WARMUP,
+                    drain_after=warmup_cfg.drain,
+                    drain_timeout=timeouts.warmup_drain_timeout_s,
+                )
+            )
+
         phases.append(
             PhaseConfig(
-                "warmup",
-                warmup_rt,
-                warmup_dataset,
-                PhaseType.WARMUP,
-                drain_after=warmup_cfg.drain,
-                drain_timeout=drain_cfg.warmup_timeout_s,
+                "performance",
+                ctx.rt_settings,
+                ctx.dataloader,
+                PhaseType.PERFORMANCE,
+                strategy=perf_strategy,
+                drain_timeout=timeouts.performance_drain_timeout_s,
+                routing_headers=routing_headers,
             )
         )
 
-    # Performance phase
-    phases.append(
-        PhaseConfig(
-            "performance",
-            ctx.rt_settings,
-            ctx.dataloader,
-            PhaseType.PERFORMANCE,
-            strategy=perf_strategy,
-            drain_timeout=drain_cfg.performance_timeout_s,
-        )
-    )
+    # Accuracy mirrors the perf load pattern so evaluation exercises the
+    # endpoint the same way it was benchmarked. AGENTIC_INFERENCE can't drive
+    # the (non-agentic) accuracy datasets — create_load_strategy rejects it —
+    # so it (and a missing perf pattern) falls back to MAX_THROUGHPUT.
+    perf_lp = ctx.rt_settings.load_pattern if ctx.rt_settings is not None else None
+    if perf_lp is None or perf_lp.type == LoadPatternType.AGENTIC_INFERENCE:
+        acc_load_pattern = LoadPattern(type=LoadPatternType.MAX_THROUGHPUT)
+    else:
+        acc_load_pattern = perf_lp
 
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
-        if eval_cfg.dataset_name == "performance":
+        if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
+            continue
+        if eval_cfg.dataset_type == DatasetType.PERFORMANCE:
             continue
         acc_ds = eval_cfg.dataset
         if isinstance(acc_ds, AgenticInferenceDataset):
@@ -496,22 +693,24 @@ def _build_phases(
                 "AgenticInferenceDataset, which is not yet supported for "
                 "accuracy evaluation."
             )
-        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
-        # would silently rate-limit evaluation until an agentic inference accuracy strategy
-        # and QPS-budgeting support are added.
-        acc_load_pattern: LoadPattern | None = LoadPattern(
-            type=LoadPatternType.MAX_THROUGHPUT
+        logger.info(
+            "Accuracy issuer '%s' load mode: %s",
+            eval_cfg.dataset_name,
+            acc_load_pattern,
+        )
+        rng_settings = ctx.rt_settings or RuntimeSettings.from_config(
+            ctx.config, acc_ds.num_samples()
         )
         acc_settings = RuntimeSettings(
-            metric_target=ctx.rt_settings.metric_target,
-            reported_metrics=ctx.rt_settings.reported_metrics,
-            min_duration_ms=0,
-            max_duration_ms=None,
+            metric_target=rng_settings.metric_target,
+            reported_metrics=rng_settings.reported_metrics,
+            min_issue_duration_ms=None,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=acc_ds.num_samples(),
             n_samples_to_issue=acc_ds.num_samples() * acc_ds.repeats,
             min_sample_count=acc_ds.num_samples() * acc_ds.repeats,
-            rng_sched=ctx.rt_settings.rng_sched,
-            rng_sample_index=ctx.rt_settings.rng_sample_index,
+            rng_sched=rng_settings.rng_sched,
+            rng_sample_index=rng_settings.rng_sample_index,
             load_pattern=acc_load_pattern,
         )
         phases.append(
@@ -520,141 +719,112 @@ def _build_phases(
                 acc_settings,
                 acc_ds,
                 PhaseType.ACCURACY,
-                drain_timeout=drain_cfg.accuracy_timeout_s,
+                drain_timeout=timeouts.accuracy_drain_timeout_s,
             )
         )
 
     return phases
 
 
-def _load_final_snapshot_from_disk(path: Path) -> dict[str, Any] | None:
-    """Read the persisted ``final_snapshot.json`` written by the aggregator.
-
-    Returns the snapshot in its dict form — the same shape produced by
-    ``snapshot_to_dict`` and consumed by ``Report.from_snapshot``. No
-    intermediate Struct decode (see ``Report.from_snapshot`` docstring
-    for why the dict shape is the consumer contract).
-
-    Returns ``None`` if the file is missing (the aggregator was killed
-    by an uncatchable signal — SIGKILL, OOM-kill — before its handler
-    could write) or unreadable.
-    """
-    if not path.exists():
-        return None
+async def _create_issuer(
+    ctx: BenchmarkContext, loop: asyncio.AbstractEventLoop
+) -> tuple[HttpClientSampleIssuer, HTTPEndpointClient]:
+    """Create the HTTP endpoint client + sample issuer, or raise SetupError."""
+    config = ctx.config
+    endpoints = config.endpoint_config.endpoints
+    logger.info(f"Connecting: {endpoints}")
     try:
-        return json.loads(path.read_bytes())
-    except Exception as e:  # noqa: BLE001 — best-effort.
-        logger.warning("Failed to read final snapshot %s: %s", path, e)
+        api_type: APIType = config.endpoint_config.api_type
+        # client.api_type is propagated from endpoint_config.api_type by
+        # BenchmarkConfig._propagate_client_api_type — no override needed here.
+        client_overrides: dict = {
+            "endpoint_urls": [
+                urljoin(e.rstrip("/") + "/", api_type.default_route())
+                for e in endpoints
+            ],
+            "api_key": config.endpoint_config.api_key,
+            "event_logs_dir": ctx.report_dir,
+            "cpu_affinity": ctx.affinity_plan,
+            "trace_pipe_path": (
+                trace.fifo_path(os.getpid()) if trace.is_enabled() else None
+            ),
+        }
+        if ctx.accuracy_only:
+            # Single-stream (num_workers=1, max_connections=1) is baked into
+            # config in setup_benchmark so it is persisted to config.yaml;
+            # no runtime override needed here.
+            logger.info(
+                "Accuracy-only: single-stream (1 worker, 1 connection) for "
+                "deterministic ordering"
+            )
+        http_config = config.settings.client.with_updates(**client_overrides)
+        http_client = await HTTPEndpointClient.create(http_config, loop)
+        issuer = HttpClientSampleIssuer(http_client)
+        return issuer, http_client
+    except Exception as e:
+        raise SetupError(f"Failed to connect to endpoint: {e}") from e
+
+
+def _build_agentic_strategy(
+    ctx: BenchmarkContext,
+) -> AgenticInferenceStrategy | None:
+    """Build the agentic inference strategy when the perf dataset uses it."""
+    if not isinstance(ctx.dataloader, AgenticInferenceDataset):
         return None
-
-
-# (start_path, stop_path) for each supported inference engine's profiling
-# protocol. Add a row when introducing a new ProfilerEngine variant.
-_PROFILE_PATHS: dict[ProfilerEngine, tuple[str, str]] = {
-    ProfilerEngine.VLLM: ("/start_profile", "/stop_profile"),
-}
-
-
-def _derive_profile_urls(
-    endpoints: list[str], engine: ProfilerEngine, action: str
-) -> list[str]:
-    """One profile URL per endpoint, derived from the engine's HTTP protocol.
-
-    For vLLM: strip a trailing ``/v1`` from each endpoint and append
-    ``/{start,stop}_profile``. ``action`` is ``"start"`` or ``"stop"``.
-    """
-    if not endpoints:
-        raise ValueError(
-            f"profiling.engine={engine.value} but endpoint_config.endpoints "
-            f"is empty; cannot derive {action} URLs"
+    agentic_cfg = None
+    if ctx.config.datasets:
+        perf_ds_cfg = next(
+            (d for d in ctx.config.datasets if d.type == DatasetType.PERFORMANCE),
+            None,
         )
-    start_path, stop_path = _PROFILE_PATHS[engine]
-    path = start_path if action == "start" else stop_path
-    urls: list[str] = []
-    for ep in endpoints:
-        base = ep.rstrip("/")
-        if base.endswith("/v1"):
-            base = base[:-3]
-        urls.append(f"{base.rstrip('/')}{path}")
-    return urls
-
-
-def _post_profile(url: str) -> dict[str, Any]:
-    """POST {url} with empty body; never raises. Returns a record dict suitable
-    for report.txt rendering and profiling.json serialization."""
-    record: dict[str, Any] = {
-        "url": url,
-        "sent_at_ns": time.monotonic_ns(),
-        "sent_at_iso": datetime.now().isoformat(timespec="milliseconds"),
-        "status": None,
-        "error": None,
-    }
-    req = urllib_request.Request(url, method="POST", data=b"")
-    try:
-        with urllib_request.urlopen(req, timeout=2) as resp:
-            record["status"] = resp.status
-    except urllib_error.HTTPError as e:
-        record["status"] = e.code
-        record["error"] = f"{e.code} {e.reason}"
-    except Exception as e:  # noqa: BLE001 — profile failures must never abort a run
-        record["error"] = f"{type(e).__name__}: {e}"
-    return record
-
-
-def _render_profile_status(rec: dict[str, Any]) -> str:
-    status = rec.get("status")
-    error = rec.get("error")
-    if status == 200:
-        return "200 OK"
-    if status == 404:
-        return (
-            "404 (profiling not enabled on server — pass "
-            "--profiler-config.profiler=... to server)"
-        )
-    if error:
-        return error
-    if status is not None:
-        return str(status)
-    return "ERROR"
-
-
-def _write_profiling_section(f: TextIO, profiling: dict[str, Any]) -> None:
-    """Append the Profiling section to report.txt (called after report.display)."""
-    starts = profiling.get("starts", [])
-    stops = profiling.get("stops", [])
-    f.write("\n------------------- Profiling -------------------\n")
-    f.write(f"Engine: {profiling.get('engine', 'unknown')}\n")
-    f.write("Start:\n")
-    for rec in starts:
-        f.write(
-            f"  POST {rec['url']} @ {rec['sent_at_iso']} → "
-            f"{_render_profile_status(rec)}\n"
-        )
-    if stops:
-        f.write("Stop:\n")
-        for rec in stops:
-            suffix = (
-                " (from abort handler)" if rec.get("stop_reason") == "abort" else ""
-            )
-            f.write(
-                f"  POST {rec['url']} @ {rec['sent_at_iso']} → "
-                f"{_render_profile_status(rec)}{suffix}\n"
-            )
-    if starts and stops:
-        first_start = min(r["sent_at_ns"] for r in starts)
-        last_stop = max(r["sent_at_ns"] for r in stops)
-        f.write(f"Trigger span: {(last_stop - first_start) / 1e9:.2f} s\n")
-    f.write(
-        "\nNote: actual trace window is bounded by server-side "
-        "--profiler-config.delay_iterations and "
-        "--profiler-config.max_iterations.\n"
-        "Trace artifact path is in server stdout.\n"
+        if perf_ds_cfg is not None:
+            agentic_cfg = perf_ds_cfg.agentic_inference
+    assert ctx.dataloader.conversation_metadata is not None
+    rng_sample_index = (
+        ctx.rt_settings.rng_sample_index if ctx.rt_settings is not None else None
     )
+    return AgenticInferenceStrategy(
+        conversation_manager=ConversationManager(),
+        dataset_metadata=ctx.dataloader.conversation_metadata,
+        agentic_inference_config=agentic_cfg,
+        target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
+        rng_sample_index=rng_sample_index,
+    )
+
+
+def _wire_on_sample_complete(
+    collector: ResponseCollector,
+    agentic_inference_strategy: AgenticInferenceStrategy | None,
+    publisher: EventPublisherService,
+) -> Callable[[QueryResult], None]:
+    """Compose the per-sample completion callback (agentic strategy + collector)."""
+    if agentic_inference_strategy is None:
+        return collector.on_complete_hook
+
+    def _on_sample_complete(result: QueryResult) -> None:
+        try:
+            agentic_inference_strategy.on_sample_complete(result)
+        except Exception:
+            logger.exception(
+                "agentic_inference_strategy.on_sample_complete failed (result=%s)",
+                result.id,
+            )
+        try:
+            collector.on_complete_hook(result)
+        except Exception:
+            logger.exception("collector.on_complete_hook failed (result=%s)", result.id)
+
+    agentic_inference_strategy._session_on_sample_complete = _on_sample_complete
+    agentic_inference_strategy._session_publisher = publisher
+    return _on_sample_complete
 
 
 async def _run_benchmark_async(
     ctx: BenchmarkContext,
     loop: asyncio.AbstractEventLoop,
+    *,
+    deadline: float | None = None,
+    sigint: SigintGovernor,
 ) -> BenchmarkResult:
     """Run async benchmark session."""
     config = ctx.config
@@ -670,399 +840,266 @@ async def _run_benchmark_async(
     )
     collector = ResponseCollector(collect_responses=ctx.collect_responses, pbar=pbar)
 
-    # ZMQ context for event publishing + service launcher
-    with ManagedZMQContext.scoped(io_threads=2) as zmq_ctx:
-        # Event publisher
-        publisher = EventPublisherService(zmq_ctx)
-        pub_socket_name = publisher.socket_name
+    # Tmpfs for high-frequency writes (event log); execute owns its lifecycle
+    # (salvage + rmtree). metrics_output_dir lives on disk under the report dir so
+    # the final snapshot is preserved with the rest of the run artifacts — it is
+    # NOT tmpfs and is never removed here. Paths are computed here (no mkdir) so the
+    # cleanup `except` can always reference tmpfs_dir; the mkdirs run inside the try
+    # so a mkdir failure that already created tmpfs_dir is still salvaged/removed.
+    shm = Path("/dev/shm")
+    tmpfs_base = shm if shm.exists() else Path(tempfile.gettempdir())
+    tmpfs_dir = tmpfs_base / f"benchmark_{session_id}"
+    event_log_dir = tmpfs_dir / "events"
+    metrics_output_dir = ctx.report_dir / "metrics"
 
-        # Tmpfs for high-frequency writes (event log).
-        shm = Path("/dev/shm")
-        use_shm = shm.exists()
-        tmpfs_base = shm if use_shm else Path(tempfile.gettempdir())
-        tmpfs_dir = tmpfs_base / f"benchmark_{session_id}"
+    pipe = MetricsPipeline(
+        config,
+        tokenizer_name=ctx.tokenizer_name,
+        enable_streaming=ctx.enable_streaming,
+        accuracy_only=ctx.accuracy_only,
+        event_log_dir=event_log_dir,
+        metrics_output_dir=metrics_output_dir,
+        loop=loop,
+    )
+    report: Report | None = None
+    profiler: ProfileController
+    # Bound up front so the outer finally can always shut it down: a setup error
+    # after _create_issuer (e.g. _build_agentic_strategy/_build_phases raising)
+    # would otherwise leak the client's worker subprocesses. shutdown_async() is
+    # idempotent, so the clean-path shutdown below is a harmless second call.
+    http_client: HTTPEndpointClient | None = None
+    abort_event = asyncio.Event()
+    watchdog = RunWatchdog(loop, deadline, abort_event)
+    watchdog.bind_task(asyncio.current_task())
+    sigint.bind_task(asyncio.current_task(), loop)
+
+    try:
         tmpfs_dir.mkdir(parents=True, exist_ok=True)
-
-        event_log_dir = tmpfs_dir / "events"
         event_log_dir.mkdir(parents=True, exist_ok=True)
-
-        # Metrics-snapshot output (disk fallback for the final snapshot).
-        # Lives under the report dir so it's preserved with the rest of
-        # the run artifacts.
-        metrics_output_dir = ctx.report_dir / "metrics"
         metrics_output_dir.mkdir(parents=True, exist_ok=True)
-
-        metrics_socket_name = f"metrics_pub_{uuid.uuid4().hex[:8]}"
-
-        # Connect the metrics-snapshot subscriber BEFORE launching the
-        # aggregator subprocess that binds the matching PUB socket. ZMQ
-        # tolerates connect-before-bind on IPC (the connect resolves once
-        # the binder appears), and starting the SUB reader early gives
-        # the subscription handshake time to complete during the
-        # ~1-2 second subprocess-launch window. This eliminates the
-        # slow-joiner risk of dropping early live ticks (or the worst
-        # case: missing COMPLETE if the SUB handshake never warms up).
-        if zmq_ctx.socket_dir is None:
-            raise RuntimeError("ZMQ socket_dir must be set after publisher bind")
-        metrics_subscriber = MetricsSnapshotSubscriber(
-            metrics_socket_name, zmq_ctx, loop
+        # Pre-derive profile URLs (before the run so a bad config — engine set but
+        # no endpoints — fails here yet still triggers the tmpfs/pbar cleanup below).
+        profiler = ProfileController(
+            config.settings.profiling.engine,
+            config.endpoint_config.endpoints,
+            config.settings.profiling.urls,
         )
-        metrics_subscriber.start()
-        # -vvv: hand the dashboard the metrics-PUB address so it can open
-        # its own SUB (fresh live snapshots, immune to main-loop starvation).
-        trace.publish_metrics_addr(metrics_subscriber.connect_address)
-
-        # -vvv: snapshot sidecar tap — the FALLBACK live feed for the
-        # dashboard's LOADGEN panel. The provider reads
-        # ``metrics_subscriber.latest``, advanced by the subscriber's
-        # ``process()`` task on THIS loop; under a saturated 30k+ req/s run
-        # the loop can starve that callback, so ``latest`` (and thus the
-        # sidecar) freezes. The dashboard's PRIMARY live feed avoids this: it
-        # runs its own daemon SUB straight to the aggregator PUB (address
-        # handed off via ``publish_metrics_addr`` above), which is immune to
-        # main-loop starvation. The sidecar is consumed only until that SUB
-        # connects — and as the carrier for the authoritative terminal
-        # snapshot, which trace.teardown() writes here (``state ==
-        # "complete"``) before closing the FIFO, so the closing frame always
-        # reflects ``final_snapshot.json``.
-        trace.start_snapshot_tap(
-            loop,
-            lambda: (
-                snapshot_to_dict(metrics_subscriber.latest)
-                if metrics_subscriber.latest is not None
-                else None
-            ),
-        )
-
-        # Launch service subprocesses
-        launcher = ServiceLauncher(zmq_ctx)
-        aggregator_args: list[str] = [
-            "--socket-dir",
-            zmq_ctx.socket_dir,
-            "--socket-name",
-            pub_socket_name,
-            "--metrics-socket",
-            metrics_socket_name,
-            "--metrics-output-dir",
-            str(metrics_output_dir),
-        ]
-        if ctx.enable_streaming:
-            aggregator_args.append("--streaming")
-        if ctx.tokenizer_name is not None:
-            aggregator_args.extend(["--tokenizer", ctx.tokenizer_name])
-        aggregator_args.extend(
-            ["--drain-timeout", str(config.settings.drain.metrics_drain_timeout_s)]
-        )
-        aggregator_args.extend(
-            [
-                "--tokenizer-workers",
-                str(config.settings.drain.metrics_tokenizer_workers),
-            ]
-        )
-
-        # EventLoggerService writes events.jsonl to tmpfs (high-frequency writes)
-        event_logger_args: list[str] = [
-            "--log-dir",
-            str(event_log_dir),
-            "--socket-dir",
-            zmq_ctx.socket_dir,
-            "--socket-name",
-            pub_socket_name,
-            "--writers",
-            "jsonl",
-        ]
-
-        await launcher.launch(
-            [
-                ServiceConfig(
-                    module="inference_endpoint.async_utils.services.metrics_aggregator",
-                    args=aggregator_args,
-                ),
-                ServiceConfig(
-                    module="inference_endpoint.async_utils.services.event_logger",
-                    args=event_logger_args,
-                ),
-            ],
-            timeout=30.0,
-        )
-
-        # Create endpoint client on the shared loop
-        endpoints = config.endpoint_config.endpoints
-        logger.info(f"Connecting: {endpoints}")
-        http_client: HTTPEndpointClient | None = None
-        try:
-            api_type: APIType = config.endpoint_config.api_type
-            # client.api_type is propagated from endpoint_config.api_type by
-            # BenchmarkConfig._propagate_client_api_type — no override needed here.
-            http_config = config.settings.client.with_updates(
-                endpoint_urls=[
-                    urljoin(e.rstrip("/") + "/", api_type.default_route())
-                    for e in endpoints
-                ],
-                api_key=config.endpoint_config.api_key,
-                event_logs_dir=ctx.report_dir,
-                cpu_affinity=ctx.affinity_plan,
-                trace_pipe_path=(
-                    trace.fifo_path(os.getpid()) if trace.is_enabled() else None
-                ),
-            )
-            http_client = await HTTPEndpointClient.create(http_config, loop)
-            issuer = HttpClientSampleIssuer(http_client)
-        except Exception as e:
-            pbar.close()
-            publisher.close()
-            launcher.kill_all()
-            raise SetupError(f"Failed to connect to endpoint: {e}") from e
-
-        # Build agentic inference strategy if the performance dataset uses it.
-        agentic_inference_strategy: AgenticInferenceStrategy | None = None
-        if isinstance(ctx.dataloader, AgenticInferenceDataset):
-            agentic_cfg = None
-            if ctx.config.datasets:
-                perf_ds_cfg = next(
-                    (
-                        d
-                        for d in ctx.config.datasets
-                        if d.type == DatasetType.PERFORMANCE
-                    ),
-                    None,
-                )
-                if perf_ds_cfg is not None:
-                    agentic_cfg = perf_ds_cfg.agentic_inference
-            assert ctx.dataloader.conversation_metadata is not None
-            agentic_inference_strategy = AgenticInferenceStrategy(
-                conversation_manager=ConversationManager(),
-                dataset_metadata=ctx.dataloader.conversation_metadata,
-                agentic_inference_config=agentic_cfg,
-                target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
-            )
-
-        _on_sample_complete: Callable[[QueryResult], None]
-        if agentic_inference_strategy is not None:
-
-            def _on_sample_complete(result: QueryResult) -> None:
-                try:
-                    agentic_inference_strategy.on_sample_complete(result)
-                except Exception:
-                    logger.exception(
-                        "agentic_inference_strategy.on_sample_complete failed (result=%s)",
-                        result.id,
-                    )
-                try:
-                    collector.on_complete_hook(result)
-                except Exception:
-                    logger.exception(
-                        "collector.on_complete_hook failed (result=%s)", result.id
-                    )
-
-            agentic_inference_strategy._session_on_sample_complete = _on_sample_complete
-            agentic_inference_strategy._session_publisher = publisher
-
-        else:
-            _on_sample_complete = collector.on_complete_hook
-
-        # Create session
-        session = BenchmarkSession(
-            issuer=issuer,
-            event_publisher=publisher,
-            loop=loop,
-            on_sample_complete=_on_sample_complete,
-            session_id=session_id,
-        )
-
-        phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
-        report: Report | None = None
-
-        # Timer starts when the performance phase begins (after warmup drains),
-        # so max_duration_ms applies only to the perf phase, not warmup.
-        global_timeout_handle = None
-        _timeout_done = False
-        max_duration_ms = ctx.rt_settings.max_duration_ms
-
-        # Profile trigger state. Pre-derive URLs once so a bad config
-        # (engine set but no endpoints) fails before the run.
-        profiling_cfg = config.settings.profiling
-        profile_start_urls: list[str] = []
-        profile_stop_urls: list[str] = []
-        profile_starts: list[dict[str, Any]] = []
-        profile_stops: list[dict[str, Any]] = []
-        if profiling_cfg.engine is not None:
-            profile_endpoints = profiling_cfg.urls or config.endpoint_config.endpoints
-            profile_start_urls = _derive_profile_urls(
-                profile_endpoints, profiling_cfg.engine, "start"
-            )
-            profile_stop_urls = _derive_profile_urls(
-                profile_endpoints, profiling_cfg.engine, "stop"
-            )
-        session_completed_normally = False
-
-        def _on_global_timeout() -> None:
-            if not _timeout_done:
-                logger.warning(
-                    "Global experiment timeout reached (%d ms); stopping session.",
-                    max_duration_ms,
-                )
-                session.stop()
-
-        def _on_phase_start(phase: PhaseConfig) -> None:
-            nonlocal global_timeout_handle
-            if phase.phase_type != PhaseType.PERFORMANCE:
-                return
-            # -vvv: signal the dashboard that warmup is over so its
-            # LOADGEN vs TRACE accumulators reset to the same
-            # window the loadgen aggregator's tracked counters use.
-            trace.emit_trace(trace.Event.PERF_START, 0)
-            if max_duration_ms is not None:
-                global_timeout_handle = loop.call_later(
-                    max_duration_ms / 1000.0, _on_global_timeout
-                )
-            # Fire /start_profile sequentially before any perf request is
-            # issued, so the server is armed when traffic begins. Blocks
-            # the loop briefly (sub-100ms per URL); strategy task hasn't
-            # been created yet so nothing is starved.
-            for url in profile_start_urls:
-                rec = _post_profile(url)
-                if rec["status"] == 200:
-                    logger.info("Profile start: %s -> 200 OK", url)
-                else:
-                    logger.warning(
-                        "Profile start: %s -> %s",
-                        url,
-                        rec["error"] or rec["status"],
-                    )
-                profile_starts.append(rec)
-
-        loop.add_signal_handler(signal.SIGINT, session.stop)
-        try:
-            result = await session.run(phases, on_phase_start=_on_phase_start)
-            session_completed_normally = True
-        except Exception as e:
-            raise ExecutionError(f"Benchmark execution failed: {e}") from e
-        finally:
-            # -vvv: the run is over (issuance + drain complete) — tell the
-            # dashboard to freeze deterministically.
-            trace.emit_trace(trace.Event.PERF_END, 0)
-            _timeout_done = True
-            if global_timeout_handle is not None:
-                global_timeout_handle.cancel()
-            loop.remove_signal_handler(signal.SIGINT)
-            # Fire /stop_profile for URLs whose /start_profile succeeded.
-            # Unifies the clean phase-end path and the abort path —
-            # both reach this block, both fire stops.
-            if profile_starts:
-                stop_reason = "phase_end" if session_completed_normally else "abort"
-                for i, start_rec in enumerate(profile_starts):
-                    if start_rec["status"] != 200 or i >= len(profile_stop_urls):
-                        continue
-                    rec = _post_profile(profile_stop_urls[i])
-                    rec["stop_reason"] = stop_reason
-                    if rec["status"] == 200:
-                        logger.info("Profile stop: %s -> 200 OK", profile_stop_urls[i])
-                    else:
-                        logger.warning(
-                            "Profile stop: %s -> %s",
-                            profile_stop_urls[i],
-                            rec["error"] or rec["status"],
-                        )
-                    profile_stops.append(rec)
-            logger.info("Cleaning up...")
+        # MetricsPipeline is an async context manager: __aenter__ brings up ZMQ +
+        # services; __aexit__ kills the services iff the run never drained (publisher
+        # still set) else just releases the ZMQ scope. So the setup/connect-failure
+        # paths need no explicit abort — skipping the drain below leaves the
+        # publisher set and __aexit__ kills.
+        async with pipe:
             try:
-                if http_client:
-                    await http_client.shutdown_async()
-            except Exception as e:
-                logger.warning(f"Client cleanup error: {e}")
-            logger.info(
-                "Closing publisher (buffer=%d, pending=%d)...",
-                publisher.buffered_count,
-                publisher.pending_count,
-            )
-            publisher.close()
-            logger.info("Waiting for services to finish processing...")
-            await asyncio.to_thread(launcher.wait_for_exit, None)
+                # start() guarantees the publisher exists; narrow it for the checker.
+                publisher = pipe.publisher
+                assert publisher is not None
 
-            # Source the snapshot dict for Report:
-            # 1. Preferred: the JSON file the aggregator atomically wrote
-            #    in publish_final (ENDED-driven or signal-handler-driven).
-            # 2. Fallback: convert the last live snapshot from pub/sub to
-            #    its dict form. Only reached when the aggregator was killed
-            #    by an uncatchable signal (SIGKILL / OOM) before its
-            #    handler could write. Report will be marked incomplete
-            #    because state will be LIVE / DRAINING, not "complete".
-            snap_dict: dict[str, Any] | None = _load_final_snapshot_from_disk(
-                metrics_output_dir / "final_snapshot.json"
-            )
-            if snap_dict is not None:
-                logger.info("Built report from final_snapshot.json")
-            elif metrics_subscriber.latest is not None:
-                snap_dict = snapshot_to_dict(metrics_subscriber.latest)
-                logger.warning(
-                    "No final_snapshot.json on disk; falling back to last "
-                    "pub/sub snapshot (state may or may not be terminal)"
+                issuer, http_client = await _create_issuer(ctx, loop)
+
+                agentic_inference_strategy = _build_agentic_strategy(ctx)
+                on_sample_complete = _wire_on_sample_complete(
+                    collector, agentic_inference_strategy, publisher
                 )
-            else:
-                logger.error("No metrics snapshot available; cannot build report")
 
-            if snap_dict is not None:
+                session = BenchmarkSession(
+                    issuer=issuer,
+                    event_publisher=publisher,
+                    loop=loop,
+                    on_sample_complete=on_sample_complete,
+                    session_id=session_id,
+                    endpoint_response_idle_timeout_s=ctx.config.settings.timeouts.endpoint_response_idle_timeout_s,
+                )
+                watchdog.bind_session(session)
+                sigint.bind_session(session, abort_event)
+                phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
+
+                max_issue_duration_ms = (
+                    ctx.rt_settings.max_issue_duration_ms
+                    if ctx.rt_settings is not None
+                    else None
+                )
+                _perf_cap_done = False
+                session_completed_normally = False
+                stall_error: str | None = None
+
+                def _on_perf_phase_timeout() -> None:
+                    if not _perf_cap_done:
+                        logger.warning(
+                            "Performance phase max_duration reached (%d ms); "
+                            "ending performance phase.",
+                            max_issue_duration_ms,
+                        )
+                        # Stop only the perf phase, not the whole session, so a
+                        # combined perf+accuracy run still runs accuracy after the
+                        # perf cap.
+                        session.stop_current_phase()
+
+                perf_timeout = _PerfPhaseTimeout(
+                    loop, max_issue_duration_ms, _on_perf_phase_timeout
+                )
+
+                def _on_phase_start(phase: PhaseConfig) -> None:
+                    if phase.phase_type == PhaseType.PERFORMANCE:
+                        # Fire /start_profile sequentially before any perf
+                        # request is issued, so the server is armed when
+                        # traffic begins.
+                        profiler.start()
+                        # -vvv: signal the dashboard that warmup is over so its
+                        # LOADGEN vs TRACE accumulators reset to the same
+                        # window the loadgen aggregator's tracked counters use.
+                        trace.emit_trace(trace.Event.PERF_START, 0)
+                    # Arms the perf cap on PERFORMANCE and cancels it when any
+                    # later phase starts, so a combined perf+accuracy run can
+                    # never have its accuracy phase truncated by the perf cap.
+                    perf_timeout.on_phase_start(phase.phase_type)
+
                 try:
-                    runtime = ctx.config.settings.runtime
-                    warmup = ctx.config.settings.warmup
-                    load_pattern = ctx.config.settings.load_pattern
-                    report = Report.from_snapshot(
-                        snap_dict,
-                        seeds={
-                            "scheduler_random_seed": runtime.scheduler_random_seed,
-                            "dataloader_random_seed": runtime.dataloader_random_seed,
-                            "warmup_random_seed": warmup.warmup_random_seed,
-                        },
-                        use_legacy_loadgen_qps_metrics=(
-                            load_pattern.type == LoadPatternType.POISSON
-                            and load_pattern.use_legacy_loadgen_qps_metrics
-                        ),
+                    result = await session.run(
+                        phases,
+                        on_phase_start=_on_phase_start,
                     )
-                    if not report.complete:
-                        logger.warning(
-                            "Report is incomplete (state=%s, n_pending_tasks=%d)",
-                            report.state,
-                            snap_dict.get("n_pending_tasks", 0),
+                    session_completed_normally = not session.stop_requested
+                except Exception as e:
+                    if watchdog.fired:
+                        logger.exception(
+                            "Session error after run timeout fired "
+                            "(continuing to finalize)"
                         )
-                    if report.legacy_loadgen_window_duration_ns is not None:
-                        logger.warning(
-                            "Reporting QPS/TPS with the legacy MLPerf LoadGen Server "
-                            "'completed' definition (deprecated; to be removed once a "
-                            "formal tail-cutting mechanism lands). Pass "
-                            "--no-use-legacy-loadgen-qps-metrics for endpoints-native "
-                            "metrics."
+                        result = SessionResult(
+                            session_id=session_id,
+                            phase_results=[],
+                            start_time_ns=0,
+                            end_time_ns=0,
                         )
-                except Exception as e:  # noqa: BLE001 — best-effort report build.
-                    logger.warning(f"Failed to build report from snapshot: {e}")
-
-            # Cancel trace tasks, flush emitter, unlink FIFO, write final
-            # snapshot. No-op when trace was never enabled.
-            await trace.teardown(final_snapshot=snap_dict)
-            metrics_subscriber.close()
-            pbar.close()
-
-    profiling_payload: dict[str, Any] | None = None
-    if profiling_cfg.engine is not None:
-        profiling_payload = {
-            "engine": profiling_cfg.engine.value,
-            "starts": profile_starts,
-            "stops": profile_stops,
-        }
+                    elif isinstance(e, EndpointResponseIdleTimeoutError):
+                        # Endpoint stall is fatal but the drained data is still
+                        # worth keeping: fall through to the drain below so the
+                        # interrupted report and standard artifacts are written,
+                        # then run_benchmark fails with this message.
+                        logger.error(
+                            "Endpoint stalled — finalizing partial results "
+                            "before failing the run: %s",
+                            e,
+                        )
+                        stall_error = str(e)
+                        result = SessionResult(
+                            session_id=session_id,
+                            phase_results=[],
+                            start_time_ns=0,
+                            end_time_ns=0,
+                        )
+                    else:
+                        raise ExecutionError(f"Benchmark execution failed: {e}") from e
+                finally:
+                    # -vvv: the run is over (issuance + drain complete) — tell
+                    # the dashboard to freeze deterministically.
+                    trace.emit_trace(trace.Event.PERF_END, 0)
+                    _perf_cap_done = True
+                    perf_timeout.cancel()
+                    # Fire /stop_profile for URLs whose /start_profile succeeded.
+                    # Unifies the clean phase-end path and the abort path.
+                    profiler.stop(session_completed_normally and not watchdog.fired)
+                    # Graceful drain runs on both the clean-finish and session-
+                    # failure paths; BenchmarkSession.run publishes ENDED in finally.
+                    try:
+                        report = await pipe.drain_and_build_report(
+                            abort_event=abort_event,
+                            interrupted_teardown_grace_s=(
+                                config.settings.timeouts.interrupted_teardown_grace_s
+                            ),
+                        )
+                        if report is None:
+                            raise ExecutionError(
+                                "Benchmark completed without a usable metrics report"
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        # Surface drain/report failures on a clean run. Once the
+                        # run is already failing, preserve the original error
+                        # instead of replacing it with a teardown failure.
+                        if session_completed_normally and not sigint.interrupted:
+                            raise
+                        logger.warning(
+                            "Drain/report build error suppressed (run "
+                            "already failing): %s",
+                            e,
+                        )
+            finally:
+                # Runs on every path, including a setup error before session.run
+                # (which never reaches the session finally above). pbar.close() is
+                # cosmetic — a failure here (e.g. BrokenPipeError on a closed stderr)
+                # must not mask the exception being unwound; swallow it. The HTTP
+                # client is shut down here rather than in the session finally so a
+                # setup error can't leak its worker subprocesses; shutdown_async()
+                # is idempotent, so the clean-path call after the drain is a no-op.
+                # pipe teardown runs via the async-with __aexit__.
+                # Cancel trace tasks, flush emitter, unlink FIFO, write final
+                # snapshot. No-op when trace was never enabled.
+                await trace.teardown(final_snapshot=pipe.final_snapshot)
+                try:
+                    pbar.close()
+                except Exception as e:  # noqa: BLE001 — progress bar is cosmetic
+                    logger.warning("Progress bar close error: %s", e)
+                if http_client is not None:
+                    try:
+                        await http_client.shutdown_async()
+                    except Exception as e:  # noqa: BLE001 — best-effort; idempotent
+                        logger.warning(f"Client cleanup error: {e}")
+    except BaseException as e:
+        # Abnormal unwind: preserve the event log before re-raising.
+        if tmpfs_dir.exists():
+            try:
+                _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
+                shutil.rmtree(tmpfs_dir, ignore_errors=True)
+            except Exception as salvage_err:  # noqa: BLE001 — salvage best-effort; keep original exc
+                logger.warning(
+                    "Failed to salvage tmpfs: %s — tmpfs retained at %s",
+                    salvage_err,
+                    tmpfs_dir,
+                )
+        if sigint.interrupted and isinstance(e, asyncio.CancelledError):
+            raise KeyboardInterrupt from e
+        if watchdog.fired and isinstance(e, Exception | asyncio.CancelledError):
+            raise ExecutionError(
+                "Run timeout (settings.timeouts.run_timeout_s) reached; run "
+                "aborted before a report could be produced"
+            ) from e
+        raise
+    finally:
+        watchdog.cancel()
 
     return BenchmarkResult(
         session=result,
         collector=collector,
         report=report,
         tmpfs_dir=tmpfs_dir,
-        profiling=profiling_payload,
+        profiling=profiler.payload(),
+        run_timed_out=watchdog.fired,
+        user_interrupted=sigint.interrupted,
+        stall_error=stall_error,
     )
 
 
-def run_benchmark_async(ctx: BenchmarkContext) -> BenchmarkResult:
-    """Run async benchmark. Sync entry point — drives the event loop."""
+def _run_deadline(config: BenchmarkConfig) -> float | None:
+    run_timeout_s = config.settings.timeouts.run_timeout_s
+    return None if run_timeout_s is None else time.monotonic() + run_timeout_s
+
+
+def run_benchmark_async(
+    ctx: BenchmarkContext,
+    *,
+    deadline: float | None = None,
+    sigint: SigintGovernor | None = None,
+) -> BenchmarkResult:
+    """Drive the async benchmark through the process's managed event loop."""
+    if sigint is None:
+        sigint = SigintGovernor()
+    if deadline is None:
+        deadline = _run_deadline(ctx.config)
     loop = LoopManager().default_loop
-    return loop.run_until_complete(_run_benchmark_async(ctx, loop))
+    return loop.run_until_complete(
+        _run_benchmark_async(ctx, loop, deadline=deadline, sigint=sigint)
+    )
 
 
 def _write_scoring_artifacts(
@@ -1080,6 +1117,9 @@ def _write_scoring_artifacts(
     sample_idx_map: dict[str, dict[str, int]] = {}
     for phase_result in result.phase_results:
         sample_idx_map[phase_result.name] = phase_result.uuid_to_index
+    for eval_cfg in ctx.eval_configs:
+        if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
+            sample_idx_map.setdefault(eval_cfg.dataset_name, {})
 
     map_path = ctx.report_dir / "sample_idx_map.json"
     with map_path.open("wb") as f:
@@ -1108,66 +1148,35 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         logger.debug(f"Copied {src_events} -> {dst_events}")
 
 
-def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
-    """Score accuracy, aggregate results, write JSON."""
-    config = ctx.config
-    result = bench.session
-    collector = bench.collector
-    report = bench.report
+def _write_report_artifacts(
+    ctx: BenchmarkContext, report: Report, profiling: dict[str, Any] | None
+) -> None:
+    """Display the report and write result_summary.json + report.txt.
 
-    # Display report if available (from MetricsAggregator pub/sub snapshot).
-    # result_summary.json is the self-complete machine-readable report (carries
-    # qps/tps/seeds via Report.to_json); report.txt is the full human-readable
-    # dump (histograms + percentiles); the console log shows just the summary.
-    if report is not None:
-        report.display(fn=lambda s: logger.info(s), summary_only=True)
-        report.to_json(save_to=ctx.report_dir / "result_summary.json")
+    result_summary.json is the self-complete machine-readable report (carries
+    qps/tps/seeds/accuracy via Report.to_json); report.txt is the full
+    human-readable dump; the console log shows the summary.
+    """
+    report.display(fn=lambda s: logger.info(s), summary_only=True)
+    performance_dir = ctx.report_dir / "performance"
+    performance_dir.mkdir(parents=True, exist_ok=True)
+    report.to_json(save_to=performance_dir / "result_summary.json")
 
-        report_txt = ctx.report_dir / "report.txt"
-        with report_txt.open("w") as f:
-            report.display(fn=lambda s: print(s, file=f))
-            if bench.profiling is not None:
-                _write_profiling_section(f, bench.profiling)
-        logger.info("Report written to %s", report_txt)
+    report_txt = ctx.report_dir / "report.txt"
+    with report_txt.open("w") as f:
+        report.display(fn=lambda s: print(s, file=f))
+        if profiling is not None:
+            write_profiling_section(f, profiling)
+    logger.info("Report written to %s", report_txt)
 
-    # Sibling profiling.json — kept separate so Report stays a pure
-    # snapshot-derived struct.
-    if bench.profiling is not None:
-        (ctx.report_dir / "profiling.json").write_text(
-            json.dumps(bench.profiling, indent=2)
-        )
 
-    # Write scoring artifacts + copy event log from tmpfs to disk
-    _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
-
-    # Accuracy scoring
-    accuracy_scores: dict[str, Any] = {}
-    for eval_cfg in ctx.eval_configs:
-        scorer_instance = eval_cfg.scorer(
-            eval_cfg.dataset_name,
-            eval_cfg.dataset,
-            eval_cfg.report_dir,
-            extractor=eval_cfg.extractor,
-            ground_truth_column=eval_cfg.ground_truth_column,
-            **eval_cfg.extras,
-        )
-        score, n_repeats = scorer_instance.score()
-        assert eval_cfg.dataset.data is not None
-        num_samples = len(eval_cfg.dataset.data)
-        if eval_cfg.dataset_name == "performance":
-            num_samples = sum(phase.issued_count for phase in result.perf_results)
-        accuracy_scores[eval_cfg.dataset_name] = {
-            "dataset_name": eval_cfg.dataset_name,
-            "num_samples": num_samples,
-            "extractor": (
-                eval_cfg.extractor.__name__ if eval_cfg.extractor is not None else None
-            ),
-            "ground_truth_column": eval_cfg.ground_truth_column,
-            "score": score,
-        }
-        logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
-
-    # Report metrics: prefer Report from MetricsSnapshot, fall back to SessionResult
+def _summarize_and_log_metrics(
+    ctx: BenchmarkContext,
+    report: Report | None,
+    result: SessionResult,
+    collector: ResponseCollector,
+) -> None:
+    """Log the run's headline metrics, preferring Report over SessionResult."""
     if report is not None and report.duration_ns is not None:
         perf_elapsed = report.duration_ns / 1e9
         total_issued = report.n_samples_issued
@@ -1185,9 +1194,19 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         qps = total_issued / perf_elapsed if perf_elapsed > 0 else 0.0
 
     logger.info(f"Completed in {perf_elapsed:.1f}s")
-    logger.info(f"Results: {max(0, total_issued - n_errors)}/{total_issued} successful")
-    if qps > 0:
-        logger.info(f"Estimated QPS: {qps:.1f}")
+    if ctx.accuracy_only:
+        acc_total = sum(
+            ds.dataset.num_samples() * ds.num_repeats
+            for ds in ctx.eval_configs
+            if ds.dataset_type == DatasetType.ACCURACY
+        )
+        logger.info(f"Accuracy-only: {acc_total} samples evaluated")
+    else:
+        logger.info(
+            f"Results: {max(0, total_issued - n_errors)}/{total_issued} successful"
+        )
+        if qps > 0:
+            logger.info(f"Estimated QPS: {qps:.1f}")
 
     if collector.errors:
         logger.warning(f"Errors: {len(collector.errors)}")
@@ -1196,54 +1215,151 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         if len(collector.errors) > 3:
             logger.debug(f"  ... +{len(collector.errors) - 3} more")
 
-    # Write results JSON
+
+def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
+    """Score accuracy, aggregate results, write JSON."""
+    result = bench.session
+    collector = bench.collector
+    report = bench.report
+    aborted = (
+        bench.run_timed_out
+        or bench.user_interrupted
+        or bench.stall_error is not None
+        or (report is not None and report.state == "interrupted")
+    )
+    if report is not None and aborted and report.state != "interrupted":
+        report = msgspec.structs.replace(report, complete=False, state="interrupted")
+        bench.report = report
+
+    # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
+    # sample_idx_map.json + events.jsonl from here).
+    _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
+
+    # Full-run OSL over every turn, including those issued after the performance
+    # window closed, plus accuracy scoring. Both run inside the try/finally so a
+    # Ctrl-C during the (large) event-log scan still writes an interrupted report
+    # instead of losing it. Skipped on abort: a partial tail would report as
+    # complete.
+    full_run_osl: dict[str, Any] | None = None
+    accuracy_scores: list[dict[str, Any]] = []
     try:
-        results: dict[str, Any] = {
-            "config": {
-                "endpoint": config.endpoint_config.endpoints,
-                "mode": ctx.test_mode,
-                "target_qps": config.settings.load_pattern.target_qps,
-            },
-            "results": {
-                "total": total_issued,
-                "successful": max(0, total_issued - n_errors),
-                "failed": n_errors,
-                "elapsed_time": perf_elapsed,
-                "qps": qps,
-            },
-        }
-        if accuracy_scores:
-            results["accuracy_scores"] = accuracy_scores
-        if ctx.collect_responses:
-            results["responses"] = collector.responses
-        if collector.errors:
-            results["errors"] = collector.errors
+        if aborted:
+            logger.warning("Run aborted — skipping accuracy scoring on partial data")
+        else:
+            full_run_osl = full_run_osl_for_report(ctx.report_dir, ctx.tokenizer_name)
+            accuracy_scores = score_accuracy(ctx, result)
+    except KeyboardInterrupt:
+        if report is not None:
+            report = msgspec.structs.replace(
+                report, complete=False, state="interrupted"
+            )
+            bench.report = report
+        raise
+    finally:
+        # Attach the per-dataset accuracy list so result_summary.json, the
+        # console summary, and report.txt all carry it.
+        if report is not None:
+            final_report = msgspec.structs.replace(
+                report,
+                accuracy=accuracy_scores,
+                output_sequence_lengths_full_run=full_run_osl,
+            )
+            _write_report_artifacts(ctx, final_report, bench.profiling)
+            report = final_report
+    bench.report = report
 
-        results_path = ctx.report_dir / "results.json"
-        with open(results_path, "w") as f:
-            json.dump(results, f, indent=2)
-        logger.info(f"Saved: {results_path}")
-    except Exception as e:
-        logger.error(f"Save failed: {e}")
+    _summarize_and_log_metrics(ctx, report, result, collector)
+
+    # Sibling profiling.json — kept separate so Report stays a pure snapshot-
+    # derived struct. Written after the report artifacts (and best-effort) so
+    # an OSError here can't discard the already-written perf report.
+    if bench.profiling is not None:
+        try:
+            (ctx.report_dir / "profiling.json").write_text(
+                json.dumps(bench.profiling, indent=2)
+            )
+        except OSError as e:
+            logger.warning("Failed to write profiling.json: %s", e)
+
+    # Emit the accuracy results as a focused artifact under accuracy/. Written
+    # after the report artifacts so a write failure here can't discard them.
+    write_accuracy_results(ctx.report_dir, accuracy_scores)
 
 
-def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
-    """Orchestrate setup → execute → finalize."""
+def run_benchmark(
+    config: BenchmarkConfig,
+    test_mode: TestMode,
+) -> Path:
+    """Orchestrate setup → execute → finalize for the main run.
+
+    ``ACC`` is an accuracy-only run with no performance phase. In other modes,
+    configured performance and accuracy work runs as declared in the config.
+    The CLI ``--accuracy-only`` flag is a convenience alias that resolves to
+    ``TestMode.ACC``.
+
+    Returns the run's ``report_dir`` so the caller can locate artifacts (and, for
+    a config with an ``audit:`` block, point ``run_audit`` at ``<report_dir>/audit``).
+    The compliance audit is dispatched by the caller (``cli._run``), not here, so
+    this module does not depend on ``commands.audit``.
+
+    """
     logger.debug(
         "BenchmarkConfig (%s):\n%s",
         type(config).__name__,
         config.model_dump_json(indent=2, exclude_none=True),
     )
-    ctx = setup_benchmark(config, test_mode)
+    deadline = _run_deadline(config)
+    run_timeout_s = config.settings.timeouts.run_timeout_s
+    sigint = SigintGovernor()
     bench: BenchmarkResult | None = None
-    try:
-        bench = run_benchmark_async(ctx)
-        finalize_benchmark(ctx, bench)
-    except KeyboardInterrupt:
-        logger.warning("Benchmark interrupted by user")
-    finally:
-        if bench:
-            if bench.tmpfs_dir.exists():
-                _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
-                shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
-            logger.info(f"Partial results saved to {ctx.report_dir}")
+    with sigint_policy(sigint):
+        try:
+            ctx = setup_benchmark(config, test_mode)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ExecutionError(
+                    f"Run timeout ({run_timeout_s}s) reached during setup; "
+                    "no services were started"
+                )
+            bench = run_benchmark_async(ctx, deadline=deadline, sigint=sigint)
+            bench.user_interrupted = bench.user_interrupted or sigint.interrupted
+            finalize_benchmark(ctx, bench)
+            if bench.user_interrupted or sigint.interrupted:
+                raise KeyboardInterrupt
+            if bench.run_timed_out:
+                raise ExecutionError(
+                    f"Run timeout ({run_timeout_s}s) reached; run aborted and "
+                    "report marked INTERRUPTED"
+                )
+            if bench.stall_error is not None:
+                raise ExecutionError(
+                    f"{bench.stall_error}; run aborted and report marked INTERRUPTED"
+                )
+            if bench.report is None:
+                raise ExecutionError("Benchmark produced no usable metrics report")
+            if not (report := bench.report).complete:
+                if report.state == "complete" and report.n_samples_dropped == 0:
+                    raise ExecutionError("Metrics tokenization did not finish")
+                raise ExecutionError(
+                    "Benchmark report is incomplete "
+                    f"(state={report.state}, "
+                    f"n_samples_dropped={report.n_samples_dropped})"
+                )
+        except KeyboardInterrupt:
+            # Salvage results (finally), then propagate to main.py -> exit 130.
+            logger.warning("Benchmark interrupted by user")
+            raise
+        finally:
+            if bench:
+                if bench.tmpfs_dir.exists():
+                    try:
+                        _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
+                        shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
+                    except Exception as e:  # noqa: BLE001 — salvage best-effort
+                        logger.warning(
+                            "Failed to salvage tmpfs: %s — tmpfs retained at %s",
+                            e,
+                            bench.tmpfs_dir,
+                        )
+                logger.info(f"Partial results saved to {ctx.report_dir}")
+
+    return ctx.report_dir

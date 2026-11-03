@@ -1,0 +1,55 @@
+# Isolated uv project for the MLPerf DeepSeek-R1 accuracy evaluator.
+#
+# Lives in its own subproject because the official MLCommons evaluator
+# (language/deepseek-r1/eval_accuracy.py + its prm800k math grader and
+# LiveCodeBench code-executor submodules) pins old/heavy deps that conflict
+# with the parent endpoints package's runtime deps. Keeping it separate means
+# the parent lockfile stays solvable and this env stays reproducible.
+#
+# `inference_endpoint.evaluation.scoring.LegacyMLPerfDeepSeekR1Scorer` invokes
+# `deepseek_eval_runner.py` in this subproject via `uv run --project`, so the
+# main benchmark process never imports the evaluator.
+#
+# The evaluator source itself is NOT vendored into the repo; `setup_eval.sh`
+# fetches it (and clones the prm800k / LiveCodeBench submodules) at pinned
+# commits into ./mlperf_eval/. See examples/07_DeepSeekR1_Example/README.md.
+#
+# Usage on the accuracy host:
+#   cd src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1
+#   uv sync
+#   bash setup_eval.sh
+#   # LegacyMLPerfDeepSeekR1Scorer in the parent will shell out automatically.
+
+[project]
+name = "deepseek-r1-mlperf-accuracy"
+version = "0.1.0"
+description = "Isolated MLCommons DeepSeek-R1 accuracy evaluation environment."
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    # eval_accuracy.py core
+    "pandas==3.0.3",
+    "pyarrow==24.0.0",
+    "numpy==1.26.4",
+    "tqdm==4.67.3",
+    "transformers==5.9.0",
+    # prm800k math grader (math500 subset)
+    "sympy==1.14.0",
+    "pylatexenc==2.10",
+    # LiveCodeBench evaluation path (livecodebench subset).
+    # LCB is installed with --no-deps in setup_eval.sh to avoid pulling the
+    # full vllm/torch model stack; these are the deps its *evaluation* path
+    # (build_prompt_benchmark + code execution) actually needs.
+    #
+    # NOTE: LCB's code sandbox also imports `pyext`, whose only release (0.7)
+    # fails to build on Python 3.12 (uses the removed inspect.getargspec). It is
+    # intentionally omitted here so the env stays solvable; the livecodebench
+    # subset (349/4388 samples) degrades gracefully - LegacyMLPerfDeepSeekR1Scorer's runner
+    # isolates per-subset failures and reports complete=false. To score LCB,
+    # install a 3.12-compatible pyext fork in this env before running.
+    "datasets==4.8.5",
+    "pebble==5.2.0",
+]
+
+[tool.uv]
+# Script-runner env: no build, no install of this project itself.
+package = false

@@ -213,8 +213,8 @@ if __name__ == "__main__":
     user_config = UserConfig(
         user_metric_target=2,  # Target QPS baseline
         min_sample_count=100,  # Minimum samples to issue
-        min_duration_ms=10 * 1000,  # 10 seconds minimum
-        max_duration_ms=5 * 60 * 1000,  # 5 minutes maximum
+        min_issue_duration_ms=10 * 1000,  # 10 seconds minimum
+        max_issue_duration_ms=5 * 60 * 1000,  # 5 minutes maximum
         total_sample_count=args.total_sample_count if args.total_sample_count else None,
         ds_subset_size=dataset.num_samples(),  # Use all available samples
     )

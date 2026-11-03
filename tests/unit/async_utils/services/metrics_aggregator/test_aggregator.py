@@ -428,6 +428,58 @@ class TestIsl:
             finally:
                 agg.close()
 
+    @pytest.mark.asyncio
+    async def test_disabled_isl_skips_prompt_tokenization_keeps_osl(self, tmp_path):
+        """enable_isl=False: no ISL series, no prompt enqueued; OSL/TPOT intact."""
+        loop = asyncio.get_event_loop()
+        messages = (
+            {"role": "system", "content": "follow instructions"},
+            {"role": "user", "content": "summarize this"},
+        )
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, registry, _ = make_aggregator(
+                ctx,
+                loop,
+                "agg_isl_disabled",
+                tokenizer=MockBatchTokenizer(),
+                enable_isl=False,
+            )
+            try:
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(
+                            SampleEventType.ISSUED,
+                            "s1",
+                            ts=1000,
+                            data=PromptData(messages=messages),
+                        ),
+                    ]
+                )
+                assert not registry.has_series(MetricSeriesKey.ISL.value)
+                assert agg.pending_tokens == 0
+
+                await agg.process(
+                    [
+                        sample_event(SampleEventType.RECV_FIRST, "s1", ts=2000),
+                        sample_event(
+                            SampleEventType.COMPLETE,
+                            "s1",
+                            ts=5000,
+                            data=streaming_text("hello", " world", " foo"),
+                        ),
+                        session_event(SessionEventType.ENDED, ts=5000),
+                    ]
+                )
+                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 3
+                assert snapshot_series_total(
+                    registry, MetricSeriesKey.TPOT_NS.value
+                ) == pytest.approx(1500.0)
+            finally:
+                agg.close()
+
 
 # ---------------------------------------------------------------------------
 # Edge cases and event ordering
@@ -534,9 +586,32 @@ class TestEdgeCases:
                     ]
                 )
                 publisher.publish_final.assert_awaited_once()
+                assert publisher.publish_final.await_args.kwargs["interrupted"] is False
                 # close() is invoked twice: once explicitly in the ENDED branch,
                 # then again from the aggregator's ``close`` (via _finalize).
                 assert publisher.close.call_count >= 1
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_marker_tags_final_snapshot(self, tmp_path):
+        """The session's INTERRUPTED marker (published just before ENDED on an
+        aborted run) must flow through to ``publish_final(interrupted=True)``
+        so the ENDED-driven finalize writes state=interrupted — a ^C'd run
+        must never produce a COMPLETE final snapshot."""
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, publisher = make_aggregator(ctx, loop, "agg_interrupted_marker")
+            try:
+                await agg.process(
+                    [
+                        session_event(SessionEventType.STARTED, ts=0),
+                        session_event(SessionEventType.INTERRUPTED, ts=50),
+                        session_event(SessionEventType.ENDED, ts=100),
+                    ]
+                )
+                publisher.publish_final.assert_awaited_once()
+                assert publisher.publish_final.await_args.kwargs["interrupted"] is True
             finally:
                 agg.close()
 
@@ -808,6 +883,40 @@ class TestCounterAccounting:
             finally:
                 agg.close()
 
+    @pytest.mark.asyncio
+    async def test_finish_reason_counters_bucket_unknown_values(self, tmp_path):
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, registry, _ = make_aggregator(ctx, loop, "agg_finish_reasons")
+            try:
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(SampleEventType.ISSUED, "s1", ts=1),
+                        EventRecord(
+                            event_type=SampleEventType.COMPLETE,
+                            timestamp_ns=2,
+                            sample_uuid="s1",
+                            finish_reason="stop",
+                        ),
+                        sample_event(SampleEventType.ISSUED, "s2", ts=3),
+                        EventRecord(
+                            event_type=SampleEventType.COMPLETE,
+                            timestamp_ns=4,
+                            sample_uuid="s2",
+                            finish_reason="future_reason",
+                        ),
+                    ]
+                )
+
+                counters = snapshot_counters(registry)
+                assert counters[MetricCounterKey.TRACKED_FINISH_REASON_STOP.value] == 1
+                assert counters[MetricCounterKey.TRACKED_FINISH_REASON_OTHER.value] == 1
+            finally:
+                agg.close()
+
 
 # ---------------------------------------------------------------------------
 # Token trigger tests (with mock BatchTokenizer and real event loop)
@@ -842,6 +951,45 @@ class TestAsyncTriggers:
                 # ISL task is in-flight; drain it
                 await agg._token_queue.drain_all()
                 assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 4
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
+    async def test_isl_structured_prompt_includes_reasoning_and_tools(self, tmp_path):
+        loop = asyncio.get_event_loop()
+        tokenizer = MockBatchTokenizer()
+        messages = (
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "reasoning_content": "think carefully",
+                "content": None,
+                "tool_calls": ({"function": {"name": "lookup"}},),
+            },
+            {"role": "tool", "content": "tool result"},
+        )
+        tools = ({"function": {"name": "lookup"}},)
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_isl_structured", tokenizer=tokenizer
+            )
+            try:
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(
+                            SampleEventType.ISSUED,
+                            "s1",
+                            ts=1000,
+                            data=PromptData(messages=messages, tools=tools),
+                        ),
+                    ]
+                )
+                await agg._token_queue.drain_all()
+                assert snapshot_series_count(registry, MetricSeriesKey.ISL.value) == 1
+                assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) > 5
             finally:
                 agg.close()
 
@@ -1130,10 +1278,7 @@ class TestAsyncTriggers:
         loop = asyncio.get_event_loop()
 
         class FailingBatchTokenizer:
-            async def count_texts_async(self, texts, _loop, live=False):
-                raise RuntimeError("tokenizer backend died")
-
-            async def token_count_message_async(self, *args):
+            async def count_batch_async(self, inputs, _loop, live=False):
                 raise RuntimeError("tokenizer backend died")
 
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
@@ -1177,13 +1322,9 @@ class TestAsyncTriggers:
         loop = asyncio.get_event_loop()
 
         class BlockingBatchTokenizer:
-            async def count_texts_async(self, texts, _loop, live=False):
+            async def count_batch_async(self, inputs, _loop, live=False):
                 await asyncio.sleep(10.0)  # exceeds drain timeout
-                return [0] * len(texts)
-
-            async def token_count_message_async(self, *args):
-                await asyncio.sleep(10.0)
-                return 0
+                return [0] * len(inputs)
 
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, _, publisher = make_aggregator(
@@ -1248,7 +1389,9 @@ class TestAsyncTriggers:
                             SampleEventType.COMPLETE,
                             "s1",
                             ts=5000,
-                            data=TextModelOutput(output="ok", tool_calls=(tool_call,)),
+                            data=TextModelOutput(
+                                output=("ok",), tool_calls=((), (tool_call,))
+                            ),
                         ),
                     ]
                 )

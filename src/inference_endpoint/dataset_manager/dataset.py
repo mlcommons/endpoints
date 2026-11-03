@@ -30,7 +30,13 @@ import pandas as pd
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
-from .transforms import Transform, apply_transforms, get_transforms_for_api_type
+from ..exceptions import DatasetValidationError
+from .transforms import (
+    ColumnFilter,
+    Transform,
+    apply_transforms,
+    get_transforms_for_api_type,
+)
 
 if TYPE_CHECKING:
     from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
@@ -252,6 +258,34 @@ def load_from_huggingface(
     return ds[split].to_pandas()
 
 
+def _check_unsaltable(sample: Any) -> DatasetValidationError.Reason | None:
+    """Return the Reason a sample cannot be salted, or None if it can.
+
+    Salt requires a dict sample with a str 'prompt' and neither 'input_tokens'
+    nor 'messages'. Both are sent to the server ahead of 'prompt' — adapters
+    forward 'input_tokens' verbatim, and the OpenAI chat adapter prefers
+    'messages' over 'prompt' (openai_msgspec_adapter.py) — so a sample carrying
+    either would ship an unsalted payload even after 'prompt' is salted.
+    A list-form 'prompt' (an OpenAI batch / token-ID array, or this project's
+    multimodal content-part convention) is an explicitly unsupported salt path
+    and is rejected with its own reason.
+    """
+    Reason = DatasetValidationError.Reason
+    if not isinstance(sample, dict):
+        return Reason.TYPE_MISMATCH
+    if "input_tokens" in sample:
+        return Reason.INPUT_TOKENS_SHADOWING
+    if "messages" in sample:
+        return Reason.MESSAGES_SHADOWING
+    if "prompt" not in sample:
+        return Reason.PROMPT_MISSING
+    if isinstance(sample["prompt"], list):
+        return Reason.PROMPT_LIST_UNSUPPORTED
+    if not isinstance(sample["prompt"], str):
+        return Reason.PROMPT_TYPE_MISMATCH
+    return None
+
+
 class Dataset:
     """Class for loading and managing benchmark datasets.
 
@@ -275,6 +309,9 @@ class Dataset:
 
     DATASET_ID: ClassVar[str]
     """The unique identifier for the dataset. Automatically set by __init_subclass__."""
+
+    ACCURACY_ONLY: ClassVar[bool] = False
+    """Whether this dataset may only be used for accuracy."""
 
     def __init_subclass__(
         cls,
@@ -372,12 +409,32 @@ class Dataset:
         if self.transforms is not None:
             transforms.extend(self.transforms)
 
-        # If adapter is specified, use it to get transforms, otherwise fallback to use APIType to
-        # get transforms.
+        # Collect the adapter's (or API type's) default transforms to append
+        # after any dataset-provided ones.
         if adapter is not None and model_params is not None:
-            transforms.extend(adapter.dataset_transforms(model_params))
+            adapter_transforms = adapter.dataset_transforms(model_params)
         elif api_type is not None and model_params is not None:
-            transforms.extend(get_transforms_for_api_type(api_type, model_params))
+            adapter_transforms = get_transforms_for_api_type(api_type, model_params)
+        else:
+            adapter_transforms = []
+
+        # A ColumnFilter projects the frame down to the columns the API path
+        # expects. The adapter's default filter assumes a single "prompt"
+        # column, which is wrong for datasets whose schema is "messages"+"tools"
+        # (e.g. the BFCL function-calling presets): running it would drop the
+        # columns those datasets need. When the dataset already supplies its own
+        # ColumnFilter (the authoritative projection for its schema), we drop
+        # ONLY the adapter's ColumnFilter and still apply every other adapter
+        # transform (Harmonize, tokenization, etc.), so behavior is unchanged
+        # apart from which columns survive the projection.
+        has_user_column_filter = any(isinstance(t, ColumnFilter) for t in transforms)
+        for t in adapter_transforms:
+            if has_user_column_filter and isinstance(t, ColumnFilter):
+                self.logger.debug(
+                    "Skipping adapter ColumnFilter (preset already provides one)"
+                )
+                continue
+            transforms.append(t)
 
         if transforms:
             df = apply_transforms(df, transforms)
@@ -412,55 +469,64 @@ class Dataset:
             data = self._apply_salt(data)
         return data
 
+    def validate_saltable(self) -> None:
+        """Raise if any loaded sample cannot be salted.
+
+        salt requires a dict sample with a text ('str') 'prompt' and neither
+        'input_tokens' nor 'messages' (adapters send those verbatim / prefer
+        'messages' over 'prompt', so a salted 'prompt' would never reach the
+        server); a list-form 'prompt' (batch / token-IDs / multimodal content
+        parts) is an unsupported salt path and is rejected too. A non-saltable
+        sample is an error, not a silent
+        skip: skipping would leave the KV cache un-busted. Every sample is
+        checked — a single invalid item fails the run, because the seeded warmup
+        subset can draw any index and salt correctness is all-or-nothing. Called
+        before any load is issued — at benchmark setup and again from with_salt().
+
+        Raises:
+            DatasetValidationError: naming the first offending sample. The index
+                is into the loaded, post-transform sample order, not the source
+                file line.
+        """
+        assert self.data is not None, "Dataset not loaded. Call load() first."
+        for i, sample in enumerate(self.data):
+            if reason := _check_unsaltable(sample):
+                raise DatasetValidationError(
+                    reason,
+                    detail=(
+                        f"sample {i} (index into the loaded, post-transform "
+                        f"order); disable salt (--no-warmup-salt / warmup.salt: "
+                        f"false) or use a text-prompt dataset"
+                    ),
+                )
+
     def with_salt(self, rng: random.Random) -> "Dataset":
         """Return a shallow copy of this dataset that salts each load_sample() call.
 
         The returned dataset shares the same loaded data — no re-loading needed.
         Each load_sample() call on the returned dataset prepends a unique hex salt
-        derived from rng to the prompt field, preventing KV-cache reuse.
+        derived from rng to the 'prompt' field, preventing KV-cache reuse.
+
+        Validates every sample first (see validate_saltable): a non-saltable
+        dataset raises here, before any load is issued.
+
+        Raises:
+            DatasetValidationError: if any sample cannot be salted.
         """
+        self.validate_saltable()
         clone = copy.copy(self)
         clone._salt_rng = rng
         return clone
 
-    def _apply_salt(self, data: Any) -> Any:
-        """Prepend a unique salt to the prompt field of a sample dict."""
+    def _apply_salt(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Prepend a unique salt to the 'prompt' field.
+
+        with_salt() has validated every sample, so ``data`` is guaranteed to be a
+        dict with a str 'prompt' and neither 'input_tokens' nor 'messages'.
+        """
         assert self._salt_rng is not None
-        if not isinstance(data, dict):
-            return data
-        if "input_tokens" in data and "prompt" not in data:
-            self.logger.warning(
-                "salt=True: sample has 'input_tokens' but no 'prompt' — "
-                "salt cannot be applied to pre-tokenized input; KV-cache reuse may not be prevented"
-            )
-            return data
-        if "input_tokens" in data and "prompt" in data:
-            self.logger.warning(
-                "salt=True: sample has both 'input_tokens' and 'prompt' — "
-                "salt applied to 'prompt' only; adapters that use 'input_tokens' "
-                "directly will still reuse the KV cache"
-            )
-        if "prompt" not in data:
-            return data
-        prompt = data["prompt"]
         salt = self._salt_rng.randbytes(8).hex()
-        if isinstance(prompt, str):
-            return {**data, "prompt": f"[{salt}] {prompt}"}
-        if isinstance(prompt, list) and prompt:
-            # Find the first text part at any index (image-first prompts place text at index 1+)
-            for i, part in enumerate(prompt):
-                if isinstance(part, dict) and part.get("type") == "text":
-                    salted_parts = [
-                        *prompt[:i],
-                        {**part, "text": f"[{salt}] {part['text']}"},
-                        *prompt[i + 1 :],
-                    ]
-                    return {**data, "prompt": salted_parts}
-            self.logger.warning(
-                "salt=True: multimodal prompt has no text part — "
-                "salt cannot be applied; KV-cache reuse may not be prevented"
-            )
-        return data  # unsupported prompt type — skip salting
+        return {**data, "prompt": f"[{salt}] {data['prompt']}"}
 
     def num_samples(self) -> int:
         assert self.data is not None, "Dataset not loaded. Call load() first."

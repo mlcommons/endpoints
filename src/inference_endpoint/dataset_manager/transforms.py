@@ -116,7 +116,7 @@ class UserPromptFormatter(RowProcessor):
 class AddStaticColumns(Transform):
     """Transform that adds columns with constant values to a DataFrame.
 
-    When overwrite=False, existing non-null values are preserved — dataset
+    When overwrite=False, existing non-null values are preserved - dataset
     per-row overrides take precedence over the supplied defaults.
     """
 
@@ -176,12 +176,30 @@ class Harmonize(RowProcessor):
         self.prompt_column = prompt_column
         self.tokenized_column = tokenized_column
         self.harmonized_column = harmonized_column
-        self.harmonizer = Harmonizer(
-            tokenizer_name=tokenizer_name,
-            encoding_name=encoding_name,
-            reasoning_effort=reasoning_effort,
-            conversation_start_date=conversation_start_date,
-        )
+        # Build the Harmonizer lazily: it downloads/loads the Harmony vocab,
+        # which is unnecessary (and fails offline) when the dataset already
+        # carries pre-tokenized `tokenized_column` (e.g. pre-tokenized MLPerf
+        # prompts sent to /v1/completions) - in that case __call__ short-circuits
+        # and the Harmonizer is never needed.
+        self._tokenizer_name = tokenizer_name
+        self._encoding_name = encoding_name
+        self._reasoning_effort = reasoning_effort
+        self._conversation_start_date = conversation_start_date
+        self._harmonizer: Harmonizer | None = None
+
+    @property
+    def harmonizer(self) -> Harmonizer:
+        # Lazily built so construction doesn't fail offline when inputs are
+        # already pre-tokenized. Relies on serial access (RowProcessor drives
+        # this via single-threaded df.apply); not safe for concurrent first build.
+        if self._harmonizer is None:
+            self._harmonizer = Harmonizer(
+                tokenizer_name=self._tokenizer_name,
+                encoding_name=self._encoding_name,
+                reasoning_effort=self._reasoning_effort,
+                conversation_start_date=self._conversation_start_date,
+            )
+        return self._harmonizer
 
     def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply the transform, skipping if the target column already exists."""
@@ -291,7 +309,7 @@ class ColumnRemap(Transform):
         old_cols = set(df.columns)
         for src, dst in self.remap.items():
             if isinstance(src, str):
-                # String keys are explicit — must exist in the DataFrame
+                # String keys are explicit - must exist in the DataFrame
                 if src in old_cols:
                     new_cols[src] = dst
                 elif self.strict:
@@ -300,7 +318,7 @@ class ColumnRemap(Transform):
                         f"Available: {sorted(old_cols)}"
                     )
             elif isinstance(src, tuple):
-                # Tuple keys are fuzzy — use first candidate found
+                # Tuple keys are fuzzy - use first candidate found
                 found = None
                 for candidate in src:
                     if candidate in old_cols:
@@ -311,7 +329,7 @@ class ColumnRemap(Transform):
                             raise ValueError(
                                 f"Multiple columns found for fuzzy remap: {found} and {candidate}"
                             )
-        # Cannot use errors="ignore" — it silently skips missing columns,
+        # Cannot use errors="ignore" - it silently skips missing columns,
         # hiding typos in user-provided parser remaps.
         df = df.rename(columns=new_cols)
         return df

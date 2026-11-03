@@ -28,7 +28,8 @@ from __future__ import annotations
 import logging
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from .. import metrics
@@ -41,6 +42,38 @@ if TYPE_CHECKING:
     from .schema import BenchmarkConfig, LoadPattern
 
 
+class SampleOrderKind(str, Enum):
+    """Which SampleOrder strategy a SampleOrderSpec selects."""
+
+    WITHOUT_REPLACEMENT = "without_replacement"
+    WITH_REPLACEMENT = "with_replacement"
+    SINGLE = "single"
+
+
+@dataclass(frozen=True, slots=True)
+class SampleOrderSpec:
+    """Generic sample-ordering selector consumed by create_sample_order.
+
+    ``kind`` selects the strategy; ``fixed_index`` is only meaningful for
+    ``SampleOrderKind.SINGLE``.
+    """
+
+    kind: SampleOrderKind = SampleOrderKind.WITHOUT_REPLACEMENT
+    fixed_index: int | None = None
+
+    @classmethod
+    def without_replacement(cls) -> SampleOrderSpec:
+        return cls(kind=SampleOrderKind.WITHOUT_REPLACEMENT)
+
+    @classmethod
+    def with_replacement(cls) -> SampleOrderSpec:
+        return cls(kind=SampleOrderKind.WITH_REPLACEMENT)
+
+    @classmethod
+    def single(cls, index: int) -> SampleOrderSpec:
+        return cls(kind=SampleOrderKind.SINGLE, fixed_index=index)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     """Immutable runtime settings for benchmark execution.
@@ -49,22 +82,19 @@ class RuntimeSettings:
     and ruleset constraints. It should never be instantiated directly by users,
     but rather created through:
     - Ruleset.apply_user_config() for ruleset-constrained configs
-    - RuntimeSettings.from_config() factory method (to be added in Phase 3)
+    - RuntimeSettings.from_config() factory method
 
     All fields are immutable (frozen dataclass) to prevent accidental modification
     during benchmark execution.
     """
 
-    metric_target: metrics.Metric
+    metric_target: metrics.Metric | None
     """Primary metric to target (e.g., Throughput(100) for 100 QPS)"""
 
     reported_metrics: list[metrics.Metric]
     """List of metrics to collect and report"""
 
-    min_duration_ms: int
-    """Minimum benchmark duration in milliseconds"""
-
-    max_duration_ms: int | None
+    max_issue_duration_ms: int | None
     """Maximum benchmark duration in milliseconds (timeout). None means no wall-clock limit."""
 
     n_samples_from_dataset: int
@@ -80,10 +110,15 @@ class RuntimeSettings:
     """Random number generator for scheduler"""
 
     rng_sample_index: random.Random
-    """Random number generator for sample indexing"""
+    """Random number generator for sample indexing / agentic conversation shuffle"""
 
     load_pattern: LoadPattern | None
     """Load pattern configuration"""
+
+    min_issue_duration_ms: int | None = field(default=None, kw_only=True)
+
+    sample_order: SampleOrderSpec = field(default_factory=SampleOrderSpec, kw_only=True)
+    """Sample-ordering strategy (default: without-replacement)."""
 
     @classmethod
     def from_config(
@@ -93,29 +128,7 @@ class RuntimeSettings:
         ruleset: BenchmarkSuiteRuleset | None = None,
         **overrides,
     ) -> RuntimeSettings:
-        """Create RuntimeSettings from BenchmarkConfig.
-
-        This is the primary factory method for creating RuntimeSettings from
-        a validated BenchmarkConfig (Pydantic model).
-
-        Args:
-            config: Validated BenchmarkConfig
-            dataloader_num_samples: Number of samples loaded from dataset
-            ruleset: Optional ruleset to apply constraints (delegates to ruleset's apply_user_config)
-            **overrides: Additional fields to override (e.g., for testing)
-
-        Returns:
-            Immutable RuntimeSettings instance
-
-        Note: If a ruleset is provided, it would handle the conversion with competition-specific logic.
-        For now, we use default conversion. Full ruleset integration is deferred to Phase 4.
-        """
-        if ruleset is not None:
-            # Ruleset handles conversion with competition-specific logic
-            # This would need UserConfig which we don't have in the current CLI flow
-            # For now, we use default conversion even if ruleset is provided
-            # Full ruleset integration is deferred to Phase 4
-            pass
+        """Create immutable runtime settings from a validated config."""
 
         return cls._from_config_default(config, dataloader_num_samples, **overrides)
 
@@ -140,32 +153,40 @@ class RuntimeSettings:
         runtime_cfg = config.settings.runtime
         load_pattern_cfg = config.settings.load_pattern
 
-        # TODO: The default target_qps should be None in Offline mode, but we use 10.0 for now.
-        # This is a temporary solution to avoid breaking changes.
-        effective_qps = (
-            load_pattern_cfg.target_qps
-            if load_pattern_cfg.target_qps is not None
-            else 10.0
-        )
+        target_qps = load_pattern_cfg.target_qps
 
         # Build kwargs from Pydantic models
         kwargs = {
-            "metric_target": metrics.Throughput(effective_qps),
-            "reported_metrics": [metrics.Throughput(effective_qps)],
-            "min_duration_ms": runtime_cfg.min_duration_ms,
-            "max_duration_ms": None
-            if runtime_cfg.max_duration_ms == 0
-            else runtime_cfg.max_duration_ms,
+            "metric_target": (
+                metrics.Throughput(target_qps) if target_qps is not None else None
+            ),
+            "reported_metrics": (
+                [metrics.Throughput(target_qps)] if target_qps is not None else []
+            ),
+            "min_issue_duration_ms": runtime_cfg.min_issue_duration_ms,
+            "max_issue_duration_ms": runtime_cfg.max_issue_duration_ms,
             "n_samples_from_dataset": dataloader_num_samples,
             "n_samples_to_issue": runtime_cfg.n_samples_to_issue,  # From config (CLI --num-samples or YAML)
             "min_sample_count": 1,
             "rng_sched": random.Random(runtime_cfg.scheduler_random_seed),
             "rng_sample_index": random.Random(runtime_cfg.dataloader_random_seed),
             "load_pattern": load_pattern_cfg,
+            "sample_order": SampleOrderSpec(),
         }
 
         # Apply overrides
         kwargs.update(overrides)
+        if (
+            load_pattern_cfg.type != LoadPatternType.AGENTIC_INFERENCE
+            and kwargs["n_samples_to_issue"] is None
+            and not kwargs["min_issue_duration_ms"]
+        ):
+            logger.warning(
+                "No sample count; issuing one dataset pass (%d). Set "
+                "settings.runtime.n_samples_to_issue; Poisson runs may instead "
+                "set min_issue_duration_ms.",
+                dataloader_num_samples,
+            )
 
         return cls(**kwargs)  # type: ignore[arg-type]
 
@@ -176,8 +197,8 @@ class RuntimeSettings:
 
         Priority:
         1. If `n_samples_to_issue` is set, return it (explicit override)
-        2. If min_duration_ms=0, return all dataset samples (new CLI default)
-        3. Otherwise, calculate from metric target * duration
+        2. If no min_issue_duration_ms target is set, return all dataset samples
+        3. Otherwise, derive the count as target_qps x min_issue_duration_ms
 
         Args:
             padding_factor (float): Factor to multiply the expected number of samples by to account for variance.
@@ -214,20 +235,24 @@ class RuntimeSettings:
             )
             return self.n_samples_from_dataset
 
-        # If min_duration is 0, use all dataset samples (new CLI default behavior)
-        if self.min_duration_ms == 0:
+        # None from config and 0 from programmatic callers both mean dataset once.
+        if not self.min_issue_duration_ms:
             result = max(self.min_sample_count, self.n_samples_from_dataset)
             logger.debug(
-                f"Sample count: {result} (using all dataset samples, duration=0)"
+                f"Sample count: {result} (all dataset samples; no min_issue_duration_ms target)"
             )
             return result
 
         # Calculate from duration and metric target
+        if self.metric_target is None:
+            raise ValueError(
+                "min_issue_duration_ms requires an explicit load_pattern.target_qps"
+            )
         if isinstance(self.metric_target, metrics.Throughput):
             expected_sps = self.metric_target.target
-            expected_samples = expected_sps * (self.min_duration_ms / 1000)
+            expected_samples = expected_sps * (self.min_issue_duration_ms / 1000)
         elif isinstance(self.metric_target, metrics.QueryLatency):
-            expected_samples = self.min_duration_ms / self.metric_target.target
+            expected_samples = self.min_issue_duration_ms / self.metric_target.target
         else:
             raise NotImplementedError(
                 f"Cannot infer n_samples_to_issue from metric target type: {type(self.metric_target)}"
@@ -237,7 +262,7 @@ class RuntimeSettings:
             self.min_sample_count, math.ceil(expected_samples * padding_factor)
         )
         logger.debug(
-            f"Sample count: {result} (calculated from duration={self.min_duration_ms}ms × target_qps={self.metric_target.target} × padding={padding_factor})"
+            f"Sample count: {result} (calculated from duration={self.min_issue_duration_ms}ms × target_qps={self.metric_target.target} × padding={padding_factor})"
         )
 
         # Pad to multiples of dataset size

@@ -45,13 +45,10 @@ datasets:
     path: "test.jsonl"
 
 settings:
-  runtime:
-    min_duration_ms: 60000
   load_pattern:
     type: "max_throughput"
   client:
     num_workers: 4
-    worker_initialization_timeout: 120
     transport:
       type: zmq
       recv_buffer_size: 16777216
@@ -68,9 +65,63 @@ endpoint_config:
         assert config.name == "test-config"
         assert config.type == BenchmarkTestType.OFFLINE
         assert len(config.datasets) == 1
-        assert config.settings.client.worker_initialization_timeout == 120.0
         assert config.settings.client.transport.recv_buffer_size == 16777216
         assert config.settings.client.transport.send_buffer_size == 8388608
+
+    def test_load_agentic_routing_headers(self, tmp_path):
+        config_file = tmp_path / "agentic_routing_headers.yaml"
+        config_file.write_text(
+            """
+type: online
+model_params:
+  name: test-model
+datasets:
+  - name: agentic
+    type: performance
+    path: agentic.jsonl
+    agentic_inference:
+      routing_headers:
+        - X-Session-ID
+        - X-SMG-Routing-Key
+settings:
+  load_pattern:
+    type: agentic_inference
+    target_concurrency: 8
+endpoint_config:
+  endpoints:
+    - http://localhost:8000
+"""
+        )
+
+        config = BenchmarkConfig.from_yaml_file(config_file)
+
+        agentic_config = config.datasets[0].agentic_inference
+        assert agentic_config is not None
+        assert agentic_config.routing_headers == (
+            "X-Session-ID",
+            "X-SMG-Routing-Key",
+        )
+
+    def test_load_metrics_isl_disabled(self, tmp_path):
+        config_file = tmp_path / "metrics_isl_disabled.yaml"
+        config_file.write_text(
+            """
+type: offline
+model_params:
+  name: test-model
+datasets:
+  - path: test.jsonl
+settings:
+  metrics_isl: false
+endpoint_config:
+  endpoints:
+    - http://localhost:8000
+"""
+        )
+
+        config = BenchmarkConfig.from_yaml_file(config_file)
+
+        assert config.settings.metrics_isl is False
 
     def test_load_nonexistent_file(self):
         """Test error when file doesn't exist."""
@@ -175,7 +226,7 @@ class TestDefaultConfigs:
         config = BenchmarkConfig.create_default_config(BenchmarkTestType.OFFLINE)
         assert isinstance(config, BenchmarkConfig)
         assert config.settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
-        assert config.settings.runtime.min_duration_ms == 600000
+        assert config.settings.timeouts.run_timeout_s is None
         assert config.settings.client.num_workers >= 1  # auto-resolved from -1
 
     def test_create_default_online_config(self):
@@ -183,7 +234,7 @@ class TestDefaultConfigs:
         assert isinstance(config, BenchmarkConfig)
         assert config.settings.load_pattern.type == LoadPatternType.POISSON
         assert config.settings.load_pattern.target_qps == 10.0
-        assert config.settings.runtime.min_duration_ms == 600000
+        assert config.settings.timeouts.run_timeout_s is None
 
     def test_create_default_eval_not_implemented(self):
         with pytest.raises(CLIError, match="EVAL"):

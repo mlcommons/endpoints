@@ -6,13 +6,13 @@
 # lcb-service:latest so the hardened run command in README.md and the scorer's
 # ws://localhost:13835/evaluate expectation work unchanged.
 #
-# Usage:
-#   LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh
-#   LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh --sqsh            # also create lcb_service.sqsh
-#   LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh --sqsh out.sqsh   # enroot import to out.sqsh
-#   LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh --no-local-tag    # skip the lcb-service:latest tag
+# Usage (images are tagged by short SHA, so LCB_IMAGE_TAG selects the build):
+#   LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh
+#   LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh --sqsh            # also create lcb_service.sqsh
+#   LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh --sqsh out.sqsh   # enroot import to out.sqsh
+#   LCB_IMAGE_REGISTRY=myregistry.com/team LCB_IMAGE_TAG=<sha> ./pull_image.sh --no-local-tag    # skip the lcb-service:latest tag
 #
-# Environment variables: see _image_env.sh (LCB_IMAGE_REGISTRY required).
+# Environment variables: see _image_env.sh (LCB_IMAGE_REGISTRY + LCB_IMAGE_TAG required).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,0 +1,42 @@
+# Online Latency Benchmark
+name: "online-llama2-70b-orca-benchmark"
+version: "1.0"
+type: "submission"
+benchmark_mode: "online"
+
+model_params:
+  name: "meta-llama/Llama-2-70b-chat-hf"
+  temperature: 0
+  top_p: 1
+  max_new_tokens: 1024
+
+datasets:
+  - name: open_orca::llama2_70b
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "rouge"
+      extractor: "identity_extractor"
+      ground_truth: "output"
+  - name: open_orca::llama2_70b
+    type: "performance"
+
+settings:
+  runtime:
+    max_issue_duration_ms: 600000 # 10 minute cap on the performance phase
+    n_samples_to_issue: 24576 # One performance dataset pass
+    scheduler_random_seed: 42 # For Poisson/distribution sampling
+    dataloader_random_seed: 42 # For dataset shuffling
+
+  load_pattern:
+    type: "poisson"
+    target_qps: 10
+
+  client:
+    num_workers: 4
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_key: null
+
+report_dir: results/llama2_70b_orca_benchmark_mlperf/

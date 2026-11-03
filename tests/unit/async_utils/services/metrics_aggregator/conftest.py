@@ -40,6 +40,12 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     SeriesStat,
     SessionState,
 )
+from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
+    MessageInput,
+    PromptInput,
+    TextInput,
+    TokenIdsInput,
+)
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.record import (
     EventRecord,
@@ -50,8 +56,18 @@ from inference_endpoint.core.types import TextModelOutput
 
 # ---------------------------------------------------------------------------
 # Mock BatchTokenizer — whitespace token counts; matches the BatchTokenizer
-# surface the TokenBatchQueue calls (count_texts_async + message path).
+# surface the TokenBatchQueue calls (one mixed-batch method).
 # ---------------------------------------------------------------------------
+
+
+def count_text_tokens(texts: list[str]) -> list[int]:
+    """Whitespace token counts.
+
+    The sync counterpart of :class:`MockBatchTokenizer`'s text path, so the live
+    collector and an ``events.jsonl`` re-parse count with one implementation
+    rather than two copies of a fake.
+    """
+    return [len(text.split()) for text in texts]
 
 
 class MockBatchTokenizer:
@@ -60,32 +76,41 @@ class MockBatchTokenizer:
     def __init__(self, delay: float = 0.0) -> None:
         self._delay = delay
 
-    async def count_texts_async(
-        self,
-        texts: list[str],
-        _loop: asyncio.AbstractEventLoop,
-        live: bool = False,
-    ) -> list[int]:
+    async def count_batch_async(self, inputs, _loop, live=False):
         if self._delay:
             await asyncio.sleep(self._delay)
-        return [len(t.split()) for t in texts]
-
-    async def token_count_message_async(
-        self,
-        content: str,
-        reasoning: str | None,
-        tool_calls,
-        _loop: asyncio.AbstractEventLoop,
-    ) -> int:
         import msgspec
 
-        if self._delay:
-            await asyncio.sleep(self._delay)
-        tool_calls_str = (
-            msgspec.json.encode(list(tool_calls)).decode() if tool_calls else ""
-        )
-        combined = (content or "") + " " + (reasoning or "") + " " + tool_calls_str
-        return len(combined.split())
+        outcomes = []
+        for item in inputs:
+            if isinstance(item, TokenIdsInput):
+                outcomes.append(len(item.token_ids))
+            elif isinstance(item, TextInput):
+                outcomes.append(count_text_tokens([item.text])[0])
+            elif isinstance(item, MessageInput):
+                tool_calls = (
+                    msgspec.json.encode(list(item.tool_calls)).decode()
+                    if item.tool_calls
+                    else ""
+                )
+                combined = (
+                    (item.content or "")
+                    + " "
+                    + (item.reasoning or "")
+                    + " "
+                    + tool_calls
+                )
+                outcomes.append(len(combined.split()))
+            elif isinstance(item, PromptInput):
+                parts = [
+                    str(message.get(key, ""))
+                    for message in item.messages
+                    for key in ("content", "reasoning_content", "tool_calls")
+                    if message.get(key)
+                ]
+                parts.extend(str(tool) for tool in item.tools or ())
+                outcomes.append(len(" ".join(parts).split()))
+        return outcomes
 
     def close(self) -> None:
         pass
@@ -170,8 +195,10 @@ def make_aggregator(
     tokenizer=None,
     live_flush_interval_s: float | None = None,
     streaming: bool = True,
+    enable_isl: bool = True,
     shutdown_event: asyncio.Event | None = None,
     drain_timeout_s: float | None = None,
+    steady_state_profile: str | None = None,
 ) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
     """Construct an aggregator wired to a real SUB socket and a mocked publisher.
 
@@ -203,7 +230,9 @@ def make_aggregator(
         tokenizer=tokenizer,
         live_flush_interval_s=live_flush_interval_s,
         streaming=streaming,
+        enable_isl=enable_isl,
         shutdown_event=shutdown_event,
         drain_timeout_s=drain_timeout_s,
+        steady_state_profile=steady_state_profile,
     )
     return agg, registry, publisher

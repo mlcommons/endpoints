@@ -142,6 +142,7 @@ class TestWorkerBasicFunctionality:
                 assert query_id in final_responses
                 response = final_responses[query_id]
                 assert response.error is None
+                assert response.metadata.get("worker_id") == 0
 
                 if stream:
                     # Streaming response - expected is (first_chunk_content, full_output_tuple)
@@ -293,6 +294,7 @@ class TestWorkerErrorHandling:
             assert isinstance(response, QueryResult)
             assert response.id == query_id
             assert response.error is not None
+            assert response.metadata.get("worker_id") == 0
             error_str = str(response.error)
             error_lower = error_str.lower()
             assert (
@@ -363,6 +365,7 @@ class TestWorkerErrorHandling:
             assert isinstance(response, QueryResult)
             assert response.id == query_id
             assert response.error is not None
+            assert response.metadata.get("worker_id") == 0
             err_str = str(response.error)
             assert error_msg in err_str
             assert response.response_output is None

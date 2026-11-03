@@ -20,6 +20,9 @@ import re
 
 import pytest
 from inference_endpoint import metrics
+from inference_endpoint.config import ruleset_registry
+from inference_endpoint.config.ruleset_registry import register_ruleset
+from inference_endpoint.config.rulesets.mlcommons.rules import RoundRuleset
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -34,6 +37,7 @@ from inference_endpoint.config.schema import (
     OSLDistributionType,
     ProfilerEngine,
     ProfilingConfig,
+    RuntimeConfig,
     StreamingMode,
     SubmissionReference,
     TestType,
@@ -142,6 +146,130 @@ class TestDataset:
         ds = Dataset(path="datasets/my_data.jsonl")
         assert ds.name == "my_data"
 
+    @pytest.mark.unit
+    def test_generation_config_override_accepts_known_keys(self):
+        ds = Dataset(
+            name="acc",
+            type=DatasetType.ACCURACY,
+            path="acc.jsonl",
+            generation_config_override={"max_new_tokens": 32768, "temperature": 0.0},
+        )
+        assert ds.generation_config_override == {
+            "max_new_tokens": 32768,
+            "temperature": 0.0,
+        }
+
+    @pytest.mark.unit
+    def test_generation_config_override_rejects_unknown_key(self):
+        with pytest.raises(
+            ValueError, match=r"unknown keys in generation_config_override.*bogus"
+        ):
+            Dataset(
+                name="acc",
+                path="a.jsonl",
+                generation_config_override={"bogus": 1},
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("key", ["name", "streaming", "tokenizer_name"])
+    def test_generation_config_override_rejects_metrics_decoupled_key(self, key):
+        """Per-run/identity keys drive the single global tokenizer / aggregator,
+        so a per-dataset override is rejected at construction rather than
+        silently desyncing metrics accounting.
+        """
+        with pytest.raises(
+            ValueError,
+            match=r"not honored per-dataset",
+        ):
+            Dataset(
+                name="acc",
+                path="a.jsonl",
+                generation_config_override={key: "whatever"},
+            )
+
+    @pytest.mark.unit
+    def test_generation_config_override_none_is_noop(self):
+        base = ModelParams(name="m", max_new_tokens=1024, streaming=StreamingMode.ON)
+        ds = Dataset(name="x", path="x.jsonl")
+        assert ds.effective_generation_config(base) is base
+
+    @pytest.mark.unit
+    def test_effective_generation_config_merges_sparse_dict(self):
+        base = ModelParams(name="m", temperature=0.5, top_p=0.9, max_new_tokens=1024)
+        ds = Dataset(
+            name="x",
+            path="x.jsonl",
+            generation_config_override={"max_new_tokens": 32768},
+        )
+        merged = ds.effective_generation_config(base)
+        # overridden field changes...
+        assert merged.max_new_tokens == 32768
+        # ...everything else is preserved from base
+        assert merged.name == "m"
+        assert merged.temperature == 0.5
+        assert merged.top_p == 0.9
+
+    @pytest.mark.unit
+    def test_effective_generation_config_validates_value(self):
+        """ModelParams.model_validate is invoked on the merged dict, so a
+        type-invalid override is rejected (e.g. non-numeric temperature)."""
+        base = ModelParams(name="m")
+        ds = Dataset(
+            name="x",
+            path="x.jsonl",
+            generation_config_override={"temperature": "hot"},
+        )
+        with pytest.raises(ValueError):
+            ds.effective_generation_config(base)
+
+    @pytest.mark.unit
+    def test_effective_generation_config_deep_merges_nested_dict(self):
+        """Sparse overrides of nested fields (osl_distribution,
+        chat_template_kwargs) preserve sibling defaults from the base rather
+        than wholesale-replacing the nested object. Pins the deep-merge
+        behavior added in response to PR review feedback.
+        """
+        base = ModelParams(
+            name="m",
+            osl_distribution=OSLDistribution(
+                type=OSLDistributionType.NORMAL, mean=1000, std=200, min=512, max=2048
+            ),
+        )
+        ds = Dataset(
+            name="x",
+            path="x.jsonl",
+            generation_config_override={"osl_distribution": {"max": 512}},
+        )
+        merged = ds.effective_generation_config(base)
+        # the explicitly overridden nested field changes...
+        assert merged.osl_distribution.max == 512
+        # ...and the unspecified siblings are preserved from base
+        assert merged.osl_distribution.type == OSLDistributionType.NORMAL
+        assert merged.osl_distribution.mean == 1000
+        assert merged.osl_distribution.std == 200
+        assert merged.osl_distribution.min == 512
+
+    @pytest.mark.unit
+    def test_effective_generation_config_deep_merges_chat_template_kwargs(self):
+        """Deep-merge also applies to free-form nested dicts like
+        chat_template_kwargs; sparse overrides preserve sibling entries.
+        """
+        base = ModelParams(
+            name="m", chat_template_kwargs={"enable_thinking": True, "tools": []}
+        )
+        ds = Dataset(
+            name="x",
+            path="x.jsonl",
+            generation_config_override={
+                "chat_template_kwargs": {"enable_thinking": False}
+            },
+        )
+        merged = ds.effective_generation_config(base)
+        assert merged.chat_template_kwargs == {
+            "enable_thinking": False,
+            "tools": [],
+        }
+
 
 class TestBenchmarkConfig:
     @pytest.mark.unit
@@ -161,12 +289,12 @@ class TestBenchmarkConfig:
             benchmark_mode=TestType.OFFLINE,
             endpoint_config={"endpoints": ["http://localhost:8000"]},
             submission_ref=SubmissionReference(
-                model="llama-2-70b", ruleset="mlperf-inference-v6.0"
+                model="llama-2-70b", ruleset="mlperf-inference-v6.1"
             ),
             datasets=[{"path": "perf.jsonl"}],
         )
         assert config.model_params.name == "llama-2-70b"
-        assert config.submission_ref.ruleset == "mlperf-inference-v6.0"
+        assert config.submission_ref.ruleset == "mlperf-inference-v6.1"
 
     @pytest.mark.unit
     def test_multiple_accuracy_datasets(self):
@@ -226,38 +354,25 @@ class TestBenchmarkConfig:
             )
 
     @pytest.mark.unit
-    def test_negative_min_duration_rejected(self):
-        with pytest.raises(ValueError, match="greater than or equal to 0"):
-            BenchmarkConfig(
-                type=TestType.OFFLINE,
-                model_params={"name": "M"},
-                endpoint_config={"endpoints": ["http://x"]},
-                datasets=[{"path": "D"}],
-                settings={"runtime": {"min_duration_ms": -1}},
-            )
+    def test_endpoint_response_idle_timeout_requires_positive_value(self):
+        base = {
+            "type": TestType.OFFLINE,
+            "model_params": {"name": "M"},
+            "endpoint_config": {"endpoints": ["http://x"]},
+            "datasets": [{"path": "D"}],
+        }
+        assert (
+            BenchmarkConfig(**base).settings.timeouts.endpoint_response_idle_timeout_s
+            is None
+        )
 
-    @pytest.mark.unit
-    def test_max_lt_min_duration_rejected(self):
-        with pytest.raises(ValueError, match="max_duration_ms"):
+        config = BenchmarkConfig(
+            **base, settings={"timeouts": {"endpoint_response_idle_timeout_s": 15}}
+        )
+        assert config.settings.timeouts.endpoint_response_idle_timeout_s == 15
+        with pytest.raises(ValueError, match="greater than 0"):
             BenchmarkConfig(
-                type=TestType.OFFLINE,
-                model_params={"name": "M"},
-                endpoint_config={"endpoints": ["http://x"]},
-                datasets=[{"path": "D"}],
-                settings={
-                    "runtime": {"min_duration_ms": 5000, "max_duration_ms": 1000}
-                },
-            )
-
-    @pytest.mark.unit
-    def test_max_duration_below_zero_rejected(self):
-        with pytest.raises(ValueError, match="greater than or equal to 0"):
-            BenchmarkConfig(
-                type=TestType.OFFLINE,
-                model_params={"name": "M"},
-                endpoint_config={"endpoints": ["http://x"]},
-                datasets=[{"path": "D"}],
-                settings={"runtime": {"max_duration_ms": -1}},
+                **base, settings={"timeouts": {"endpoint_response_idle_timeout_s": 0}}
             )
 
     @pytest.mark.unit
@@ -292,7 +407,7 @@ class TestBenchmarkConfigMethods:
             model_params={"name": "M"},
             endpoint_config={"endpoints": ["http://x"]},
             datasets=[{"path": "D"}],
-            submission_ref={"model": "M", "ruleset": "R"},
+            submission_ref={"model": "M", "ruleset": "mlperf-inference-v6.1"},
         )
         assert config.get_benchmark_mode() == TestType.OFFLINE
 
@@ -376,7 +491,29 @@ class TestBenchmarkConfigMethods:
         assert loaded.model_params.name == "M"
 
     @pytest.mark.unit
-    def test_max_duration_zero_converts_to_none_in_runtime_settings(self):
+    def test_redact_secret_fields_scrubs_url_credentials(self):
+        value = {
+            "endpoints": [
+                "https://user:password@example.com/v1?token=query-secret&model=m"
+            ],
+            "callback": "wss://example.com/events?access-key=another-secret",
+            "unchanged": "https://example.com/v1?model=a%2Fb",
+            "description": "token=query-secret",
+        }
+
+        redacted = BenchmarkConfig._redact_secret_fields(value)
+
+        endpoint = redacted["endpoints"][0]
+        assert "user" not in endpoint
+        assert "password" not in endpoint
+        assert "query-secret" not in endpoint
+        assert "model=m" in endpoint
+        assert "another-secret" not in redacted["callback"]
+        assert redacted["unchanged"] == value["unchanged"]
+        assert redacted["description"] == value["description"]
+
+    @pytest.mark.unit
+    def test_max_issue_duration_defaults_to_none_in_runtime_settings(self):
         from inference_endpoint.config.runtime_settings import RuntimeSettings
 
         config = BenchmarkConfig(
@@ -384,10 +521,67 @@ class TestBenchmarkConfigMethods:
             model_params={"name": "M"},
             endpoint_config={"endpoints": ["http://x"]},
             datasets=[{"path": "D"}],
-            settings={"runtime": {"max_duration_ms": 0}},
         )
         rt = RuntimeSettings.from_config(config, dataloader_num_samples=100)
-        assert rt.max_duration_ms is None
+        assert rt.max_issue_duration_ms is None
+
+    @pytest.mark.unit
+    def test_min_issue_duration_sizes_the_run(self, caplog):
+        """runtime.min_issue_duration_ms drives target_qps × duration
+        sample-count derivation, with suffix parsing; None = dataset once."""
+        from inference_endpoint.config.runtime_settings import RuntimeSettings
+
+        config = BenchmarkConfig(
+            type=TestType.ONLINE,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[{"path": "D"}],
+            settings={
+                "load_pattern": {"type": "poisson", "target_qps": 10},
+                "runtime": {"min_issue_duration_ms": "600s"},
+            },
+        )
+        assert config.settings.runtime.min_issue_duration_ms == 600_000
+        rt = RuntimeSettings.from_config(config, dataloader_num_samples=100)
+        # 10 QPS × 600 s × 1.1 padding = 6600, ceil'd past the float artifact
+        # (6600.0000…01 → 6601) then padded up to the next dataset multiple.
+        assert rt.total_samples_to_issue() == 6700
+
+        no_duration = config.with_updates(
+            settings=config.settings.model_copy(
+                update={"runtime": RuntimeConfig(min_issue_duration_ms=None)}
+            )
+        )
+        with caplog.at_level("WARNING"):
+            rt = RuntimeSettings.from_config(no_duration, dataloader_num_samples=100)
+        assert rt.total_samples_to_issue() == 100
+        assert "settings.runtime.n_samples_to_issue" in caplog.text
+        assert "Poisson" in caplog.text
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "load_pattern",
+        [
+            {"type": "max_throughput"},
+            {"type": "concurrency", "target_concurrency": 8},
+        ],
+    )
+    def test_min_issue_duration_requires_poisson_target_qps(self, load_pattern):
+        """Duration sizing has no rate to multiply by outside poisson —
+        rejected instead of inventing a synthetic default QPS."""
+        with pytest.raises(ValidationError, match="min_issue_duration_ms requires"):
+            BenchmarkConfig(
+                type=TestType.ONLINE
+                if load_pattern["type"] == "concurrency"
+                else TestType.OFFLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D"}],
+                settings={
+                    "load_pattern": load_pattern,
+                    "runtime": {"min_issue_duration_ms": "600s"},
+                },
+            )
 
     @pytest.mark.unit
     def test_from_yaml_file_not_found(self):
@@ -565,6 +759,27 @@ class TestAgenticInferenceValidation:
         assert config.settings.load_pattern.target_concurrency == 16
 
     @pytest.mark.unit
+    def test_agentic_inference_forwards_concurrency_to_swe_bench_workers(self):
+        values = self._make_online_agentic_inference(concurrency=16)
+        values["datasets"].append(
+            {
+                "name": "swe_bench",
+                "type": "accuracy",
+                "accuracy_config": {"eval_method": "swe_bench_scorer"},
+            }
+        )
+
+        config = BenchmarkConfig(**values)
+
+        accuracy_dataset = next(
+            dataset
+            for dataset in config.datasets
+            if dataset.type == DatasetType.ACCURACY
+        )
+        assert accuracy_dataset.accuracy_config is not None
+        assert accuracy_dataset.accuracy_config.extras == {"workers": 16}
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "controls", [{"min_new_tokens": 0}, {"skip_special_tokens": False}]
     )
@@ -573,6 +788,23 @@ class TestAgenticInferenceValidation:
     ):
         values = self._make_online_agentic_inference()
         values["model_params"].update(controls)
+        values["endpoint_config"]["api_type"] = APIType.OPENAI_COMPLETIONS
+        with pytest.raises(
+            ValidationError, match="not supported for agentic inference"
+        ):
+            BenchmarkConfig(**values)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "override", [{"min_new_tokens": 0}, {"skip_special_tokens": False}]
+    )
+    def test_agentic_inference_rejects_completion_controls_via_override(self, override):
+        """Completion controls reaching an agentic dataset through a per-dataset
+        generation_config_override are rejected, exactly as when set on top-level
+        model_params."""
+        values = self._make_online_agentic_inference(
+            generation_config_override=override
+        )
         values["endpoint_config"]["api_type"] = APIType.OPENAI_COMPLETIONS
         with pytest.raises(
             ValidationError, match="not supported for agentic inference"
@@ -649,11 +881,71 @@ class TestAgenticInferenceValidation:
             )
 
 
+class TestSWEBenchValidation:
+    @staticmethod
+    def _config(datasets, endpoints=None):
+        return {
+            "type": TestType.OFFLINE,
+            "model_params": {"name": "M"},
+            "endpoint_config": {
+                "endpoints": endpoints
+                or ["http://endpoint-a:30000", "http://endpoint-b:30000"]
+            },
+            "datasets": datasets,
+        }
+
+    @pytest.mark.unit
+    def test_rejects_multiple_endpoints_for_accuracy_dataset(self):
+        values = self._config(
+            [
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                }
+            ]
+        )
+
+        with pytest.raises(ValidationError, match="exactly one endpoint URL"):
+            BenchmarkConfig(**values)
+
+    @pytest.mark.unit
+    def test_rejects_multiple_endpoints_for_inline_performance_scoring(self):
+        values = self._config(
+            [
+                {
+                    "path": "D",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                }
+            ]
+        )
+
+        with pytest.raises(ValidationError, match="exactly one endpoint URL"):
+            BenchmarkConfig(**values)
+
+    @pytest.mark.unit
+    def test_accepts_one_endpoint(self):
+        values = self._config(
+            [
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                }
+            ],
+            endpoints=["http://endpoint:30000"],
+        )
+
+        config = BenchmarkConfig(**values)
+
+        assert config.endpoint_config.endpoints == ["http://endpoint:30000"]
+
+
 class TestAgenticInferenceTotalSamples:
     """Tests for total_samples_to_issue() with agentic_inference load pattern."""
 
     @pytest.mark.unit
-    def test_agentic_inference_uses_dataset_size_ignoring_duration(self):
+    def test_agentic_inference_uses_dataset_size(self):
         config = BenchmarkConfig(
             type=TestType.ONLINE,
             model_params={"name": "M"},
@@ -661,7 +953,6 @@ class TestAgenticInferenceTotalSamples:
             datasets=[{"path": "D", "agentic_inference": {}}],
             settings={
                 "load_pattern": {"type": "agentic_inference", "target_concurrency": 4},
-                "runtime": {"min_duration_ms": 600000},
             },
         )
         rt = RuntimeSettings.from_config(config, dataloader_num_samples=4316)
@@ -673,8 +964,8 @@ class TestAgenticInferenceTotalSamples:
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
             reported_metrics=[metrics.Throughput(10.0)],
-            min_duration_ms=600000,
-            max_duration_ms=None,
+            min_issue_duration_ms=600000,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=5,
             n_samples_to_issue=None,
             min_sample_count=100,
@@ -690,8 +981,8 @@ class TestAgenticInferenceTotalSamples:
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
             reported_metrics=[metrics.Throughput(10.0)],
-            min_duration_ms=600000,
-            max_duration_ms=None,
+            min_issue_duration_ms=600000,
+            max_issue_duration_ms=None,
             n_samples_from_dataset=4316,
             n_samples_to_issue=200,
             min_sample_count=1,
@@ -729,3 +1020,183 @@ class TestProfilingConfig:
     def test_valid_urls_accepted(self):
         cfg = ProfilingConfig(engine="vllm", urls=["http://h:8001/v1"])
         assert cfg.urls == ["http://h:8001/v1"]
+
+
+# Official v6.1 seeds from loadgen/mlperf.conf L41-43 (schedule / sample_index).
+_V6_1_SCHED_SEED = 16159082839903944936
+_V6_1_SAMPLE_SEED = 2747215439041700203
+
+
+class TestRulesetSeedOverride:
+    """A submission ruleset pins the runtime RNG seeds at config construction,
+    before the config is dumped to the report dir."""
+
+    def _submission(self, ruleset: str, runtime: dict | None = None) -> BenchmarkConfig:
+        settings = {"runtime": runtime} if runtime is not None else {}
+        return BenchmarkConfig(
+            type=TestType.SUBMISSION,
+            benchmark_mode=TestType.OFFLINE,
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
+            submission_ref=SubmissionReference(model="llama-2-70b", ruleset=ruleset),
+            datasets=[{"path": "perf.jsonl"}],
+            settings=settings,
+        )
+
+    @pytest.mark.unit
+    def test_registered_ruleset_pins_seeds(self):
+        cfg = self._submission("mlperf-inference-v6.1")
+        assert cfg.settings.runtime.scheduler_random_seed == _V6_1_SCHED_SEED
+        assert cfg.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
+        # Warmup is reseeded from the sample-index (dataloader) seed so its
+        # sample order derives from the same pinned seed as the perf phase.
+        assert cfg.settings.warmup.warmup_random_seed == _V6_1_SAMPLE_SEED
+
+    @pytest.mark.unit
+    def test_override_precedes_config_dump(self, tmp_path):
+        """The dumped config.yaml carries the pinned seeds, so the report dir's
+        config is representative of what actually ran."""
+        cfg = self._submission("mlperf-inference-v6.1")
+        out = tmp_path / "config.yaml"
+        cfg.to_yaml_file(out)
+        reloaded = BenchmarkConfig.from_yaml_file(out)
+        assert reloaded.settings.runtime.scheduler_random_seed == _V6_1_SCHED_SEED
+        assert reloaded.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
+
+    @pytest.mark.unit
+    def test_ruleset_seed_wins_over_user_value(self):
+        """Compliance rounds lock the seeds — a user-supplied seed is overridden
+        (mirrors LoadGen locking core seeds from user.conf)."""
+        cfg = self._submission(
+            "mlperf-inference-v6.1",
+            runtime={"scheduler_random_seed": 7, "dataloader_random_seed": 9},
+        )
+        assert cfg.settings.runtime.scheduler_random_seed == _V6_1_SCHED_SEED
+        assert cfg.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
+
+    @pytest.mark.unit
+    def test_unregistered_ruleset_submission_raises(self):
+        """A submission naming an unregistered ruleset must fail loudly rather
+        than silently falling back to default seeds."""
+        with pytest.raises(ValidationError):
+            self._submission("does-not-exist")
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("test_type", "settings"),
+        [
+            (TestType.OFFLINE, {}),
+            (
+                TestType.ONLINE,
+                {
+                    "load_pattern": {
+                        "type": LoadPatternType.CONCURRENCY,
+                        "target_concurrency": 1,
+                    }
+                },
+            ),
+        ],
+    )
+    def test_unregistered_ruleset_raises_for_any_type(self, test_type, settings):
+        """Naming a ruleset is a declaration that the run is bound to its seeds.
+        A typo must fail loudly rather than silently running on the defaults —
+        the run would otherwise look bound while issuing load from seed 42.
+        """
+        with pytest.raises(ValidationError, match="not registered"):
+            BenchmarkConfig(
+                type=test_type,
+                model_params={"name": "test"},
+                endpoint_config={"endpoints": ["http://localhost:8000"]},
+                datasets=[{"path": "test.jsonl"}],
+                settings=settings,
+                submission_ref=SubmissionReference(
+                    model="test", ruleset="does-not-exist"
+                ),
+            )
+
+    @pytest.mark.unit
+    def test_unregistered_ruleset_error_names_the_available_rulesets(self):
+        """The failure has to be actionable: a near-miss on a cohort-qualified
+        name is the likely mistake, so the message lists what is registered."""
+        with pytest.raises(ValidationError, match="mlperf-endpoints-current"):
+            BenchmarkConfig(
+                type=TestType.OFFLINE,
+                model_params={"name": "test"},
+                endpoint_config={"endpoints": ["http://localhost:8000"]},
+                datasets=[{"path": "test.jsonl"}],
+                submission_ref=SubmissionReference(
+                    model="test", ruleset="mlperf-endpoints-v1.0-2026-10-C1"
+                ),
+            )
+
+    @pytest.mark.unit
+    def test_no_submission_ref_keeps_defaults(self):
+        cfg = BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "test"},
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
+            datasets=[{"path": "test.jsonl"}],
+        )
+        assert cfg.settings.runtime.scheduler_random_seed == 42
+        assert cfg.settings.runtime.dataloader_random_seed == 42
+
+    @pytest.fixture
+    def register_temp_ruleset(self):
+        """Register a throwaway RoundRuleset for the test, then unregister it."""
+        registered: list[str] = []
+
+        def _register(name, *, scheduler_rng_seed, sample_index_rng_seed):
+            register_ruleset(
+                name,
+                RoundRuleset(
+                    version=name,
+                    scheduler_rng_seed=scheduler_rng_seed,
+                    sample_index_rng_seed=sample_index_rng_seed,
+                    benchmark_rulesets={},
+                ),
+            )
+            registered.append(name)
+            return name
+
+        yield _register
+        for name in registered:
+            ruleset_registry._RULESET_REGISTRY.pop(name, None)
+
+    @pytest.mark.unit
+    def test_partial_none_seed_sample_index_rejected(self, register_temp_ruleset):
+        """A submission ruleset must pin both seeds. ``None`` (unseeded) is a
+        valid value in the general ruleset contract but incoherent for a pinned
+        submission, so a partially-unseeded ruleset is rejected loudly."""
+        name = register_temp_ruleset(
+            "test-partial-seed", scheduler_rng_seed=None, sample_index_rng_seed=999
+        )
+        with pytest.raises(ValidationError, match="leaves an RNG seed unset"):
+            self._submission(name)
+
+    @pytest.mark.unit
+    def test_partial_none_seed_scheduler_rejected(self, register_temp_ruleset):
+        """Mirror of the scheduler-None case: scheduler set, sample_index None."""
+        name = register_temp_ruleset(
+            "test-partial-sched", scheduler_rng_seed=777, sample_index_rng_seed=None
+        )
+        with pytest.raises(ValidationError, match="leaves an RNG seed unset"):
+            self._submission(name)
+
+    @pytest.mark.unit
+    def test_all_none_seed_rejected(self, register_temp_ruleset):
+        """A fully unseeded ruleset (both seeds ``None``) is rejected."""
+        name = register_temp_ruleset(
+            "test-no-seed", scheduler_rng_seed=None, sample_index_rng_seed=None
+        )
+        with pytest.raises(ValidationError, match="leaves an RNG seed unset"):
+            self._submission(name)
+
+    @pytest.mark.unit
+    def test_non_int_seed_rejected(self, register_temp_ruleset):
+        """Seed *values* are validated: a wrong-typed ruleset seed fails config
+        construction instead of silently landing a ``str`` on the runtime.
+        Guards against the model_copy(update=) __dict__ bypass."""
+        name = register_temp_ruleset(
+            "test-bad-seed", scheduler_rng_seed="oops", sample_index_rng_seed=999
+        )
+        with pytest.raises(ValidationError):
+            self._submission(name)

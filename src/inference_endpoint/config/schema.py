@@ -22,10 +22,12 @@ on Annotated fields to declare shorthand aliases alongside dotted paths.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal, Self, Union
+from typing import Annotated, Any, Literal, Self, Union
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import cyclopts
 import yaml
@@ -42,7 +44,6 @@ from pydantic import (
     model_validator,
 )
 
-from .. import metrics
 from ..core.types import APIType
 from ..endpoint_client.config import HTTPClientConfig
 from ..exceptions import CLIError
@@ -50,10 +51,46 @@ from ..utils import WithUpdatesMixin
 from .ruleset_base import BenchmarkSuiteRuleset
 from .utils import parse_dataset_string, resolve_env_vars
 
+logger = logging.getLogger(__name__)
 
-class SystemDefaults(BaseModel):
-    DEFAULT_TIMEOUT: ClassVar[float] = 300.0
-    DEFAULT_METRIC: ClassVar[metrics.Metric] = metrics.Throughput(0.0)
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``override`` into ``base`` and return the result.
+
+    For overlapping keys whose values are both dicts, recurse; otherwise the
+    override value wins. Mutates a *copy* — callers can safely pass model_dump()
+    output. Used by ``Dataset.effective_generation_config`` so a sparse nested
+    override (e.g. ``{osl_distribution: {max: 512}}``) preserves siblings.
+    """
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+# ModelParams fields that drive the single global tokenizer / MetricsAggregator
+# (launched once from top-level model_params), so a per-dataset override would
+# desync ISL/OSL/TTFT/TPOT accounting without changing what is measured. Rejected
+# as generation_config_override keys — they are per-run/identity, not per-dataset.
+_METRICS_DECOUPLED_OVERRIDE_KEYS = frozenset({"name", "streaming", "tokenizer_name"})
+
+
+def _non_default_completion_controls(mp: ModelParams) -> list[str]:
+    """Completion-only ModelParams controls set to a non-default value.
+
+    ``min_new_tokens``/``skip_special_tokens`` are only honored by the
+    ``openai_completions`` adapter; ``BenchmarkConfig`` rejects them for other
+    ``api_type``s. Shared by the top-level and per-dataset-override checks so
+    both config surfaces validate identically.
+    """
+    checks = {
+        "min_new_tokens": mp.min_new_tokens != 1,
+        "skip_special_tokens": not mp.skip_special_tokens,
+    }
+    return [name for name, non_default in checks.items() if non_default]
 
 
 class LoadPatternType(str, Enum):
@@ -103,14 +140,75 @@ class ScorerMethod(str, Enum):
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
     AGENTIC_INFERENCE_INLINE = "agentic_inference_inline"
     VBENCH = "vbench"
+    BFCL_V4 = "bfcl_v4"
+    LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
+    SWE_BENCH = "swe_bench_scorer"
+
+
+# Audit configuration; runnable test registry lives in compliance/.
+class AuditTestId(str, Enum):
+    """Registered compliance audit test identifiers."""
+
+    # Output-caching audit — MLPerf TEST04 (duplicate-query caching detection).
+    OUTPUT_CACHING_TEST = "output_caching_test"
+
+
+class OutputCachingTestConfig(BaseModel):
+    """Configuration for the output-caching audit (MLPerf TEST04).
+
+    The output-caching test runs two back-to-back phases — a reference run of
+    distinct samples and an audit run that repeats one fixed sample — then
+    checks that the audit QPS does not exceed the reference QPS by more than
+    ``threshold``. A large speedup indicates the SUT is caching responses.
+
+    samples: reference-phase query count (required — an explicit count keeps
+        the per-phase completion check meaningful; a duration-driven phase has
+        no independent target to validate completion against)
+    audit_samples: audit-phase query count (None → equals samples)
+    sample_index: which dataset row is repeated (MLCommons performance_issue_same_index)
+    threshold: tolerance shared by both pass checks — each phase must complete
+        ≥ requested * (1 - threshold), and audit_qps must stay < ref_qps * (1 + threshold)
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    test: Literal[AuditTestId.OUTPUT_CACHING_TEST]
+    only: bool = Field(
+        False,
+        description="Run only the audit — skip the main benchmark (upstream-style standalone TEST04)",
+    )
+    samples: int = Field(..., ge=1, description="Reference phase query count")
+    audit_samples: int | None = Field(
+        None, ge=1, description="Audit phase query count (default: equals samples)"
+    )
+    sample_index: int = Field(
+        0, ge=0, description="Dataset row index repeated in the audit phase"
+    )
+    threshold: float = Field(
+        0.10,
+        gt=0,
+        lt=1,
+        description=(
+            "Tolerance for both checks: each phase must complete "
+            "≥ requested * (1 - threshold), and audit_qps must stay "
+            "< ref_qps * (1 + threshold)"
+        ),
+    )
+
+
+# Single member today; becomes
+# Annotated[OutputCachingTestConfig | ..., Field(discriminator="test")]
+# when additional audit tests are added.
+AuditConfig = OutputCachingTestConfig
 
 
 class TestMode(str, Enum):
-    """Test mode determining what to collect.
+    """Test mode controlling performance issuance and response collection.
 
-    - PERF: Performance metrics only (no response storage)
-    - ACC: Accuracy metrics (collect and evaluate responses)
-    - BOTH: Both performance and accuracy (selective collection by dataset type)
+    - PERF: Run performance and ordinary configured scoring without in-process
+      collection; skip scorers that own an external evaluation run
+    - ACC: Skip performance and collect responses for configured scoring
+    - BOTH: Run performance and configured scoring with response collection
     """
 
     PERF = "perf"
@@ -144,16 +242,6 @@ class TestType(str, Enum):
     ONLINE = "online"
     EVAL = "eval"
     SUBMISSION = "submission"
-
-
-# Mapping from template type strings to TestType enums
-# Single source of truth for template type conversion
-TEMPLATE_TYPE_MAP = {
-    "offline": TestType.OFFLINE,
-    "online": TestType.ONLINE,
-    "eval": TestType.EVAL,
-    "submission": TestType.SUBMISSION,
-}
 
 
 class OSLDistribution(BaseModel):
@@ -190,6 +278,12 @@ class ModelParams(BaseModel):
         cyclopts.Parameter(alias="--model", help="Model name", required=True),
     ] = ""
     temperature: float | None = Field(None, description="Sampling temperature")
+    seed: Annotated[
+        int | None,
+        cyclopts.Parameter(
+            alias="--seed", help="Random seed for reproducible sampling"
+        ),
+    ] = Field(None, description="Random seed for reproducible sampling")
     top_k: int | None = Field(None, description="Top-K sampling")
     top_p: float | None = Field(None, description="Top-P (nucleus) sampling")
     repetition_penalty: float | None = Field(None, description="Repetition penalty")
@@ -307,6 +401,13 @@ class AgenticInferenceConfig(BaseModel):
             "in dataset."
         ),
     )
+    routing_headers: tuple[str, ...] = Field(
+        default=("X-Session-ID",),
+        description=(
+            "HTTP header names populated with the conversation ID on every "
+            "agentic request."
+        ),
+    )
     num_trajectories_to_issue: int | None = Field(
         default=None,
         gt=0,
@@ -354,11 +455,44 @@ class Dataset(BaseModel):
     parser: dict[str, str] | None = Field(
         None, description="Column remapping: {prompt: <col>, system: <col>}"
     )
+    generate_params: dict[str, Any] | None = Field(
+        None, description="Dataset-specific parameters passed to the generate() method"
+    )
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"
     )
     agentic_inference: AgenticInferenceConfig | None = Field(
         None, description="Agentic inference conversation configuration"
+    )
+    # Per-dataset generation config is a first-class capability: different
+    # accuracy datasets legitimately want different generation settings (e.g.
+    # per-dataset max OSL or top_p, as seen in DS-V4), and dataset-scoping also
+    # enables per-dataset dynamic OSL distributions. Only generation knobs are
+    # overridable — per-run/identity fields (`_METRICS_DECOUPLED_OVERRIDE_KEYS`:
+    # name / streaming / tokenizer_name) drive the single global tokenizer and
+    # MetricsAggregator, so overriding them per-dataset would desync ISL/OSL/
+    # TTFT/TPOT accounting; they are rejected at validation.
+    #
+    # TODO(post-mortem): split ModelParams into a per-run ModelIdentity and a
+    # GenerationConfig, so the override surface is exactly the generation fields
+    # and identity fields cannot be named here at all. Field/method names use
+    # "generation_config" to keep that migration mechanical.
+    #
+    # Nested dicts (`osl_distribution`, `chat_template_kwargs`) are deep-merged
+    # so sparse overrides preserve sibling defaults.
+    generation_config_override: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Per-dataset overrides for the top-level model_params (sparse — "
+            "only the fields you want to override). Merged on top of "
+            "BenchmarkConfig.model_params at dataset-load time. Useful for "
+            "MLPerf-style runs where accuracy and performance use different "
+            "output budgets in the same fleet, e.g. "
+            "generation_config_override: {max_new_tokens: 32768, "
+            "temperature: 0.0}. NOTE: per-run/identity keys (`name`, "
+            "`streaming`, `tokenizer_name`) are rejected here — set them on "
+            "top-level model_params."
+        ),
     )
 
     @model_validator(mode="after")
@@ -367,6 +501,53 @@ class Dataset(BaseModel):
         if not self.name and self.path:
             object.__setattr__(self, "name", Path(self.path).stem)
         return self
+
+    @model_validator(mode="after")
+    def _validate_generation_config_override(self) -> Self:
+        """Fail fast on unknown keys and on per-run/identity keys the single
+        global tokenizer / MetricsAggregator would ignore. Override *values*
+        are validated at merge time (see ``effective_generation_config``)
+        because cross-field validation needs the base ``ModelParams`` from
+        ``BenchmarkConfig``.
+        """
+        if self.generation_config_override:
+            keys = set(self.generation_config_override)
+            valid = set(ModelParams.model_fields)
+            bad = sorted(keys - valid)
+            if bad:
+                raise ValueError(
+                    f"Dataset '{self.name}': unknown keys in "
+                    f"generation_config_override: {bad}. "
+                    f"Valid keys: {sorted(valid)}"
+                )
+            decoupled = sorted(keys & _METRICS_DECOUPLED_OVERRIDE_KEYS)
+            if decoupled:
+                raise ValueError(
+                    f"Dataset '{self.name}': generation_config_override keys "
+                    f"{decoupled} are not honored per-dataset — the single "
+                    "global tokenizer / metrics aggregator is launched from "
+                    "top-level model_params, so a per-dataset value would "
+                    "desync ISL/OSL/TTFT/TPOT accounting. Set them on "
+                    "top-level model_params instead."
+                )
+        return self
+
+    def effective_generation_config(self, base: ModelParams) -> ModelParams:
+        """Return base merged with this dataset's generation-config overrides.
+
+        Nested dicts are deep-merged so a sparse nested override preserves
+        sibling defaults (e.g. ``{osl_distribution: {max: 512}}`` keeps the
+        base ``type/mean/std/min``). The merged dict is re-validated through
+        ``ModelParams.model_validate`` so type-invalid scalar overrides (e.g.
+        ``temperature: 'hot'``) are rejected. Note that this only catches
+        scalar invalidity — a sparse nested override whose merged result
+        passes default-validation will not raise (callers that need stricter
+        nested validation should set ``base`` to an explicit instance).
+        """
+        if not self.generation_config_override:
+            return base
+        merged = _deep_merge(base.model_dump(), self.generation_config_override)
+        return ModelParams.model_validate(merged)
 
 
 class AccuracyConfig(BaseModel):
@@ -410,29 +591,32 @@ class AccuracyConfig(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    """Runtime configuration.
+    """Workload sizing, issue-duration cap, and random seeds.
 
-    Sample count priority (in RuntimeSettings.total_samples_to_issue()):
-    1. n_samples_to_issue (if specified) — explicit override
-    2. Calculated from QPS * duration — duration-based (default: 600000ms)
-    3. All dataset samples — fallback when duration is 0
+    ``n_samples_to_issue`` wins over ``min_issue_duration_ms``; with neither,
+    the dataset is issued once. Give-up deadlines live in ``settings.timeouts``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    min_duration_ms: Annotated[
-        int,
-        cyclopts.Parameter(
-            alias="--duration", help="Min duration (ms, or with suffix: 600s, 10m)"
+    min_issue_duration_ms: int | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Poisson sample-count sizing input: target_qps × duration. Explicit "
+            "n_samples_to_issue wins; None issues the dataset once."
         ),
-    ] = Field(600000, ge=0)
-    max_duration_ms: int = Field(
-        0,
-        ge=0,
-        description="Maximum test duration in ms (0 for no limit)",
+    )
+    max_issue_duration_ms: int | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Cap on performance-phase issuing in ms; reaching it ends the "
+            "phase normally (None = no cap)"
+        ),
     )
 
-    @field_validator("min_duration_ms", "max_duration_ms", mode="before")
+    @field_validator("min_issue_duration_ms", "max_issue_duration_ms", mode="before")
     @classmethod
     def _parse_duration_suffix(cls, v: object) -> object:
         """Accept duration with unit suffix: 600s, 10m, 600000ms, or plain int (ms)."""
@@ -451,14 +635,23 @@ class RuntimeConfig(BaseModel):
         cyclopts.Parameter(alias="--num-samples", help="Sample count override"),
     ] = Field(None, gt=0)
     scheduler_random_seed: int = Field(42, description="Scheduler RNG seed")
-    dataloader_random_seed: int = Field(42, description="Dataloader RNG seed")
+    dataloader_random_seed: int = Field(
+        42,
+        description=(
+            "Dataloader RNG seed (sample shuffle; agentic conversation order)"
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_durations(self) -> Self:
-        if self.max_duration_ms != 0 and self.max_duration_ms < self.min_duration_ms:
+        if (
+            self.max_issue_duration_ms is not None
+            and self.min_issue_duration_ms is not None
+            and self.max_issue_duration_ms < self.min_issue_duration_ms
+        ):
             raise ValueError(
-                f"max_duration_ms ({self.max_duration_ms}) must be >= "
-                f"min_duration_ms ({self.min_duration_ms})"
+                f"max_issue_duration_ms ({self.max_issue_duration_ms}) must be >= "
+                f"min_issue_duration_ms ({self.min_issue_duration_ms})"
             )
         return self
 
@@ -532,6 +725,20 @@ class LoadPattern(BaseModel):
             )
         return self
 
+    def __str__(self) -> str:
+        """Human-readable "type (param=value)" form for logging, e.g.
+        ``concurrency (target_concurrency=7)`` / ``poisson (target_qps=10.0)``.
+        Patterns without a driving parameter render as just the type name.
+        """
+        if self.type in (
+            LoadPatternType.CONCURRENCY,
+            LoadPatternType.AGENTIC_INFERENCE,
+        ):
+            return f"{self.type.value} (target_concurrency={self.target_concurrency})"
+        if self.type == LoadPatternType.POISSON:
+            return f"{self.type.value} (target_qps={self.target_qps})"
+        return self.type.value
+
 
 @cyclopts.Parameter(name="*")
 class WarmupConfig(BaseModel):
@@ -554,17 +761,19 @@ class WarmupConfig(BaseModel):
     ] = Field(None, gt=0, description="Warmup request count (None = full dataset once)")
     salt: Annotated[
         bool,
-        cyclopts.Parameter(
-            alias="--warmup-salt",
-            help="Prepend a unique random hex salt to each warmup prompt",
-        ),
+        cyclopts.Parameter(alias="--warmup-salt"),
     ] = Field(
-        True, description="Prepend a unique random hex salt to each warmup prompt"
+        False,
+        description=(
+            "Prepend a unique random hex salt to each warmup prompt. Requires "
+            "text-'prompt' samples; enabling it on a pre-tokenized "
+            "('input_tokens') dataset is a hard error."
+        ),
     )
     drain: Annotated[
         bool,
         cyclopts.Parameter(
-            alias="--warmup-drain",
+            name="--warmup-drain",
             help="Drain in-flight warmup requests before starting the performance phase",
         ),
     ] = Field(
@@ -580,81 +789,67 @@ class WarmupConfig(BaseModel):
     ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
 
 
-class DrainConfig(BaseModel):
-    """Per-phase in-flight response drain timeout configuration."""
+class Timeouts(WithUpdatesMixin, BaseModel):
+    """Global benchmark deadlines and drain budgets.
+
+    Workload issue-duration caps remain in ``RuntimeConfig``; client worker
+    lifecycle timeouts remain in the client configuration.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    warmup_timeout_s: Annotated[
+    run_timeout_s: Annotated[
         float | None,
-        cyclopts.Parameter(
-            alias="--warmup-drain-timeout",
-            help="Warmup drain timeout in seconds (None = wait indefinitely)",
-        ),
+        cyclopts.Parameter(alias="--timeout"),
     ] = Field(
-        240.0,
+        None,
         gt=0,
-        description="Warmup drain timeout in seconds (None = wait indefinitely)",
+        description="Whole-run watchdog seconds (None = off).",
     )
-    performance_timeout_s: Annotated[
+    endpoint_response_idle_timeout_s: Annotated[
         float | None,
         cyclopts.Parameter(
-            alias="--performance-drain-timeout",
-            help="Performance drain timeout in seconds (None = wait indefinitely)",
-        ),
-    ] = Field(
-        240.0,
-        gt=0,
-        description="Performance drain timeout in seconds (None = wait indefinitely)",
-    )
-    accuracy_timeout_s: Annotated[
-        float | None,
-        cyclopts.Parameter(
-            alias="--accuracy-drain-timeout",
-            help="Accuracy drain timeout in seconds (None = wait indefinitely)",
+            alias="--endpoint-response-idle-timeout",
         ),
     ] = Field(
         None,
         gt=0,
-        description="Accuracy drain timeout in seconds (None = wait indefinitely)",
-    )
-    metrics_drain_timeout_s: Annotated[
-        float,
-        cyclopts.Parameter(
-            alias="--metrics-drain-timeout",
-            help=(
-                "Wall-clock budget (seconds) for the metrics aggregator to finish "
-                "tokenizing buffered samples after the run ends. Set to 0 to wait "
-                "indefinitely. Increase for very large datasets where the end-of-run "
-                "tokenize batch is big."
-            ),
-        ),
-    ] = Field(
-        0.0,
-        ge=0,
         description=(
-            "Wall-clock budget (seconds) to finish tokenizing buffered samples "
-            "after ENDED (default: 0 = unlimited). An incomplete drain is "
-            "surfaced via n_pending_tasks > 0, never silently dropped."
+            "Endpoint liveness deadline: fail the run when work is in flight but "
+            "no response chunk or completion arrives for this many seconds "
+            "(None = off). When enabled, recommend >=300 seconds and size it above the longest "
+            "single-request latency. See docs/config/DESIGN.md."
         ),
     )
-    metrics_tokenizer_workers: Annotated[
-        int,
-        cyclopts.Parameter(
-            alias="--metrics-tokenizer-workers",
-            help=(
-                "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT in "
-                "the metrics aggregator. 0 defers all tokenization to the "
-                "end-of-run drain, which always uses the auto-sized sharded pool."
-            ),
-        ),
-    ] = Field(
-        2,
-        ge=0,
-        description=(
-            "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
-            "(default: 2; 0 = defer everything to the end-of-run drain)."
-        ),
+    interrupted_teardown_grace_s: float = Field(
+        30.0,
+        gt=0,
+        description="Abort drain grace before remaining services are killed.",
+    )
+    service_ready_timeout_s: float = Field(
+        30.0,
+        gt=0,
+        description="Service startup wait in seconds.",
+    )
+    warmup_drain_timeout_s: float | None = Field(
+        240.0,
+        gt=0,
+        description="Warmup drain seconds (None = unlimited).",
+    )
+    performance_drain_timeout_s: float | None = Field(
+        None,
+        gt=0,
+        description="Performance drain seconds (None = unlimited).",
+    )
+    accuracy_drain_timeout_s: float | None = Field(
+        None,
+        gt=0,
+        description="Accuracy drain seconds (None = unlimited).",
+    )
+    metrics_drain_timeout_s: float | None = Field(
+        None,
+        gt=0,
+        description="Metrics drain seconds (None = unlimited).",
     )
 
 
@@ -724,8 +919,61 @@ class ProfilingConfig(BaseModel):
         return v
 
 
+class EarlyStoppingConfig(BaseModel):
+    """MLPerf-style early-stopping percentile estimates (on by default).
+
+    Adds conservative, confidence-backed estimates of the tail percentiles to the
+    TTFT / TPOT / latency metrics in ``result_summary.json``. Computed once at run
+    COMPLETE from data the aggregator already keeps (hot path untouched), and the
+    output field is additive — so it is on by default; ``enabled: false`` is the
+    single opt-out (e.g. for consumers that strictly validate the summary schema).
+    Percentile targets, confidence (0.99), and tolerance (0.0) are LoadGen-parity
+    constants in ``metrics/early_stopping.py``, not knobs. Estimate-only: no
+    target-latency pass/fail and no dynamic mid-run halt. See ``docs/early_stopping.md``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--early-stopping",  # --no-early-stopping is the meaningful opt-out
+            help="Report MLPerf early-stopping percentile estimates for TTFT/TPOT/latency",
+        ),
+    ] = Field(True, description="Early-stopping percentile estimates (default on)")
+
+
 @cyclopts.Parameter(name="*")
-class Settings(BaseModel):
+class SteadyStateConfig(BaseModel):
+    """Steady-state window detection (off by default, opt-in).
+
+    The metrics aggregator collects a per-super-pass series during the run and
+    attaches the final verdict to the report as ``steady_state``.
+
+    Collection adds one rollup per sample event. It reuses token counts from the
+    TPOT trigger, so nothing is tokenized twice.
+
+    Supported runs use the `concurrency` or `poisson` load pattern, are not
+    accuracy-only, and have a resolvable tokenizer. Other runs leave it off.
+    There is no model allowlist. See ``docs/steady_state_diagnostics.md``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: Annotated[
+        bool,
+        # Use an explicit name, not an alias. An alias would also expose the
+        # field name, and a bare `--enabled` collides with other flattened
+        # single-field option models.
+        cyclopts.Parameter(
+            name="--steady-state",
+            help="Detect the run's steady window and report it",
+        ),
+    ] = Field(False, description="Steady-state window detection (default off)")
+
+
+@cyclopts.Parameter(name="*")
+class Settings(WithUpdatesMixin, BaseModel):
     """Test settings."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -733,12 +981,53 @@ class Settings(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
-    drain: DrainConfig = Field(
-        default_factory=DrainConfig,
-        description="Per-phase in-flight response drain timeout configuration",
+    timeouts: Timeouts = Field(
+        default_factory=Timeouts,
+        description="All global waits and deadlines (see config/schema.py)",
     )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
     profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
+    early_stopping: EarlyStoppingConfig = Field(
+        default_factory=EarlyStoppingConfig,
+        description="MLPerf early-stopping percentile estimates (on by default; enabled: false opts out)",
+    )
+    steady_state: SteadyStateConfig = Field(
+        default_factory=SteadyStateConfig,
+        description="Steady-state window detection (off by default; enabled: true opts in)",
+    )
+    metrics_tokenizer_workers: Annotated[
+        int,
+        cyclopts.Parameter(alias="--metrics-tokenizer-workers"),
+    ] = Field(
+        4,
+        ge=0,
+        description=(
+            "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
+            "(default: 4; 0 = defer everything to the end-of-run drain)."
+        ),
+    )
+    metrics_isl: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--metrics-isl",
+            help="Collect input sequence length (ISL) metrics",
+        ),
+    ] = Field(
+        True,
+        description="Collect input sequence length (ISL) metrics (default: true).",
+    )
+
+    @model_validator(mode="after")
+    def _min_issue_duration_requires_qps(self) -> Self:
+        if self.runtime.min_issue_duration_ms is not None and (
+            self.load_pattern.type != LoadPatternType.POISSON
+            or self.load_pattern.target_qps is None
+        ):
+            raise ValueError(
+                "runtime.min_issue_duration_ms requires poisson with explicit "
+                "target_qps; use --num-samples for other load patterns"
+            )
+        return self
 
 
 class OfflineSettings(Settings):
@@ -829,10 +1118,6 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         Path | None,
         cyclopts.Parameter(alias="--report-dir", help="Report output directory"),
     ] = None
-    timeout: Annotated[
-        float | None,
-        cyclopts.Parameter(alias="--timeout", help="Global timeout in seconds"),
-    ] = None
     # verbose is handled by cyclopts meta app (-v flag), not here
     verbose: Annotated[bool, cyclopts.Parameter(show=False)] = Field(
         False, description="Enable verbose logging"
@@ -844,6 +1129,10 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             help="NUMA-aware CPU pinning",
         ),
     ] = True
+    audit: Annotated[AuditConfig | None, cyclopts.Parameter(show=False)] = Field(
+        None,
+        description="Compliance audit config (YAML only). When set, runs the audit after the main benchmark.",
+    )
 
     @field_validator("datasets", mode="before")
     @classmethod
@@ -867,7 +1156,6 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         Validation:
         - Workers must be -1 (auto) or >= 1
-        - max_duration_ms >= min_duration_ms >= 0
         - No duplicate dataset (name, type) pairs
         - Load pattern must match test type
         """
@@ -901,32 +1189,60 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
 
+        uses_swe_bench = any(
+            dataset.accuracy_config is not None
+            and dataset.accuracy_config.eval_method == ScorerMethod.SWE_BENCH
+            for dataset in self.datasets
+        )
+        if uses_swe_bench and len(self.endpoint_config.endpoints) != 1:
+            raise ValueError(
+                "SWE-bench service mode supports exactly one endpoint URL; "
+                f"got {len(self.endpoint_config.endpoints)}."
+            )
+
         # TODO(vir): Move API-type-specific validation out of this generic
         # cross-model validator and into the selected adapter. Requires a larger refactor.
-        non_default_completion_controls = {
-            "model_params.min_new_tokens": self.model_params.min_new_tokens != 1,
-            "model_params.skip_special_tokens": not self.model_params.skip_special_tokens,
+        #
+        # Completion-only controls must be gated by api_type for BOTH the
+        # top-level model_params AND every per-dataset generation_config_override,
+        # so the two config surfaces validate identically. Merge each dataset's
+        # effective params once here (parse time) — this also surfaces
+        # value-invalid overrides before setup produces side effects — and reuse
+        # the result for the agentic-inference check below.
+        effective_by_dataset: dict[int, ModelParams] = {
+            id(dataset): dataset.effective_generation_config(self.model_params)
+            for dataset in self.datasets
+            if dataset.generation_config_override
         }
-        configured_controls = [
-            name
-            for name, is_non_default in non_default_completion_controls.items()
-            if is_non_default
+        completion_control_surfaces: list[tuple[str, ModelParams]] = [
+            ("model_params", self.model_params)
         ]
-        if (
-            configured_controls
-            and self.endpoint_config.api_type != APIType.OPENAI_COMPLETIONS
-        ):
-            controls = " and ".join(configured_controls)
-            verb = "requires" if len(configured_controls) == 1 else "require"
-            required_api_type = "endpoint_config.api_type=openai_completions"
-            raise ValueError(f"{controls} {verb} {required_api_type}")
-        if configured_controls and any(
-            dataset.agentic_inference is not None for dataset in self.datasets
-        ):
-            raise ValueError(
-                "OpenAI text-completion generation controls are not supported "
-                "for agentic inference datasets"
-            )
+        for dataset in self.datasets:
+            effective = effective_by_dataset.get(id(dataset))
+            if effective is not None:
+                completion_control_surfaces.append(
+                    (
+                        f"datasets['{dataset.name}'].generation_config_override",
+                        effective,
+                    )
+                )
+        for prefix, mp in completion_control_surfaces:
+            controls = _non_default_completion_controls(mp)
+            if controls and self.endpoint_config.api_type != APIType.OPENAI_COMPLETIONS:
+                names = " and ".join(f"{prefix}.{name}" for name in controls)
+                verb = "requires" if len(controls) == 1 else "require"
+                raise ValueError(
+                    f"{names} {verb} endpoint_config.api_type=openai_completions"
+                )
+        for dataset in self.datasets:
+            if dataset.agentic_inference is None:
+                continue
+            effective = effective_by_dataset.get(id(dataset), self.model_params)
+            if _non_default_completion_controls(effective):
+                raise ValueError(
+                    "OpenAI text-completion generation controls are not supported "
+                    "for agentic inference datasets"
+                )
 
         # --- Validate (cross-model checks only; sub-models self-validate) ---
         if self.type == TestType.SUBMISSION and not self.benchmark_mode:
@@ -934,7 +1250,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 "SUBMISSION configs must specify benchmark_mode (offline or online)"
             )
 
-        # Duplicate datasets — same (name, type) would collide in results.json
+        # Duplicate datasets — same (name, type) would collide in the accuracy report
         if self.datasets:
             pairs = [(d.name, d.type) for d in self.datasets]
             dupes = [
@@ -1003,7 +1319,119 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 f"got '{lp.type}'"
             )
 
+        # Forward target_concurrency as SWE-bench workers when unset.
+        concurrency = (
+            lp.target_concurrency
+            if lp.type
+            in (LoadPatternType.CONCURRENCY, LoadPatternType.AGENTIC_INFERENCE)
+            and lp.target_concurrency
+            else None
+        )
+        if concurrency is not None and self.datasets:
+            updated_datasets = []
+            changed = False
+            for ds in self.datasets:
+                acc = ds.accuracy_config
+                if (
+                    acc is not None
+                    and acc.eval_method == ScorerMethod.SWE_BENCH
+                    and (acc.extras is None or acc.extras.get("workers") is None)
+                ):
+                    new_extras = {**(acc.extras or {}), "workers": concurrency}
+                    new_acc = acc.model_copy(update={"extras": new_extras})
+                    ds = ds.model_copy(update={"accuracy_config": new_acc})
+                    changed = True
+                updated_datasets.append(ds)
+            if changed:
+                object.__setattr__(self, "datasets", updated_datasets)
+
+        # Pin RNG seeds from the submission ruleset. Done last so the values
+        # are baked into the config before any consumer reads them — the config
+        # dump to the report dir, RuntimeSettings.from_config, and the report
+        # seeds block all see the pinned values.
+        self._apply_ruleset_seed_overrides()
+
         return self
+
+    def _apply_ruleset_seed_overrides(self) -> None:
+        """Override runtime + warmup RNG seeds from the selected submission ruleset.
+
+        MLPerf rounds pin the RNG seeds; this mirrors LoadGen locking the core
+        seeds from ``user.conf`` (a submitter cannot substitute their own).
+        If ``submission_ref`` is unset, the config is left unchanged. Naming an
+        unregistered ruleset is always an error, for every test type: declaring
+        a ``submission_ref`` asserts the run is bound to that ruleset's seeds,
+        so a typo that silently fell back to the defaults would produce a run
+        that looks bound while issuing load from seed 42.
+
+        The warmup phase is reseeded from the sample-index (dataloader) seed so
+        its sample order derives from the same pinned seed as the perf phase.
+        Only the seed *value* is propagated — each phase builds its own
+        ``random.Random`` downstream, so the RNG object is never shared.
+        """
+        if self.submission_ref is None:
+            return
+        try:
+            ruleset = self.submission_ref.get_ruleset_instance()
+        except KeyError as e:
+            # Imported here, not at module scope: ruleset_registry imports the
+            # rulesets package, which imports this module (same reason
+            # SubmissionReference.get_ruleset_instance defers it).
+            from .ruleset_registry import list_rulesets
+
+            # The likely mistake is a near-miss on a cohort-qualified name, so
+            # name the alternatives rather than only the rejected value.
+            raise ValueError(
+                f"submission_ref.ruleset {self.submission_ref.ruleset!r} is not "
+                "registered, so the run cannot be bound to its RNG seeds and "
+                "would silently fall back to the defaults. Registered rulesets: "
+                + ", ".join(sorted(list_rulesets()))
+            ) from e
+
+        # A ruleset used as a submission_ref must pin both seeds. ``None`` means
+        # "unseeded" in the general ruleset contract (ruleset_base.py), but an
+        # unseeded submission is incoherent and would silently diverge from the
+        # random.Random(None) path in RoundRuleset.apply_user_config. Reject it.
+        if ruleset.scheduler_rng_seed is None or ruleset.sample_index_rng_seed is None:
+            raise ValueError(
+                f"submission_ref.ruleset {self.submission_ref.ruleset!r} leaves an "
+                "RNG seed unset; a pinned ruleset must define both the scheduler "
+                "and sample-index seeds."
+            )
+
+        # Rebuild through model_validate (not model_copy(update=)): with
+        # extra='forbid' this validates seed *values* and rejects renamed/unknown
+        # fields. model_copy(update=) writes straight into __dict__, so a
+        # wrong-typed (e.g. str) or renamed seed would slip through unchecked.
+        runtime = self.settings.runtime
+        new_runtime = type(runtime).model_validate(
+            {
+                **runtime.model_dump(),
+                "scheduler_random_seed": ruleset.scheduler_rng_seed,
+                "dataloader_random_seed": ruleset.sample_index_rng_seed,
+            }
+        )
+        warmup = self.settings.warmup
+        new_warmup = type(warmup).model_validate(
+            {
+                **warmup.model_dump(),
+                "warmup_random_seed": ruleset.sample_index_rng_seed,
+            }
+        )
+        object.__setattr__(
+            self,
+            "settings",
+            self.settings.model_copy(
+                update={"runtime": new_runtime, "warmup": new_warmup}
+            ),
+        )
+        logger.debug(
+            "Pinned RNG seeds from ruleset %r: scheduler=%s sample_index=%s "
+            "(warmup reseeded from sample_index)",
+            self.submission_ref.ruleset,
+            ruleset.scheduler_rng_seed,
+            ruleset.sample_index_rng_seed,
+        )
 
     @model_validator(mode="after")
     def _propagate_client_api_type(self) -> Self:
@@ -1056,20 +1484,94 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         return _config_adapter.validate_python(data)
 
-    def to_yaml_file(self, path: Path, exclude_none: bool = True) -> None:
+    @staticmethod
+    def _is_secret_field_name(key: Any) -> bool:
+        normalized = str(key).strip().lower().replace("-", "_")
+        return (
+            normalized
+            in {
+                "api_key",
+                "access_token",
+                "authorization",
+                "auth_token",
+                "password",
+                "token",
+            }
+            or normalized.endswith(("_key", "_token", "_password"))
+            or "secret" in normalized
+        )
+
+    @staticmethod
+    def _redact_url_secrets(value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return value
+        if parsed.scheme.lower() not in {"http", "https", "ws", "wss"} or not (
+            parsed.netloc
+        ):
+            return value
+
+        changed = False
+        netloc = parsed.netloc
+        if "@" in netloc:
+            netloc = f"<redacted>@{netloc.rsplit('@', 1)[1]}"
+            changed = True
+
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        redacted_query: list[tuple[str, str]] = []
+        for key, item in query:
+            if BenchmarkConfig._is_secret_field_name(key):
+                item = "<redacted>"
+                changed = True
+            redacted_query.append((key, item))
+
+        if not changed:
+            return value
+        return urlunsplit(
+            parsed._replace(netloc=netloc, query=urlencode(redacted_query, doseq=True))
+        )
+
+    @staticmethod
+    def _redact_secret_fields(value: Any) -> Any:
+        if isinstance(value, dict):
+            redacted: dict[str, Any] = {}
+            for key, item in value.items():
+                if BenchmarkConfig._is_secret_field_name(key):
+                    redacted[key] = "<redacted>"
+                else:
+                    redacted[key] = BenchmarkConfig._redact_secret_fields(item)
+            return redacted
+        if isinstance(value, list):
+            return [BenchmarkConfig._redact_secret_fields(item) for item in value]
+        if isinstance(value, str):
+            return BenchmarkConfig._redact_url_secrets(value)
+        return value
+
+    def to_yaml_file(
+        self,
+        path: Path,
+        exclude_none: bool = True,
+        *,
+        redact_secrets: bool = False,
+    ) -> None:
         """Save BenchmarkConfig to YAML file.
 
         Args:
             path: Path to save YAML file
             exclude_none: Whether to exclude None values (default: True)
+            redact_secrets: Replace secret-like values before persistence.
         """
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self.model_dump(exclude_none=exclude_none, mode="json")
+        if redact_secrets:
+            payload = self._redact_secret_fields(payload)
 
         with open(path, "w") as f:
             yaml.dump(
-                self.model_dump(exclude_none=exclude_none, mode="json"),
+                payload,
                 f,
                 default_flow_style=False,
                 sort_keys=False,

@@ -26,6 +26,8 @@ from pathlib import Path
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
+from inference_endpoint.metrics.early_stopping import EarlyStoppingSpec
+from inference_endpoint.metrics.steady_state_diagnostics import PROFILES
 from inference_endpoint.utils.logging import setup_logging
 
 from .aggregator import MetricCounterKey, MetricsAggregatorService
@@ -36,6 +38,13 @@ from .snapshot import MetricsSnapshotCodec
 from .token_metrics import BatchTokenizer, TokenBatchQueue
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
 
 
 def _make_sigterm_handler(
@@ -93,7 +102,7 @@ def _make_sigterm_handler(
 
     def _on_sigterm() -> None:
         logger.warning(
-            "metrics aggregator received SIGTERM; " "writing INTERRUPTED final snapshot"
+            "metrics aggregator received SIGTERM; writing INTERRUPTED final snapshot"
         )
         task = loop.create_task(_signal_finalize())
         pending_tasks.add(task)
@@ -138,13 +147,14 @@ async def main() -> None:
     )
     parser.add_argument(
         "--drain-timeout",
-        type=float,
-        default=0.0,
+        type=_positive_float,
+        default=None,
         help=(
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
             "after ENDED before the aggregator emits the final snapshot with "
-            "n_pending_tasks > 0 (0 = wait indefinitely, the default; the "
-            "benchmark forwards the schema default, see config/schema.py). "
+            "n_pending_tasks > 0. Omit to wait indefinitely (the default). "
+            "Mirrors settings.timeouts.metrics_drain_timeout_s (see "
+            "config/schema.py). "
             "Increase for very large datasets where the end-of-run tokenize "
             "batch is big."
         ),
@@ -170,7 +180,7 @@ async def main() -> None:
     parser.add_argument(
         "--tokenizer-workers",
         type=int,
-        default=2,
+        default=4,
         help=(
             "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
             "(0 = no mid-run tokenization, everything defers to the "
@@ -178,6 +188,12 @@ async def main() -> None:
             "see config/schema.py). The drain always uses the auto-sized "
             "sharded pool — one worker process per 8-core block."
         ),
+    )
+    parser.add_argument(
+        "--metrics-isl",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Collect input sequence length (ISL) metrics (default: enabled).",
     )
     parser.add_argument(
         "--streaming",
@@ -196,6 +212,23 @@ async def main() -> None:
         type=int,
         default=0,
         help="Identity to send in the readiness signal",
+    )
+    parser.add_argument(
+        "--early-stopping",
+        action="store_true",
+        default=False,
+        help="Compute MLPerf early-stopping percentile estimates for TTFT/TPOT/latency.",
+    )
+    parser.add_argument(
+        "--steady-state-profile",
+        default=None,
+        choices=sorted(PROFILES),
+        help=(
+            "Collect the steady-state super-pass series. Evaluate it with this "
+            "workload profile's CoV bounds and warmup driver. Omit this flag to "
+            "disable collection. The parent resolves it from the load pattern so "
+            "standalone detector re-runs use the same profile."
+        ),
     )
     args = parser.parse_args()
     setup_logging(level="INFO")
@@ -229,9 +262,9 @@ async def main() -> None:
                 args.tokenizer, live_workers=args.tokenizer_workers
             )
         except RuntimeError as exc:
-            # Fail-fast contract: a tokenizer environment that cannot shard
-            # must surface as a clear service-launch failure, not a silent
-            # slow path that cannot keep up with completions.
+            # Shard initialization failures must surface as a clear
+            # service-launch failure. Tokenizers without a plain-text backend
+            # do not create shards and remain usable for structured messages.
             raise SystemExit(f"FATAL: {exc}") from exc
     else:
         tokenizer_cm = nullcontext()
@@ -240,7 +273,8 @@ async def main() -> None:
         tokenizer_cm as tokenizer,
         ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx,
     ):
-        registry = MetricsRegistry()
+        es_spec = EarlyStoppingSpec() if args.early_stopping else None
+        registry = MetricsRegistry(early_stopping=es_spec)
         publisher = MetricsPublisher(
             MetricsSnapshotCodec(),
             zmq_ctx,
@@ -264,8 +298,10 @@ async def main() -> None:
                     args.publish_interval if args.tokenizer_workers > 0 else None
                 ),
                 streaming=args.streaming,
+                enable_isl=args.metrics_isl,
                 shutdown_event=shutdown_event,
-                drain_timeout_s=None if args.drain_timeout == 0 else args.drain_timeout,
+                drain_timeout_s=args.drain_timeout,
+                steady_state_profile=args.steady_state_profile,
             )
             aggregator.start()
 
@@ -305,11 +341,16 @@ async def main() -> None:
             # and let the parent's ENDED-driven path drive shutdown.
             loop.add_signal_handler(
                 signal.SIGINT,
-                lambda: logger.info(
+                lambda: logger.warning(
                     "metrics aggregator received SIGINT — ignoring "
                     "(parent's ENDED path is authoritative)"
                 ),
             )
+
+            # Touch a fixed startup marker in the (already-known) output dir once
+            # the signal handlers are registered, so a harness can poll for it as
+            # an exact "ready to receive signals" gate instead of a fixed sleep.
+            (metrics_output_dir / ".ready").touch()
 
             if args.readiness_path:
                 await send_ready_signal(zmq_ctx, args.readiness_path, args.readiness_id)

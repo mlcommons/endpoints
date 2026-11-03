@@ -28,7 +28,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .rulesets.mlcommons.rules import ALL_ROUNDS as mlcommons_rounds
 from .rulesets.mlcommons.rules import CURRENT as mlcommons_current
+from .rulesets.mlcommons.rules import EDGE_CURRENT as mlcommons_edge_current
+from .rulesets.mlcommons.rules import ENDPOINTS_ALL as mlcommons_endpoints_all
+from .rulesets.mlcommons.rules import ENDPOINTS_CURRENT as mlcommons_endpoints_current
 
 if TYPE_CHECKING:
     from .ruleset_base import BenchmarkSuiteRuleset
@@ -43,7 +47,16 @@ def register_ruleset(name: str, ruleset: BenchmarkSuiteRuleset) -> None:
     Args:
         name: Unique name/version identifier (e.g., "mlperf-inference-v5.1")
         ruleset: The ruleset instance to register
+
+    Raises:
+        ValueError: If a ruleset is already registered under ``name`` (prevents
+            an accidental overwrite via this function). The MLCommons
+            auto-registration path uses ``setdefault`` and does not hit this
+            guard; round-version uniqueness is enforced by
+            ``test_round_versions_are_unique``.
     """
+    if name in _RULESET_REGISTRY:
+        raise ValueError(f"Ruleset {name!r} is already registered")
     _RULESET_REGISTRY[name] = ruleset
 
 
@@ -78,11 +91,30 @@ def list_rulesets() -> list[str]:
 
 # Auto-register MLCommons rulesets
 def _auto_register_mlcommons():
-    """Auto-register MLCommons rulesets."""
-    # Register with version-specific name
-    register_ruleset(f"mlperf-inference-{mlcommons_current.version}", mlcommons_current)
-    # Also register as "mlcommons-current" for convenience
-    register_ruleset("mlcommons-current", mlcommons_current)
+    """Auto-register MLCommons rulesets (idempotent).
+
+    Uses ``setdefault`` so re-running (e.g. a module re-import) is a no-op
+    rather than tripping ``register_ruleset``'s duplicate guard. Uniqueness of
+    round versions is enforced separately by ``test_round_versions_are_unique``.
+    """
+    # Register every known round under its version-specific name
+    for ruleset in mlcommons_rounds:
+        _RULESET_REGISTRY.setdefault(f"mlperf-inference-{ruleset.version}", ruleset)
+    # Also register the current round as "mlcommons-current" for convenience
+    _RULESET_REGISTRY.setdefault("mlcommons-current", mlcommons_current)
+    # Edge-agentic ruleset: by version and as the edge "current".
+    _RULESET_REGISTRY.setdefault(
+        f"mlperf-{mlcommons_edge_current.version}", mlcommons_edge_current
+    )  # -> "mlperf-edge-v0.1"
+    _RULESET_REGISTRY.setdefault("mlperf-edge-current", mlcommons_edge_current)
+    # Endpoints seed sets: by cohort-qualified version and as the endpoints
+    # "current". A later cohort registers alongside rather than replacing, so a
+    # submission bound to an earlier set stays resolvable for its full window.
+    for ruleset in mlcommons_endpoints_all:
+        _RULESET_REGISTRY.setdefault(f"mlperf-{ruleset.version}", ruleset)
+    _RULESET_REGISTRY.setdefault(
+        "mlperf-endpoints-current", mlcommons_endpoints_current
+    )
 
 
 # Auto-register on import
