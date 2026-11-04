@@ -243,6 +243,11 @@ class Ref:
             ref table at cohort load (`RefTable.annotate`) when this ref names a
             block: the declared `(name, type)` of every leaf directly under it,
             which the collection rows decode their members by. (Default: None)
+        sensitive (bool): Filled from the cohort's ref table at cohort load
+            (`RefTable.annotate`): a sensitive fact's resolved value is never
+            quoted in a row's diagnostics, `(redacted)` stands in for it. An
+            un-annotated Ref (a hand-built row, a checker namespace) is not
+            sensitive. (Default: False)
     """
 
     # The row language's scope namespaces: the node scopes a fact tree hangs under.
@@ -263,6 +268,7 @@ class Ref:
     default: Any = MISSING
     type: str | None = None
     members: tuple[tuple[str, str], ...] | None = None
+    sensitive: bool = False
 
     @classmethod
     def from_string(cls, value: str) -> Ref | None:
@@ -342,6 +348,9 @@ class _Fact:
         nullable (bool): Whether an explicit `null` counts as a value the upload
             may carry. Without it a present `null` refuses the upload at collect
             time, like any other mistyped value. (Default: False)
+        sensitive (bool): Whether the leaf's values are secret: a resolved
+            value of a sensitive fact is redacted from the row diagnostics
+            that would otherwise quote it. (Default: False)
     """
 
     VALID_TYPES: ClassVar[frozenset[str]] = frozenset(
@@ -353,6 +362,7 @@ class _Fact:
     default: Any = MISSING
     allowlist: tuple[Any, ...] | None = None
     nullable: bool = False
+    sensitive: bool = False
 
     def __post_init__(self) -> None:
         """Refuse an unknown `type` at construction, whoever builds the fact."""
@@ -430,8 +440,8 @@ class RefTable:
 
     `RefTable.from_yaml(root / "valid_refs.yaml")` parses the declaration.
     `validate_names` refuses a path naming nothing (with `near_match`'s hint) or
-    stepping below a leaf. `annotate` fills one row `Ref`'s `required`/
-    `default` from the leaf it names.
+    stepping below a leaf. `annotate` fills one row `Ref`'s leaf notes
+    (`required`/`default`/`type`/`sensitive`) from the leaf it names.
     """
 
     FILENAME: ClassVar[str] = "valid_refs.yaml"
@@ -532,8 +542,9 @@ class RefTable:
         Args:
             ref (Ref): The row's `Ref`, after `validate_names`.
         Returns:
-            Ref: `ref` with its leaf's `required`/`default`/`type`, or its
-                block's `members`, filled; `ref` itself when it names neither.
+            Ref: `ref` with its leaf's `required`/`default`/`type`/`sensitive`,
+                or its block's `members`, filled; `ref` itself when it names
+                neither.
         """
         level: Any = self._roots
         for name in ref.parts:
@@ -546,6 +557,7 @@ class RefTable:
                 required=level.required,
                 default=level.default,
                 type=level.type,
+                sensitive=level.sensitive,
             )
         if isinstance(level, Mapping):
             members = tuple(
@@ -679,7 +691,7 @@ def _entry(name: str, node: Any) -> Any:
 
     A mapping is the annotated-leaf form when `type` names one of the valid
     types and every key is reserved
-    (`type`/`required`/`default`/`allowlist`/`nullable`); anything else is a
+    (`type`/`required`/`default`/`allowlist`/`nullable`/`sensitive`); anything else is a
     block of sub-entries, so a rule field literally named `type` stays a block
     when its value is not a type name: `field: { type: { ... } }` is a block.
 
@@ -708,6 +720,10 @@ def _entry(name: str, node: Any) -> Any:
             nullable = node.get("nullable", False)
             if not isinstance(nullable, bool):
                 raise ValueError(f"{name}: `nullable` needs to be true or false")
+
+            sensitive = node.get("sensitive", False)
+            if not isinstance(sensitive, bool):
+                raise ValueError(f"{name}: `sensitive` needs to be true or false")
             allowlist = node.get("allowlist")
             if allowlist is not None and node["type"] == "dict":
                 raise ValueError(
@@ -745,6 +761,7 @@ def _entry(name: str, node: Any) -> Any:
                 default=default,
                 allowlist=tuple(allowlist) if allowlist is not None else None,
                 nullable=nullable,
+                sensitive=sensitive,
             )
             if (
                 default is not MISSING

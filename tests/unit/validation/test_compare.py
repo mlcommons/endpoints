@@ -496,6 +496,29 @@ class TestCompareVerdict:
         assert "eq" in verdict.why and "12.5" in verdict.why and "10.0" in verdict.why
 
     @pytest.mark.unit
+    def test_a_sensitive_ref_value_is_redacted_from_the_why(self, tmp_path):
+        path = tmp_path / "valid_refs.yaml"
+        path.write_text(
+            "point:\n  config:\n    api_key: { type: str, sensitive: true }\n",
+            encoding="utf-8",
+        )
+        row = _annotated(
+            _compare(
+                op="in",
+                left="point.config.api_key",
+                right=["", "<redacted>"],
+            ),
+            RefTable.from_yaml(path),
+        )
+        verdict = Verdict.evaluate(
+            row, {"point": {"config": {"api_key": "sk-live-abc123"}}}
+        )
+        assert verdict.ok is False
+        assert "point.config.api_key" in verdict.why
+        assert "(redacted)" in verdict.why
+        assert "sk-live-abc123" not in verdict.why
+
+    @pytest.mark.unit
     def test_incommensurable_ordering_pair_fails_with_why(self):
         verdict = Verdict.evaluate(_compare(op="gt", left=5, right=None), SCOPES)
         assert verdict.ok is False

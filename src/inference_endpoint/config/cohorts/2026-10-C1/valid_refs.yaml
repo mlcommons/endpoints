@@ -8,7 +8,8 @@
 # carries the type the document must hold; `required: true` marks the facts the
 # checker refuses a run for omitting at all (the parser-minimum trio plus
 # `point.config.concurrency`); `nullable: true` admits an explicit `null` (the
-# facts the client's own summary writes as null).
+# facts the client's own summary writes as null); `sensitive: true` keeps a
+# fact's value out of row diagnostics (`(redacted)` stands in for it).
 
 point:
   config:
@@ -136,7 +137,7 @@ point:
             type: str,
             allowlist: [openai, openai_completions, sglang, videogen],
           }
-        api_key: { type: str, nullable: true }
+        api_key: { type: str, nullable: true, sensitive: true }
         event_logs_dir: { type: str, nullable: true }
       timeouts:
         run_timeout_s: { type: float, nullable: true }

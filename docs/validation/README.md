@@ -729,6 +729,13 @@ document -> fields (`point.config.concurrency` is the `config` document's
   comment saying why (per-version compatibility: a later client change lands as
   a new cohort revision, not a moved goalpost). Undeclared keys under it report
   `ignored:` like anywhere else: the copy types what it lists, nothing more.
+
+- A leaf declared `sensitive: true` (the shipped cohort marks
+  `config.runtime_settings.client.api_key`) never has a resolved value quoted in
+  a diagnostic: a failing row reads `(redacted)` where the value would be, so a
+  mistakenly submitted credential is not copied into validation logs. The
+  annotation is the cohort's, never a value-pattern guess by the checker.
+
 - What a present value must carry is declared the same way and checked at
   collect time (`Finding.collect` refuses before any finding): match its leaf's
   type (`does not match its declared type`), sit in its `allowlist` where one is

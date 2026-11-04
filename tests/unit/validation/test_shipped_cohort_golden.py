@@ -288,4 +288,11 @@ class TestShippedCohortGolden:
         root = tmp_path / "upload"
         _build_upload(root, api_key="sk-live-abc123")
         assert main([str(COHORT), str(root)]) == 1
-        assert "point_api_key_redacted" in capsys.readouterr().out
+        ordinary = capsys.readouterr()
+        assert "point_api_key_redacted" in ordinary.out
+        assert "sk-live-abc123" not in ordinary.out
+        assert "sk-live-abc123" not in ordinary.err
+        assert main([str(COHORT), str(root), "--audit"]) == 1
+        audited = capsys.readouterr()
+        assert "sk-live-abc123" not in audited.out
+        assert "sk-live-abc123" not in audited.err

@@ -157,6 +157,26 @@ def _show(value: Any, limit: int = 80) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+# What a sensitive fact's resolved value stands as in a row's diagnostic.
+_REDACTED = "(redacted)"
+
+
+def _shown(value: Any, operand: Any, limit: int = 80) -> str:
+    """`_show` of `value`, unless `operand` is a sensitive `Ref`.
+
+    Args:
+        value (Any): The resolved operand value to render.
+        operand (Any): The row slot `value` resolved from: a sensitive `Ref`
+            never has its value rendered.
+        limit (int): The `_show` bound. (Default: 80)
+    Returns:
+        str: `_show(value, limit)`, or the redaction marker.
+    """
+    if isinstance(operand, Ref) and operand.sensitive:
+        return _REDACTED
+    return _show(value, limit)
+
+
 def _operand(ref: Ref, scopes: Mapping[str, Any]) -> tuple[bool, Any]:
     """(found, value) of a comparison operand, materializing its declared default.
 
@@ -374,7 +394,7 @@ class Compare(BaseModel):
             held = op.holds(Predicate(value if found else MISSING, None))
             if held:
                 return True, ""
-            got = _show(value) if found else "absent"
+            got = "absent" if not found else _shown(value, self.left)
             return False, f"expected {self.left} {op.label}, got {got}"
 
         out: list[Any] = []
@@ -412,11 +432,11 @@ class Compare(BaseModel):
         if bounds:
             return False, (
                 f"expected {self.left} {self.op} {bounds[0]}..{bounds[1]}, "
-                f"got {_show(left)}"
+                f"got {_shown(left, self.left)}"
             )
         return False, (
             f"expected {self.left} {self.op} {self.right}, "
-            f"got {_show(left)} vs {_show(right)}"
+            f"got {_shown(left, self.left)} vs {_shown(right, self.right)}"
         )
 
     def describe(self) -> str:
@@ -594,7 +614,8 @@ class Aggregate(BaseModel):
             # not judge False: as a `when` gate a false verdict reads as "not
             # applicable" and would switch the check off by omission.
             raise ValueError(
-                f"expected {self.over} to be a collection, got {_show(over)}"
+                f"expected {self.over} to be a collection, "
+                f"got {_shown(over, self.over)}"
             )
         if not items and not self.defines_empty:
             return False, f"expected {self.name} of {self.over}, got no values"
@@ -616,7 +637,7 @@ class Aggregate(BaseModel):
             return True, ""
         return False, (
             f"expected {self.name} of {self.over} {self.op} {self.value}, "
-            f"got {_show(measured)} vs {_show(value)}"
+            f"got {_shown(measured, self.over)} vs {_shown(value, self.value)}"
         )
 
     def describe(self) -> str:

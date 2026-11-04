@@ -538,6 +538,13 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   The parser-enforced facts decode through the same rule, so a stringified
   `concurrency` is read once and identically by the parser and by the row.
 
+- **Sensitive facts are annotated, then never quoted.** A cohort may declare a
+  leaf `sensitive: true` (`valid_refs.yaml`; today `client.api_key`);
+  `RefTable.annotate` carries the flag onto every row `Ref` that names it, and
+  `_shown` substitutes `(redacted)` for the resolved value in every failure
+  diagnostic (`Compare` and `Aggregate` alike). Nothing pattern-matches values
+  to guess a secret.
+
 - **`_read_artifact` is fd-anchored.** The node's directory opens
   `O_NOFOLLOW|O_DIRECTORY`, and the artifact opens by name relative to that fd
   with `O_NOFOLLOW|O_NONBLOCK`: neither a symlinked artifact (in-tree or out)
