@@ -184,7 +184,7 @@ def _operand(ref: Ref, scopes: Mapping[str, Any]) -> tuple[bool, Any]:
     (`Ref.default`, today §8.3's `offline`: "absent or `none`") judges as that
     value when the upload omits it -- so `offline ne dedicated` holds for a
     non-Offline point instead of going dark. Presence rows never come here:
-    `exists`/`absent`/`not_null` key on the key's raw absence.
+    `exists`/`absent`/`not_null`/`non_blank` key on the key's raw absence.
 
     Args:
         ref (Ref): The operand's reference to resolve.
@@ -209,7 +209,7 @@ def _missing_outcome(missing: Sequence[Ref]) -> tuple[bool, str]:
     reading "not applicable". Any other absent fact is the declaration's own
     not-declared state: the row does not hold, and a `when` row over it gates
     its check off by declared semantics (a check meant to test presence says
-    so with `exists`/`absent`/`not_null`).
+    so with `exists`/`absent`/`not_null`/`non_blank`).
 
     Args:
         missing (Sequence[Ref]): Every operand `Ref` absent from the upload, in
@@ -259,11 +259,11 @@ class Compare(BaseModel):
             op: eq
             right: point.result_summary.n_samples_issued
 
-    Arity follows the op (`Op.slots` in `operations.py`): `exists`, `absent`
-    and `not_null` take `left` alone, every other op takes `right`. An `in`
-    row may spell `right` as an inclusive `{"lo": ..., "hi": ...}` range
-    literal; the bounds are literals (a dynamic range names a checker namespace
-    that yields an `Interval`, e.g. `regions.coverage`).
+    Arity follows the op (`Op.slots` in `operations.py`): `exists`, `absent`,
+    `not_null` and `non_blank` take `left` alone, every other op takes `right`.
+    An `in` row may spell `right` as an inclusive `{"lo": ..., "hi": ...}`
+    range literal; the bounds are literals (a dynamic range names a checker
+    namespace that yields an `Interval`, e.g. `regions.coverage`).
 
     A `right` given at all to a left-only op is a shape error.
     `abs_tol`/`rel_tol` reach `eq` and `ne` only.
@@ -271,8 +271,9 @@ class Compare(BaseModel):
     Args:
         op (str): The YAML op name, resolved to an `Op` subclass
             (`operations.py`).
-        left (Any): The compared operand, or the `Ref` whose presence a
-            presence op asks about (`exists`/`absent`/`not_null`).
+        left (Any): The compared operand, or the `Ref` whose presence (or
+            content) a left-only op asks about (`exists`/`absent`/`not_null`/
+            `non_blank`).
         right (Any | None): The compare target of every op whose slots take it,
             or an `in` row's inclusive `{"lo": ..., "hi": ...}` range literal.
             (Default: None)

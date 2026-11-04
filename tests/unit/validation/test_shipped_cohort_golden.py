@@ -296,3 +296,14 @@ class TestShippedCohortGolden:
         audited = capsys.readouterr()
         assert "sk-live-abc123" not in audited.out
         assert "sk-live-abc123" not in audited.err
+
+    @pytest.mark.unit
+    def test_a_blank_disclosure_fails_the_cohort(self, tmp_path, capsys):
+        root = tmp_path / "upload"
+        _build_upload(root)
+        path = root / "results" / SYSTEM / MODEL / "r8" / "point.yaml"
+        config = yaml.safe_load(path.read_text(encoding="utf-8"))
+        config["division"] = " "
+        path.write_text(yaml.safe_dump(config, sort_keys=True), encoding="utf-8")
+        assert main([str(COHORT), str(root)]) == 1
+        assert "point_disclosure_complete" in capsys.readouterr().out

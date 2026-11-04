@@ -377,3 +377,14 @@ class NotNull(Op, name="not_null", slots=(), needs_found=True):
         self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
     ) -> bool:
         return predicate.subject is not MISSING and predicate.subject is not None
+
+
+class NonBlank(Op, name="non_blank", slots=(), needs_found=True):
+    """`left` names a present string with content (not empty, not whitespace only)."""
+
+    label: ClassVar[str] = "to be a non-blank string"
+
+    def holds(
+        self, predicate: Predicate, abs_tol: float = 0.0, rel_tol: float = 0.0
+    ) -> bool:
+        return isinstance(predicate.subject, str) and bool(predicate.subject.strip())

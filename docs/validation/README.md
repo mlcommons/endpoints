@@ -333,6 +333,9 @@ Every comparison takes `left` and `op`; the remaining keys follow the `op`:
      absent.
    - `not_null`: True if `left` resolves to a value that is not `null` (both a
      missing key and a stored `null` fail).
+   - `non_blank`: True if `left` resolves to a string with content - neither the
+     empty string nor whitespace only. A missing key and a stored `null` fail
+     it.
 
    A present-but-unparsable artifact is refused loudly at `Finding.collect` (see
    "Refusals"), so in a checked run `absent` always means genuinely missing.
@@ -391,7 +394,7 @@ will be raised at load time. The legal shapes for a `Ref`'s definition are:
 - `{ type: int, default: 1 }`
 - `{ type: int, required: true }`
 
-Presence probes (`exists`/`absent`/`not_null`) always read the key's own raw
+Presence probes (`exists`/`absent`/`not_null`/`non_blank`) always read the key's
 state, never the declared default: an omitted `config.offline` is absent
 (`exists` false, `not_null` false), while `offline: none` is present, stored as
 the string `none`. The two "no declaration" spellings (the omitted key under its
@@ -448,9 +451,9 @@ assert:
 
 An `aggregate` computes its value with the `aggregate` key (a computation from
 the table above) and compares the result with `value` using one of the `op`s
-listed above. `Op`s like `in`, `matches`, `exists`/`absent`/`not_null` have
-semantics for collections, strings, and presence checks, which `aggregate`s do
-not support.
+listed above. `Op`s like `in`, `matches`, `exists`/`absent`/`not_null`/
+`non_blank` have semantics for collections, strings, and presence checks, which
+`aggregate`s do not support.
 
 `value` uses the same rules as comparison operands:
 

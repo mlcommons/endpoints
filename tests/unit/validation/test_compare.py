@@ -152,7 +152,7 @@ class TestOperandForms:
         assert row.right == "squad.v2.0"
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("op", ["exists", "absent", "not_null"])
+    @pytest.mark.parametrize("op", ["exists", "absent", "not_null", "non_blank"])
     def test_presence_ops_need_a_reference_left(self, op):
         with pytest.raises(ValueError, match="presence"):
             _compare(op=op, left={"literal": "point.tps"})
@@ -637,7 +637,12 @@ class TestCompareVerdict:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("op", "ok"),
-        [("exists", False), ("absent", True), ("not_null", False)],
+        [
+            ("exists", False),
+            ("absent", True),
+            ("not_null", False),
+            ("non_blank", False),
+        ],
     )
     def test_missing_state_grid_for_presence_ops(self, op, ok):
         """A missing reference: exists false, absent true, not_null false."""
@@ -651,7 +656,12 @@ class TestCompareVerdict:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("op", "ok"),
-        [("exists", True), ("absent", False), ("not_null", False)],
+        [
+            ("exists", True),
+            ("absent", False),
+            ("not_null", False),
+            ("non_blank", False),
+        ],
     )
     def test_null_state_grid_for_presence_ops(self, op, ok):
         assert (
@@ -660,6 +670,22 @@ class TestCompareVerdict:
             ).ok
             is ok
         )
+
+    @pytest.mark.unit
+    def test_non_blank_reads_content_not_presence(self):
+        scopes = {"point": {"config": {"model_name": "m", "empty": "", "spaces": "  "}}}
+        assert (
+            Verdict.evaluate(
+                _compare(op="non_blank", left="point.config.model_name"), scopes
+            ).ok
+            is True
+        )
+        for key in ("empty", "spaces"):
+            verdict = Verdict.evaluate(
+                _compare(op="non_blank", left=f"point.config.{key}"), scopes
+            )
+            assert verdict.ok is False
+            assert "non-blank" in verdict.why
 
     @pytest.mark.unit
     def test_missing_reference_fails_a_comparison_and_names_it(self):

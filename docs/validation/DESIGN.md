@@ -583,5 +583,6 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   one operator where that form is mandatory for `right` rather than intentional:
   `Compare._matches_right_is_explicit_literal` refuses anything else at load, so
   a regex is never mistaken for a dotted reference and a pattern is never
-  authored as one. Presence ops (`exists`/`absent`/`not_null`) refuse a literal
-  `left` at load — that asks whether a constant exists, which answers itself.
+  authored as one. Left-only ops (`exists`/`absent`/`not_null`/`non_blank`)
+  refuse a literal `left` at load — that asks whether a constant exists, which
+  answers itself.

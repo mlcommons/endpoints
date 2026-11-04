@@ -10,23 +10,23 @@
 # cohort's `valid_refs.yaml` notes at collect time, not by rows here.
 
 point_disclosure_complete:
-  description: Every §8.3 disclosure field is present and non-empty.
+  description: Every §8.3 disclosure field is present and non-blank (empty or whitespace-only values fail).
   rule: "Endpoints Policy §8.3, Measurement Point (point.yaml); §1, Submission completeness."
-  fix: Add the missing field to this run's point.yaml and re-submit.
+  fix: Add the field to this run's point.yaml with content (a blank value fails it) and re-submit.
   severity: fail
   assert:
-    - { left: point.config.division, op: exists }
+    - { left: point.config.division, op: non_blank }
     - { left: point.config.max_supported_concurrency, op: exists }
-    - { left: point.config.model_name, op: exists }
-    - { left: point.config.model_precision, op: exists }
-    - { left: point.config.link_to_model, op: exists }
-    - { left: point.config.dataset_name, op: exists }
-    - { left: point.config.dataset_type, op: exists }
-    - { left: point.config.dataset_link, op: exists }
-    - { left: point.config.shared_src, op: exists }
-    - { left: point.config.shared_docs, op: exists }
-    - { left: point.config.seed_set, op: exists }
-    - { left: point.config.target_cohort, op: exists }
+    - { left: point.config.model_name, op: non_blank }
+    - { left: point.config.model_precision, op: non_blank }
+    - { left: point.config.link_to_model, op: non_blank }
+    - { left: point.config.dataset_name, op: non_blank }
+    - { left: point.config.dataset_type, op: non_blank }
+    - { left: point.config.dataset_link, op: non_blank }
+    - { left: point.config.shared_src, op: non_blank }
+    - { left: point.config.shared_docs, op: non_blank }
+    - { left: point.config.seed_set, op: non_blank }
+    - { left: point.config.target_cohort, op: non_blank }
 
 point_run_complete:
   description: The run completed; a drain timeout or interrupt leaves it incomplete.
