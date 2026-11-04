@@ -725,6 +725,12 @@ unchecked).
   - `derived.model_name_admitted` - every declared `model_name` is in the
     catalog's admitted set
   - `derived.out_of_range_points` - Section 5.4's flagged points tuple
+  - `derived.conflicting_load_patterns` - the distinct patterns when the type
+    vote disagrees
+  - `derived.conflicting_model_names` / `derived.conflicting_datasets` /
+    `derived.conflicting_seed_sets` - Section 9.1's configuration consistency
+  - `derived.inconsistent_system_desc_keys` - Section 8.5's differing system
+    description keys
 - `ruleset` - the packaged ruleset the cohort's `cohort.yaml` names (a
   registered round, e.g. `mlperf-inference-v6.1`):
   - `ruleset.models.<name>.<key>` - model definitions (the round's `models.py`)

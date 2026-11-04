@@ -717,6 +717,106 @@ class TestCoverageAndCounts:
         assert walked.offline_points_missing_accuracy() == ()
 
 
+class TestCurveConsistency:
+    """The per-curve agreement derivations (Sections 8.5/9.1)."""
+
+    @pytest.mark.unit
+    def test_a_dedicated_offline_run_is_left_out_of_the_type_vote(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    config_extra={"runtime_settings": {"load_pattern": "concurrency"}},
+                ),
+                Run(
+                    concurrency=50,
+                    offline="dedicated",
+                    config_extra={
+                        "runtime_settings": {"load_pattern": "max_throughput"}
+                    },
+                ),
+                Run(
+                    concurrency=8192,
+                    config_extra={"runtime_settings": {"load_pattern": "concurrency"}},
+                ),
+            ],
+        )
+        assert pareto.conflicting_load_patterns() == ()
+
+    @pytest.mark.unit
+    def test_disagreeing_fixed_points_name_their_patterns(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    config_extra={"runtime_settings": {"load_pattern": "concurrency"}},
+                ),
+                Run(
+                    concurrency=32,
+                    config_extra={
+                        "runtime_settings": {"load_pattern": "agentic_inference"}
+                    },
+                ),
+                Run(
+                    concurrency=8192,
+                    config_extra={"runtime_settings": {"load_pattern": "concurrency"}},
+                ),
+            ],
+        )
+        assert pareto.conflicting_load_patterns() == (
+            "agentic_inference",
+            "concurrency",
+        )
+
+    @pytest.mark.unit
+    def test_disagreeing_datasets_include_the_omitted_default(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16, config_extra={"dataset": "mlperf-perf-dataset-v1"}),
+                Run(concurrency=8192),
+            ],
+        )
+        assert pareto.conflicting_datasets() == ("", "mlperf-perf-dataset-v1")
+
+    @pytest.mark.unit
+    def test_disagreeing_seed_sets_skip_the_absent_declarations(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16, config_extra={"seed_set": "A"}),
+                Run(concurrency=32, config_extra={"seed_set": "B"}),
+                Run(concurrency=8192),
+            ],
+        )
+        assert pareto.conflicting_seed_sets() == ("A", "B")
+
+    @pytest.mark.unit
+    def test_only_the_identity_fields_make_a_description_inconsistent(self, tmp_path):
+        identity = {"node_sets": [{"system_node_ensemble_id": 0, "nodes": 1}]}
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16, system_desc_extra={"cooling": "air", **identity}),
+                Run(
+                    concurrency=8192,
+                    system_desc_extra={"cooling": "liquid", **identity},
+                ),
+            ],
+        )
+        assert pareto.inconsistent_system_desc_keys() == ("cooling",)
+        per_point = _pareto(
+            tmp_path / "second",
+            [
+                Run(concurrency=16, system_desc_extra={"batch": 1, **identity}),
+                Run(concurrency=8192, system_desc_extra={"batch": 8, **identity}),
+            ],
+        )
+        assert per_point.inconsistent_system_desc_keys() == ()
+
+
 class TestDerivedExposure:
     """`Pareto.derived`: the `derived.<name>` fields, resolved from the pareto itself."""
 
@@ -734,6 +834,11 @@ class TestDerivedExposure:
             "point_count",
             "point_count_min",
             "uncovered_regions",
+            "conflicting_load_patterns",
+            "conflicting_model_names",
+            "conflicting_datasets",
+            "conflicting_seed_sets",
+            "inconsistent_system_desc_keys",
         }
 
     @pytest.mark.unit

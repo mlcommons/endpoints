@@ -74,6 +74,24 @@ _MANDATORY_REGIONS: tuple[RegionKind, ...] = (
     RegionKind.HIGH_CONCURRENCY,
 )
 
+# §8.5 describes one system per curve, but §8.1 calls each point's copy of the
+# system description the "framework/parallelism/precision for this point", and
+# §4.5.3's worked example changes the replica size between points: these are
+# the fields a curve's points may legitimately spell differently.
+_PER_POINT_SYSTEM_DESC_FIELDS: frozenset[str] = frozenset(
+    {
+        "tps_utilization",
+        "tensor_parallel",
+        "pipeline_parallel",
+        "expert_parallel",
+        "data_parallel",
+        "disaggregated",
+        "batch",
+        "config_summary",
+        "config_summary_notes",
+    }
+)
+
 
 def normalize_offline(declared: Any) -> Any:
     """The `offline` declaration as `Point.offline` carries it.
@@ -192,6 +210,11 @@ class Point:
         model_name (str | None): The declared `model_name` (§8.3): the key the
             catalog's agentic flag is looked up by. `None` when the artifact omits it
             or spells another type. (Default: None)
+        load_pattern (str | None): The declared `runtime_settings.load_pattern`,
+            defaulted to `concurrency` where the block omits it (the schema's own
+            default). (Default: None)
+        dataset (str | None): The declared `dataset` id. (Default: None)
+        seed_set (str | None): The declared `seed_set` id. (Default: None)
     """
 
     offline: Literal["dedicated", "elected"] | None
@@ -202,6 +225,9 @@ class Point:
     # one without its point node.
     node: Node | None = None
     model_name: str | None = None
+    load_pattern: str | None = None
+    dataset: str | None = None
+    seed_set: str | None = None
 
     def __post_init__(self) -> None:
         if self.offline not in (None, "dedicated", "elected"):
@@ -244,6 +270,12 @@ class Point:
         system_tps = _finite_fact(
             summary, "system_tps", f"{node.dir}/result_summary.json"
         )
+        runtime_settings = config.get("runtime_settings")
+        pattern = (
+            runtime_settings.get("load_pattern", "concurrency")
+            if isinstance(runtime_settings, Mapping)
+            else None
+        )
         return cls(
             offline=offline,
             concurrency=concurrency,
@@ -251,6 +283,17 @@ class Point:
             system_desc=system_desc,
             node=node,
             model_name=declared_name if isinstance(declared_name, str) else None,
+            load_pattern=pattern if isinstance(pattern, str) else None,
+            dataset=(
+                config.get("dataset")
+                if isinstance(config.get("dataset"), str)
+                else None
+            ),
+            seed_set=(
+                config.get("seed_set")
+                if isinstance(config.get("seed_set"), str)
+                else None
+            ),
         )
 
     def point_power_kw(
@@ -570,6 +613,97 @@ class Pareto:
         """
         return tuple(self._offline_partition()[0])
 
+    def conflicting_load_patterns(self) -> tuple[str, ...]:
+        """The distinct load patterns when the type-voting points disagree (§8.5).
+
+        §6.1 gives a dedicated Offline run its own pattern (`max_throughput`), so
+        it is left out of the vote; an elected point is an ordinary
+        fixed-concurrency run and votes. Empty when the vote is unanimous or no
+        voting point declares a pattern.
+
+        Returns:
+            tuple[str, ...]: The distinct patterns, sorted, when more than one
+                is in play; otherwise empty.
+        """
+        patterns = {
+            point.load_pattern
+            for point in self.points
+            if point.offline != "dedicated" and point.load_pattern is not None
+        }
+        return tuple(sorted(patterns)) if len(patterns) > 1 else ()
+
+    def conflicting_model_names(self) -> tuple[str, ...]:
+        """The distinct declared `model_name`s when the points disagree (§9.1).
+
+        Returns:
+            tuple[str, ...]: The distinct names, sorted, when more than one is
+                declared; otherwise empty.
+        """
+        names = {point.model_name for point in self.points if point.model_name}
+        return tuple(sorted(names)) if len(names) > 1 else ()
+
+    def conflicting_datasets(self) -> tuple[str, ...]:
+        """The distinct `dataset` ids when the points disagree (§9.1).
+
+        A point that declares no `dataset` reads as the schema's own default
+        (the empty string), so one declared id beside an omitted key is a
+        disagreement, exactly as the round's checker reads it.
+
+        Returns:
+            tuple[str, ...]: The distinct ids, sorted, when more than one is in
+                play; otherwise empty.
+        """
+        datasets = {point.dataset or "" for point in self.points}
+        return tuple(sorted(datasets)) if len(datasets) > 1 else ()
+
+    def conflicting_seed_sets(self) -> tuple[str, ...]:
+        """The distinct `seed_set` ids when the points disagree (§9.1).
+
+        A point with no declaration is left out: absence is the disclosure
+        rows' report, not a disagreement.
+
+        Returns:
+            tuple[str, ...]: The distinct ids, sorted, when more than one is
+                declared; otherwise empty.
+        """
+        ids = {point.seed_set for point in self.points if point.seed_set is not None}
+        return tuple(sorted(ids)) if len(ids) > 1 else ()
+
+    def inconsistent_system_desc_keys(self) -> tuple[str, ...]:
+        """Keys whose value differs between the curve's point descriptions (§8.5).
+
+        Every point of a curve must describe the same system. Each point's
+        `system_desc.json` is compared to the first's, with the fields §8.1 and
+        §4.5.3 leave per-point (`_PER_POINT_SYSTEM_DESC_FIELDS`) excluded.
+
+        Returns:
+            tuple[str, ...]: The differing keys, sorted; empty when every
+                description reads the same (or none is parsable).
+        """
+        identities: list[Mapping[str, Any]] = []
+        for point in self.points:
+            if point.node is None:
+                continue
+            value, error = point.node.read("system_desc.json")
+            if error is not None or not isinstance(value, Mapping):
+                continue
+            identities.append(
+                {
+                    key: item
+                    for key, item in value.items()
+                    if key not in _PER_POINT_SYSTEM_DESC_FIELDS
+                }
+            )
+        if not identities:
+            return ()
+        first = identities[0]
+        differing: set[str] = set()
+        for identity in identities[1:]:
+            for key in set(identity) | set(first):
+                if identity.get(key) != first.get(key):
+                    differing.add(key)
+        return tuple(sorted(differing))
+
     def accuracy_uncovered_regions(self) -> tuple[str, ...]:
         """The §5.3 mandatory regions no accuracy-carrying point lands in.
 
@@ -885,6 +1019,11 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,
     "model_name_admitted": Pareto.model_name_admitted,
+    "conflicting_load_patterns": Pareto.conflicting_load_patterns,
+    "conflicting_model_names": Pareto.conflicting_model_names,
+    "conflicting_datasets": Pareto.conflicting_datasets,
+    "conflicting_seed_sets": Pareto.conflicting_seed_sets,
+    "inconsistent_system_desc_keys": Pareto.inconsistent_system_desc_keys,
     "out_of_range_points": lambda pareto: pareto.out_of_range_points(pareto.regions()),
 }
 

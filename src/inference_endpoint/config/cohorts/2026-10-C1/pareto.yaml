@@ -99,3 +99,63 @@ pareto_model_name_admitted:
     - { left: ruleset.models, op: exists }
   assert:
     - { left: derived.model_name_admitted, op: eq, right: true }
+
+pareto_benchmark_type_consistency:
+  description: The curve's type-voting points agree on the load pattern (§8.5).
+  rule: "Endpoints Policy §8.5, Curve Consistency; §6.1, Load Patterns."
+  fix: Declare one load pattern across the point files (a dedicated Offline run may differ).
+  severity: fail
+  assert:
+    - {
+        over: derived.conflicting_load_patterns,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }
+
+pareto_config_model_consistency:
+  description: Every point of the curve declares the same model name (§9.1).
+  rule: "Endpoints Policy §9.1, Configuration Consistency; §8.3, Measurement Point."
+  fix: Declare one `model_name` across the point files.
+  severity: fail
+  assert:
+    - {
+        over: derived.conflicting_model_names,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }
+
+pareto_config_dataset_consistency:
+  description: Every point of the curve declares the same dataset id (§9.1).
+  rule: "Endpoints Policy §9.1, Configuration Consistency; §8.3, Measurement Point."
+  fix: Declare one `dataset` across the point files.
+  severity: fail
+  assert:
+    - { over: derived.conflicting_datasets, aggregate: count, op: eq, value: 0 }
+
+pareto_seed_set_consistency:
+  description: Every point of the curve records the same seed set (§9.1).
+  rule: "Endpoints Policy §9.1, Configuration Consistency; §4.6, Seeds."
+  fix: Bind every point of the curve to one published seed set.
+  severity: fail
+  assert:
+    - {
+        over: derived.conflicting_seed_sets,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }
+
+pareto_system_desc_consistency:
+  description: Every point of the curve describes the same system (§8.5).
+  rule: "Endpoints Policy §8.5, Curve Consistency; §8.1, System Description."
+  fix: Align the point files' system descriptions (only the per-point parallelism/batch fields may differ).
+  severity: fail
+  assert:
+    - {
+        over: derived.inconsistent_system_desc_keys,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }

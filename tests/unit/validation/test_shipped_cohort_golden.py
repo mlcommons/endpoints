@@ -313,3 +313,14 @@ class TestShippedCohortGolden:
         path.write_text(yaml.safe_dump(config, sort_keys=True), encoding="utf-8")
         assert main([str(COHORT), str(root)]) == 1
         assert "pareto_model_name_admitted" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_a_disagreeing_load_pattern_fails_the_cohort(self, tmp_path, capsys):
+        root = tmp_path / "upload"
+        _build_upload(root)
+        path = root / "results" / SYSTEM / MODEL / "r8" / "point.yaml"
+        config = yaml.safe_load(path.read_text(encoding="utf-8"))
+        config["runtime_settings"]["load_pattern"] = "agentic_inference"
+        path.write_text(yaml.safe_dump(config, sort_keys=True), encoding="utf-8")
+        assert main([str(COHORT), str(root)]) == 1
+        assert "pareto_benchmark_type_consistency" in capsys.readouterr().out
