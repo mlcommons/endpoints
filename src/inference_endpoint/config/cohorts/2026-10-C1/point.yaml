@@ -329,9 +329,9 @@ point_accuracy_scores_present:
   fix: Run this point's accuracy dataset and ship its accuracy_results.json.
   severity: fail
   when:
-    - { left: point.accuracy_results, op: exists }
+    - { left: point.accuracy_results.accuracy_scores, op: exists }
   assert:
-    - over: point.accuracy_results
+    - over: point.accuracy_results.accuracy_scores
       aggregate: count
       op: gt
       value: 0

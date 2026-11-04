@@ -525,7 +525,7 @@ class _GateResolver:
 
     def _row_scopes(self, node: Node) -> dict[str, Any]:
         """The row-resolvable scope map at `node`, built once per node."""
-        key = str(node.dir)
+        key = f"{node.kind.value}:{node.dir}"
         if key not in self._scopes:
             self._scopes[key] = _scopes_rows_view(node, self._submission)
         return self._scopes[key]
@@ -544,8 +544,10 @@ def _chain_nodes(scope: RuleScopes, node: Node) -> tuple[Node, ...]:
 
     Same-or-ancestor scope resolves to the one chain node (a point's pareto,
     system and submission ancestors). A finer scope resolves to every such node
-    below `node` (a system-scoped check vouches with all of its points). A
-    subtree without any yields no nodes -- the chain claims nothing there.
+    below `node` (a system-scoped check vouches with all of its points), never
+    one inside a refused subtree (`_is_refused`): a refused node's facts cannot
+    be trusted, so it can neither vouch for nor block a judged dependent. A
+    subtree without any claimable node yields none -- the chain claims nothing.
 
     Raises:
         ValueError: When no ancestor of the requested `scope` kind exists above `node`
@@ -558,7 +560,9 @@ def _chain_nodes(scope: RuleScopes, node: Node) -> tuple[Node, ...]:
         if probe is not None:
             return (probe,)
         raise ValueError(f"no {scope.value} node above {node.dir}")
-    return tuple(_below(node, scope))
+    return tuple(
+        candidate for candidate in _below(node, scope) if not _is_refused(candidate)
+    )
 
 
 def _below(node: Node, scope: RuleScopes) -> Iterator[Node]:

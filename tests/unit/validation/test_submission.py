@@ -903,6 +903,100 @@ class TestCurveConsistency:
         )
         assert pareto.tps_utilization_mismatch_points() == (64,)
 
+    @pytest.mark.unit
+    def test_the_throughput_band_and_the_whole_run_reading(self, tmp_path):
+        measured = {
+            "duration_ns": 2_000_000_000,
+            "output_sequence_lengths": {"total": 2000},
+        }
+        pareto = _pareto(
+            tmp_path,
+            [
+                # 0.9% off its derivation: inside the 1% band.
+                Run(concurrency=16, system_tps=1009.0, summary_extra=measured),
+                # 1.5% off: the blocking row's finding.
+                Run(concurrency=32, system_tps=1015.0, summary_extra=measured),
+                # The client's whole-run `tps` is the stored side, not the
+                # steady-window alias `system_tps` would carry (500).
+                Run(
+                    concurrency=50,
+                    system_tps=OMITTED,
+                    summary_extra={
+                        **measured,
+                        "tps": 1000.0,
+                        "steady_state": {"window": {"tps": {"system": 500.0}}},
+                    },
+                ),
+            ],
+        )
+        assert pareto.system_tps_mismatch_points() == (32,)
+
+    @pytest.mark.unit
+    def test_unsafe_summary_numbers_are_skipped_not_raised(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                # A NaN duration derives no throughput (and never agrees).
+                Run(
+                    concurrency=16,
+                    system_tps=1000.0,
+                    summary_extra={
+                        "duration_ns": float("nan"),
+                        "output_sequence_lengths": {"total": 2000},
+                    },
+                ),
+                # A subnormal duration rounds to zero seconds: no division.
+                Run(
+                    concurrency=32,
+                    system_tps=1000.0,
+                    summary_extra={
+                        "duration_ns": 5e-324,
+                        "output_sequence_lengths": {"total": 2000},
+                    },
+                ),
+                # A stringified total decodes like every other numeric fact.
+                Run(
+                    concurrency=50,
+                    system_tps=1000.0,
+                    summary_extra={
+                        "duration_ns": 2_000_000_000,
+                        "output_sequence_lengths": {"total": "2000.0"},
+                    },
+                ),
+            ],
+        )
+        assert pareto.system_tps_mismatch_points() == ()
+
+    @pytest.mark.unit
+    def test_a_stringified_count_reads_as_its_number(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    summary_extra={
+                        "n_samples_issued": "10",
+                        "n_samples_completed": "9",
+                    },
+                )
+            ],
+        )
+        assert pareto.accounting_mismatch_points() == (16,)
+
+    @pytest.mark.unit
+    def test_a_stringified_number_is_the_same_declaration(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16),
+                Run(
+                    concurrency=32,
+                    system_desc_extra={"max_supported_concurrency": "8192"},
+                ),
+            ],
+        )
+        assert pareto.inconsistent_system_desc_keys() == ()
+
 
 class TestDerivedExposure:
     """`Pareto.derived`: the `derived.<name>` fields, resolved from the pareto itself."""

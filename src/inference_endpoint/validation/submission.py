@@ -89,8 +89,8 @@ def _derived_system_tps(value: Mapping[str, Any]) -> float | None:
 
     `output_sequence_lengths.total` over `duration_ns` seconds -- the derived
     side of Section 9.1's throughput checks. A summary missing either number,
-    or carrying a non-positive duration, yields `None` and its row is left to
-    the presence refusals.
+    or carrying a non-finite or non-positive one, yields `None` and its row is
+    left to the presence refusals.
 
     Args:
         value (Mapping[str, Any]): One `result_summary.json` document.
@@ -99,18 +99,26 @@ def _derived_system_tps(value: Mapping[str, Any]) -> float | None:
             own numbers cannot carry one.
     """
     totals = value.get("output_sequence_lengths")
-    total = totals.get("total") if isinstance(totals, Mapping) else None
-    duration_ns = value.get("duration_ns")
+    total = decode_number(
+        totals.get("total") if isinstance(totals, Mapping) else None, "float"
+    )
+    duration_ns = decode_number(value.get("duration_ns"), "float")
     numbers = (total, duration_ns)
     if (
         not all(
             isinstance(number, int | float) and not isinstance(number, bool)
             for number in numbers
         )
+        or not all(math.isfinite(float(number)) for number in numbers)
         or duration_ns <= 0
     ):
         return None
-    return float(total) / (float(duration_ns) / 1e9)
+    seconds = float(duration_ns) / 1e9
+    if seconds <= 0:
+        # A subnormal nanosecond count rounds to zero seconds: no throughput
+        # can be derived, and dividing by it would raise.
+        return None
+    return float(total) / seconds
 
 
 # §8.5 describes one system per curve, but §8.1 calls each point's copy of the
@@ -746,7 +754,7 @@ class Pareto:
         differing: set[str] = set()
         for identity in identities[1:]:
             for key in set(identity) | set(first):
-                if identity.get(key) != first.get(key):
+                if not _same_value(identity.get(key), first.get(key)):
                     differing.add(key)
         return tuple(sorted(differing))
 
@@ -755,8 +763,9 @@ class Pareto:
 
         `n_samples_completed + n_samples_failed` must equal `n_samples_issued`.
         A missing `n_samples_failed` reads as `0` (the summary schema's own
-        default); a point whose summary omits the other two counts is left to
-        the required-fact refusals rather than counted here.
+        default), and the counts decode through `decode_number`, so a
+        stringified count reads as its number; a point whose summary omits the
+        other two counts is left to the required-fact refusals.
 
         Returns:
             tuple[int, ...]: The concurrency of each inconsistent point, empty
@@ -769,9 +778,9 @@ class Pareto:
             value, error = point.node.read("result_summary.json")
             if error is not None or not isinstance(value, Mapping):
                 continue
-            issued = value.get("n_samples_issued")
-            completed = value.get("n_samples_completed")
-            failed = value.get("n_samples_failed", 0)
+            issued = decode_number(value.get("n_samples_issued"), "int")
+            completed = decode_number(value.get("n_samples_completed"), "int")
+            failed = decode_number(value.get("n_samples_failed", 0), "int")
             counts = (issued, completed, failed)
             if not all(
                 isinstance(count, int) and not isinstance(count, bool)
@@ -803,11 +812,13 @@ class Pareto:
             value, error = point.node.read("result_summary.json")
             if error is not None or not isinstance(value, Mapping):
                 continue
-            stored = value.get("full_run_system_tps", value.get("system_tps"))
+            stored = decode_number(
+                value.get("full_run_system_tps", value.get("system_tps")), "float"
+            )
             derived = _derived_system_tps(value)
             if not isinstance(stored, int | float) or isinstance(stored, bool):
                 continue
-            if derived is None:
+            if not math.isfinite(float(stored)) or derived is None:
                 continue
             if abs(float(stored) - derived) / max(abs(derived), 1e-9) > TPS_TOLERANCE:
                 mismatched.append(point.concurrency)
@@ -1061,10 +1072,12 @@ class Submission:
         A problem that keeps one submission (one `<system>/<model>`) from being
         judged is carried as a `RefusedSubmission` instead of raised, so the
         other submissions of a pool still get their findings. A problem of the
-        input itself -- an unwalkable root, a pool listing no system -- stays an
-        error.
+        input itself -- an unwalkable root, a pool listing no system, or an
+        entry directly under the root that no kind can take -- stays an error.
         """
         tree = SubmissionNode.from_directory(root, ruleset=ruleset)
+        if tree.refusals:
+            raise ValueError("; ".join(tree.refusals))
         paretos: list[Pareto] = []
         refused: list[RefusedSubmission] = []
         for system in tree.children:
@@ -1146,12 +1159,40 @@ def _same_declaration(
     return first_value == other_value
 
 
+def _same_value(first: Any, other: Any) -> bool:
+    """Whether two declared values read as the same declaration.
+
+    A number and its stringified spelling are the same declaration: every
+    numeric fact decodes through `decode_number`, so a curve mixing `8192` and
+    `"8192"` describes one system. `True` never agrees with `1`, and a
+    non-numeric value still compares by exact type.
+
+    Args:
+        first (Any): One declared value, as the artifact spells it.
+        other (Any): The value another point spells for the same key.
+    Returns:
+        bool: Whether both read as the same declaration.
+    """
+    if isinstance(first, bool) or isinstance(other, bool):
+        return isinstance(first, bool) and isinstance(other, bool) and first == other
+    decoded_first = decode_number(first, "float")
+    decoded_other = decode_number(other, "float")
+    numbers = (decoded_first, decoded_other)
+    if all(
+        isinstance(number, int | float) and not isinstance(number, bool)
+        for number in numbers
+    ):
+        return float(decoded_first) == float(decoded_other)
+    return type(decoded_first) is type(decoded_other) and decoded_first == decoded_other  # noqa: E721
+
+
 class DerivedFields(Mapping[str, Any]):
     """Lazy `derived.<name>` mapping: a derivation runs only when a row names it.
 
     `Ref.resolve` walks this like any namespace. `view["point_cap"]` ->
     `Pareto.point_cap()`'s value, memoized. `view["nope"]` -> `KeyError`, so
     `Ref.resolve` reports the field absent. Membership asks the known-names
+
     tables only and never runs a derivation, so one derivation's fail-loud
     `ValueError` reaches exactly the row that named it.
 

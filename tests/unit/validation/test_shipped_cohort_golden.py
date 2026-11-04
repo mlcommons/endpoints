@@ -295,6 +295,23 @@ class TestShippedCohortGolden:
         assert "pareto_point_count_min" in out
 
     @pytest.mark.unit
+    def test_a_pool_level_listing_refusal_stops_the_input(self, tmp_path, capsys):
+        """A listing problem at the pool root refuses the input, never skips it.
+
+        The refusal is the input's own: without surfacing it, every descendant
+        would read as refused, every check would skip, and the pool would report
+        accepted -- a fail-open.
+        """
+        root = tmp_path / "upload"
+        _build_upload(root)
+        (root / "results" / "linked").symlink_to(
+            root / "results" / SYSTEM, target_is_directory=True
+        )
+        assert main([str(COHORT), str(root)]) == 2
+        captured = capsys.readouterr()
+        assert "linked" in captured.err + captured.out
+
+    @pytest.mark.unit
     def test_a_live_api_key_fails_the_cohort(self, tmp_path, capsys):
         root = tmp_path / "upload"
         _build_upload(root, api_key="sk-live-abc123")
