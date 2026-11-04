@@ -65,9 +65,15 @@ Run a cohort against one submission with the CLI:
 python -m inference_endpoint.validation my_cohort submission_result_directory/
 ```
 
-The submission argument is the upload root (`results/<system>/<model>/r<N>/`
-below it). Each run directory `r<N>/` carries its own `system_desc.json`
-(Section 8.2.1), its `point.yaml` (`concurrency`, `offline` declaration) and its
+The submission argument accepts either shape:
+
+- a **pool root**: the tree holding `results/<system>/<model>/r<N>/`;
+- one **`<system>` directory** (Section 8.3): `<model>/r<N>/` and the system's
+  `system_power.json` directly below it, so the system-scoped checks can read
+  that file (a bare `<system>/<model>` input cannot).
+
+Each run directory `r<N>/` carries its own `system_desc.json` (Section 8.2.1),
+its `point.yaml` (`concurrency`, `offline` declaration) and its
 `result_summary.json`, whose Section 4.1 aggregate `system_tps` is the point's
 throughput - read as Section 4.4's official value: the steady-state window's TPS
 (`steady_state.tps.system`) wherever the summary carries a valid window

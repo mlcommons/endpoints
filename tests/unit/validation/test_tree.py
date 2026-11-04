@@ -144,6 +144,28 @@ class TestWalk:
         with pytest.raises(NotADirectoryError, match="is not a directory"):
             SubmissionNode.from_directory(path)
 
+    @pytest.mark.unit
+    def test_a_system_directory_is_a_valid_root(self, tmp_path):
+        """One Section 8.3 `<system>` dir: its models hang from a synthesized
+        `system` node, which reads the system's own `system_power.json`."""
+        _, root = _tree(
+            tmp_path,
+            system_artifacts={"system_power.json": {"provisioned_power_kw": 1.0}},
+        )
+        system_dir = root / "results" / "sys"
+        node = SubmissionNode.from_directory(system_dir)
+        system = node.children[0]
+        assert type(system) is SystemNode
+        assert system.dir == system_dir
+        assert [p.dir.name for p in system.children] == ["model"]
+        assert [p.dir.name for p in system.children[0].children] == ["r16", "r8"]
+        # Section 8.3 reads `system_power.json` at the system level; the
+        # wrapper root keeps no artifacts of its own from the shared directory.
+        assert system.scopes()["system"]["system_power"] == {
+            "provisioned_power_kw": 1.0
+        }
+        assert node.scopes()["submission"] == {}
+
 
 class TestRead:
     """`Node.read`: (value, error) over the eagerly loaded artifacts."""

@@ -792,3 +792,10 @@ class TestEmptySystems:
         (root / "results" / "empty_sys").mkdir(parents=True)
         with pytest.raises(ValueError, match="has no model directories"):
             Submission.from_directory(root)
+
+    @pytest.mark.unit
+    def test_a_pool_root_holding_no_paretos_is_refused(self, tmp_path):
+        root = tmp_path / "acme"
+        (root / "results").mkdir(parents=True)
+        with pytest.raises(ValueError, match="holds no paretos"):
+            Submission.from_directory(root)

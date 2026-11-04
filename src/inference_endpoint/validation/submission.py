@@ -677,6 +677,12 @@ class Submission:
                         f"{pareto_node.dir} has no run directories (r<N>) to check"
                     )
                 paretos.append(Pareto.from_nodes(pareto_node))
+        if not paretos:
+            raise ValueError(
+                f"{root} holds no paretos: a pool root expects "
+                "results/<system>/<model>/r<N>/, a system directory "
+                "<model>/r<N>/"
+            )
         return cls(tree, paretos)
 
     def pareto_at(self, node: Node) -> Pareto | None:

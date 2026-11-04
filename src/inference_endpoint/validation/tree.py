@@ -322,11 +322,11 @@ class SubmissionNode(Node, kind=RuleScopes.SUBMISSION):
         ruleset: Catalog | None = None,
         regions: Regions | None = None,
     ) -> Node:
-        """The `submission` node for `root`, with `results/<system>/<model>/r<N>` below.
+        """The `submission` node for `root`: a pool or one `<system>` directory.
 
         Args:
-            root (Path): The upload root. `submission/acme` -> that submission's
-                tree.
+            root (Path): The input directory: a pool root (every `<system>`
+                below its `results/`) or one §8.3 `<system>` directory.
             ruleset (Catalog | None): The `ruleset` root of `Ref.resolve`: a
                 `Catalog`, or `None` for no `ruleset` root. (Default: None)
             regions (Regions | None): The `regions` root of `Ref.resolve`: a
@@ -354,7 +354,7 @@ class SubmissionNode(Node, kind=RuleScopes.SUBMISSION):
         submission = cls(
             RuleScopes.SUBMISSION, root, None, ruleset=ruleset, regions=regions
         )
-        submission.children = _walk(submission, RuleScopes.SYSTEM, root / "results")
+        submission.children = _submission_children(submission, root)
         return submission
 
 
@@ -424,6 +424,35 @@ def _walk(parent: Node, kind: RuleScopes, where: Path) -> tuple[Node, ...]:
             f"{where} holds entries no check can reach: {', '.join(unreachable)}"
         )
     return tuple(children)
+
+
+def _submission_children(submission: Node, root: Path) -> tuple[Node, ...]:
+    """The `submission` node's children: a pool's systems, or one system node.
+
+    Two inputs are accepted: a **pool root**, every `<system>` directory below
+    its `results/`; and one §8.3 **`<system>` directory**, whose `<model>`
+    curves and `system_power.json` sit directly below it, so its synthesized
+    `system` node reads the same files the pool walk would.
+
+    Args:
+        submission (Node): The root node the children hang from.
+        root (Path): The input directory.
+    Returns:
+        tuple[Node, ...]: The `system` children, sorted by name.
+    Raises:
+        ValueError: When the walk refuses an entry no kind can take.
+    """
+    results = root / "results"
+    if results.is_dir():
+        return _walk(submission, RuleScopes.SYSTEM, results)
+    system = Node(RuleScopes.SYSTEM, root, submission)
+    system.children = _walk(system, RuleScopes.PARETO, root)
+    # The wrapper root and the system node share one directory here: the
+    # mapped artifacts in it (`system_power.json` and the like) are the
+    # system's, so the wrapper keeps none of its own and the `submission`
+    # scope stays empty.
+    submission.artifacts.clear()
+    return (system,)
 
 
 class _ArtifactBudget:

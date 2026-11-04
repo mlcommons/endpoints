@@ -260,6 +260,9 @@ class TestShippedCohortGolden:
         root = tmp_path / "upload"
         _build_upload(root)
         assert main([str(COHORT), str(root)]) == 0
+        # A single Section 8.3 `<system>` directory runs the same cohort: the
+        # synthesized system node reads `results/<system>/system_power.json`.
+        assert main([str(COHORT), str(root / "results" / SYSTEM)]) == 0
 
     @pytest.mark.unit
     def test_dropping_the_offline_run_fails_the_cohort(self, tmp_path, capsys):

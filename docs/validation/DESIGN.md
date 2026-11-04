@@ -195,10 +195,12 @@ for.
     a first run's omission.
   - `Submission` (frozen `tree` + `paretos`) is built by
     `Submission.from_directory(root, ruleset=...)` — one `Pareto` per
-    `<system>/<model>`, refusing a `<system>` with no model directories and a
-    `<model>` with no run directories (an empty system cannot hide from
-    system-scoped checks); `pareto_at(node)` locates the pareto a tree node
-    belongs to.
+    `<system>/<model>`. The input is either a pool root (every `<system>` below
+    its `results/`) or one `<system>` directory, whose synthesized `system` node
+    reads the system's own `system_power.json`; a `<system>` with no model
+    directories and a pool holding no paretos are refused (an empty system
+    cannot hide from system-scoped checks); `pareto_at(node)` locates the pareto
+    a tree node belongs to.
 
 - **`runner.py`** — `Finding` (the audit-trail record: `check_id`/`severity`/
   `scope`/`node_directory`/`verdict`/`rule`), `Finding.collect` (whose phases
@@ -262,7 +264,8 @@ one `Pareto.from_nodes` per `results/<system>/<model>/`, so the typed `Point`s
 and what the rows read are one parsed projection, not two.
 
 `SubmissionNode.from_directory(root, ruleset=..., regions=...)` stays the raw
-tree entry for tests and rule authors.
+tree entry for tests and rule authors: either input shape walks to the same node
+structure, the `system` node sitting at the `<system>` directory itself.
 
 ## 4. Data flow
 

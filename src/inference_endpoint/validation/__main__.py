@@ -91,7 +91,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "submission",
         type=Path,
-        help="submission root (results/<system>/<model>/r<N>/)",
+        help=(
+            "submission input: a pool root (results/<system>/<model>/r<N>/) "
+            "or one <system> directory (<model>/r<N>/ plus system_power.json)"
+        ),
     )
     parser.add_argument(
         "--audit", action="store_true", help="print held findings alongside failures"
