@@ -80,11 +80,13 @@ point:
       # (src/inference_endpoint/config/schema.py) to maintain per-version
       # compatibility pending any schema changes: a cohort pins the shape it
       # validates against, and a later client change lands as a new cohort
-      # revision instead of moving this one.
+      # revision instead of moving this one. The copy preserves the client's
+      # nullability: every field the model leaves optional is declared
+      # `nullable: true`, so a serialized `Settings` block reads as-is.
       runtime:
-        min_issue_duration_ms: { type: int }
-        max_issue_duration_ms: { type: int }
-        n_samples_to_issue: { type: int }
+        min_issue_duration_ms: { type: int, nullable: true }
+        max_issue_duration_ms: { type: int, nullable: true }
+        n_samples_to_issue: { type: int, nullable: true }
         scheduler_random_seed: { type: int }
         dataloader_random_seed: { type: int }
       load_pattern:
@@ -101,8 +103,8 @@ point:
                 step,
               ],
           }
-        target_qps: { type: float }
-        target_concurrency: { type: int }
+        target_qps: { type: float, nullable: true }
+        target_concurrency: { type: int, nullable: true }
         use_legacy_loadgen_qps_metrics: { type: bool }
       client:
         num_workers: { type: int }
@@ -135,25 +137,25 @@ point:
             allowlist: [openai, openai_completions, sglang, videogen],
           }
         api_key: { type: str, nullable: true }
-        event_logs_dir: { type: str }
+        event_logs_dir: { type: str, nullable: true }
       timeouts:
-        run_timeout_s: { type: float }
-        endpoint_response_idle_timeout_s: { type: float }
+        run_timeout_s: { type: float, nullable: true }
+        endpoint_response_idle_timeout_s: { type: float, nullable: true }
         interrupted_teardown_grace_s: { type: float }
         service_ready_timeout_s: { type: float }
-        warmup_drain_timeout_s: { type: float }
-        performance_drain_timeout_s: { type: float }
-        accuracy_drain_timeout_s: { type: float }
-        metrics_drain_timeout_s: { type: float }
+        warmup_drain_timeout_s: { type: float, nullable: true }
+        performance_drain_timeout_s: { type: float, nullable: true }
+        accuracy_drain_timeout_s: { type: float, nullable: true }
+        metrics_drain_timeout_s: { type: float, nullable: true }
       warmup:
         enabled: { type: bool }
-        n_requests: { type: int }
+        n_requests: { type: int, nullable: true }
         salt: { type: bool }
         drain: { type: bool }
         warmup_random_seed: { type: int }
       profiling:
-        engine: { type: str, allowlist: [vllm] }
-        urls: { type: list }
+        engine: { type: str, allowlist: [vllm], nullable: true }
+        urls: { type: list, nullable: true }
       early_stopping:
         enabled: { type: bool }
       steady_state:
