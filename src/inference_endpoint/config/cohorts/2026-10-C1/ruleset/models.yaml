@@ -103,6 +103,15 @@ kimi-k3:
     inline: { dataset: agentic_combined, lower: 58.32 }
     swebench: { dataset: swe_bench, mean_of_n: 4, lower: 93.5 }
     osl: { field: output_sequence_lengths_full_run, band: [425, 520] }
+  approved_drafters:
+    # The separately published DSpark heads (endpoints#494), transcribed from
+    # the submission checker's `data/approved_drafters.yaml`.
+    - approved_cohort: 2026-09-C1
+      model_id: RadixArk/Kimi-K3-DSpark
+      weight_checksum: git-sha1:3c5bac301d9cf392706189d82ed947feca6c2f0f
+    - approved_cohort: 2026-09-C1
+      model_id: Inferact/Kimi-K3-DSpark
+      weight_checksum: git-sha1:cf6b8244620e7ea4b0651d214f28e89eac75bed6
 
 qwen3_6-35b-a3b:
   name: qwen3_6-35b-a3b
@@ -114,6 +123,17 @@ qwen3_6-35b-a3b:
     inline: { dataset: agentic_combined, lower: 55.86 }
     swebench: { dataset: swe_bench, mean_of_n: 4, lower: 69.0 }
     osl: { field: output_sequence_lengths_full_run, band: [344, 422] }
+  approved_drafters:
+    # The native MTP heads in each approved checkpoint (endpoints#494).
+    - approved_cohort: 2026-09-C1
+      model_id: Qwen/Qwen3.6-35B-A3B
+      weight_checksum: git-sha1:995ad96eacd98c81ed38be0c5b274b04031597b0
+    - approved_cohort: 2026-09-C1
+      model_id: Qwen/Qwen3.6-35B-A3B-FP8
+      weight_checksum: git-sha1:95a723d08a9490559dae23d0cff1d9466213d989
+    - approved_cohort: 2026-09-C1
+      model_id: nvidia/Qwen3.6-35B-A3B-NVFP4
+      weight_checksum: git-sha1:1355db6a052410cfd62085d94b58866fd0f2c3c5
 
 deepseek-v4_1-flash:
   name: deepseek-v4_1-flash
@@ -125,3 +145,8 @@ deepseek-v4_1-flash:
     inline: { dataset: agentic_combined, lower: 52.36 }
     swebench: { dataset: swe_bench, mean_of_n: 4, lower: 96.4 }
     osl: { field: output_sequence_lengths_full_run, band: [793, 970] }
+  approved_drafters:
+    # The native DSpark head in the approved checkpoint (endpoints#519).
+    - approved_cohort: 2026-09-C1
+      model_id: deepseek-ai/DeepSeek-V4.1-Flash
+      weight_checksum: git-sha1:dba1be0a40aa45a94ad051997016db3960a90277

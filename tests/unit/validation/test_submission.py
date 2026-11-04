@@ -1150,6 +1150,7 @@ class TestDerivedExposure:
             "accuracy_gate_misses",
             "structure_misses",
             "unresolved_shared_paths",
+            "unapproved_drafter_points",
         }
 
     @pytest.mark.unit
@@ -1182,6 +1183,78 @@ class TestDerivedExposure:
         runs = [Run(concurrency=16, config_extra={"shared_src": "../outside"})]
         pareto = write_upload(root, {SYSTEM: runs}).paretos[0]
         assert pareto.unresolved_shared_paths() == ("shared_src=../outside",)
+
+    @pytest.mark.unit
+    def test_a_drafter_must_be_approved_and_old_enough(self, tmp_path):
+        weight = "git-sha1:" + "a" * 40
+        target = "git-sha1:" + "b" * 40
+        catalog = Catalog(
+            models={
+                "gpt-oss-120b": {
+                    "approved_drafters": [
+                        {
+                            "approved_cohort": "2026-09-C1",
+                            "model_id": "acme/head",
+                            "weight_checksum": weight,
+                        },
+                        {
+                            "approved_cohort": "2026-09-C1",
+                            "target_checksum": target,
+                            "configuration": {"exit_layer": 24},
+                        },
+                    ]
+                }
+            },
+            datasets={},
+        )
+        runs = [
+            # A declaration naming no approved checksum.
+            Run(
+                concurrency=8,
+                config_extra={
+                    "model_name": "gpt-oss-120b",
+                    "target_cohort": "2026-10-C1",
+                    "speculative_decoding": {"weight_checksum": "git-sha1:unknown"},
+                },
+            ),
+            # The weight-identified entry, at the earliest cohort it may be used.
+            Run(
+                concurrency=16,
+                config_extra={
+                    "model_name": "gpt-oss-120b",
+                    "target_cohort": "2026-10-C1",
+                    "speculative_decoding": {"weight_checksum": weight},
+                },
+            ),
+            # Approved, but targeted before its two-cohort lead time elapsed.
+            Run(
+                concurrency=32,
+                config_extra={
+                    "model_name": "gpt-oss-120b",
+                    "target_cohort": "2026-09-C1",
+                    "speculative_decoding": {"weight_checksum": weight},
+                },
+            ),
+            # The configuration-identified entry, matched by checksum + block.
+            Run(
+                concurrency=64,
+                config_extra={
+                    "model_name": "gpt-oss-120b",
+                    "target_cohort": "2026-11-C1",
+                    "speculative_decoding": {
+                        "target_checksum": target,
+                        "configuration": {"exit_layer": 24},
+                    },
+                },
+            ),
+        ]
+        pareto = write_upload(
+            tmp_path / "upload", {SYSTEM: runs}, ruleset=catalog
+        ).paretos[0]
+        misses = pareto.unapproved_drafter_points()
+        assert any("matches no approved drafter" in miss for miss in misses)
+        assert any("2026-09-C1 precedes" in miss for miss in misses)
+        assert len(misses) == 2
 
     @pytest.mark.unit
     def test_every_named_derivation_resolves_for_one_pareto(self, tmp_path):

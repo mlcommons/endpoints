@@ -35,6 +35,7 @@ second copy can drift from the first.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -312,6 +313,57 @@ def _resolves_shared_path(root: Path, value: str) -> Path | None:
         return None
     candidate = root.joinpath(*parts)
     return candidate if candidate.is_dir() else None
+
+
+# Section 2.9.4's lead time: two cohorts after the entry's approval.
+_DRAFTER_APPROVAL_LEAD_COHORTS = 2
+
+
+def _advance_cohort(cohort: str, steps: int) -> str | None:
+    """`cohort` advanced by `steps` publications, or `None` when it is no cohort.
+
+    The calendar's own order: `C0` -> `C1` -> the next month's `C0`. Zero steps
+    is the spelling check.
+    """
+    match = re.fullmatch(r"(\d{4})-(\d{2})-C([01])", cohort)
+    if match is None:
+        return None
+    year, month, index = (int(part) for part in match.groups())
+    for _ in range(steps):
+        if index == 0:
+            index = 1
+        else:
+            index = 0
+            month += 1
+            if month > 12:
+                month = 1
+                year += 1
+    return f"{year:04d}-{month:02d}-C{index}"
+
+
+def _drafter_entry_matches(
+    entry: Mapping[str, Any], declared: Mapping[str, Any]
+) -> bool:
+    """Whether one approved entry names the declared drafter (§9.1's two forms).
+
+    A weight-identified entry matches by `weight_checksum`; a
+    configuration-identified one by `target_checksum` plus its non-empty
+    `configuration`. A model id alone never matches, as Section 2.9.4's
+    checksum identification intends.
+    """
+    weight = entry.get("weight_checksum")
+    if isinstance(weight, str) and weight:
+        return declared.get("weight_checksum") == weight
+    target = entry.get("target_checksum")
+    configuration = entry.get("configuration")
+    if isinstance(target, str) and target:
+        return (
+            declared.get("target_checksum") == target
+            and isinstance(configuration, Mapping)
+            and bool(configuration)
+            and declared.get("configuration") == configuration
+        )
+    return False
 
 
 def normalize_offline(declared: Any) -> Any:
@@ -1254,6 +1306,71 @@ class Pareto:
                     unresolved.add(f"{pointer}={value}")
         return tuple(sorted(unresolved))
 
+    def unapproved_drafter_points(self) -> tuple[str, ...]:
+        """The points whose speculative decoding is not an approved drafter.
+
+        Section 2.9.4 makes the drafters a curated, published list: a point
+        declaring `speculative_decoding` must name an entry approved for its
+        benchmark -- by weight checksum, or by target checksum plus the entry's
+        own configuration -- and the entry must have been approved at least two
+        cohorts before the point's `target_cohort`. The list lives on the
+        catalog's model entry (`approved_drafters`), so a model declaring none
+        has none, and speculative decoding stays disallowed for it. A point
+        whose `target_cohort`, or an entry whose `approved_cohort`, records no
+        parseable cohort is not judged here (the checker warns instead).
+
+        Returns:
+            tuple[str, ...]: One line per unapproved or too-early drafter, empty
+                when every declaration matches an approved entry in time.
+        """
+        catalog = self._catalog()
+        model_name = self._model_name()
+        if catalog is None or model_name is None:
+            return ()
+        model = catalog.models.get(model_name)
+        if not isinstance(model, Mapping):
+            return ()
+        declared_entries = model.get("approved_drafters")
+        entries = (
+            [entry for entry in declared_entries if isinstance(entry, Mapping)]
+            if isinstance(declared_entries, Sequence)
+            and not isinstance(declared_entries, str | bytes)
+            else []
+        )
+        misses: list[str] = []
+        for point in self.points:
+            if point.node is None:
+                continue
+            config, error = point.node.read("point.yaml")
+            if error is not None or not isinstance(config, Mapping):
+                continue
+            declared = config.get("speculative_decoding")
+            if not isinstance(declared, Mapping) or not declared:
+                continue
+            matched = next(
+                (entry for entry in entries if _drafter_entry_matches(entry, declared)),
+                None,
+            )
+            if matched is None:
+                misses.append(
+                    f"c{point.concurrency}: speculative_decoding matches no "
+                    f"approved drafter for {model_name}"
+                )
+                continue
+            target = _advance_cohort(str(config.get("target_cohort", "")), 0)
+            earliest = _advance_cohort(
+                str(matched.get("approved_cohort", "")),
+                _DRAFTER_APPROVAL_LEAD_COHORTS,
+            )
+            if target is None or earliest is None:
+                continue
+            if target < earliest:
+                misses.append(
+                    f"c{point.concurrency}: target cohort {target} precedes the "
+                    f"drafter's earliest use {earliest}"
+                )
+        return tuple(misses)
+
     def offline_points_missing_accuracy(self) -> tuple[int, ...]:
         """The Offline points carrying no `accuracy_results.json` (§4.3).
 
@@ -1580,6 +1697,7 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "accuracy_gate_misses": Pareto.accuracy_gate_misses,
     "structure_misses": Pareto.structure_misses,
     "unresolved_shared_paths": Pareto.unresolved_shared_paths,
+    "unapproved_drafter_points": Pareto.unapproved_drafter_points,
     "uncovered_regions": Pareto.uncovered_regions,
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,

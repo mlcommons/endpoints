@@ -762,6 +762,8 @@ unchecked).
     one README per implementation)
   - `derived.unresolved_shared_paths` - the `shared_src`/`shared_docs` pointers
     that do not resolve under the submission root
+  - `derived.unapproved_drafter_points` - Section 2.9.4's approved-drafter and
+    lead-time misses
 - `ruleset` - the packaged ruleset the cohort's `cohort.yaml` names (a
   registered round, e.g. `mlperf-inference-v6.1`):
   - `ruleset.models.<name>.<key>` - model definitions (the round's `models.py`)

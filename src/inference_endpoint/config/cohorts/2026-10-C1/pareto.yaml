@@ -240,3 +240,16 @@ pareto_shared_path_resolution:
         op: eq,
         value: 0,
       }
+
+pareto_approved_drafter:
+  description: Every speculative-decoding declaration matches an approved drafter for its benchmark and cohort window (§2.9.4).
+  rule: "Endpoints Policy §2.9.4, Approved Drafters; §9.1, Automated Checks."
+  fix: Declare a published drafter's checksum (or drop `speculative_decoding`), and target a cohort at least two after its approval.
+  severity: fail
+  assert:
+    - {
+        over: derived.unapproved_drafter_points,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }
