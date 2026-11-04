@@ -220,6 +220,25 @@ class TestParetoShape:
             write_upload(tmp_path / "acme", {SYSTEM: runs})
 
     @pytest.mark.unit
+    def test_two_points_with_the_same_concurrency_are_refused(self, tmp_path):
+        runs = [
+            Run(concurrency=16),
+            Run(concurrency=16, dir_name="r016", system_tps=5400.0),
+        ]
+        with pytest.raises(ValueError, match="must be distinct"):
+            write_upload(tmp_path / "acme", {SYSTEM: runs})
+
+    @pytest.mark.unit
+    def test_a_dedicated_offline_run_may_share_a_concurrency(self, tmp_path):
+        runs = [
+            Run(concurrency=16, offline="dedicated", system_tps=5292.0),
+            Run(concurrency=16, dir_name="r016"),
+            Run(concurrency=8192, system_tps=5400.0),
+        ]
+        pareto = _pareto(tmp_path, runs)
+        assert pareto.point_count() == 3
+
+    @pytest.mark.unit
     def test_an_elected_offline_point_not_at_c_max_is_refused(self, tmp_path):
         runs = [
             Run(concurrency=16),

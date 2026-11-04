@@ -342,10 +342,13 @@ class Pareto:
         Raises:
             ValueError: When the pareto has no measurement point. When its points
                 do not declare one integer `max_supported_concurrency` (§9.1, Max
-                concurrency declared). When more than one point carries an `offline`
-                declaration (§9.1, Offline point present). When an `elected` declaration
-                sits off the C_max point (§9.1, Offline point present). When a dedicated
-                Offline run lacks exactly one C_max point (§9.1, Offline ordering).
+                concurrency declared). When more than one point carries an
+                `offline` declaration (§9.1, Offline point present). When an
+                `elected` declaration sits off the C_max point (§9.1, Offline point
+                present). When a dedicated Offline run lacks exactly one C_max
+                point (§9.1, Offline ordering). When two fixed-concurrency points
+                declare the same concurrency (§5.3, Minimum Submission
+                Requirements; the dedicated Offline run is exempt).
         """
         if not self.points:
             raise ValueError("a pareto needs at least one measurement point")
@@ -384,6 +387,19 @@ class Pareto:
                     "a dedicated Offline run needs exactly one C_max point "
                     "(Endpoints Policy §9.1, Offline ordering)"
                 )
+
+        seen: dict[int, Point] = {}
+        for point in self.points:
+            if point.offline == "dedicated":
+                continue
+            if point.concurrency in seen:
+                raise ValueError(
+                    f"a pareto's fixed-concurrency points must be distinct: "
+                    f"concurrency {point.concurrency} is declared more than once "
+                    "(Endpoints Policy §5.3, Minimum Submission Requirements; "
+                    "the dedicated Offline run is exempt)"
+                )
+            seen[point.concurrency] = point
 
     def _offline_partition(self) -> tuple[list[Point], list[Point], list[Point]]:
         """`(declared, elected, dedicated)` over the `offline` declaration field."""
