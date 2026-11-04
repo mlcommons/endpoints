@@ -550,28 +550,57 @@ class Pareto:
         """
         return tuple(self._offline_partition()[0])
 
-    def accuracy_run_count(self) -> int:
-        """How many points carry an `accuracy_results.json` (§9.1's run count).
+    def accuracy_uncovered_regions(self) -> tuple[str, ...]:
+        """The §5.3 mandatory regions no accuracy-carrying point lands in.
 
-        For a non-agentic pareto a carrying point IS the §4.3 validation run
-        (`point_accuracy_present` keys on the same presence), so this count is
-        the measured side of §9.1's Accuracy-run-count row. An agentic
-        `accuracy_results.json` may hold inline scores only - the file cannot
-        tell inline from validation - which is why the row gates on
-        `agentic()` false rather than counting here.
+        §4.3's validation runs must cover the four mandatory regions: a region
+        is covered when a point carrying a parsable `accuracy_results.json`
+        falls in it. Unlike the curve's own coverage (`uncovered_regions`), a
+        dedicated Offline point is not exempt here: the round's checker reads
+        every accuracy-carrying point's concurrency regardless of its
+        `offline` declaration, and the `margin` band is not a coverage region.
 
         Returns:
-            int: The points whose run directory carries a parsable
-                `accuracy_results.json`.
+            tuple[str, ...]: One `region` wire value per uncovered mandatory
+                region, empty when every one is covered.
         """
-        count = 0
+        regions = self.regions()
+        covered: set[RegionKind] = set()
+        for point in self._accuracy_carrying_points():
+            kind = regions.covers(point.concurrency)
+            if kind is not None:
+                covered.add(kind)
+        return tuple(kind.value for kind in _MANDATORY_REGIONS if kind not in covered)
+
+    def offline_points_missing_accuracy(self) -> tuple[int, ...]:
+        """The Offline points carrying no `accuracy_results.json` (§4.3).
+
+        Every Offline point's §4.3 validation result must be shipped: an
+        elected C_max point is one of the required results, and a dedicated
+        run's result stands beside the four region results
+        (`accuracy_uncovered_regions` counts the regions only).
+
+        Returns:
+            tuple[int, ...]: The concurrency of each Offline point with no
+                parsable accuracy result, empty when all carry one.
+        """
+        carrying = {id(point) for point in self._accuracy_carrying_points()}
+        return tuple(
+            point.concurrency
+            for point in self.offline_points()
+            if id(point) not in carrying
+        )
+
+    def _accuracy_carrying_points(self) -> tuple[Point, ...]:
+        """The points whose run directory carries a parsable accuracy result."""
+        carrying: list[Point] = []
         for point in self.points:
             if point.node is None:
                 continue
             value, error = point.node.read("accuracy_results.json")
             if value is not MISSING and error is None:
-                count += 1
-        return count
+                carrying.append(point)
+        return tuple(carrying)
 
     def point_count_min(self) -> int:
         """Endpoints Policy §5.3's minimum point count this pareto needs.
@@ -594,27 +623,13 @@ class Pareto:
             return base
         return base + (0 if any(p.offline == "elected" for p in self.points) else 1)
 
-    def accuracy_run_count_requirement(self) -> int:
-        """Endpoints Policy §4.3's accuracy result count `N` this pareto needs.
-
-        "One per mandatory point": one per mandatory concurrency region (4)
-        plus the Offline point for non-agentic benchmarks, hence `5`. Agentic
-        paretos declare none (`4`); as with `point_count_min`, the shape keys
-        on `agentic()`.
-
-        Returns:
-            int: `MANDATORY_REGION_COUNT` plus one for a non-agentic pareto
-                (`5`); `MANDATORY_REGION_COUNT` alone for agentic paretos (`4`).
-        """
-        return MANDATORY_REGION_COUNT + (0 if self.agentic() else 1)
-
     def derived(self) -> Mapping[str, Any]:
         """Named derivations for `derived.<name>` row refs, as a lazy mapping.
 
         The boundary rule for derivations ("named derivations on their subject,
         exposed as fields `Ref` reads"): the keys are `_DERIVATION_METHODS`'
-        names - the Offline/point-count/region-coverage/accuracy-count facts a
-        row cannot compute itself - each resolved via its own named method at
+        names - the Offline/point-count/region-coverage/accuracy-coverage facts
+        a row cannot compute itself - each resolved via its own named method at
         first access and memoized (`DerivedFields`). An unlisted name ->
         `KeyError`.
 
@@ -843,8 +858,8 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "point_cap": Pareto.point_cap,
     "point_count": Pareto.point_count,
     "point_count_min": Pareto.point_count_min,
-    "accuracy_run_count": Pareto.accuracy_run_count,
-    "accuracy_run_count_requirement": Pareto.accuracy_run_count_requirement,
+    "accuracy_uncovered_regions": Pareto.accuracy_uncovered_regions,
+    "offline_points_missing_accuracy": Pareto.offline_points_missing_accuracy,
     "uncovered_regions": Pareto.uncovered_regions,
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,

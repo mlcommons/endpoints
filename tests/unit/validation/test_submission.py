@@ -516,10 +516,10 @@ class TestOutOfRangePoints:
 
 
 class TestThresholdsPerShape:
-    """`point_count_min` / `accuracy_run_count_requirement`: §5.3/§4.3 counts."""
+    """`point_count_min`: Section 5.3's minimum point count per shape."""
 
     @pytest.mark.unit
-    def test_dedicated_offline_wants_8_and_5(self, tmp_path):
+    def test_dedicated_offline_wants_8(self, tmp_path):
         pareto = _pareto(
             tmp_path,
             [
@@ -529,22 +529,19 @@ class TestThresholdsPerShape:
             ],
         )
         assert pareto.point_count_min() == 8
-        assert pareto.accuracy_run_count_requirement() == 5
 
     @pytest.mark.unit
-    def test_elected_offline_wants_7_and_5(self, tmp_path):
+    def test_elected_offline_wants_7(self, tmp_path):
         pareto = _pareto(
             tmp_path,
             [Run(concurrency=16), Run(concurrency=8192, offline="elected")],
         )
         assert pareto.point_count_min() == 7
-        assert pareto.accuracy_run_count_requirement() == 5
 
     @pytest.mark.unit
-    def test_agentic_wants_7_and_4(self, tmp_path):
+    def test_agentic_wants_7(self, tmp_path):
         pareto = _pareto(tmp_path, [Run(concurrency=16), Run(concurrency=8192)])
         assert pareto.point_count_min() == 7
-        assert pareto.accuracy_run_count_requirement() == 4
 
     @pytest.mark.unit
     def test_a_cataloged_non_agentic_model_without_offline_reads_8(self, tmp_path):
@@ -565,10 +562,9 @@ class TestThresholdsPerShape:
         pareto = upload.paretos[0]
         assert pareto.agentic() is False
         assert pareto.point_count_min() == 8
-        assert pareto.accuracy_run_count_requirement() == 5
 
     @pytest.mark.unit
-    def test_a_cataloged_agentic_model_reads_7_and_4(self, tmp_path):
+    def test_a_cataloged_agentic_model_reads_7(self, tmp_path):
         upload = write_upload(
             tmp_path / "acme",
             {SYSTEM: [Run(concurrency=16, config_extra={"model_name": "kimi-k3"})]},
@@ -577,7 +573,6 @@ class TestThresholdsPerShape:
         pareto = upload.paretos[0]
         assert pareto.agentic() is True
         assert pareto.point_count_min() == 7
-        assert pareto.accuracy_run_count_requirement() == 4
 
     @pytest.mark.unit
     def test_an_unknown_model_falls_back_to_the_declared_shape(self, tmp_path):
@@ -602,7 +597,7 @@ class TestThresholdsPerShape:
 
 
 class TestCoverageAndCounts:
-    """`uncovered_regions` / `offline_points` / `accuracy_run_count`."""
+    """`uncovered_regions` / `offline_points` / the accuracy coverage facts."""
 
     @pytest.mark.unit
     def test_every_mandatory_region_can_be_covered(self, tmp_path):
@@ -649,9 +644,17 @@ class TestCoverageAndCounts:
         assert tuple(p.offline for p in pareto.offline_points()) == ("elected",)
 
     @pytest.mark.unit
-    def test_accuracy_run_count_counts_carrying_points(self, tmp_path):
+    def test_accuracy_coverage_counts_only_carrying_points(self, tmp_path):
         root = tmp_path / "acme"
-        for name, carries in (("r16", True), ("r8192", False)):
+        # c_min 16, c_max 8192: Ultra Low is 16, Low is 17..36. The Low point
+        # carries no accuracy result, so the curve covers Low and its
+        # validation runs do not.
+        for name, carries in (
+            ("r16", True),
+            ("r24", False),
+            ("r100", True),
+            ("r8192", True),
+        ):
             run_dir = write_run(
                 root / "results" / "sys" / "model" / name,
                 Run(concurrency=int(name[1:])),
@@ -661,7 +664,24 @@ class TestCoverageAndCounts:
                     '{"accuracy_scores": [{"score": 1.0}]}', encoding="utf-8"
                 )
         pareto = Submission.from_directory(root).paretos[0]
-        assert pareto.accuracy_run_count() == 1
+        assert pareto.uncovered_regions() == ()
+        assert pareto.accuracy_uncovered_regions() == ("low_concurrency",)
+
+    @pytest.mark.unit
+    def test_an_offline_point_without_an_accuracy_result_is_named(self, tmp_path):
+        root = tmp_path / "acme"
+        run_dir = write_run(
+            root / "results" / "sys" / "model" / "r8192",
+            Run(concurrency=8192, offline="elected"),
+        )
+        write_run(root / "results" / "sys" / "model" / "r16", Run(concurrency=16))
+        pareto = Submission.from_directory(root).paretos[0]
+        assert pareto.offline_points_missing_accuracy() == (8192,)
+        (run_dir / "accuracy_results.json").write_text(
+            '{"accuracy_scores": [{"score": 1.0}]}', encoding="utf-8"
+        )
+        walked = Submission.from_directory(root).paretos[0]
+        assert walked.offline_points_missing_accuracy() == ()
 
 
 class TestDerivedExposure:
@@ -671,8 +691,8 @@ class TestDerivedExposure:
     def test_the_derivation_names_are_the_policy_derivations(self):
         assert set(DERIVATION_NAMES) == {
             "agentic",
-            "accuracy_run_count",
-            "accuracy_run_count_requirement",
+            "accuracy_uncovered_regions",
+            "offline_points_missing_accuracy",
             "offline_ordering",
             "offline_points",
             "out_of_range_points",

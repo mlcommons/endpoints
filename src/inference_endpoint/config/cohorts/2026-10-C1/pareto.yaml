@@ -4,8 +4,8 @@
 # A pareto row may name `pareto.…` facts, the coarser `system.`/`submission.`
 # namespaces, and the per-pareto `derived.*`/`regions.*` names. Counting over
 # the pareto's points is available as `derived.point_count`,
-# `derived.uncovered_regions`, `derived.offline_points` and
-# `derived.accuracy_run_count`; what a row still cannot do -- compare a point
+# `derived.uncovered_regions`, `derived.offline_points` and the two accuracy
+# coverage derivations; what a row still cannot do -- compare a point
 # to the curve's maximum, or place a point in a computed region band -- is
 # listed in ../2026-10-C1.md under "Not yet expressible", with the reason.
 
@@ -64,16 +64,28 @@ pareto_offline_absent_for_agentic:
   assert:
     - { over: derived.offline_points, aggregate: count, op: eq, value: 0 }
 
-pareto_accuracy_run_count:
-  description: A non-agentic pareto carries exactly N accuracy validation results.
-  rule: "Endpoints Policy §4.3, Accuracy Metric; §9.1, Accuracy run count."
-  fix: Ship exactly one accuracy result at each mandatory point and none at submitter's-choice points.
+pareto_accuracy_coverage:
+  description: The pareto's accuracy validation runs cover each §5.3 mandatory region.
+  rule: "Endpoints Policy §4.3, Accuracy Metric; §5.3, Accuracy Runs."
+  fix: Run and ship an accuracy result at a point in each uncovered region.
   severity: fail
-  when:
-    - { left: derived.agentic, op: eq, right: false }
   assert:
     - {
-        left: derived.accuracy_run_count,
+        over: derived.accuracy_uncovered_regions,
+        aggregate: count,
         op: eq,
-        right: derived.accuracy_run_count_requirement,
+        value: 0,
+      }
+
+pareto_offline_accuracy:
+  description: The Offline point carries its §4.3 accuracy validation result.
+  rule: "Endpoints Policy §4.3, Accuracy Metric; §5.7, Offline Result."
+  fix: Run and ship the Offline point's accuracy result.
+  severity: fail
+  assert:
+    - {
+        over: derived.offline_points_missing_accuracy,
+        aggregate: count,
+        op: eq,
+        value: 0,
       }

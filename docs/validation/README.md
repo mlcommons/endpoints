@@ -714,8 +714,10 @@ unchecked).
   - `derived.point_cap` - Section 5.6's `<=32`
   - `derived.point_count` - the pareto's measurement-point count
   - `derived.point_count_min` - Section 5.3's minimum count
-  - `derived.accuracy_run_count` - points carrying an `accuracy_results.json`
-  - `derived.accuracy_run_count_requirement` - Section 4.3's `N`
+  - `derived.accuracy_uncovered_regions` - Section 4.3's mandatory regions with
+    no accuracy-carrying point
+  - `derived.offline_points_missing_accuracy` - the Offline points lacking an
+    accuracy result
   - `derived.uncovered_regions` - Section 5.4's mandatory regions with no point
   - `derived.offline_points` - the points carrying an `offline` declaration
   - `derived.agentic` - the catalog's agentic flag for the declared model (the

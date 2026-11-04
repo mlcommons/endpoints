@@ -185,8 +185,9 @@ for.
     Its methods: `offline_ordering` (Section 5.7.2's two clauses), `point_cap`
     (Section 5.6's `<= 32`), `point_count`/`point_count_min` (Section 5.3),
     `uncovered_regions` (Section 5.4's coverage gaps), `offline_points` (Section
-    5.7's presence), `accuracy_run_count`/ `accuracy_run_count_requirement`
-    (Section 4.3), `agentic` (the catalog's benchmark flag),
+    5.7's presence),
+    `accuracy_uncovered_regions`/`offline_points_missing_accuracy` (Section
+    4.3's accuracy coverage), `agentic` (the catalog's benchmark flag),
     `out_of_range_points` (Section 5.4's Concurrency-in-range row), `derived()`
     (the lazy `derived.<name>` facts-projection), and `_validate_shape`, which
     refuses shapes the derivations would trip on. Points must agree on their
@@ -446,8 +447,10 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   the C_max point is `elected` as the Offline result (`7`), Section 5.3's
   one-fewer-distinct-run derivation. `agentic()` decides the shape.
 
-- **`Pareto.accuracy_run_count_requirement()`** — `4` for an agentic pareto, `5`
-  otherwise, Section 4.3's `N`. `agentic()` decides the shape.
+- **`Pareto.accuracy_uncovered_regions()`** — the mandatory regions with no
+  accuracy-carrying point in them, Section 4.3's per-band coverage requirement.
+  Unlike `uncovered_regions`, a dedicated Offline point is not exempt: the
+  round's checker reads every carrying point's concurrency.
 
 - **`Pareto.point_count()`** — `len(points)`, Section 5.3/9.1's Point-count
   row's measured side.
@@ -461,10 +464,9 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   `tuple(p for p in points if p.offline is not None)`, Section 5.7's presence
   rule (`_validate_shape` refuses more than one).
 
-- **`Pareto.accuracy_run_count()`** — count of points whose run directory
-  carries a parsable `accuracy_results.json`, Section 9.1's Accuracy-run-count
-  row's measured side. The row gates it on `agentic()` false: an agentic file
-  cannot be told inline from validation.
+- **`Pareto.offline_points_missing_accuracy()`** — the Offline points whose run
+  directory carries no parsable `accuracy_results.json`, Section 4.3's Offline
+  validation result (`_accuracy_carrying_points` is the shared reader).
 
 - **`Pareto.agentic()`** — the catalog's `agentic` flag for the declared
   `model_name` (`node.root().ruleset`, the cohort's catalog), falling back to
@@ -514,8 +516,8 @@ Each formula below is anchored to the Endpoints Policy section it implements.
 - **Derivations are exposed as fields `Ref` reads, and that exposure is
   priced.** The `derived.<name>` names are exactly `_DERIVATION_METHODS`' keys,
   published as `DERIVATION_NAMES`: `offline_ordering`, `point_cap`,
-  `point_count`, `point_count_min`, `accuracy_run_count`,
-  `accuracy_run_count_requirement`, `uncovered_regions`, `offline_points`,
+  `point_count`, `point_count_min`, `accuracy_uncovered_regions`,
+  `offline_points_missing_accuracy`, `uncovered_regions`, `offline_points`,
   `agentic`, `out_of_range_points`. `Point.point_power_kw` and
   `Interval.for_accuracy_gate` stay **method-only**: their inputs
   (provisioned/engaged node counts; the per-model reference score and gate
