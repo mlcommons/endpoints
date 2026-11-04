@@ -636,6 +636,14 @@ class TestCoverageAndCounts:
         assert pareto.uncovered_regions() == ("med_concurrency",)
 
     @pytest.mark.unit
+    def test_a_curve_above_the_ultra_low_region_names_both_low_bands(self, tmp_path):
+        # Every point above 32: C_min clamps to 32 (the round's checker reads
+        # `min(lowest, 32)`), so Ultra Low (`low_latency` on the wire) and Low
+        # are both uncovered -- the checker's own two coverage errors.
+        pareto = _pareto(tmp_path, [Run(concurrency=64), Run(concurrency=8192)])
+        assert pareto.uncovered_regions() == ("low_latency", "low_concurrency")
+
+    @pytest.mark.unit
     def test_offline_points_lists_the_declaration(self, tmp_path):
         pareto = _pareto(
             tmp_path,

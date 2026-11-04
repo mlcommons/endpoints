@@ -89,7 +89,9 @@ class Regions:
 
         `C_min` is `system_desc["c_min_override"]` where declared (§5.4), else the
         pareto's minimum point concurrency ("C_min is derived from the submission
-        points", §5.5). Multiple points may sit in `[1, 32]`: §5.4 Example C's own
+        points", §5.5), clamped to `[1, 32]`: a curve whose points all sit above
+        the Ultra Low region still gets usable boundaries and the coverage rows
+        report the gap. Multiple points may sit in `[1, 32]`: §5.4 Example C's own
         seven-point set `{16, 24, 64, 96, 128, 256, 1000}` carries two, and with
         `c_min_override: 32` the points at 16 and 32 both sit in the Ultra Low
         Concurrency region (§5.4's override example).
@@ -124,7 +126,12 @@ class Regions:
         ):
             raise ValueError("point concurrencies need to be integers")
         if "c_min_override" not in system_desc:
-            return cls.for_bounds(c_min=min(concurrencies), c_max=c_max)
+            # `min(lowest, 32)`: the round's checker reads the same clamp, so a
+            # curve with no Ultra Low Concurrency point still gets usable
+            # boundaries; the coverage rows report the missing points.
+            return cls.for_bounds(
+                c_min=min(min(concurrencies), C_MIN_HIGHEST), c_max=c_max
+            )
         declared = system_desc["c_min_override"]
         if (
             not isinstance(declared, int)

@@ -146,6 +146,16 @@ class TestForPareto:
         assert regions == Regions.for_bounds(c_min=16, c_max=1024)
 
     @pytest.mark.unit
+    def test_a_curve_above_the_ultra_low_region_clamps_c_min(self):
+        # The round's checker reads `min(lowest, 32)`: a curve whose points all
+        # sit above the Ultra Low region still gets boundaries, and the
+        # coverage rows report the gap.
+        regions = Regions.for_pareto({"max_supported_concurrency": 2048}, [64, 2048])
+        assert regions == Regions.for_bounds(c_min=32, c_max=2048)
+        assert regions.low_latency == Interval(1, 32)
+        assert regions.low_concurrency == Interval(33, 45)
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "override", [C_MIN_LOWEST - 1, C_MIN_HIGHEST + 1, None, 40, "32"]
     )
@@ -160,7 +170,6 @@ class TestForPareto:
         [
             ({}, [32, 40]),
             ({"max_supported_concurrency": "8192"}, [32, 40]),
-            ({"max_supported_concurrency": 8192}, [40, 80]),
             ({"max_supported_concurrency": 8192}, []),
             ({"max_supported_concurrency": 8192}, [32, 20.0, 40]),
         ],
@@ -169,7 +178,7 @@ class TestForPareto:
         with pytest.raises(
             ValueError,
             match=(
-                "max_supported_concurrency|must be between|need at least one point"
+                "max_supported_concurrency|need at least one point"
                 "|concurrencies need to be integers"
             ),
         ):
