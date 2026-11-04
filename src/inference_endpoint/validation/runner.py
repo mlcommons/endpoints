@@ -205,6 +205,10 @@ def _validate_points(submission: Submission) -> None:
     and a shared or foreign node would corrupt counts, regions and derivations.
     """
     if not submission.points:
+        if submission.refused:
+            # Every submission of the input was refused: nothing to check, and
+            # the refusals are the report.
+            return
         raise ValueError("submission has no measurement points to check")
     for point in submission.points:
         if not isinstance(point.node, Node) or point.node.kind != RuleScopes.POINT:
@@ -213,7 +217,9 @@ def _validate_points(submission: Submission) -> None:
             )
     root = _tree_root(submission)
     tree = {
-        id(node): node for node in _all_nodes(root) if node.kind == RuleScopes.POINT
+        id(node): node
+        for node in _all_nodes(root)
+        if node.kind == RuleScopes.POINT and not _is_refused(node)
     }
     seen: dict[int, Point] = {}
     for point in submission.points:
@@ -253,6 +259,7 @@ def _validate_artifacts(submission: Submission) -> None:
     broken = [
         f"{node.dir / name}: {error}"
         for node in _all_nodes(root)
+        if not _is_refused(node)
         for name, (value, error) in sorted(node.artifacts.items())
         if error is not None
     ]
@@ -280,6 +287,8 @@ def _validate_declared_values(
         return ()
     notes: list[str] = []
     for node in _all_nodes(_tree_root(submission)):
+        if _is_refused(node):
+            continue
         fields = node.scopes().get(node.kind.value, {})
         try:
             shape_notes = cohort.refs.validate_values(node.kind.value, fields)
@@ -315,6 +324,20 @@ def _all_nodes(node: Node) -> Iterator[Node]:
     yield node
     for child in node.children:
         yield from _all_nodes(child)
+
+
+def _is_refused(node: Node) -> bool:
+    """Whether `node`'s subtree is refused: it or an ancestor carries refusals.
+
+    A refused subtree gets no findings: its facts cannot be trusted, and the
+    refusal (reported by `Submission.refused`) is its verdict.
+    """
+    probe: Node | None = node
+    while probe is not None:
+        if probe.refusals:
+            return True
+        probe = probe.parent
+    return False
 
 
 def _collect_candidates(cohort: Cohort) -> tuple[Check, ...]:
@@ -634,7 +657,7 @@ def _scope_nodes(scope: RuleScopes, submission: Submission) -> tuple[Node, ...]:
                     f"no {scope.value} node above point {point.concurrency}"
                 )
             nodes.append(probe)
-    return tuple({node.dir: node for node in nodes}.values())
+    return tuple({node.dir: node for node in nodes if not _is_refused(node)}.values())
 
 
 def _when_rows_hold(check: Check, scopes: Mapping[str, Any], where: Path) -> bool:

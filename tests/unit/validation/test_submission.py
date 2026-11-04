@@ -35,7 +35,7 @@ from inference_endpoint.validation.submission import (
     Point,
     Submission,
 )
-from submission_helpers import OMITTED, Run, write_run, write_upload
+from submission_helpers import OMITTED, Run, refused_messages, write_run, write_upload
 
 SYSTEM = ("sys", "model")
 
@@ -108,22 +108,26 @@ class TestPointFromNode:
         # Loader-minimum precedence: `Point`'s own domain check speaks at
         # `Submission.from_directory`, before any collect-time table value
         # checking could judge `offline`.
-        with pytest.raises(ValueError, match="offline must be"):
+        refused = refused_messages(
             write_upload(
                 tmp_path / "acme",
                 {SYSTEM: [Run(concurrency=16, offline="maybe")]},
             )
+        )
+        assert any("offline must be" in message for message in refused)
 
     @pytest.mark.unit
     @pytest.mark.parametrize("system_tps", [None, OMITTED, "nan", True])
     def test_a_result_summary_without_numeric_system_tps_is_refused(
         self, tmp_path, system_tps
     ):
-        with pytest.raises(ValueError, match="needs a numeric system_tps"):
+        refused = refused_messages(
             write_upload(
                 tmp_path / "acme",
                 {SYSTEM: [Run(concurrency=16, system_tps=system_tps)]},
             )
+        )
+        assert any("needs a numeric system_tps" in message for message in refused)
 
     @pytest.mark.unit
     def test_a_stringified_system_tps_reads_as_its_number(self, tmp_path):
@@ -163,29 +167,34 @@ class TestPointFromNode:
 
     @pytest.mark.unit
     def test_a_concurrency_that_spells_no_number_is_refused(self, tmp_path):
-        with pytest.raises(ValueError, match="needs an integer concurrency"):
+        refused = refused_messages(
             write_upload(
                 tmp_path / "acme",
                 {SYSTEM: [Run(concurrency="sixteen", dir_name="r16")]},
             )
+        )
+        assert any("needs an integer concurrency" in message for message in refused)
 
     @pytest.mark.unit
     def test_a_system_desc_without_max_supported_concurrency_is_refused(self, tmp_path):
-        with pytest.raises(
-            ValueError, match="needs an integer max_supported_concurrency"
-        ):
+        refused = refused_messages(
             write_upload(
                 tmp_path / "acme",
                 {SYSTEM: [Run(concurrency=16, max_supported_concurrency=OMITTED)]},
             )
+        )
+        assert any(
+            "needs an integer max_supported_concurrency" in message
+            for message in refused
+        )
 
     @pytest.mark.unit
     def test_a_run_without_a_result_summary_file_is_refused(self, tmp_path):
         run_dir = tmp_path / "acme" / "results" / "sys" / "model" / "r16"
         write_run(run_dir, Run(concurrency=16))
         (run_dir / "result_summary.json").unlink()
-        with pytest.raises(ValueError, match="cannot carry its facts"):
-            write_upload(tmp_path / "acme", {SYSTEM: []})
+        refused = refused_messages(write_upload(tmp_path / "acme", {SYSTEM: []}))
+        assert any("cannot carry its facts" in message for message in refused)
 
 
 class TestParetoShape:
@@ -197,8 +206,8 @@ class TestParetoShape:
             Run(concurrency=16, offline="dedicated", system_tps=5292.0),
             Run(concurrency=8192, offline="elected"),
         ]
-        with pytest.raises(ValueError, match="exactly one point may carry"):
-            write_upload(tmp_path / "acme", {SYSTEM: runs})
+        refused = refused_messages(write_upload(tmp_path / "acme", {SYSTEM: runs}))
+        assert any("exactly one point may carry" in message for message in refused)
 
     @pytest.mark.unit
     def test_a_dedicated_run_needs_exactly_one_c_max_point(self, tmp_path):
@@ -206,8 +215,8 @@ class TestParetoShape:
             Run(concurrency=16, offline="dedicated", system_tps=5292.0),
             Run(concurrency=512),
         ]
-        with pytest.raises(ValueError, match="needs exactly one C_max point"):
-            write_upload(tmp_path / "acme", {SYSTEM: runs})
+        refused = refused_messages(write_upload(tmp_path / "acme", {SYSTEM: runs}))
+        assert any("needs exactly one C_max point" in message for message in refused)
 
     @pytest.mark.unit
     def test_two_c_max_points_beside_a_dedicated_run_are_refused(self, tmp_path):
@@ -216,8 +225,8 @@ class TestParetoShape:
             Run(concurrency=8192, system_tps=5400.0),
             Run(concurrency=8192, dir_name="r8193", system_tps=5200.0),
         ]
-        with pytest.raises(ValueError, match="needs exactly one C_max point"):
-            write_upload(tmp_path / "acme", {SYSTEM: runs})
+        refused = refused_messages(write_upload(tmp_path / "acme", {SYSTEM: runs}))
+        assert any("needs exactly one C_max point" in message for message in refused)
 
     @pytest.mark.unit
     def test_two_points_with_the_same_concurrency_are_refused(self, tmp_path):
@@ -225,8 +234,8 @@ class TestParetoShape:
             Run(concurrency=16),
             Run(concurrency=16, dir_name="r016", system_tps=5400.0),
         ]
-        with pytest.raises(ValueError, match="must be distinct"):
-            write_upload(tmp_path / "acme", {SYSTEM: runs})
+        refused = refused_messages(write_upload(tmp_path / "acme", {SYSTEM: runs}))
+        assert any("must be distinct" in message for message in refused)
 
     @pytest.mark.unit
     def test_a_dedicated_offline_run_may_share_a_concurrency(self, tmp_path):
@@ -245,8 +254,8 @@ class TestParetoShape:
             Run(concurrency=512, offline="elected"),
             Run(concurrency=8192, system_tps=5400.0),
         ]
-        with pytest.raises(ValueError, match="Offline point present"):
-            write_upload(tmp_path / "acme", {SYSTEM: runs})
+        refused = refused_messages(write_upload(tmp_path / "acme", {SYSTEM: runs}))
+        assert any("Offline point present" in message for message in refused)
 
     @pytest.mark.unit
     def test_the_points_must_agree_on_max_supported_concurrency(self, tmp_path):
@@ -254,8 +263,8 @@ class TestParetoShape:
             Run(concurrency=16, max_supported_concurrency=8192),
             Run(concurrency=8192, max_supported_concurrency=4096),
         ]
-        with pytest.raises(ValueError, match="must declare the same"):
-            write_upload(tmp_path / "acme", {SYSTEM: runs})
+        refused = refused_messages(write_upload(tmp_path / "acme", {SYSTEM: runs}))
+        assert any("must declare the same" in message for message in refused)
 
     @pytest.mark.unit
     def test_the_points_must_agree_on_a_declared_c_min_override(self, tmp_path):
@@ -263,8 +272,8 @@ class TestParetoShape:
             Run(concurrency=16, c_min_override=16),
             Run(concurrency=8192),
         ]
-        with pytest.raises(ValueError, match="C_min override"):
-            write_upload(tmp_path / "acme", {SYSTEM: runs})
+        refused = refused_messages(write_upload(tmp_path / "acme", {SYSTEM: runs}))
+        assert any("C_min override" in message for message in refused)
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -325,18 +334,20 @@ class TestFromDirectory:
     def test_a_null_client_tps_is_still_refused(self, tmp_path):
         # A run that recorded no OSL writes `tps: null`; the policy metric is
         # not there to read, so the load still refuses.
-        with pytest.raises(ValueError, match="needs a numeric system_tps"):
+        refused = refused_messages(
             write_upload(
                 tmp_path / "acme",
                 {SYSTEM: [Run(system_tps=OMITTED, summary_extra={"tps": None})]},
             )
+        )
+        assert any("needs a numeric system_tps" in message for message in refused)
 
     @pytest.mark.unit
     def test_a_pareto_without_run_directories_is_refused(self, tmp_path):
         root = tmp_path / "acme"
         (root / "results" / "sys" / "model").mkdir(parents=True)
-        with pytest.raises(ValueError, match="has no run directories"):
-            write_upload(root, {})
+        refused = refused_messages(write_upload(root, {}))
+        assert any("has no run directories" in message for message in refused)
 
 
 class TestMultiPareto:
@@ -727,35 +738,43 @@ class TestNumericGuards:
 
     @pytest.mark.unit
     def test_a_non_finite_system_tps_is_refused(self, tmp_path):
-        with pytest.raises(ValueError, match="needs a finite value"):
+        refused = refused_messages(
             write_upload(
                 tmp_path / "acme",
                 {SYSTEM: [Run(concurrency=16, system_tps=float("inf"))]},
             )
+        )
+        assert any("needs a finite value" in message for message in refused)
 
     @pytest.mark.unit
     def test_a_system_tps_outside_float_range_is_refused(self, tmp_path):
-        with pytest.raises(ValueError, match="outside float range"):
+        refused = refused_messages(
             write_upload(
                 tmp_path / "acme",
                 {SYSTEM: [Run(concurrency=16, system_tps=10**400)]},
             )
+        )
+        assert any("outside float range" in message for message in refused)
 
     @pytest.mark.unit
     def test_a_c_max_outside_float_range_is_refused(self, tmp_path):
-        with pytest.raises(ValueError, match="outside float range"):
+        refused = refused_messages(
             write_upload(
                 tmp_path / "acme",
                 {SYSTEM: [Run(concurrency=16, max_supported_concurrency=10**400)]},
             )
+        )
+        assert any("outside float range" in message for message in refused)
 
     @pytest.mark.unit
     def test_a_concurrency_outside_float_range_is_refused(self, tmp_path):
-        with pytest.raises(ValueError, match="outside float range"):
+        refused = refused_messages(
             write_upload(
                 tmp_path / "acme",
                 {SYSTEM: [Run(concurrency=10**400, dir_name="r16")]},
             )
+        )
+        assert any("outside float range" in message for message in refused)
 
 
 class TestSharedFactsAgreement:
@@ -768,8 +787,10 @@ class TestSharedFactsAgreement:
         # Run 2's `c_min_override: null` is §5.4's invalid declaration; a
         # `get`-based comparison once let it read equal to run 1's omission.
         runs = [Run(concurrency=16), Run(concurrency=8192, c_min_override=None)]
-        with pytest.raises(ValueError, match="must declare the same c_min_override"):
-            write_upload(tmp_path / "acme", {SYSTEM: runs})
+        refused = refused_messages(write_upload(tmp_path / "acme", {SYSTEM: runs}))
+        assert any(
+            "must declare the same c_min_override" in message for message in refused
+        )
 
     @pytest.mark.unit
     def test_an_int_and_a_float_c_min_override_do_not_agree(self, tmp_path):
@@ -778,8 +799,10 @@ class TestSharedFactsAgreement:
             Run(concurrency=32, c_min_override=16.0),
             Run(concurrency=8192),
         ]
-        with pytest.raises(ValueError, match="must declare the same c_min_override"):
-            write_upload(tmp_path / "acme", {SYSTEM: runs})
+        refused = refused_messages(write_upload(tmp_path / "acme", {SYSTEM: runs}))
+        assert any(
+            "must declare the same c_min_override" in message for message in refused
+        )
 
 
 class TestEmptySystems:
@@ -790,8 +813,8 @@ class TestEmptySystems:
         root = tmp_path / "acme"
         write_run(root / "results" / "sys" / "model" / "r16", Run(concurrency=16))
         (root / "results" / "empty_sys").mkdir(parents=True)
-        with pytest.raises(ValueError, match="has no model directories"):
-            Submission.from_directory(root)
+        refused = refused_messages(Submission.from_directory(root))
+        assert any("has no model directories" in message for message in refused)
 
     @pytest.mark.unit
     def test_a_pool_root_holding_no_paretos_is_refused(self, tmp_path):

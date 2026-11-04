@@ -627,6 +627,42 @@ class Pareto:
 
 
 @dataclass(frozen=True)
+class RefusedSubmission:
+    """One submission the loader could not judge: its path and why.
+
+    Args:
+        path (Path): The refused `results/<system>/<model>/` directory, or the
+            refused directory itself when no submission sits below it.
+        message (str): Why the subtree cannot be judged.
+    """
+
+    path: Path
+    message: str
+
+
+def _refuse(node: Node, message: str) -> None:
+    """Record `message` on `node`: its subtree is unjudgeable from here."""
+    node.refusals = (*node.refusals, message)
+
+
+def _refused_submissions(node: Node) -> list[RefusedSubmission]:
+    """`node`'s refusals as per-submission records, one per pareto below it.
+
+    A refused node with no pareto below it (a system directory holding no
+    model directory) keeps one record of its own: the refusal is real and must
+    be reported even though no submission can carry it.
+    """
+    paretos = [child for child in node.children if child.kind is RuleScopes.PARETO]
+    if not paretos:
+        return [RefusedSubmission(node.dir, refusal) for refusal in node.refusals]
+    return [
+        RefusedSubmission(pareto.dir, refusal)
+        for pareto in paretos
+        for refusal in node.refusals
+    ]
+
+
+@dataclass(frozen=True)
 class Submission:
     """One uploaded tree: its paretos, and the nodes rows resolve facts from.
 
@@ -643,10 +679,14 @@ class Submission:
             `<model>` nodes the paretos hang from.
         paretos (Sequence[Pareto]): One `Pareto` per `<system>/<model>` of the
             tree, in tree order.
+        refused (tuple[RefusedSubmission, ...]): One record per submission the
+            loader could not judge, so a pool may mix judged and refused
+            submissions. (Default: ())
     """
 
     tree: Node
     paretos: Sequence[Pareto]
+    refused: tuple[RefusedSubmission, ...] = ()
     points: tuple[Point, ...] = field(init=False, repr=False, compare=False)
     # Pareto node id -> its `Pareto`: the one lookup `pareto_at` needs. `id()`
     # keys are safe here: nodes compare by identity and the tree outlives this.
@@ -665,25 +705,48 @@ class Submission:
 
     @classmethod
     def from_directory(cls, root: Path, ruleset: Catalog | None = None) -> Submission:
-        """Build one from its uploaded tree rather than by hand."""
+        """Build one from its uploaded tree rather than by hand.
+
+        A problem that keeps one submission (one `<system>/<model>`) from being
+        judged is carried as a `RefusedSubmission` instead of raised, so the
+        other submissions of a pool still get their findings. A problem of the
+        input itself -- an unwalkable root, a pool listing no system -- stays an
+        error.
+        """
         tree = SubmissionNode.from_directory(root, ruleset=ruleset)
         paretos: list[Pareto] = []
+        refused: list[RefusedSubmission] = []
         for system in tree.children:
+            if system.refusals:
+                refused.extend(_refused_submissions(system))
+                continue
             if not system.children:
-                raise ValueError(f"{system.dir} has no model directories to check")
+                _refuse(system, f"{system.dir} has no model directories to check")
+                refused.extend(_refused_submissions(system))
+                continue
             for pareto_node in system.children:
+                if pareto_node.refusals:
+                    refused.extend(_refused_submissions(pareto_node))
+                    continue
                 if not pareto_node.children:
-                    raise ValueError(
-                        f"{pareto_node.dir} has no run directories (r<N>) to check"
+                    _refuse(
+                        pareto_node,
+                        f"{pareto_node.dir} has no run directories (r<N>) to check",
                     )
-                paretos.append(Pareto.from_nodes(pareto_node))
-        if not paretos:
+                    refused.extend(_refused_submissions(pareto_node))
+                    continue
+                try:
+                    paretos.append(Pareto.from_nodes(pareto_node))
+                except ValueError as exc:
+                    _refuse(pareto_node, str(exc))
+                    refused.extend(_refused_submissions(pareto_node))
+        if not paretos and not refused:
             raise ValueError(
                 f"{root} holds no paretos: a pool root expects "
                 "results/<system>/<model>/r<N>/, a system directory "
                 "<model>/r<N>/"
             )
-        return cls(tree, paretos)
+        return cls(tree, tuple(paretos), tuple(refused))
 
     def pareto_at(self, node: Node) -> Pareto | None:
         """The Pareto `node` belongs to. `None` for nodes above every pareto."""

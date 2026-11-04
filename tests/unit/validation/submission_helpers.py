@@ -153,6 +153,17 @@ def write_upload(
     return Submission.from_directory(root, ruleset=ruleset)
 
 
+def refused_messages(submission: Submission) -> list[str]:
+    """The loader refusals' messages, one per refused submission.
+
+    Args:
+        submission (Submission): The upload whose `refused` records to read.
+    Returns:
+        list[str]: The `RefusedSubmission.message` of each record, in order.
+    """
+    return [refused.message for refused in submission.refused]
+
+
 # The suite's standard `valid_refs.yaml`: every field name its checks name,
 # with the three absent states spelled per field -- `concurrency` /
 # `system_desc.max_supported_concurrency` / `result_summary.system_tps` are

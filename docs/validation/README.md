@@ -89,6 +89,13 @@ The cohort's optional `cohort.yaml` manifest names the packaged ruleset its
 `ruleset.*` refs read (e.g. `mlperf-inference-v6.1`); without it, a `ruleset.*`
 row is refused (`the tree was built without ruleset`).
 
+A submission the loader cannot judge (a run directory missing its summary, a
+curve whose points disagree, a directory listing refusing entries) is reported
+as `refused: <dir>: <message>` on stderr and counts against the exit code; its
+sibling submissions still run and report their findings. Only a problem of the
+input itself - an unwalkable tree, a pool root without systems - refuses the
+whole run before any check starts.
+
 The run prints one line per failing finding:
 
 - The evaluated `assert` predicate (`1 le 128`), marked `FAIL` or `WARN`
@@ -118,11 +125,11 @@ Exit codes, in plain words:
 
 - `0` - every applicable check held, or the checks that did not hold failed only
   at `warn` severity (a warning is reported and passes through).
-- `1` - at least one failing `fail` finding (`B blocking` nonzero): the
-  submission is blocked.
-- `2` - the cohort or the submission was refused before any check ran (a
-  duplicate check id, a check naming a fact the cohort's `valid_refs.yaml` does
-  not declare, a run directory without its `system_tps`, ...).
+- `1` - at least one failing `fail` finding (`B blocking` nonzero), or at least
+  one refused submission: the submission is blocked.
+- `2` - the cohort or the input was refused before any check ran (a duplicate
+  check id, a check naming a fact the cohort's `valid_refs.yaml` does not
+  declare, an unwalkable tree, a pool root holding no systems).
 
 Severity shapes the submission's fate, not premise vouching: a failing `warn`
 still withholds its `needs` dependents.

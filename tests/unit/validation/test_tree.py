@@ -91,19 +91,24 @@ class TestWalk:
     def test_a_directory_that_is_not_a_point_is_refused(self, tmp_path):
         _, root = _tree(tmp_path)
         (root / "results" / "sys" / "model" / "notes").mkdir()
-        with pytest.raises(
-            ValueError, match=r"no check can reach: notes \(not an `r<N>` point"
-        ):
-            SubmissionNode.from_directory(root)
+        walked = SubmissionNode.from_directory(root)
+        pareto = walked.children[0].children[0]
+        assert pareto.refusals == (
+            f"{pareto.dir} holds entries no check can reach: "
+            "notes (not an `r<N>` point directory)",
+        )
+        assert [p.dir.name for p in pareto.children] == ["r16", "r8"]
 
     @pytest.mark.unit
     def test_a_point_named_file_is_refused(self, tmp_path):
         _, root = _tree(tmp_path)
         (root / "results" / "sys" / "model" / "r32").write_text("{}", encoding="utf-8")
-        with pytest.raises(
-            ValueError, match=r"no check can reach: r32 \(a point is a directory\)"
-        ):
-            SubmissionNode.from_directory(root)
+        walked = SubmissionNode.from_directory(root)
+        pareto = walked.children[0].children[0]
+        assert pareto.refusals == (
+            f"{pareto.dir} holds entries no check can reach: "
+            "r32 (a point is a directory)",
+        )
 
     @pytest.mark.unit
     def test_a_symlinked_directory_is_refused_not_skipped(self, tmp_path):
@@ -113,10 +118,12 @@ class TestWalk:
         (root / "results" / "sys" / "model" / "r99").symlink_to(
             outside, target_is_directory=True
         )
-        with pytest.raises(
-            ValueError, match=r"no check can reach: r99 \(a symlinked directory\)"
-        ):
-            SubmissionNode.from_directory(root)
+        walked = SubmissionNode.from_directory(root)
+        pareto = walked.children[0].children[0]
+        assert pareto.refusals == (
+            f"{pareto.dir} holds entries no check can reach: "
+            "r99 (a symlinked directory)",
+        )
 
     @pytest.mark.unit
     def test_a_stray_file_beside_the_points_is_ignored(self, tmp_path):

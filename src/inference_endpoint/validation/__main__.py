@@ -75,9 +75,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns:
         int: `0` = every applicable check held, or failed only at `warn` severity (a
             warning is reported and passes through). `1` = at least one failing `fail`
-            finding. `2` = the cohort or the submission was refused before any check ran
-            (a bad check file, an unwalkable tree, an unreadable artifact, a
-            number no `float` can carry).
+            finding, or at least one refused submission. `2` = the cohort or the input
+            was refused before any check ran (a bad check file, an unwalkable tree, an
+            unreadable artifact, a number no `float` can carry).
     """
     parser = argparse.ArgumentParser(
         prog="python -m inference_endpoint.validation",
@@ -112,6 +112,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, OverflowError) as exc:
         print(f"refused: {_escaped(str(exc))}", file=sys.stderr)
         return 2
+    for refused in submission.refused:
+        print(
+            _escaped(f"refused: {refused.path}: {refused.message}"),
+            file=sys.stderr,
+        )
     for note in collected.notes:
         # Shape notes, not findings: numeric-string readings and undeclared keys.
         print(_escaped(note), file=sys.stderr)
@@ -151,7 +156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{len(collected.findings)} finding(s), {len(failing)} failing "
         f"({len(blocking)} blocking)"
     )
-    return 1 if blocking else 0
+    return 1 if blocking or submission.refused else 0
 
 
 if __name__ == "__main__":

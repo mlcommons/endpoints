@@ -187,6 +187,10 @@ class Node:
             (Default: ())
         artifacts (dict[str, tuple[Any, str | None]]): Each `FILE_TO_KEY_MAP`
             artifact present: name -> its parsed `(value, error)` pair. (Default: {})
+        refusals (tuple[str, ...]): Why this node's own level cannot be judged:
+            entries its directory listing refused, or a loader refusal of the
+            subtree. A refused subtree is reported per submission instead of
+            aborting the whole input. (Default: ())
         ruleset (Catalog | None): The `ruleset` namespace `scopes()` exposes. The root
             node holds it when the submission was built with one. (Default: None)
         regions (Regions | None): The `regions` namespace `scopes()` exposes. Each pareto
@@ -206,6 +210,7 @@ class Node:
     )
     ruleset: Catalog | None = field(default=None, repr=False)
     regions: Regions | None = field(default=None, repr=False)
+    refusals: tuple[str, ...] = field(default=(), repr=False)
 
     def __init_subclass__(cls, kind: RuleScopes, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -385,6 +390,9 @@ def _walk(parent: Node, kind: RuleScopes, where: Path) -> tuple[Node, ...]:
     outside the upload. Plain files with other names stay ignored: uploads
     carry them.
 
+    The refusal is recorded on `parent`: entries of its own directory listing
+    no kind can take make its scope unjudgeable.
+
     Args:
         parent (Node): The node whose children are walked.
         kind (RuleScopes): Which child kind to take.
@@ -392,8 +400,6 @@ def _walk(parent: Node, kind: RuleScopes, where: Path) -> tuple[Node, ...]:
     Returns:
         tuple[Node, ...]: The children of `kind`, sorted by name, each with their
             own subtree below it.
-    Raises:
-        ValueError: When `where` holds an entry no kind can take.
     """
     children = []
     unreachable: list[str] = []
@@ -420,8 +426,12 @@ def _walk(parent: Node, kind: RuleScopes, where: Path) -> tuple[Node, ...]:
             node.children = _walk(node, below, entry)
         children.append(node)
     if unreachable:
-        raise ValueError(
-            f"{where} holds entries no check can reach: {', '.join(unreachable)}"
+        # The listing belongs to `parent`: its own scope cannot be judged, and
+        # `Submission.from_directory` reports the refusal per submission below
+        # it. A pool-level listing (whose `parent` is the root) stays a
+        # whole-input refusal.
+        parent.refusals = (
+            f"{where} holds entries no check can reach: {', '.join(unreachable)}",
         )
     return tuple(children)
 
