@@ -19,11 +19,11 @@ One golden upload's summaries come from the client's own writers
 (`Report.to_json`, `BenchmarkConfig.to_yaml_file`, `write_accuracy_results`),
 and a conforming 8-point pareto must exit 0 against the packaged cohort. The
 fixture carries the shapes only real output has -- a null
-`e2e_avg_interactivity` on the point with a failed sample, the dedicated
-Offline run's empty `tpot`, the recorded warmup salt, and one point whose
-`runtime_settings` is the client's full serialized `Settings` block (every
-optional field an explicit `null`) -- so cohort edits and client schema
-changes surface here instead of on a real upload.
+`e2e_avg_interactivity` on the point with a failed sample and the dedicated
+Offline run's empty `tpot` -- while `point.yaml` follows §8.3's canonical
+schema (v1.0 seed names, one explicit `null`, a pasted client `api_key` the
+diagnostics must not print), so cohort edits and client schema changes surface
+here instead of on a real upload.
 """
 
 import json
@@ -35,7 +35,7 @@ import inference_endpoint
 import pytest
 import yaml
 from inference_endpoint.commands.benchmark.accuracy import write_accuracy_results
-from inference_endpoint.config.schema import BenchmarkConfig, Settings
+from inference_endpoint.config.schema import BenchmarkConfig
 from inference_endpoint.config.schema import TestType as BenchmarkTestType
 from inference_endpoint.metrics.report import Report
 from inference_endpoint.validation.__main__ import main
@@ -57,13 +57,10 @@ OFFLINE_CONCURRENCY = FLOOR
 # submitter's-choice points get non-blocking `point_accuracy_present` warns.
 ACCURACY_POINTS = (8, 16, 64, 2048, OFFLINE_CONCURRENCY)
 FAILED_SAMPLE_POINT = 64
-# The point whose `runtime_settings` carries the client's full serialized
-# `Settings` block instead of the trimmed one (the cohort's pinned copy must
-# admit every key and explicit null the client can produce).
-FULL_SETTINGS_POINT = 2048
 SET_A = {
-    "scheduler_random_seed": 10487924139932647040,
-    "dataloader_random_seed": 586478644936801402,
+    "scheduler_rng_seed": 10487924139932647040,
+    "sample_index_rng_seed": 586478644936801402,
+    "model_seed": 9315206023656308754,
 }
 
 
@@ -123,27 +120,23 @@ def _summary(run_dir: Path, *, failed: int, with_tpot: bool) -> None:
     report.to_json(save_to=run_dir / "result_summary.json")
 
 
-def _runtime_settings(api_key: str, load_pattern: str, *, full: bool) -> dict[str, Any]:
-    """The point's `runtime_settings`: the trimmed block, or a full client dump.
+def _runtime_settings(api_key: str, load_pattern: str) -> dict[str, Any]:
+    """The point's `runtime_settings` as §8.3's schema spells it.
 
-    The full form is the client's own `Settings().model_dump(mode="json")` with
-    set A's runtime seeds, this run's load-pattern type, and the recorded API
-    key applied, so the cohort's pinned copy meets every key and explicit
-    `null` the client can serialize.
+    Set A's seeds under §4.6's v1.0 names, the run's load pattern, one explicit
+    `null` for an optional (`min_sample_count`), and - as paste tolerance - the
+    recorded client API key: a `client` block the cohort judges without
+    printing the key it carries.
     """
-    if not full:
-        return {
-            "runtime": dict(SET_A),
-            "load_pattern": {"type": load_pattern},
-            "client": {"stream_all_chunks": True, "api_key": api_key},
-            "warmup": {"enabled": True, "n_requests": 160, "salt": True},
-        }
-    settings = Settings().model_dump(mode="json")
-    settings["load_pattern"]["type"] = load_pattern
-    settings["runtime"]["scheduler_random_seed"] = SET_A["scheduler_random_seed"]
-    settings["runtime"]["dataloader_random_seed"] = SET_A["dataloader_random_seed"]
-    settings["client"]["api_key"] = api_key
-    return settings
+    return {
+        "load_pattern": load_pattern,
+        "min_duration_ms": 600_000,
+        "min_sample_count": None,
+        "runtime": dict(SET_A),
+        "stream_all_chunks": True,
+        "warmup": {"salt": True},
+        "client": {"api_key": api_key},
+    }
 
 
 def _point_yaml(
@@ -153,7 +146,6 @@ def _point_yaml(
     offline: str | None,
     load_pattern: str,
     api_key: str,
-    full_settings: bool = False,
 ) -> None:
     """Write `point.yaml` (§8.3) with the disclosures the cohort checks."""
     config: dict[str, Any] = {
@@ -165,13 +157,10 @@ def _point_yaml(
         "division": "Standardized",
         "link_to_model": "https://example.com/model",
         "link_to_model_transformation": None,
-        "load_pattern": load_pattern,
         "max_supported_concurrency": MAX_SUPPORTED,
         "model_name": MODEL,
         "model_precision": "FP16",
-        "runtime_settings": _runtime_settings(
-            api_key, load_pattern, full=full_settings
-        ),
+        "runtime_settings": _runtime_settings(api_key, load_pattern),
         "seed_set": "A",
         "shared_docs": "docs",
         "shared_src": "src",
@@ -179,7 +168,7 @@ def _point_yaml(
         "warmup": {
             "concurrency": 16,
             "data_source": "mlperf-perf-dataset-v1 validation split",
-            "duration_s": 60,
+            "duration_s": 60.0,
             "initialization_steps": ["model loaded", "kv-cache warmed"],
             "logs_retained": True,
             "requests_completed": 160,
@@ -238,7 +227,6 @@ def _build_upload(root: Path, *, api_key: str = "<redacted>") -> None:
             offline=offline,
             load_pattern="max_throughput" if offline else "concurrency",
             api_key=api_key,
-            full_settings=concurrency == FULL_SETTINGS_POINT,
         )
         (run_dir / "system_desc.json").write_text(
             json.dumps({"max_supported_concurrency": MAX_SUPPORTED}),

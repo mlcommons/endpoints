@@ -14,9 +14,13 @@
 point:
   config:
     concurrency: { type: int, required: true }
-    offline: { type: str, allowlist: [dedicated, elected, none], default: null }
-    load_pattern:
-      { type: str, allowlist: [concurrency, agentic_inference, max_throughput] }
+    offline:
+      {
+        type: str,
+        allowlist: [dedicated, elected, none],
+        default: null,
+        nullable: true,
+      }
     region:
       {
         type: str,
@@ -29,33 +33,35 @@ point:
             margin,
             submitters_choice,
           ],
+        nullable: true,
       }
-    seed_set: { type: str }
-    target_cohort: { type: str }
-    model_name: { type: str }
-    model_precision: { type: str }
-    model_notes: { type: str }
+    seed_set: { type: str, nullable: true }
+    target_cohort: { type: str, nullable: true }
+    model_name: { type: str, nullable: true }
+    model_precision: { type: str, nullable: true }
+    model_notes: { type: str, nullable: true }
     dataset: { type: str }
-    dataset_name: { type: str }
-    dataset_type: { type: str }
-    dataset_link: { type: str }
-    link_to_model: { type: str }
+    dataset_name: { type: str, nullable: true }
+    dataset_type: { type: str, nullable: true }
+    dataset_link: { type: str, nullable: true }
+    link_to_model: { type: str, nullable: true }
     link_to_model_transformation: { type: str, nullable: true }
-    shared_src: { type: str }
-    shared_docs: { type: str }
-    division: { type: str }
-    max_supported_concurrency: { type: int }
-    nodes_used: { type: list }
-    dp_shortfall: dict
-    speculative_decoding: dict
+    shared_src: { type: str, nullable: true }
+    shared_docs: { type: str, nullable: true }
+    division: { type: str, nullable: true }
+    max_supported_concurrency: { type: int, nullable: true }
+    nodes_used: { type: list, nullable: true }
+    dp_shortfall: { type: dict, nullable: true }
+    speculative_decoding: { type: dict, nullable: true }
     warmup:
-      duration_s: { type: int }
+      duration_s: { type: float }
       requests_issued: { type: int }
       requests_completed: { type: int }
       concurrency: { type: int }
-      logs_retained: { type: bool }
+      logs_retained: { type: bool, nullable: true }
+      link_logs: { type: str, nullable: true }
+      initialization_steps: { type: list }
       data_source: { type: str }
-      salt: { type: bool }
     steady_state:
       status:
         {
@@ -67,102 +73,55 @@ point:
               insufficient_passes,
               partial_dataset,
             ],
+          nullable: true,
         }
+      # §4.4's verdicts; the trailing two are the legacy wire spellings the
+      # round's own checker still reads.
       verdict:
         {
           type: str,
           allowlist:
-            [steady_state, drifting_up, drifting_down, anomaly, not_found],
+            [
+              steady_state,
+              drifting_up,
+              drifting_down,
+              anomaly,
+              not_found,
+              "STEADY STATE",
+              "not found",
+            ],
+          nullable: true,
         }
       window: dict
       state: dict
+    # The canonical `RuntimeSettings` block of the submission's own schema.
+    # The client's `Settings` shapes (a `load_pattern` block, the `client`/
+    # `timeouts`/`profiling` subtrees) are not part of a point.yaml; a pasted
+    # block still parses, its undeclared keys surfacing as ignored notes.
     runtime_settings:
-      # Deliberately copied out of the client's `Settings` model
-      # (src/inference_endpoint/config/schema.py) to maintain per-version
-      # compatibility pending any schema changes: a cohort pins the shape it
-      # validates against, and a later client change lands as a new cohort
-      # revision instead of moving this one. The copy preserves the client's
-      # nullability: every field the model leaves optional is declared
-      # `nullable: true`, so a serialized `Settings` block reads as-is.
-      runtime:
-        min_issue_duration_ms: { type: int, nullable: true }
-        max_issue_duration_ms: { type: int, nullable: true }
-        n_samples_to_issue: { type: int, nullable: true }
-        scheduler_random_seed: { type: int }
-        dataloader_random_seed: { type: int }
       load_pattern:
-        type:
-          {
-            type: str,
-            allowlist:
-              [
-                max_throughput,
-                poisson,
-                concurrency,
-                agentic_inference,
-                burst,
-                step,
-              ],
-          }
-        target_qps: { type: float, nullable: true }
-        target_concurrency: { type: int, nullable: true }
-        use_legacy_loadgen_qps_metrics: { type: bool }
-      client:
-        num_workers: { type: int }
-        log_level: { type: str }
-        warmup_connections: { type: int }
-        auto_warmup_budget_fraction: { type: float }
-        max_concurrent_warmup_connects: { type: int }
-        max_connections: { type: int }
-        transport:
-          type: { type: str, allowlist: [zmq] }
-          recv_buffer_size: { type: int }
-          send_buffer_size: { type: int }
-          io_threads: { type: int }
-          worker_io_threads: { type: int }
-          high_water_mark: { type: int }
-          linger: { type: int }
-          immediate: { type: int }
-        stream_all_chunks: { type: bool }
-        worker_initialization_timeout: { type: float }
-        worker_graceful_shutdown_wait: { type: float }
-        worker_force_kill_timeout: { type: float }
-        insecure: { type: bool }
-        max_idle_time: { type: float }
-        min_required_connections: { type: int }
-        worker_gc_mode: { type: str, allowlist: [disabled, relaxed, system] }
-        endpoint_urls: { type: list }
-        api_type:
-          {
-            type: str,
-            allowlist: [openai, openai_completions, sglang, videogen],
-          }
-        api_key: { type: str, nullable: true, sensitive: true }
-        event_logs_dir: { type: str, nullable: true }
-      timeouts:
-        run_timeout_s: { type: float, nullable: true }
-        endpoint_response_idle_timeout_s: { type: float, nullable: true }
-        interrupted_teardown_grace_s: { type: float }
-        service_ready_timeout_s: { type: float }
-        warmup_drain_timeout_s: { type: float, nullable: true }
-        performance_drain_timeout_s: { type: float, nullable: true }
-        accuracy_drain_timeout_s: { type: float, nullable: true }
-        metrics_drain_timeout_s: { type: float, nullable: true }
+        # §6.1's two patterns; `max_throughput` appears only on a dedicated
+        # Offline point, which §6.1 exempts - the row enforces that pairing.
+        {
+          type: str,
+          allowlist: [concurrency, agentic_inference, max_throughput],
+        }
+      min_duration_ms: { type: int }
+      min_sample_count: { type: int, nullable: true }
+      stream_all_chunks: { type: bool }
+      runtime:
+        # §4.6's v1.0 spellings, then the v0.7 pair the schema still reads.
+        scheduler_rng_seed: { type: int, nullable: true }
+        sample_index_rng_seed: { type: int, nullable: true }
+        model_seed: { type: int, nullable: true }
+        scheduler_random_seed: { type: int, nullable: true }
+        dataloader_random_seed: { type: int, nullable: true }
       warmup:
-        enabled: { type: bool }
-        n_requests: { type: int, nullable: true }
-        salt: { type: bool }
-        drain: { type: bool }
-        warmup_random_seed: { type: int }
-      profiling:
-        engine: { type: str, allowlist: [vllm], nullable: true }
-        urls: { type: list, nullable: true }
-      early_stopping:
-        enabled: { type: bool }
-      steady_state:
-        enabled: { type: bool }
-      metrics_tokenizer_workers: { type: int }
-      metrics_isl: { type: bool }
+        salt: { type: bool, nullable: true }
+      # Paste tolerance: a submitter who carries the client's `client` block
+      # keeps its API key out of diagnostics (`sensitive` redacts it).
+      client:
+        api_key: { type: str, nullable: true, sensitive: true }
   system_desc:
     max_supported_concurrency: { type: int, required: true }
     c_min_override: { type: int, default: null }
@@ -182,7 +141,7 @@ point:
     complete: { type: bool }
     state: { type: str }
     qps: { type: float, nullable: true }
-    duration_ns: { type: int, nullable: true }
+    duration_ns: { type: float, nullable: true }
     n_samples_issued: { type: int }
     n_samples_completed: { type: int }
     n_samples_failed: { type: int }

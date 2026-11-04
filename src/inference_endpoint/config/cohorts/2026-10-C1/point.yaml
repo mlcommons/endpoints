@@ -6,8 +6,9 @@
 # rescaling or the power model are listed in ../README.md under "Not yet
 # expressible" with the reason; the vocabulary-only rules (an `offline` value
 # outside §8.3's three, a `region` outside §8.3's six, a steady-state verdict
-# outside §4.4's five, a `load_pattern` outside §6.1's two) are enforced by this
-# cohort's `valid_refs.yaml` notes at collect time, not by rows here.
+# outside §4.4's vocabulary, a `load_pattern` outside §6.1's patterns) are
+# enforced by this cohort's `valid_refs.yaml` notes at collect time, not by
+# rows here.
 
 point_disclosure_complete:
   description: Every §8.3 disclosure field is present and non-blank (empty or whitespace-only values fail).
@@ -33,6 +34,11 @@ point_run_complete:
   rule: "Endpoints Policy §9.1, Automated Checks; §1, Submission completeness."
   fix: "Re-run this point to completion (`complete: false` marks a drain timeout or an interrupted run)."
   severity: fail
+  # The completion marker the client's own summary writes; a canonical
+  # `result_summary.json` (PointSummary) carries none, so this row judges the
+  # marker where a run recorded it.
+  when:
+    - { left: point.result_summary.complete, op: exists }
   assert:
     - { left: point.result_summary.complete, op: eq, right: true }
 
@@ -73,10 +79,10 @@ point_seed_runtime_match:
   fix: "Bind the run to the set A ruleset (`submission_ref.ruleset: endpoints-v1.0-2026-10-C1-A`) and re-run."
   severity: fail
   assert:
-    - left: point.config.runtime_settings.runtime.scheduler_random_seed
+    - left: point.config.runtime_settings.runtime.scheduler_rng_seed
       op: eq
       right: 10487924139932647040
-    - left: point.config.runtime_settings.runtime.dataloader_random_seed
+    - left: point.config.runtime_settings.runtime.sample_index_rng_seed
       op: eq
       right: 586478644936801402
 
@@ -112,7 +118,11 @@ point_offline_load_pattern:
   when:
     - { left: point.config.offline, op: eq, right: dedicated }
   assert:
-    - { left: point.config.load_pattern, op: eq, right: max_throughput }
+    - {
+        left: point.config.runtime_settings.load_pattern,
+        op: eq,
+        right: max_throughput,
+      }
 
 point_warmup_present:
   description: The run declares its warmup block.
@@ -314,14 +324,14 @@ point_sample_count_floor_open_orca:
       right: 24576
 
 point_accuracy_scores_present:
-  description: The run carries at least one accuracy result.
+  description: The run's accuracy_results.json carries at least one dataset entry.
   rule: "Endpoints Policy §5.3, Accuracy Runs; §15, Accuracy."
   fix: Run this point's accuracy dataset and ship its accuracy_results.json.
   severity: fail
   when:
     - { left: point.accuracy_results, op: exists }
   assert:
-    - over: point.accuracy_results.accuracy_scores
+    - over: point.accuracy_results
       aggregate: count
       op: gt
       value: 0
