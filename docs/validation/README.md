@@ -734,6 +734,10 @@ unchecked).
   - `derived.accounting_mismatch_points` / `derived.system_tps_mismatch_points`
     - Section 14's counts and Section 9.1's derived throughput, as the offending
       points' concurrencies
+  - `derived.misplaced_region_points` - the points whose declared `region` is
+    not their concurrency's computed band
+  - `derived.tps_utilization_mismatch_points` - the points whose declared
+    `system_desc.tps_utilization` misses their share of the curve's peak
 - `ruleset` - the packaged ruleset the cohort's `cohort.yaml` names (a
   registered round, e.g. `mlperf-inference-v6.1`):
   - `ruleset.models.<name>.<key>` - model definitions (the round's `models.py`)

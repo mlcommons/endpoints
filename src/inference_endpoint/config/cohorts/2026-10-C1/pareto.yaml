@@ -185,3 +185,29 @@ pareto_metric_consistency_system_tps:
         op: eq,
         value: 0,
       }
+
+pareto_region_placement:
+  description: Every declared region matches the band its concurrency computes (§8.3).
+  rule: "Endpoints Policy §5.5, Concurrency Regions; §8.3, Measurement Point."
+  fix: Correct the flagged points' `region`, or drop it where the band is intentional (`submitters_choice`).
+  severity: warn
+  assert:
+    - {
+        over: derived.misplaced_region_points,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }
+
+pareto_tps_utilization:
+  description: Every declared system_desc tps_utilization equals the point's share of its curve's peak throughput (§8.2).
+  rule: "Endpoints Policy §8.2, System Description; §9.1, Automated Checks."
+  fix: Recompute the flagged points' `tps_utilization` as `system_tps / max(system_tps)` over the curve.
+  severity: fail
+  assert:
+    - {
+        over: derived.tps_utilization_mismatch_points,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }

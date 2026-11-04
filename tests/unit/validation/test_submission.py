@@ -864,6 +864,45 @@ class TestCurveConsistency:
         )
         assert pareto.system_tps_mismatch_points() == (64,)
 
+    @pytest.mark.unit
+    def test_a_declared_region_off_its_band_is_named(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16, config_extra={"region": "low_latency"}),
+                Run(concurrency=50, config_extra={"region": "low_latency"}),
+                Run(concurrency=64, config_extra={"region": "submitters_choice"}),
+            ],
+        )
+        assert pareto.misplaced_region_points() == (50,)
+
+    @pytest.mark.unit
+    def test_a_declared_utilization_off_its_share_is_named(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_tps=1000.0,
+                    summary_extra={
+                        "duration_ns": 2_000_000_000,
+                        "output_sequence_lengths": {"total": 2000},
+                    },
+                    system_desc_extra={"tps_utilization": 1.0},
+                ),
+                Run(
+                    concurrency=64,
+                    system_tps=500.0,
+                    summary_extra={
+                        "duration_ns": 2_000_000_000,
+                        "output_sequence_lengths": {"total": 1000},
+                    },
+                    system_desc_extra={"tps_utilization": 1.0},
+                ),
+            ],
+        )
+        assert pareto.tps_utilization_mismatch_points() == (64,)
+
 
 class TestDerivedExposure:
     """`Pareto.derived`: the `derived.<name>` fields, resolved from the pareto itself."""
@@ -889,6 +928,8 @@ class TestDerivedExposure:
             "inconsistent_system_desc_keys",
             "accounting_mismatch_points",
             "system_tps_mismatch_points",
+            "misplaced_region_points",
+            "tps_utilization_mismatch_points",
         }
 
     @pytest.mark.unit

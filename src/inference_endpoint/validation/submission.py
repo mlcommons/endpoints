@@ -78,6 +78,41 @@ _MANDATORY_REGIONS: tuple[RegionKind, ...] = (
 # of its derived value reads as consistent.
 TPS_TOLERANCE = 0.01
 
+# The checker's `_TPS_UTILIZATION_ABS_TOL`: the declared throughput
+# utilization must sit within this absolute distance of its recomputed share
+# of the curve's peak.
+TPS_UTILIZATION_ABS_TOL = 0.1
+
+
+def _derived_system_tps(value: Mapping[str, Any]) -> float | None:
+    """The whole-run throughput a summary's own numbers imply, or `None`.
+
+    `output_sequence_lengths.total` over `duration_ns` seconds -- the derived
+    side of Section 9.1's throughput checks. A summary missing either number,
+    or carrying a non-positive duration, yields `None` and its row is left to
+    the presence refusals.
+
+    Args:
+        value (Mapping[str, Any]): One `result_summary.json` document.
+    Returns:
+        float | None: The derived tokens per second, `None` when the summary's
+            own numbers cannot carry one.
+    """
+    totals = value.get("output_sequence_lengths")
+    total = totals.get("total") if isinstance(totals, Mapping) else None
+    duration_ns = value.get("duration_ns")
+    numbers = (total, duration_ns)
+    if (
+        not all(
+            isinstance(number, int | float) and not isinstance(number, bool)
+            for number in numbers
+        )
+        or duration_ns <= 0
+    ):
+        return None
+    return float(total) / (float(duration_ns) / 1e9)
+
+
 # §8.5 describes one system per curve, but §8.1 calls each point's copy of the
 # system description the "framework/parallelism/precision for this point", and
 # §4.5.3's worked example changes the replica size between points: these are
@@ -219,6 +254,9 @@ class Point:
             default). (Default: None)
         dataset (str | None): The declared `dataset` id. (Default: None)
         seed_set (str | None): The declared `seed_set` id. (Default: None)
+        region (str | None): The declared `region` (§8.3) verbatim: a band name
+            or `submitters_choice`. `None` when the artifact omits it or spells
+            another type. (Default: None)
     """
 
     offline: Literal["dedicated", "elected"] | None
@@ -232,6 +270,7 @@ class Point:
     load_pattern: str | None = None
     dataset: str | None = None
     seed_set: str | None = None
+    region: str | None = None
 
     def __post_init__(self) -> None:
         if self.offline not in (None, "dedicated", "elected"):
@@ -297,6 +336,9 @@ class Point:
                 config.get("seed_set")
                 if isinstance(config.get("seed_set"), str)
                 else None
+            ),
+            region=(
+                config.get("region") if isinstance(config.get("region"), str) else None
             ),
         )
 
@@ -762,22 +804,86 @@ class Pareto:
             if error is not None or not isinstance(value, Mapping):
                 continue
             stored = value.get("full_run_system_tps", value.get("system_tps"))
-            totals = value.get("output_sequence_lengths")
-            total = totals.get("total") if isinstance(totals, Mapping) else None
-            duration_ns = value.get("duration_ns")
-            numbers = (stored, total, duration_ns)
-            if (
-                not all(
-                    isinstance(number, int | float) and not isinstance(number, bool)
-                    for number in numbers
-                )
-                or duration_ns <= 0
-            ):
+            derived = _derived_system_tps(value)
+            if not isinstance(stored, int | float) or isinstance(stored, bool):
                 continue
-            derived = float(total) / (float(duration_ns) / 1e9)
+            if derived is None:
+                continue
             if abs(float(stored) - derived) / max(abs(derived), 1e-9) > TPS_TOLERANCE:
                 mismatched.append(point.concurrency)
         return tuple(mismatched)
+
+    def misplaced_region_points(self) -> tuple[int, ...]:
+        """Points whose declared region is not the one their concurrency computes.
+
+        Section 8.3's `region` is optional and vocabulary-only per point, while
+        Sections 5.5/5.7 derive the boundaries from the curve's own
+        `C_min`/`C_max`: the checker's `region-placement` compares each declared
+        region against the band its concurrency classifies into and warns on a
+        mismatch. A point that declares no region, declares
+        `submitters_choice`, or sits outside every band (the in-range row's own
+        finding) is not counted here.
+
+        Returns:
+            tuple[int, ...]: The concurrency of each misplaced point, empty when
+                every declared region agrees with its band.
+        """
+        regions = self.regions()
+        misplaced: list[int] = []
+        for point in self.points:
+            declared = point.region
+            if declared is None or declared == "submitters_choice":
+                continue
+            computed = regions.covers(point.concurrency)
+            if computed is None:
+                continue
+            if computed.value != declared:
+                misplaced.append(point.concurrency)
+        return tuple(misplaced)
+
+    def tps_utilization_mismatch_points(self) -> tuple[int, ...]:
+        """Points whose declared throughput utilization misses its curve share.
+
+        Section 8.2's `system_desc.tps_utilization` normalises a point against
+        the peak `system_tps` of its own curve, and Section 9.1 makes the value
+        derivable: the checker recomputes `system_tps / max(system_tps)` from
+        the summaries -- the derived whole-run throughputs, not the stored
+        field -- and accepts a declared value within `TPS_UTILIZATION_ABS_TOL`.
+        A point whose summary cannot carry a throughput, or that declares no
+        utilization, is left to the presence refusals.
+
+        Returns:
+            tuple[int, ...]: The concurrency of each mismatching point, empty
+                when every declared utilization agrees.
+        """
+        measured: dict[int, float] = {}
+        declared: dict[int, float] = {}
+        for point in self.points:
+            if point.node is None:
+                continue
+            value, error = point.node.read("result_summary.json")
+            derived = (
+                _derived_system_tps(value)
+                if error is None and isinstance(value, Mapping)
+                else None
+            )
+            util = point.system_desc.get("tps_utilization")
+            if (
+                derived is None
+                or not isinstance(util, int | float)
+                or isinstance(util, bool)
+            ):
+                continue
+            measured[point.concurrency] = derived
+            declared[point.concurrency] = float(util)
+        peak = max(measured.values(), default=0.0)
+        if peak <= 0:
+            return ()
+        return tuple(
+            concurrency
+            for concurrency, util in declared.items()
+            if abs(util - measured[concurrency] / peak) > TPS_UTILIZATION_ABS_TOL
+        )
 
     def accuracy_uncovered_regions(self) -> tuple[str, ...]:
         """The §5.3 mandatory regions no accuracy-carrying point lands in.
@@ -1092,6 +1198,8 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "offline_points_missing_accuracy": Pareto.offline_points_missing_accuracy,
     "accounting_mismatch_points": Pareto.accounting_mismatch_points,
     "system_tps_mismatch_points": Pareto.system_tps_mismatch_points,
+    "misplaced_region_points": Pareto.misplaced_region_points,
+    "tps_utilization_mismatch_points": Pareto.tps_utilization_mismatch_points,
     "uncovered_regions": Pareto.uncovered_regions,
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,
