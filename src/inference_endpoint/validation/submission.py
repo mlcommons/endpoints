@@ -121,6 +121,164 @@ def _derived_system_tps(value: Mapping[str, Any]) -> float | None:
     return float(total) / seconds
 
 
+# The bookkeeping keys an accuracy entry carries beside its metrics: never a
+# metric, whatever their value type.
+_ACCURACY_META_KEYS: frozenset[str] = frozenset(
+    {
+        "dataset_name",
+        "num_samples",
+        "n_repeats",
+        "unit_samples",
+        "total_samples",
+        "osl_tokenize_s",
+    }
+)
+
+
+def _accuracy_entries(root: Any) -> list[Mapping[str, Any]]:
+    """The per-dataset entries of an `accuracy_scores` value.
+
+    The round's checker reads a mapping keyed by dataset name; the client's own
+    writer emits a list of entries carrying `dataset_name`. Both read the same.
+
+    Args:
+        root (Any): The `accuracy_results.json` document's `accuracy_scores`.
+    Returns:
+        list[Mapping[str, Any]]: Each entry, mapping-shaped ones only.
+    """
+    if isinstance(root, Mapping):
+        return [entry for entry in root.values() if isinstance(entry, Mapping)]
+    if isinstance(root, Sequence) and not isinstance(root, str | bytes):
+        return [entry for entry in root if isinstance(entry, Mapping)]
+    return []
+
+
+def _accuracy_entry_scores(entry: Mapping[str, Any]) -> dict[str, float]:
+    """One entry's `{metric: value}`.
+
+    The checker reads three shapes: a `score` mapping of named metrics, a
+    scalar `score` (kept under its own name), or the metrics as direct entry
+    keys, with the bookkeeping keys excluded. A value that decodes to no number
+    is skipped, as the checker logs and skips it.
+
+    Args:
+        entry (Mapping[str, Any]): One dataset entry.
+    Returns:
+        dict[str, float]: The entry's numeric metrics, by name.
+    """
+    raw = entry.get("score")
+    if isinstance(raw, Mapping):
+        items = list(raw.items())
+    elif raw is not None:
+        items = [("score", raw)]
+    else:
+        items = [
+            (key, value)
+            for key, value in entry.items()
+            if key not in _ACCURACY_META_KEYS
+        ]
+    scores: dict[str, float] = {}
+    for key, value in items:
+        decoded = decode_number(value, "float")
+        if isinstance(decoded, int | float) and not isinstance(decoded, bool):
+            scores[str(key)] = float(decoded)
+    return scores
+
+
+def _accuracy_weight(entry: Mapping[str, Any]) -> float | None:
+    """One entry's aggregation weight: its sample count, `None` when unstated."""
+    for key in ("num_samples", "unit_samples"):
+        weight = decode_number(entry.get(key), "float")
+        if isinstance(weight, int | float) and not isinstance(weight, bool):
+            return float(weight)
+    return None
+
+
+def _accuracy_issued(entry: Mapping[str, Any]) -> float | None:
+    """One entry's issued sample count, `None` when it states none.
+
+    `num_samples x max(n_repeats, 1)`, the checker's own reading of the repeats
+    a dataset was run with; the client's `total_samples` is that product
+    already.
+    """
+    total = decode_number(entry.get("total_samples"), "float")
+    if isinstance(total, int | float) and not isinstance(total, bool):
+        return float(total)
+    samples = _accuracy_weight(entry)
+    if samples is None:
+        return None
+    repeats = decode_number(entry.get("n_repeats"), "float")
+    if not isinstance(repeats, int | float) or isinstance(repeats, bool):
+        repeats = 1.0
+    return samples * max(float(repeats), 1.0)
+
+
+def _accuracy_bounds(targets: Any) -> dict[str, tuple[float, float | None]]:
+    """The catalog's per-metric gate bounds, scaled by each entry's `factor`.
+
+    A `lower` entry gates below (`lower x factor`); a `band` gates on both
+    sides, its upper bound widened by the same tolerance (`upper x (2 - factor)`
+    -- the checker's own `x 0.9` / `x 1.1` pair for a `factor: 0.9` band).
+
+    Args:
+        targets (Any): The catalog model's `accuracy_targets` mapping.
+    Returns:
+        dict[str, tuple[float, float | None]]: `metric -> (lower, upper)`,
+            `upper` `None` for a one-sided gate; empty when nothing declares a
+            bound.
+    """
+    if not isinstance(targets, Mapping):
+        return {}
+    bounds: dict[str, tuple[float, float | None]] = {}
+    for metric, declared in targets.items():
+        if not isinstance(declared, Mapping):
+            continue
+        raw_factor = decode_number(declared.get("factor"), "float")
+        factor = (
+            float(raw_factor)
+            if isinstance(raw_factor, int | float) and not isinstance(raw_factor, bool)
+            else 1.0
+        )
+        band = declared.get("band")
+        if (
+            isinstance(band, Sequence)
+            and not isinstance(band, str | bytes)
+            and len(band) == 2
+        ):
+            lower = decode_number(band[0], "float")
+            upper = decode_number(band[1], "float")
+            if all(
+                isinstance(bound, int | float) and not isinstance(bound, bool)
+                for bound in (lower, upper)
+            ):
+                bounds[str(metric)] = (
+                    float(lower) * factor,
+                    float(upper) * (2.0 - factor),
+                )
+            continue
+        lower = decode_number(declared.get("lower"), "float")
+        if isinstance(lower, int | float) and not isinstance(lower, bool):
+            bounds[str(metric)] = (float(lower) * factor, None)
+    return bounds
+
+
+def _weighted_mean(pairs: Sequence[tuple[float, float | None]]) -> float:
+    """The sample-weighted mean of `(value, weight)` pairs.
+
+    The plain mean when any weight is missing or the weights sum to zero, the
+    checker's own fallback.
+    """
+    weights = [weight for _, weight in pairs]
+    if all(weight is not None for weight in weights):
+        total = sum(weight for weight in weights if weight is not None)
+        if total > 0:
+            return (
+                sum(value * weight for value, weight in pairs if weight is not None)
+                / total
+            )
+    return sum(value for value, _ in pairs) / len(pairs)
+
+
 # §8.5 describes one system per curve, but §8.1 calls each point's copy of the
 # system description the "framework/parallelism/precision for this point", and
 # §4.5.3's worked example changes the replica size between points: these are
@@ -918,6 +1076,92 @@ class Pareto:
                 covered.add(kind)
         return tuple(kind.value for kind in _MANDATORY_REGIONS if kind not in covered)
 
+    def accuracy_gate_misses(self) -> tuple[str, ...]:
+        """The Section 15 gate misses the curve's accuracy results report.
+
+        The round's checker gates each accuracy-carrying run against the
+        catalog's targets for the declared `model_name`: the run's per-dataset
+        scores aggregate into a sample-weighted mean per metric, compared
+        against `accuracy_targets` scaled by its `factor`, and the issued sample
+        count (`num_samples x max(n_repeats, 1)` per entry; the client's
+        `total_samples` where spelled) must reach the model's `min_queries`. A
+        score reported as a fraction (`0..1`) rescales to the percent scale when
+        the bound sits above 1, and a metric the run does not report is
+        skipped, exactly as the checker skips it. An aggregate holding only the
+        client's unnamed `score` is gated against the model's single metric, as
+        the checker gates it; its warning that the scalar's identity cannot be
+        verified is not a miss here.
+
+        Returns:
+            tuple[str, ...]: One line per miss (`c<N>: ...`), empty when every
+                gate holds or no catalog entry carries targets to judge.
+        """
+        catalog = self._catalog()
+        model_name = self._model_name()
+        if catalog is None or model_name is None:
+            return ()
+        model = catalog.models.get(model_name)
+        if not isinstance(model, Mapping):
+            return ()
+        bounds = _accuracy_bounds(model.get("accuracy_targets"))
+        if not bounds:
+            return ()
+        raw_min = decode_number(model.get("min_queries"), "float")
+        min_samples = (
+            float(raw_min)
+            if isinstance(raw_min, int | float) and not isinstance(raw_min, bool)
+            else None
+        )
+        misses: list[str] = []
+        for point in self._accuracy_carrying_points():
+            if point.node is None:
+                continue
+            value, error = point.node.read("accuracy_results.json")
+            if error is not None or not isinstance(value, Mapping):
+                continue
+            entries = _accuracy_entries(value.get("accuracy_scores"))
+            if not entries:
+                continue
+            issued = [count for count in map(_accuracy_issued, entries) if count]
+            if min_samples is not None and issued and sum(issued) < min_samples:
+                misses.append(
+                    f"c{point.concurrency}: {sum(issued):.0f} accuracy "
+                    f"samples < {min_samples:.0f}"
+                )
+            weighted: dict[str, list[tuple[float, float | None]]] = {}
+            for entry in entries:
+                weight = _accuracy_weight(entry)
+                for metric, score in _accuracy_entry_scores(entry).items():
+                    weighted.setdefault(metric, []).append((score, weight))
+            aggregate = {
+                metric: _weighted_mean(pairs) for metric, pairs in weighted.items()
+            }
+            if list(aggregate) == ["score"] and len(bounds) == 1:
+                aggregate = {next(iter(bounds)): aggregate["score"]}
+            for metric, (lower, upper) in bounds.items():
+                reported = next(
+                    (
+                        score
+                        for name, score in aggregate.items()
+                        if name.lower() == metric
+                    ),
+                    None,
+                )
+                if reported is None:
+                    continue
+                if 0.0 <= reported <= 1.0 and lower > 1.0:
+                    reported *= 100.0
+                if reported < lower or (upper is not None and reported > upper):
+                    gate = (
+                        f"[{lower:.4f}, {upper:.4f}]"
+                        if upper is not None
+                        else f">= {lower:.4f}"
+                    )
+                    misses.append(
+                        f"c{point.concurrency}: {metric} {reported:.4f} outside {gate}"
+                    )
+        return tuple(misses)
+
     def offline_points_missing_accuracy(self) -> tuple[int, ...]:
         """The Offline points carrying no `accuracy_results.json` (§4.3).
 
@@ -1241,6 +1485,7 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "system_tps_mismatch_points": Pareto.system_tps_mismatch_points,
     "misplaced_region_points": Pareto.misplaced_region_points,
     "tps_utilization_mismatch_points": Pareto.tps_utilization_mismatch_points,
+    "accuracy_gate_misses": Pareto.accuracy_gate_misses,
     "uncovered_regions": Pareto.uncovered_regions,
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,

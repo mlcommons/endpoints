@@ -23,6 +23,7 @@ asserts what each subject computes on the walked upload. Hand-built `Point`/
 declare (e.g. a concurrency below 1).
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,41 @@ SYSTEM = ("sys", "model")
 def _pareto(tmp_path: Path, runs: list[Run]) -> Pareto:
     """The one pareto an upload of `runs` under `tmp_path` derives."""
     return write_upload(tmp_path / "acme", {SYSTEM: runs}).paretos[0]
+
+
+def _gated_pareto(tmp_path: Path, *, score: float, unit_samples: int = 4395) -> Pareto:
+    """A one-point gpt-oss-120b pareto whose run ships one accuracy entry."""
+    run = Run(concurrency=16, config_extra={"model_name": "gpt-oss-120b"})
+    run_dir = tmp_path / "upload" / "results" / SYSTEM[0] / SYSTEM[1] / run.name()
+    write_run(run_dir, run)
+    # Written before the walk, so the run's node carries it.
+    (run_dir / "accuracy_results.json").write_text(
+        json.dumps(
+            {
+                "accuracy_scores": [
+                    {
+                        "dataset_name": "mlperf_gpt_oss_accuracy",
+                        "score": score,
+                        "unit_samples": unit_samples,
+                        "total_samples": unit_samples,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    catalog = Catalog(
+        models={
+            "gpt-oss-120b": {
+                "accuracy_targets": {"exact_match": {"lower": 83.13, "factor": 0.99}},
+                "min_queries": 4395,
+            }
+        },
+        datasets={},
+    )
+    return write_upload(tmp_path / "upload", {SYSTEM: [run]}, ruleset=catalog).paretos[
+        0
+    ]
 
 
 class TestPointFromNode:
@@ -968,6 +1004,18 @@ class TestCurveConsistency:
         assert pareto.system_tps_mismatch_points() == ()
 
     @pytest.mark.unit
+    def test_a_conforming_accuracy_entry_holds_its_gate(self, tmp_path):
+        pareto = _gated_pareto(tmp_path, score=0.8320)
+        assert pareto.accuracy_gate_misses() == ()
+
+    @pytest.mark.unit
+    def test_a_low_score_and_a_short_count_are_named(self, tmp_path):
+        pareto = _gated_pareto(tmp_path, score=0.70, unit_samples=10)
+        misses = pareto.accuracy_gate_misses()
+        assert any("exact_match" in miss for miss in misses)
+        assert any("accuracy samples" in miss for miss in misses)
+
+    @pytest.mark.unit
     def test_a_stringified_count_reads_as_its_number(self, tmp_path):
         pareto = _pareto(
             tmp_path,
@@ -1024,6 +1072,7 @@ class TestDerivedExposure:
             "system_tps_mismatch_points",
             "misplaced_region_points",
             "tps_utilization_mismatch_points",
+            "accuracy_gate_misses",
         }
 
     @pytest.mark.unit

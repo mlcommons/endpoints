@@ -211,3 +211,11 @@ pareto_tps_utilization:
         op: eq,
         value: 0,
       }
+
+pareto_accuracy_gate:
+  description: Every accuracy-carrying run meets the catalog's Section 15 gates for its declared model (§15).
+  rule: "Endpoints Policy §15, Accuracy; §12, Dataset Requirements."
+  fix: Re-run the flagged points; the sample-weighted score must reach the model's target and the issued samples its minimum count.
+  severity: fail
+  assert:
+    - { over: derived.accuracy_gate_misses, aggregate: count, op: eq, value: 0 }

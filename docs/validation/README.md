@@ -746,6 +746,8 @@ unchecked).
     not their concurrency's computed band
   - `derived.tps_utilization_mismatch_points` - the points whose declared
     `system_desc.tps_utilization` misses their share of the curve's peak
+  - `derived.accuracy_gate_misses` - Section 15's per-run gate misses, joined to
+    the catalog's `accuracy_targets` for the declared model
 - `ruleset` - the packaged ruleset the cohort's `cohort.yaml` names (a
   registered round, e.g. `mlperf-inference-v6.1`):
   - `ruleset.models.<name>.<key>` - model definitions (the round's `models.py`)
