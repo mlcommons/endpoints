@@ -90,11 +90,15 @@ The cohort's optional `cohort.yaml` manifest names the packaged ruleset its
 row is refused (`the tree was built without ruleset`).
 
 A submission the loader cannot judge (a run directory missing its summary, a
-curve whose points disagree, a directory listing refusing entries) is reported
-as `refused: <dir>: <message>` on stderr and counts against the exit code; its
-sibling submissions still run and report their findings. Only a problem of the
-input itself - an unwalkable tree, a pool root without systems - refuses the
-whole run before any check starts.
+curve whose points disagree, a listing refusal below the pool root) is reported
+in the verdict block -- `submission <label>: refused (<message>)` -- and counts
+as a rejection in the roll-up and the exit code; its sibling submissions still
+run and report their findings. A problem of the input itself -- an unwalkable
+tree, a pool root without systems, a listing refusal at the pool root -- refuses
+the whole run before any check starts. Collect-time faults of the cohort's own
+tables (a declared value outside its allowlist, an artifact that does not parse)
+stop the run the same way, so a pool carrying one such artifact is refused whole
+rather than judged in parts.
 
 The run prints one line per failing finding:
 
@@ -642,7 +646,11 @@ check load (each names its cohort file):
 - an empty cohort directory (rather than a clean pass)
 
 At submission load (`Submission.from_directory`, which parses every `Point` and
-`Pareto` -- the `2` exit):
+`Pareto`): each problem below is a **per-submission refusal** -- reported in the
+verdict block as `refused`, counted as a rejection, and reflected in the `1`
+exit -- while only the cohort or the input itself (an unwalkable tree, a pool
+with no systems, a listing refusal at the pool root) stops the run before any
+check starts (the `2` exit):
 
 - a run directory whose `point.yaml`, `system_desc.json` or
   `result_summary.json` lacks or mistypes a parser-enforced fact (`concurrency`,
@@ -770,18 +778,21 @@ document -> fields (`point.config.concurrency` is the `config` document's
   as **absent** (what `exists`/`absent`/`not_null` are for), not an error, and
   `ruleset` keys are open data too - whatever the entry contains (`vocab_size`,
   `is_drafter`, ...).
-- `config.runtime_settings` is declared as a deliberate copy of the client's
-  `Settings` shape (`src/inference_endpoint/config/schema.py`) instead of
-  `dict`, so its fields are typed and rows can name them; the copy carries a
-  comment saying why (per-version compatibility: a later client change lands as
-  a new cohort revision, not a moved goalpost). Undeclared keys under it report
-  `ignored:` like anywhere else: the copy types what it lists, nothing more.
+- `config.runtime_settings` is declared as the canonical v1.0 `RuntimeSettings`
+  block (a scalar `load_pattern`, `warmup`, the three `runtime` seeds, the stub
+  `client.api_key`) instead of a raw `dict`, so its fields are typed and rows
+  can name them. The client's own `Settings` shapes are not part of a
+  `point.yaml`; the block mirrors the round's policy schema. Undeclared keys
+  under it report `ignored:` like anywhere else - the block types what it lists,
+  nothing more.
 
 - A leaf declared `sensitive: true` (the shipped cohort marks
   `config.runtime_settings.client.api_key`) never has a resolved value quoted in
-  a diagnostic: a failing row reads `(redacted)` where the value would be, so a
-  mistakenly submitted credential is not copied into validation logs. The
-  annotation is the cohort's, never a value-pattern guess by the checker.
+  a diagnostic: a failing row reads `(redacted)` where the value would be, and
+  so does a collect-time refusal naming it, so a mistakenly submitted credential
+  is not copied into validation logs. A block reference holding a sensitive leaf
+  redacts the same way. The annotation is the cohort's, never a value-pattern
+  guess by the checker.
 
 - What a present value must carry is declared the same way and checked at
   collect time (`Finding.collect` refuses before any finding): match its leaf's

@@ -113,7 +113,7 @@ point_concurrency_positive:
 point_offline_load_pattern:
   description: The dedicated Offline run declares the Offline load pattern (§6.1).
   rule: "Endpoints Policy §6.1, Load Patterns; §9.1, Load pattern."
-  fix: "Declare `load_pattern: max_throughput` for the dedicated Offline run."
+  fix: "Declare `runtime_settings.load_pattern: max_throughput` for the dedicated Offline run."
   severity: fail
   when:
     - { left: point.config.offline, op: eq, right: dedicated }

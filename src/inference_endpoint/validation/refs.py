@@ -565,7 +565,9 @@ class RefTable:
                 for name, entry in level.items()
                 if isinstance(entry, _Fact)
             )
-            return replace(ref, members=members) if members else ref
+            carries_secret = _carries_sensitive(level)
+            annotated = replace(ref, members=members, sensitive=carries_secret)
+            return annotated if members or carries_secret else ref
         return ref
 
     def validate_values(
@@ -650,30 +652,63 @@ def _check_values(
             if isinstance(value, Mapping):
                 _check_values(entry, value, here, notes)
                 continue
-            raise ValueError(f"{'.'.join(here)}: {value!r} is no block")
+            raise ValueError(f"{'.'.join(here)}: {_quoted(entry, value)} is no block")
         if entry.is_subtree:
             # The open subtree's own value must still be a block; the values
             # below it are what the `dict` declaration leaves unchecked.
             if not isinstance(value, Mapping):
-                raise ValueError(f"{'.'.join(here)}: {value!r} is no block")
+                raise ValueError(
+                    f"{'.'.join(here)}: {_quoted(entry, value)} is no block"
+                )
             continue
         decoded = entry.coerce(value)
         if decoded is not value:
             notes.append(
-                ("coerced", f"{'.'.join(here)}: {value!r} read as {decoded!r}")
+                (
+                    "coerced",
+                    f"{'.'.join(here)}: {_quoted(entry, value)} read as "
+                    f"{_quoted(entry, decoded)}",
+                )
             )
         if not entry.matches(decoded):
             raise ValueError(
-                f"{'.'.join(here)}: {value!r} does not match its declared type "
-                f"{entry.type!r}"
+                f"{'.'.join(here)}: {_quoted(entry, value)} does not match its "
+                f"declared type {entry.type!r}"
             )
         if entry.allowlist is not None and decoded not in entry.allowlist:
             raise ValueError(
-                f"{'.'.join(here)}: {value!r} is not one of {entry.allowlist!r}"
+                f"{'.'.join(here)}: {_quoted(entry, value)} is not one of "
+                f"{entry.allowlist!r}"
             )
+
     for key in values:
         if key not in consumed:
             notes.append(("ignored", ".".join([*path, str(key)])))
+
+
+def _quoted(entry: Any, value: Any) -> str:
+    """`value` as a refusal message may quote it: a sensitive leaf never repeats it."""
+    return "(redacted)" if isinstance(entry, _Fact) and entry.sensitive else repr(value)
+
+
+def _carries_sensitive(declared: Mapping[str, Any]) -> bool:
+    """Whether any leaf below `declared` is sensitive, however deeply nested.
+
+    A block reference resolves to a mapping holding its leaves' values, so a
+    block holding a sensitive leaf must redact exactly like the leaf itself.
+
+    Args:
+        declared (Mapping[str, Any]): One block of declarations.
+    Returns:
+        bool: Whether the block carries a sensitive leaf.
+    """
+    for entry in declared.values():
+        if isinstance(entry, _Fact):
+            if entry.sensitive:
+                return True
+        elif isinstance(entry, Mapping) and _carries_sensitive(entry):
+            return True
+    return False
 
 
 def _entry(name: str, node: Any) -> Any:

@@ -100,11 +100,14 @@ point:
     # block still parses, its undeclared keys surfacing as ignored notes.
     runtime_settings:
       load_pattern:
-        # §6.1's two patterns; `max_throughput` appears only on a dedicated
-        # Offline point, which §6.1 exempts - the row enforces that pairing.
+        # §6.1's patterns; the schema's own default is `concurrency` (which
+        # `Point.from_node` reads for the derivations too), and
+        # `max_throughput` appears only on a dedicated Offline point, which
+        # §6.1 exempts - the row enforces that pairing.
         {
           type: str,
           allowlist: [concurrency, agentic_inference, max_throughput],
+          default: concurrency,
         }
       min_duration_ms: { type: int }
       min_sample_count: { type: int, nullable: true }

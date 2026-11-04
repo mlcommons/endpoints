@@ -176,7 +176,7 @@ pareto_metric_consistency_accounting:
 pareto_metric_consistency_system_tps:
   description: Every summary's stored system_tps equals its output tokens over its duration (§9.1).
   rule: "Endpoints Policy §9.1, Automated Checks; §14, Metric Consistency."
-  fix: Re-run the flagged points; the summary's throughput must be `output_sequence_lengths.total / duration_s`.
+  fix: Re-run the flagged points; the whole-run throughput (`full_run_system_tps` where the client's `tps` was aliased, else the summary's own `system_tps`) must equal `output_sequence_lengths.total / (duration_ns / 1e9)`.
   severity: fail
   assert:
     - {
