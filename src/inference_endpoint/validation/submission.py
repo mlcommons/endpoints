@@ -298,6 +298,22 @@ _PER_POINT_SYSTEM_DESC_FIELDS: frozenset[str] = frozenset(
 )
 
 
+def _resolves_shared_path(root: Path, value: str) -> Path | None:
+    """`value` as Section 9.1's shared pointer under `root`, or `None`.
+
+    The checker's rule: a non-blank POSIX-style relative pointer, free of `..`,
+    no absolute or `~` prefix, naming an existing directory below the root.
+    """
+    raw = value.strip()
+    if not raw or raw.startswith(("/", "~")):
+        return None
+    parts = [part for part in raw.replace("\\", "/").split("/") if part and part != "."]
+    if not parts or any(part == ".." for part in parts):
+        return None
+    candidate = root.joinpath(*parts)
+    return candidate if candidate.is_dir() else None
+
+
 def normalize_offline(declared: Any) -> Any:
     """The `offline` declaration as `Point.offline` carries it.
 
@@ -1162,6 +1178,82 @@ class Pareto:
                     )
         return tuple(misses)
 
+    def structure_misses(self) -> tuple[str, ...]:
+        """The submission tree's Section 8.1 structure misses.
+
+        The checker validates the submission directory itself: `docs/` must
+        exist beside `results/`, and `src/` must hold at least one
+        implementation directory, each carrying a README (Section 2.2.1). A
+        `<system>`-directory input carries no such siblings -- the checker's own
+        input is the submission root -- and the check is skipped there.
+
+        Returns:
+            tuple[str, ...]: One line per miss, empty when the tree is whole.
+        """
+        if self.node is None:
+            return ()
+        root = Path(self.node.root().dir)
+        if not (root / "results").is_dir():
+            return ()
+        misses: list[str] = []
+        if not (root / "docs").is_dir():
+            misses.append("docs/ is missing beside results/")
+        src_dir = root / "src"
+        if not src_dir.is_dir():
+            misses.append("src/ is missing")
+            return tuple(misses)
+        implementations = [path for path in sorted(src_dir.iterdir()) if path.is_dir()]
+        if not implementations:
+            misses.append("src/ holds no implementation directory")
+        for implementation in implementations:
+            readme = next(
+                (
+                    path
+                    for path in implementation.iterdir()
+                    if path.is_file() and path.name.lower() == "readme.md"
+                ),
+                None,
+            )
+            if readme is None:
+                misses.append(f"src/{implementation.name}/ carries no README.md")
+        return tuple(misses)
+
+    def unresolved_shared_paths(self) -> tuple[str, ...]:
+        """The `shared_src`/`shared_docs` pointers that do not resolve (§9.1).
+
+        Section 9.1's shared-path resolution: each pointer must name an existing
+        directory under the submission root, written relative to it -- never
+        absolute, never carrying a `..`. Reported per distinct `field=value`
+        pair, as the checker reports it (every point normally names one tree).
+        A `<system>`-directory input carries no root-level trees to resolve
+        against, and the checker's own input always does.
+
+        Returns:
+            tuple[str, ...]: One `"<field>=<value>"` per unresolvable pointer,
+                empty when every one resolves.
+        """
+        if self.node is None:
+            return ()
+        root = Path(self.node.root().dir)
+        if not (root / "results").is_dir():
+            return ()
+        seen: set[tuple[str, str]] = set()
+        unresolved: set[str] = set()
+        for point in self.points:
+            if point.node is None:
+                continue
+            config, error = point.node.read("point.yaml")
+            if error is not None or not isinstance(config, Mapping):
+                continue
+            for pointer in ("shared_src", "shared_docs"):
+                value = config.get(pointer)
+                if not isinstance(value, str) or (pointer, value) in seen:
+                    continue
+                seen.add((pointer, value))
+                if _resolves_shared_path(root, value) is None:
+                    unresolved.add(f"{pointer}={value}")
+        return tuple(sorted(unresolved))
+
     def offline_points_missing_accuracy(self) -> tuple[int, ...]:
         """The Offline points carrying no `accuracy_results.json` (§4.3).
 
@@ -1486,6 +1578,8 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "misplaced_region_points": Pareto.misplaced_region_points,
     "tps_utilization_mismatch_points": Pareto.tps_utilization_mismatch_points,
     "accuracy_gate_misses": Pareto.accuracy_gate_misses,
+    "structure_misses": Pareto.structure_misses,
+    "unresolved_shared_paths": Pareto.unresolved_shared_paths,
     "uncovered_regions": Pareto.uncovered_regions,
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,

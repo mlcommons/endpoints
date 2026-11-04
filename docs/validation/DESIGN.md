@@ -542,14 +542,16 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   `tps_utilization_mismatch_points` (Section 8.2's declared utilization off its
   share of the curve's peak beyond `TPS_UTILIZATION_ABS_TOL`),
   `out_of_range_points`, `accuracy_gate_misses` (Section 15's per-run gate
-  misses, joined to the catalog's `accuracy_targets` for the declared model).
-  `Point.point_power_kw` and `Interval.for_accuracy_gate` stay **method-only**:
-  their inputs (provisioned/engaged node counts; the per-point gate interval)
-  are carried on no fact the rows can reach today, so they price into the rows
-  that need them (the per-point denominator and audit rows) together with the
-  carries those rows bring. `Regions.covers`' row use is
-  `regions.by_kind.<kind>` membership (`op: in`) — the shape the stub cohort in
-  `tests/assets/cohorts/stub/` writes.
+  misses, joined to the catalog's `accuracy_targets` for the declared model),
+  `structure_misses` (Section 8.1's tree: `docs/`, `src/` and one README per
+  implementation), `unresolved_shared_paths` (Section 9.1's shared pointers,
+  resolved against the submission root). `Point.point_power_kw` and
+  `Interval.for_accuracy_gate` stay **method-only**: their inputs
+  (provisioned/engaged node counts; the per-point gate interval) are carried on
+  no fact the rows can reach today, so they price into the rows that need them
+  (the per-point denominator and audit rows) together with the carries those
+  rows bring. `Regions.covers`' row use is `regions.by_kind.<kind>` membership
+  (`op: in`) — the shape the stub cohort in `tests/assets/cohorts/stub/` writes.
 
 - **The strict loader refuses duplicate keys, `<<` merge keys and all YAML
   aliases.** Alias fan-out can re-walk shared subtrees exponentially, and silent

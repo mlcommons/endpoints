@@ -218,6 +218,11 @@ def _build_upload(
 ) -> None:
     """One conforming 8-point pareto plus its system-level power descriptor."""
     results = root / "results" / SYSTEM
+    (root / "src" / "impl").mkdir(parents=True)
+    (root / "src" / "impl" / "README.md").write_text(
+        "Build the SUT and reproduce a point.\n", encoding="utf-8"
+    )
+    (root / "docs").mkdir(parents=True)
     model_dir = results / MODEL
     for concurrency in (*FIXED_POINTS, OFFLINE_CONCURRENCY):
         offline = "dedicated" if concurrency == OFFLINE_CONCURRENCY else None

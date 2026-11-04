@@ -219,3 +219,24 @@ pareto_accuracy_gate:
   severity: fail
   assert:
     - { over: derived.accuracy_gate_misses, aggregate: count, op: eq, value: 0 }
+
+pareto_structure:
+  description: The submission tree carries docs/ and src/ with one README per implementation (§8.1/§2.2.1).
+  rule: "Endpoints Policy §8.1, Submission Layout; §2.2.1, Source."
+  fix: Add the missing directories beside results/ (docs/, src/<implementation>/README.md).
+  severity: fail
+  assert:
+    - { over: derived.structure_misses, aggregate: count, op: eq, value: 0 }
+
+pareto_shared_path_resolution:
+  description: Every declared shared_src/shared_docs pointer resolves under the submission root (§9.1).
+  rule: "Endpoints Policy §9.1, Automated Checks; §8.1, Submission Layout."
+  fix: Point the flagged fields at an existing directory under the submission root (relative, without `..`).
+  severity: fail
+  assert:
+    - {
+        over: derived.unresolved_shared_paths,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }

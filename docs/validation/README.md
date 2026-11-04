@@ -758,6 +758,10 @@ unchecked).
     `system_desc.tps_utilization` misses their share of the curve's peak
   - `derived.accuracy_gate_misses` - Section 15's per-run gate misses, joined to
     the catalog's `accuracy_targets` for the declared model
+  - `derived.structure_misses` - Section 8.1's tree misses (`docs/`, `src/` with
+    one README per implementation)
+  - `derived.unresolved_shared_paths` - the `shared_src`/`shared_docs` pointers
+    that do not resolve under the submission root
 - `ruleset` - the packaged ruleset the cohort's `cohort.yaml` names (a
   registered round, e.g. `mlperf-inference-v6.1`):
   - `ruleset.models.<name>.<key>` - model definitions (the round's `models.py`)

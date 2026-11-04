@@ -1148,7 +1148,40 @@ class TestDerivedExposure:
             "misplaced_region_points",
             "tps_utilization_mismatch_points",
             "accuracy_gate_misses",
+            "structure_misses",
+            "unresolved_shared_paths",
         }
+
+    @pytest.mark.unit
+    def test_the_tree_structure_and_shared_pointers_are_checked(self, tmp_path):
+        root = tmp_path / "upload"
+        runs = [
+            Run(
+                concurrency=16,
+                config_extra={"shared_src": "src/impl", "shared_docs": "docs"},
+            )
+        ]
+        pareto = write_upload(root, {SYSTEM: runs}).paretos[0]
+        assert pareto.structure_misses() == (
+            "docs/ is missing beside results/",
+            "src/ is missing",
+        )
+        assert pareto.unresolved_shared_paths() == (
+            "shared_docs=docs",
+            "shared_src=src/impl",
+        )
+        (root / "docs").mkdir()
+        (root / "src" / "impl").mkdir(parents=True)
+        (root / "src" / "impl" / "README.md").write_text("x", encoding="utf-8")
+        assert pareto.structure_misses() == ()
+        assert pareto.unresolved_shared_paths() == ()
+
+    @pytest.mark.unit
+    def test_an_escaping_pointer_does_not_resolve(self, tmp_path):
+        root = tmp_path / "upload"
+        runs = [Run(concurrency=16, config_extra={"shared_src": "../outside"})]
+        pareto = write_upload(root, {SYSTEM: runs}).paretos[0]
+        assert pareto.unresolved_shared_paths() == ("shared_src=../outside",)
 
     @pytest.mark.unit
     def test_every_named_derivation_resolves_for_one_pareto(self, tmp_path):
