@@ -1047,3 +1047,123 @@ class TestCountSync:
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
             with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 assert tok.count_sync(TextInput("hello world")) == 2
+
+
+class _InlineProc:
+    """A shard that runs the submitted worker function in this process."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def submit(self, fn, *args):
+        self.calls += 1
+        fut: Future = Future()
+        try:
+            fut.set_result(fn(*args))
+        except Exception as exc:
+            fut.set_exception(exc)
+        return fut
+
+    def shutdown(self, wait=False, cancel_futures=False):
+        pass
+
+
+def _structured_items(n: int) -> list[MessageInput | PromptInput]:
+    tools = ({"type": "function", "function": {"name": "lookup", "parameters": {}}},)
+    items: list[MessageInput | PromptInput] = []
+    for i in range(n):
+        words = " ".join(["w"] * (i % 7 + 1))
+        if i % 2:
+            items.append(MessageInput(words, "thought" if i % 3 else None, None))
+        else:
+            messages = ({"role": "user", "content": words},)
+            items.append(PromptInput(messages, tools if i % 4 else None, None, None))
+    return items
+
+
+@pytest.fixture
+def _worker_tokenizer(monkeypatch):
+    """Load the shard globals the way the shard initializer does."""
+    tok = _FakeTokenizerWithTemplateAndBackend()
+    prefix_len, baseline = token_metrics_module.chat_template_baseline(tok)
+    monkeypatch.setattr(token_metrics_module, "_WORKER_TOKENIZER", tok)
+    monkeypatch.setattr(
+        token_metrics_module, "_WORKER_TEXT_BACKEND", tok.backend_tokenizer
+    )
+    monkeypatch.setattr(token_metrics_module, "_WORKER_PREFIX_LEN", prefix_len)
+    monkeypatch.setattr(token_metrics_module, "_WORKER_BASELINE", baseline)
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("_worker_tokenizer")
+class TestStructuredDrainFanOut:
+    """The drain counts structured inputs on the shards, not one thread."""
+
+    @pytest.mark.asyncio
+    async def test_shard_counts_match_in_process_counts(self):
+        n = token_metrics_module._STRUCTURED_CHUNK_ITEMS * 2 + 5
+        items = _structured_items(n)
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplateAndBackend):
+            loop = asyncio.get_running_loop()
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                expected = await tok.count_batch_async(items, loop)
+                procs = [_InlineProc(), _InlineProc()]
+                tok._procs = procs
+                counts = await tok.count_batch_async(items, loop)
+
+        assert counts == expected
+        assert all(isinstance(c, int) for c in counts)
+        # Three chunks dealt round-robin across two shards.
+        assert [p.calls for p in procs] == [2, 1]
+
+    @pytest.mark.asyncio
+    async def test_mixed_batch_keeps_input_order(self):
+        structured = _structured_items(3)
+        inputs = [
+            TokenIdsInput((1, 2, 3)),
+            structured[0],
+            TextInput("a b"),
+            structured[1],
+            structured[2],
+        ]
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplateAndBackend):
+            loop = asyncio.get_running_loop()
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                expected = await tok.count_batch_async(inputs, loop)
+                tok._procs = [_InlineProc()]
+                assert await tok.count_batch_async(inputs, loop) == expected
+
+    @pytest.mark.asyncio
+    async def test_failed_chunk_marks_only_its_own_items(self):
+        size = token_metrics_module._STRUCTURED_CHUNK_ITEMS
+        items = _structured_items(size * 3)
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplateAndBackend):
+            loop = asyncio.get_running_loop()
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                tok._procs = [_InlineProc(), _BrokenProc()]
+                counts = await tok.count_batch_async(items, loop)
+
+        broken = counts[size : 2 * size]
+        assert all(isinstance(c, BrokenProcessPool) for c in broken)
+        assert all(isinstance(c, int) for c in counts[:size] + counts[2 * size :])
+
+    @pytest.mark.asyncio
+    async def test_live_lane_never_uses_shards(self):
+        items = _structured_items(4)
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplateAndBackend):
+            loop = asyncio.get_running_loop()
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                tok._procs = [_BrokenProc()]
+                counts = await tok.count_batch_async(items, loop, live=True)
+
+        assert all(isinstance(c, int) for c in counts)
+
+    def test_worker_returns_item_errors_instead_of_raising(self):
+        class _Bad:
+            pass
+
+        out = token_metrics_module._worker_count_structured(
+            [MessageInput("a b", None, None), _Bad()]  # type: ignore[list-item]
+        )
+        assert isinstance(out[0], int)
+        assert isinstance(out[1], Exception)
