@@ -89,3 +89,13 @@ pareto_offline_accuracy:
         op: eq,
         value: 0,
       }
+
+pareto_model_name_admitted:
+  description: The declared model is one the round's ruleset admits (§3.2).
+  rule: "Endpoints Policy §3.2, Benchmark Model."
+  fix: Declare a model the catalog names (see `ruleset/models.yaml`).
+  severity: fail
+  when:
+    - { left: ruleset.models, op: exists }
+  assert:
+    - { left: derived.model_name_admitted, op: eq, right: true }

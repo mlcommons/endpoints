@@ -575,6 +575,31 @@ class TestThresholdsPerShape:
         assert pareto.point_count_min() == 7
 
     @pytest.mark.unit
+    def test_a_cataloged_model_name_is_admitted(self, tmp_path):
+        upload = write_upload(
+            tmp_path / "acme",
+            {SYSTEM: [Run(concurrency=16, config_extra={"model_name": "kimi-k3"})]},
+            ruleset=Catalog(models={"kimi-k3": {"agentic": True}}, datasets={}),
+        )
+        assert upload.paretos[0].model_name_admitted() is True
+
+    @pytest.mark.unit
+    def test_a_model_name_outside_the_catalog_is_not_admitted(self, tmp_path):
+        upload = write_upload(
+            tmp_path / "acme",
+            {
+                SYSTEM: [
+                    Run(
+                        concurrency=16,
+                        config_extra={"model_name": "qwen3-coder-480b"},
+                    )
+                ]
+            },
+            ruleset=Catalog(models={"kimi-k3": {"agentic": True}}, datasets={}),
+        )
+        assert upload.paretos[0].model_name_admitted() is False
+
+    @pytest.mark.unit
     def test_an_unknown_model_falls_back_to_the_declared_shape(self, tmp_path):
         upload = write_upload(
             tmp_path / "acme",
@@ -699,6 +724,7 @@ class TestDerivedExposure:
     def test_the_derivation_names_are_the_policy_derivations(self):
         assert set(DERIVATION_NAMES) == {
             "agentic",
+            "model_name_admitted",
             "accuracy_uncovered_regions",
             "offline_points_missing_accuracy",
             "offline_ordering",

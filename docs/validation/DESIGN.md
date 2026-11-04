@@ -187,10 +187,11 @@ for.
     `uncovered_regions` (Section 5.4's coverage gaps), `offline_points` (Section
     5.7's presence),
     `accuracy_uncovered_regions`/`offline_points_missing_accuracy` (Section
-    4.3's accuracy coverage), `agentic` (the catalog's benchmark flag),
-    `out_of_range_points` (Section 5.4's Concurrency-in-range row), `derived()`
-    (the lazy `derived.<name>` facts-projection), and `_validate_shape`, which
-    refuses shapes the derivations would trip on. Points must agree on their
+    4.3's accuracy coverage), `agentic` (the catalog's benchmark flag), and
+    `model_name_admitted` (Section 3.2's admitted names), `out_of_range_points`
+    (Section 5.4's Concurrency-in-range row), `derived()` (the lazy
+    `derived.<name>` facts-projection), and `_validate_shape`, which refuses
+    shapes the derivations would trip on. Points must agree on their
     `max_supported_concurrency`/`c_min_override` by presence and typed value
     (`_shared_facts`), so a later run's `null` override cannot compare equal to
     a first run's omission.
@@ -472,6 +473,10 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   `model_name` (`node.root().ruleset`, the cohort's catalog), falling back to
   the declared shape for an unknown model or no catalog at all.
 
+- **`Pareto.model_name_admitted()`** — whether every declared `model_name` is
+  one the catalog's `models` names, Section 3.2's admitted-model list. The row
+  gates on `ruleset.models` existing (no catalog, no list).
+
 - **`Pareto.out_of_range_points(regions)`** —
   `tuple(p for p in points if p.offline != "dedicated" and p.concurrency not in regions.coverage())`,
   Section 5.4's Concurrency-in-range row. A dedicated Offline point is exempt:
@@ -518,14 +523,14 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   published as `DERIVATION_NAMES`: `offline_ordering`, `point_cap`,
   `point_count`, `point_count_min`, `accuracy_uncovered_regions`,
   `offline_points_missing_accuracy`, `uncovered_regions`, `offline_points`,
-  `agentic`, `out_of_range_points`. `Point.point_power_kw` and
-  `Interval.for_accuracy_gate` stay **method-only**: their inputs
-  (provisioned/engaged node counts; the per-model reference score and gate
-  factor) are carried on no fact the rows can reach today, so they price into
-  the rows that need them (the per-point denominator and accuracy-gate rows)
-  together with the carries those rows bring. `Regions.covers`' row use is
-  `regions.by_kind.<kind>` membership (`op: in`) — the shape the stub cohort in
-  `tests/assets/cohorts/stub/` writes.
+  `agentic`, `model_name_admitted`, `out_of_range_points`.
+  `Point.point_power_kw` and `Interval.for_accuracy_gate` stay **method-only**:
+  their inputs (provisioned/engaged node counts; the per-model reference score
+  and gate factor) are carried on no fact the rows can reach today, so they
+  price into the rows that need them (the per-point denominator and
+  accuracy-gate rows) together with the carries those rows bring.
+  `Regions.covers`' row use is `regions.by_kind.<kind>` membership (`op: in`) —
+  the shape the stub cohort in `tests/assets/cohorts/stub/` writes.
 
 - **The strict loader refuses duplicate keys, `<<` merge keys and all YAML
   aliases.** Alias fan-out can re-walk shared subtrees exponentially, and silent

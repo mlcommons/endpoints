@@ -515,6 +515,26 @@ class Pareto:
         """The first `model_name` the pareto's points declare."""
         return next((p.model_name for p in self.points if p.model_name), None)
 
+    def model_name_admitted(self) -> bool:
+        """Whether every declared `model_name` is one the round's ruleset admits.
+
+        §3.2's benchmark-model list is the catalog's: `ruleset.models` names the
+        admitted models, and a name outside it is a finding -- a curve whose
+        points declare different names fails on whichever is not admitted.
+        Without a catalog the answer is `False` and the row's `when` gates it
+        off (there is no list to judge against); with a catalog and no point
+        declaring a name it is also `False`, and the disclosure rows report the
+        absence.
+
+        Returns:
+            bool: Whether every declared model name is in the catalog.
+        """
+        catalog = self._catalog()
+        if catalog is None:
+            return False
+        declared = [point.model_name for point in self.points if point.model_name]
+        return bool(declared) and all(name in catalog.models for name in declared)
+
     def point_count(self) -> int:
         """The pareto's measurement-point count (§5.3/§9.1's Point count)."""
         return len(self.points)
@@ -628,8 +648,9 @@ class Pareto:
 
         The boundary rule for derivations ("named derivations on their subject,
         exposed as fields `Ref` reads"): the keys are `_DERIVATION_METHODS`'
-        names - the Offline/point-count/region-coverage/accuracy-coverage facts
-        a row cannot compute itself - each resolved via its own named method at
+        names - the Offline/point-count/region-coverage/accuracy-coverage
+        facts and the catalog-admitted model - a row cannot compute itself -
+        each resolved via its own named method at
         first access and memoized (`DerivedFields`). An unlisted name ->
         `KeyError`.
 
@@ -863,6 +884,7 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "uncovered_regions": Pareto.uncovered_regions,
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,
+    "model_name_admitted": Pareto.model_name_admitted,
     "out_of_range_points": lambda pareto: pareto.out_of_range_points(pareto.regions()),
 }
 

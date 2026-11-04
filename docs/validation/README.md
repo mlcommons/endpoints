@@ -722,6 +722,8 @@ unchecked).
   - `derived.offline_points` - the points carrying an `offline` declaration
   - `derived.agentic` - the catalog's agentic flag for the declared model (the
     declared shape's reading where no catalog entry exists)
+  - `derived.model_name_admitted` - every declared `model_name` is in the
+    catalog's admitted set
   - `derived.out_of_range_points` - Section 5.4's flagged points tuple
 - `ruleset` - the packaged ruleset the cohort's `cohort.yaml` names (a
   registered round, e.g. `mlperf-inference-v6.1`):
