@@ -81,6 +81,33 @@ def _gated_pareto(tmp_path: Path, *, score: float, unit_samples: int = 4395) -> 
     ]
 
 
+def _pareto_with_accuracy(
+    tmp_path: Path, runs: list[Run], carrying: set[int]
+) -> Pareto:
+    """A pareto whose `carrying`-concurrency runs also ship an accuracy result."""
+    root = tmp_path / "upload"
+    for run in runs:
+        run_dir = root / "results" / SYSTEM[0] / SYSTEM[1] / run.name()
+        write_run(run_dir, run)
+        if run.concurrency in carrying:
+            (run_dir / "accuracy_results.json").write_text(
+                json.dumps(
+                    {
+                        "accuracy_scores": [
+                            {
+                                "dataset_name": "cnn_dailymail",
+                                "score": 0.9,
+                                "unit_samples": 13368,
+                                "total_samples": 13368,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+    return write_upload(root, {SYSTEM: runs}).paretos[0]
+
+
 class TestPointFromNode:
     """`Point.from_node`: one run directory's named facts, enforced at load."""
 
@@ -1014,6 +1041,54 @@ class TestCurveConsistency:
         misses = pareto.accuracy_gate_misses()
         assert any("exact_match" in miss for miss in misses)
         assert any("accuracy samples" in miss for miss in misses)
+
+    @pytest.mark.unit
+    def test_a_dedicated_carrier_covers_its_band(self, tmp_path):
+        pareto = _pareto_with_accuracy(
+            tmp_path,
+            [
+                Run(concurrency=8, max_supported_concurrency=2048),
+                Run(
+                    concurrency=16, max_supported_concurrency=2048, offline="dedicated"
+                ),
+                Run(concurrency=64, max_supported_concurrency=2048),
+                Run(concurrency=1200, max_supported_concurrency=2048),
+                Run(concurrency=2048, max_supported_concurrency=2048),
+            ],
+            carrying={16, 64, 1200},
+        )
+        assert "low_concurrency" not in pareto.accuracy_uncovered_regions()
+
+    @pytest.mark.unit
+    def test_a_dedicated_point_without_a_result_is_named(self, tmp_path):
+        pareto = _pareto_with_accuracy(
+            tmp_path,
+            [
+                Run(concurrency=8, max_supported_concurrency=2048),
+                Run(
+                    concurrency=16, max_supported_concurrency=2048, offline="dedicated"
+                ),
+                Run(concurrency=64, max_supported_concurrency=2048),
+                Run(concurrency=1200, max_supported_concurrency=2048),
+                Run(concurrency=2048, max_supported_concurrency=2048),
+            ],
+            carrying={64, 1200},
+        )
+        assert pareto.offline_points_missing_accuracy() == (16,)
+
+    @pytest.mark.unit
+    def test_a_margin_carrier_covers_no_band(self, tmp_path):
+        pareto = _pareto_with_accuracy(
+            tmp_path,
+            [
+                Run(concurrency=8, max_supported_concurrency=2048),
+                Run(concurrency=64, max_supported_concurrency=2048),
+                Run(concurrency=2048, max_supported_concurrency=2048),
+                Run(concurrency=2200, max_supported_concurrency=2048),
+            ],
+            carrying={8, 64, 2200},
+        )
+        assert "high_concurrency" in pareto.accuracy_uncovered_regions()
 
     @pytest.mark.unit
     def test_a_stringified_count_reads_as_its_number(self, tmp_path):

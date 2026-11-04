@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 from inference_endpoint.validation.check import Check, Cohort
-from inference_endpoint.validation.runner import CheckRun, Finding
+from inference_endpoint.validation.runner import CheckRun, Finding, submission_verdicts
 from inference_endpoint.validation.sentinels import MISSING
 from inference_endpoint.validation.submission import Pareto, Point, Submission
 from inference_endpoint.validation.tree import SubmissionNode
@@ -989,3 +989,44 @@ class TestCheckRunRecords:
         check = _check("cap", assert_=[LITERAL_ROW])
         collected = Finding.collect(Cohort((check,)), _submission(tmp_path, [16]))
         assert set(collected.runs) == {"cap"}
+
+
+class TestSubmissionVerdicts:
+    """`submission_verdicts`: which submission a finding counts against."""
+
+    @pytest.mark.unit
+    def test_a_finding_rejects_only_the_submission_it_belongs_to(self, tmp_path):
+        submission = write_upload(
+            tmp_path / "acme",
+            {
+                ("sys-a", "model"): [Run(concurrency=16)],
+                ("sys-b", "model"): [Run(concurrency=32)],
+            },
+        )
+        check = _check(
+            "point_failure",
+            when=[{"left": "point.config.concurrency", "op": "eq", "right": 16}],
+            assert_=[{"left": 0, "op": "eq", "right": 1}],
+        )
+        collected = Finding.collect(Cohort((check,)), submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert len(verdicts) == 2
+        assert [verdict.accepted for verdict in verdicts] == [False, True]
+
+    @pytest.mark.unit
+    def test_a_system_scoped_failure_rejects_every_submission_below_it(self, tmp_path):
+        submission = write_upload(
+            tmp_path / "acme",
+            {
+                ("sys-a", "model"): [Run(concurrency=16)],
+                ("sys-b", "model"): [Run(concurrency=32)],
+            },
+        )
+        check = _check(
+            "system_failure",
+            scope="system",
+            assert_=[{"left": 0, "op": "eq", "right": 1}],
+        )
+        collected = Finding.collect(Cohort((check,)), submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert [verdict.accepted for verdict in verdicts] == [False, False]
