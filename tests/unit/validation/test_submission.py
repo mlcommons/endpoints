@@ -816,6 +816,54 @@ class TestCurveConsistency:
         )
         assert per_point.inconsistent_system_desc_keys() == ()
 
+    @pytest.mark.unit
+    def test_mismatched_sample_counts_are_named(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    summary_extra={"n_samples_issued": 10, "n_samples_completed": 10},
+                ),
+                Run(
+                    concurrency=64,
+                    summary_extra={"n_samples_issued": 10, "n_samples_completed": 9},
+                ),
+            ],
+        )
+        assert pareto.accounting_mismatch_points() == (64,)
+
+    @pytest.mark.unit
+    def test_consistent_counts_and_throughput_hold(self, tmp_path):
+        summary = {
+            "n_samples_issued": 10,
+            "n_samples_completed": 10,
+            "n_samples_failed": 0,
+            "duration_ns": 2_000_000_000,
+            "output_sequence_lengths": {"total": 2000},
+        }
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16, system_tps=1000.0, summary_extra=summary)],
+        )
+        assert pareto.accounting_mismatch_points() == ()
+        assert pareto.system_tps_mismatch_points() == ()
+
+    @pytest.mark.unit
+    def test_a_stored_throughput_off_its_derivation_is_named(self, tmp_path):
+        summary = {
+            "duration_ns": 2_000_000_000,
+            "output_sequence_lengths": {"total": 2000},
+        }
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16, system_tps=1000.0, summary_extra=summary),
+                Run(concurrency=64, system_tps=500.0, summary_extra=summary),
+            ],
+        )
+        assert pareto.system_tps_mismatch_points() == (64,)
+
 
 class TestDerivedExposure:
     """`Pareto.derived`: the `derived.<name>` fields, resolved from the pareto itself."""
@@ -839,6 +887,8 @@ class TestDerivedExposure:
             "conflicting_datasets",
             "conflicting_seed_sets",
             "inconsistent_system_desc_keys",
+            "accounting_mismatch_points",
+            "system_tps_mismatch_points",
         }
 
     @pytest.mark.unit

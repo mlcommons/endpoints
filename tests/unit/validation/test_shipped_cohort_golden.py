@@ -18,12 +18,12 @@
 One golden upload's summaries come from the client's own writers
 (`Report.to_json`, `BenchmarkConfig.to_yaml_file`, `write_accuracy_results`),
 and a conforming 8-point pareto must exit 0 against the packaged cohort. The
-fixture carries the shapes only real output has -- a null
-`e2e_avg_interactivity` on the point with a failed sample and the dedicated
-Offline run's empty `tpot` -- while `point.yaml` follows §8.3's canonical
-schema (v1.0 seed names, one explicit `null`, a pasted client `api_key` the
-diagnostics must not print), so cohort edits and client schema changes surface
-here instead of on a real upload.
+fixture carries the shapes only real output has -- the dedicated Offline
+run's empty `tpot`, and, in the failed-sample variant the negative test
+builds, a null `e2e_avg_interactivity` -- while `point.yaml` follows §8.3's
+canonical schema (v1.0 seed names, one explicit `null`, a pasted client
+`api_key` the diagnostics must not print), so cohort edits and client schema
+changes surface here instead of on a real upload.
 """
 
 import json
@@ -70,7 +70,7 @@ def _summary(run_dir: Path, *, failed: int, with_tpot: bool) -> None:
     latency_ns = 20_000_000_000
     metrics: list[dict[str, Any]] = [
         {"type": "counter", "name": "tracked_duration_ns", "value": DURATION_NS},
-        {"type": "counter", "name": "tracked_samples_issued", "value": FLOOR},
+        {"type": "counter", "name": "tracked_samples_issued", "value": FLOOR + failed},
         {"type": "counter", "name": "tracked_samples_completed", "value": FLOOR},
         {"type": "counter", "name": "tracked_samples_failed", "value": failed},
         {
@@ -213,7 +213,9 @@ def _accuracy(run_dir: Path) -> None:
     (run_dir / "accuracy").rmdir()
 
 
-def _build_upload(root: Path, *, api_key: str = "<redacted>") -> None:
+def _build_upload(
+    root: Path, *, api_key: str = "<redacted>", with_failure: bool = False
+) -> None:
     """One conforming 8-point pareto plus its system-level power descriptor."""
     results = root / "results" / SYSTEM
     model_dir = results / MODEL
@@ -234,7 +236,7 @@ def _build_upload(root: Path, *, api_key: str = "<redacted>") -> None:
         )
         _summary(
             run_dir,
-            failed=1 if concurrency == FAILED_SAMPLE_POINT else 0,
+            failed=1 if with_failure and concurrency == FAILED_SAMPLE_POINT else 0,
             with_tpot=offline is None,
         )
         _config_yaml(run_dir / "config.yaml")
@@ -267,6 +269,20 @@ class TestShippedCohortGolden:
         # A single Section 8.3 `<system>` directory runs the same cohort: the
         # synthesized system node reads `results/<system>/system_power.json`.
         assert main([str(COHORT), str(root / "results" / SYSTEM)]) == 0
+
+    @pytest.mark.unit
+    def test_a_failed_sample_run_reads_incomplete(self, tmp_path, capsys):
+        """The client's `complete: false` marker fails the completeness row.
+
+        The variant's counts stay consistent, so the accounting rows hold; only
+        the completeness marker reads the run as unfinished.
+        """
+        root = tmp_path / "upload"
+        _build_upload(root, with_failure=True)
+        assert main([str(COHORT), str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "point_run_complete" in out
+        assert "FAIL pareto_metric_consistency" not in out
 
     @pytest.mark.unit
     def test_dropping_the_offline_run_fails_the_cohort(self, tmp_path, capsys):

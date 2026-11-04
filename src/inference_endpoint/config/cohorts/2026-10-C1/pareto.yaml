@@ -159,3 +159,29 @@ pareto_system_desc_consistency:
         op: eq,
         value: 0,
       }
+
+pareto_metric_consistency_accounting:
+  description: Every summary's completed and failed samples add up to its issued count (§14).
+  rule: "Endpoints Policy §14, Metric Consistency; §9.1, Automated Checks."
+  fix: Re-run the flagged points; `n_samples_completed + n_samples_failed` must equal `n_samples_issued`.
+  severity: fail
+  assert:
+    - {
+        over: derived.accounting_mismatch_points,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }
+
+pareto_metric_consistency_system_tps:
+  description: Every summary's stored system_tps equals its output tokens over its duration (§9.1).
+  rule: "Endpoints Policy §9.1, Automated Checks; §14, Metric Consistency."
+  fix: Re-run the flagged points; the summary's throughput must be `output_sequence_lengths.total / duration_s`.
+  severity: fail
+  assert:
+    - {
+        over: derived.system_tps_mismatch_points,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }

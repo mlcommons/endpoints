@@ -534,14 +534,17 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   `offline_points_missing_accuracy`, `uncovered_regions`, `offline_points`,
   `agentic`, `model_name_admitted`, `conflicting_load_patterns`,
   `conflicting_model_names`, `conflicting_datasets`, `conflicting_seed_sets`,
-  `inconsistent_system_desc_keys`, `out_of_range_points`. `Point.point_power_kw`
-  and `Interval.for_accuracy_gate` stay **method-only**: their inputs
-  (provisioned/engaged node counts; the per-model reference score and gate
-  factor) are carried on no fact the rows can reach today, so they price into
-  the rows that need them (the per-point denominator and accuracy-gate rows)
-  together with the carries those rows bring. `Regions.covers`' row use is
-  `regions.by_kind.<kind>` membership (`op: in`) — the shape the stub cohort in
-  `tests/assets/cohorts/stub/` writes.
+  `inconsistent_system_desc_keys`, `accounting_mismatch_points` (Section 14's
+  counts that do not add up, as the offending points' concurrencies),
+  `system_tps_mismatch_points` (Section 9.1's stored throughputs off
+  `total / duration` beyond `TPS_TOLERANCE`), `out_of_range_points`.
+  `Point.point_power_kw` and `Interval.for_accuracy_gate` stay **method-only**:
+  their inputs (provisioned/engaged node counts; the per-model reference score
+  and gate factor) are carried on no fact the rows can reach today, so they
+  price into the rows that need them (the per-point denominator and
+  accuracy-gate rows) together with the carries those rows bring.
+  `Regions.covers`' row use is `regions.by_kind.<kind>` membership (`op: in`) —
+  the shape the stub cohort in `tests/assets/cohorts/stub/` writes.
 
 - **The strict loader refuses duplicate keys, `<<` merge keys and all YAML
   aliases.** Alias fan-out can re-walk shared subtrees exponentially, and silent

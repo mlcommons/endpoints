@@ -731,6 +731,9 @@ unchecked).
     `derived.conflicting_seed_sets` - Section 9.1's configuration consistency
   - `derived.inconsistent_system_desc_keys` - Section 8.5's differing system
     description keys
+  - `derived.accounting_mismatch_points` / `derived.system_tps_mismatch_points`
+    - Section 14's counts and Section 9.1's derived throughput, as the offending
+      points' concurrencies
 - `ruleset` - the packaged ruleset the cohort's `cohort.yaml` names (a
   registered round, e.g. `mlperf-inference-v6.1`):
   - `ruleset.models.<name>.<key>` - model definitions (the round's `models.py`)

@@ -74,6 +74,10 @@ _MANDATORY_REGIONS: tuple[RegionKind, ...] = (
     RegionKind.HIGH_CONCURRENCY,
 )
 
+# The checker's `_TPS_TOLERANCE`: a stored throughput within 1% relative error
+# of its derived value reads as consistent.
+TPS_TOLERANCE = 0.01
+
 # §8.5 describes one system per curve, but §8.1 calls each point's copy of the
 # system description the "framework/parallelism/precision for this point", and
 # §4.5.3's worked example changes the replica size between points: these are
@@ -704,6 +708,77 @@ class Pareto:
                     differing.add(key)
         return tuple(sorted(differing))
 
+    def accounting_mismatch_points(self) -> tuple[int, ...]:
+        """The points whose sample counts do not add up (§14, Metric Consistency).
+
+        `n_samples_completed + n_samples_failed` must equal `n_samples_issued`.
+        A missing `n_samples_failed` reads as `0` (the summary schema's own
+        default); a point whose summary omits the other two counts is left to
+        the required-fact refusals rather than counted here.
+
+        Returns:
+            tuple[int, ...]: The concurrency of each inconsistent point, empty
+                when every summary adds up.
+        """
+        mismatched: list[int] = []
+        for point in self.points:
+            if point.node is None:
+                continue
+            value, error = point.node.read("result_summary.json")
+            if error is not None or not isinstance(value, Mapping):
+                continue
+            issued = value.get("n_samples_issued")
+            completed = value.get("n_samples_completed")
+            failed = value.get("n_samples_failed", 0)
+            counts = (issued, completed, failed)
+            if not all(
+                isinstance(count, int) and not isinstance(count, bool)
+                for count in counts
+            ):
+                continue
+            if completed + failed != issued:
+                mismatched.append(point.concurrency)
+        return tuple(mismatched)
+
+    def system_tps_mismatch_points(self) -> tuple[int, ...]:
+        """The points whose stored throughput misses `tokens / duration` (§9.1).
+
+        Section 14/9.1: `system_tps` must equal the whole run's
+        `output_sequence_lengths.total` over its `duration_ns` seconds. The
+        stored side is the whole-run reading -- `full_run_system_tps` where the
+        tree aliased the client's `tps`, the document's own `system_tps`
+        otherwise -- never Section 4.4's steady-window alias. Within
+        `TPS_TOLERANCE` relative error the two agree, as the checker reads it.
+
+        Returns:
+            tuple[int, ...]: The concurrency of each mismatching point, empty
+                when every stored throughput agrees.
+        """
+        mismatched: list[int] = []
+        for point in self.points:
+            if point.node is None:
+                continue
+            value, error = point.node.read("result_summary.json")
+            if error is not None or not isinstance(value, Mapping):
+                continue
+            stored = value.get("full_run_system_tps", value.get("system_tps"))
+            totals = value.get("output_sequence_lengths")
+            total = totals.get("total") if isinstance(totals, Mapping) else None
+            duration_ns = value.get("duration_ns")
+            numbers = (stored, total, duration_ns)
+            if (
+                not all(
+                    isinstance(number, int | float) and not isinstance(number, bool)
+                    for number in numbers
+                )
+                or duration_ns <= 0
+            ):
+                continue
+            derived = float(total) / (float(duration_ns) / 1e9)
+            if abs(float(stored) - derived) / max(abs(derived), 1e-9) > TPS_TOLERANCE:
+                mismatched.append(point.concurrency)
+        return tuple(mismatched)
+
     def accuracy_uncovered_regions(self) -> tuple[str, ...]:
         """The §5.3 mandatory regions no accuracy-carrying point lands in.
 
@@ -1015,6 +1090,8 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "point_count_min": Pareto.point_count_min,
     "accuracy_uncovered_regions": Pareto.accuracy_uncovered_regions,
     "offline_points_missing_accuracy": Pareto.offline_points_missing_accuracy,
+    "accounting_mismatch_points": Pareto.accounting_mismatch_points,
+    "system_tps_mismatch_points": Pareto.system_tps_mismatch_points,
     "uncovered_regions": Pareto.uncovered_regions,
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,
