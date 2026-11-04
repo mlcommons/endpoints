@@ -154,9 +154,14 @@ Mixtral8x7B = _Model(
 #
 # equal_issue_mode is off: the clips are fixed-length (~30 s) by construction, so
 # the non-uniform-input case it exists for does not arise.
+#
+# Precision is bfloat16 where every other entry here is fp32: the MLCommons
+# reference SUT (https://github.com/mlcommons/inference/tree/master/speech2text)
+# hardcodes `dtype = "bfloat16"`. The accuracy_target_settings factor still
+# multiplies this value, as it does for every other entry.
 Whisper_large_v3 = _Model(
     "whisper-large-v3",
-    golden_accuracy=("fp32", {"accuracy": 97.9329}),
+    golden_accuracy=("bfloat16", {"accuracy": 97.9329}),
     accuracy_target_settings=[{"accuracy": (0.99,)}],
     dataset=datasets.LibriSpeechDevAll,
     use_equal_issue_mode=False,

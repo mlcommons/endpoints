@@ -15,12 +15,20 @@
 
 import json
 import os
+import subprocess
 from logging import getLogger
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 
 import pandas as pd
 
-from ...dataset import Dataset, download_from_r2
+# `requests` is barred from the benchmark's own HTTP path, which uses the
+# httptools-based ConnectionPool in endpoint_client/. This is dataset setup:
+# one blocking fetch of the pinned downloader script, run before any load is
+# issued and never during a measured request.
+import requests
+
+from ...dataset import Dataset
 
 logger = getLogger(__name__)
 
@@ -72,6 +80,85 @@ class WhisperLibriSpeech(Dataset, dataset_id="whisper_librispeech"):
         "https://inference.mlcommons-storage.org/metadata/whisper-dataset.uri"
     )
     R2_DATASET_URI_ENV = "WHISPER_LIBRISPEECH_DATASET_URI"
+
+    #: Pinned mlcommons/r2-downloader commit used by ``_download_from_r2``.
+    R2_DOWNLOADER_COMMIT = "27da4421877f2831eeb615b43ee5098c4b70be7e"
+
+    #: The resolved dataset URI is handed to a downloaded shell script, so the
+    #: host is restricted to MLCommons R2 storage. This stops a mis-set
+    #: ``$WHISPER_LIBRISPEECH_DATASET_URI`` from pointing the downloader at an
+    #: attacker-controlled location.
+    R2_ALLOWED_HOST = "mlcommons-storage.org"
+
+    #: Wall-clock ceiling for the downloader invocation. Dataset generation runs
+    #: in ``setup_benchmark``, before ``RunWatchdog`` arms its whole-run
+    #: deadline, so nothing else would ever interrupt a stalled fetch. Sized for
+    #: several GB of audio over a slow link, not for a healthy transfer.
+    R2_DOWNLOAD_TIMEOUT_S = 2 * 60 * 60
+
+    @classmethod
+    def _download_from_r2(cls, uri: str, download_dir: Path) -> None:
+        """Download the MLCommons-hosted speech2text corpus into ``download_dir``.
+
+        Fetches the pinned ``mlc-r2-downloader.sh`` and runs it against the
+        dataset's ``.uri`` metadata. The script MD5-verifies every file it pulls
+        and fails its exit code on mismatch, so the caller only needs to locate
+        the manifest afterwards.
+
+        Args:
+            uri: The dataset's published ``.uri`` metadata URL.
+            download_dir: Directory the corpus is downloaded into.
+
+        Raises:
+            ValueError: ``uri`` is not https on MLCommons R2 storage.
+            RuntimeError: the downloader exited non-zero or outran
+                ``R2_DOWNLOAD_TIMEOUT_S``.
+        """
+        parsed = urlparse(uri)
+        host = parsed.hostname or ""
+        if parsed.scheme != "https" or not (
+            host == cls.R2_ALLOWED_HOST or host.endswith("." + cls.R2_ALLOWED_HOST)
+        ):
+            raise ValueError(
+                f"Refusing to download dataset from untrusted URI '{uri}': "
+                f"expected https on {cls.R2_ALLOWED_HOST}"
+            )
+
+        download_dir.mkdir(parents=True, exist_ok=True)
+        script_path = download_dir / "mlc-r2-downloader.sh"
+        resp = requests.get(
+            "https://raw.githubusercontent.com/mlcommons/r2-downloader/"
+            f"{cls.R2_DOWNLOADER_COMMIT}/mlc-r2-downloader.sh",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        script_path.write_bytes(resp.content)
+        script_path.chmod(0o755)
+
+        logger.info("Downloading %s into %s", uri, download_dir)
+        try:
+            result = subprocess.run(
+                ["bash", str(script_path.resolve()), "-d", str(download_dir), uri],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=cls.R2_DOWNLOAD_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"R2 downloader for '{uri}' exceeded {cls.R2_DOWNLOAD_TIMEOUT_S}s "
+                f"and was killed; whatever it had written is left under "
+                f"{download_dir}. Raise the timeout, or point generate_params at "
+                "a local copy of the corpus."
+            ) from e
+        finally:
+            script_path.unlink(missing_ok=True)
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"R2 downloader failed with code {result.returncode}: {result.stderr}"
+            )
 
     @classmethod
     def generate(
@@ -167,7 +254,7 @@ class WhisperLibriSpeech(Dataset, dataset_id="whisper_librispeech"):
             "to %s; pass generate_params.manifest to use a local copy instead.",
             download_dir,
         )
-        download_from_r2(
+        cls._download_from_r2(
             os.environ.get(cls.R2_DATASET_URI_ENV) or cls.R2_DATASET_URI, download_dir
         )
         found = cls._find_manifest(download_dir)

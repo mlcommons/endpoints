@@ -162,11 +162,9 @@ class VideoGenAccumulator:
 
     Video generation requests are non-streaming HTTP, so this class should
     never be exercised. `get_final_output` raises rather than returning an
-    empty `QueryResult` because a streamed body with no `data:` frames never
-    reaches `decode_sse_message`, so nothing raises and the stream ends with
-    nothing accumulated — an empty result would record that as a successful
-    zero-output query. See `NonStreamingAccumulator`, which shares this
-    contract.
+    empty `QueryResult`, because the worker's SSE path swallows the
+    `NotImplementedError` from `decode_sse_message` and would otherwise
+    surface zero-output queries as successful.
     """
 
     def __init__(self, query_id: str, stream_all_chunks: bool) -> None:

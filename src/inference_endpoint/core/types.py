@@ -56,6 +56,37 @@ class APIType(str, Enum):
             case _:
                 raise ValueError(f"Invalid API type: {self}")
 
+    @property
+    def supports_streaming(self) -> bool:
+        """Whether this API has an SSE mode at all.
+
+        False means streaming is a property of the protocol rather than a user
+        choice: its adapter's ``decode_sse_message`` raises, and its registered
+        accumulator is a stub. Config validation resolves AUTO to OFF and
+        rejects an explicit ON rather than letting the run fail per request.
+        """
+        return self not in _NON_STREAMING_API_TYPES
+
+    @property
+    def has_text_prompt(self) -> bool:
+        """Whether a request body carries a text prompt from the dataset row.
+
+        False means anything keyed on prompt text is meaningless here: there is
+        no input sequence length to tokenize and no prompt to salt. Distinct
+        from :attr:`supports_streaming` — videogen is non-streaming but is
+        text-to-video, so it keeps both.
+        """
+        return self not in _NO_TEXT_PROMPT_API_TYPES
+
+
+#: Listed rather than derived: a new api_type defaults to the generic text path,
+#: which is the safe assumption, and ``default_route`` already forces an author
+#: adding one to visit this class.
+_NON_STREAMING_API_TYPES = frozenset({APIType.OPENAI_TRANSCRIPTIONS, APIType.VIDEOGEN})
+
+#: Audio in, transcript out — no prompt column exists to measure or salt.
+_NO_TEXT_PROMPT_API_TYPES = frozenset({APIType.OPENAI_TRANSCRIPTIONS})
+
 
 class QueryStatus(Enum):
     """Status of a query in its lifecycle.

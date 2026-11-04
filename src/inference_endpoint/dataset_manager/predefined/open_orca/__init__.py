@@ -16,12 +16,14 @@
 import gzip
 import hashlib
 import shutil
+import subprocess
 from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
+import requests
 
-from ...dataset import Dataset, download_from_r2
+from ...dataset import Dataset
 from . import presets
 
 logger = getLogger(__name__)
@@ -125,8 +127,33 @@ class OpenOrca(
         # Dataset URL from README
         dataset_url = "https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri"
 
+        # Download the r2-downloader script into a temp file in the target dir
+        COMMIT_HASH = "27da4421877f2831eeb615b43ee5098c4b70be7e"
+        downloader_url = f"https://raw.githubusercontent.com/mlcommons/r2-downloader/{COMMIT_HASH}/mlc-r2-downloader.sh"
         download_dir = cache_dir
-        download_from_r2(dataset_url, download_dir)
+        script_path = cache_dir / "mlc-r2-downloader.sh"
+        r = requests.get(downloader_url, timeout=30)
+        r.raise_for_status()
+        script_path.write_bytes(r.content)
+        script_path.chmod(0o755)
+
+        # Run the script with the dataset URL.
+        try:
+            # Use absolute path for the script to avoid path doubling when cwd is set
+            script_abs = str(script_path.resolve())
+            result = subprocess.run(
+                ["bash", script_abs, "-d", str(download_dir), dataset_url],
+                stdout=subprocess.DEVNULL,  # Suppress normal output
+                stderr=subprocess.PIPE,  # Capture errors
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"R2 downloader failed with code {result.returncode}: {result.stderr}"
+                )
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"R2 downloader failed: {e}") from e
 
         # Script will generate a new 'open_orca' subdirectory with gzip'd pickle files
         gzip_dir = download_dir
@@ -145,6 +172,7 @@ class OpenOrca(
         finally:
             for gz_path in gzip_dir.glob("*.pkl.gz"):
                 gz_path.unlink()
+            script_path.unlink(missing_ok=True)
 
 
 __all__ = ["OpenOrca"]

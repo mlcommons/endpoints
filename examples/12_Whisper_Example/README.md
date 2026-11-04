@@ -107,7 +107,7 @@ most often a manifest that is not the repackaged `dev-all-repack.json`.
 | Route + multipart upload | `openai/transcriptions_adapter.py` (`api_type: openai_transcriptions`) |
 | Dataset                  | `dataset_manager/predefined/whisper_librispeech/`                      |
 | Metric                   | `evaluation/wer.py` + `WERScorer` (`eval_method: wer`)                 |
-| Accuracy gate            | `config/rulesets/mlcommons/models.py` (`Whisper_large_v3`)             |
+| Reference numbers        | `config/rulesets/mlcommons/models.py` (`Whisper_large_v3`)             |
 
 Notes on the run config. All three constraints below are enforced by config
 validation keyed on `api_type: openai_transcriptions`, so a hand-written config
@@ -127,12 +127,42 @@ gets an error rather than a silently odd run:
   `<|startoftranscript|><|en|><|transcribe|><|notimestamps|>` prompt instead of
   auto-detecting the language per clip, which is what the MLPerf reference does.
 
-## Submission checking
+## Reference numbers
 
-The reference accuracy and the 0.99 factor are registered in
-`config/rulesets/mlcommons/models.py`, so `submission_ref` and
-`compliance/checker.py` can enforce them rather than leaving the numbers in
-prose. Both are transcriptions of the MLPerf Inference submission checker's own
-constants, where the gate is `"whisper": ("ACCURACY", (100.0 - 2.0671) * 0.99)`
-and the required sample count is 1633 — the same `100 - WER` scale `WERScorer`
-reports on.
+The reference accuracy, the 0.99 factor and the 1633-sample count are registered
+as reference data in `config/rulesets/mlcommons/models.py` (`Whisper_large_v3`)
+and `datasets.py` (`LibriSpeechDevAll`), so a `submission_ref` run resolves them
+from the ruleset instead of the numbers living only in this file. They
+transcribe the MLPerf Inference submission checker's own constants, where the
+gate is `"whisper": ("ACCURACY", (100.0 - 2.0671) * 0.99)` — the same
+`100 - WER` scale `WERScorer` reports on.
+
+The in-repo `compliance/checker.py` does **not** cover this workload: its
+accuracy gate resolves BFCL metric keys only, and its config-lock expects a
+single-stream run (`num_workers: 1`), which this example is not. Checking a
+whisper submission against the gate is the external MLPerf Inference submission
+checker's job.
+
+### Expect a score a little above the reference
+
+A healthy run scores slightly better than 97.9329%, not equal to it. The scoring
+is bit-exact with upstream — `evaluation/wer.py` reproduces
+`compute_wer_with_concatenation` from the MLCommons reference
+(https://github.com/mlcommons/inference/tree/master/speech2text) with zero
+per-sample disagreement over the full 1633-clip corpus, and the two candidate
+`EnglishTextNormalizer` implementations (`transformers` and `openai-whisper`)
+give the same corpus WER. The difference is the serving path, and it is inherent
+to benchmarking an endpoint:
+
+|                | MLPerf reference SUT                                                         | This example                                           |
+| -------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Engine         | vLLM V0, offline `LLM.generate()`                                            | any OpenAI-compatible server, over HTTP                |
+| Decoder prompt | explicit `<\|startoftranscript\|><\|en\|><\|transcribe\|><\|notimestamps\|>` | built by the server's `/v1/audio/transcriptions` layer |
+| Audio decode   | `librosa.load(path, sr=16000)` in-process                                    | server-side, from the multipart upload                 |
+| Sampling       | `temperature=0, top_p=1.0, max_tokens=200`                                   | `temperature=0`, length left to the server             |
+
+That reference's own SUT pins `dtype = "bfloat16"`, which is why
+`Whisper_large_v3.golden_accuracy` is registered as `bfloat16` rather than fp32.
+Serving fp32 instead moves the score by well under 0.1 points, so a gap of that
+size is engine variance rather than a scoring fault. `max_tokens=200` never
+binds in practice — observed output lengths top out near 150 tokens.

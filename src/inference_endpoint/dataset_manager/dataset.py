@@ -17,7 +17,6 @@ import copy
 import inspect
 import os
 import random
-import subprocess
 import warnings
 from abc import ABC
 from enum import Enum
@@ -25,16 +24,9 @@ from logging import getLogger
 from os import PathLike
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
-from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
-
-# `requests` is barred from the benchmark's own HTTP path, which uses the
-# httptools-based ConnectionPool in endpoint_client/. This is dataset setup:
-# one blocking fetch of the pinned downloader script, run before any load is
-# issued and never during a measured request.
-import requests
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
@@ -264,87 +256,6 @@ def load_from_huggingface(
         except Exception as e:
             logger.warning(f"Error caching dataset: {e}")
     return ds[split].to_pandas()
-
-
-#: Pinned mlcommons/r2-downloader commit used by download_from_r2.
-R2_DOWNLOADER_COMMIT = "27da4421877f2831eeb615b43ee5098c4b70be7e"
-
-#: Dataset URIs are handed to a downloaded shell script, so the host is
-#: restricted to MLCommons R2 storage. This stops a mis-set dataset URI from
-#: pointing the downloader at an attacker-controlled location.
-R2_ALLOWED_HOST = "mlcommons-storage.org"
-
-#: Wall-clock ceiling for one downloader invocation. Dataset generation runs in
-#: ``setup_benchmark``, before ``RunWatchdog`` arms its whole-run deadline, so
-#: nothing else would ever interrupt a stalled fetch. Sized for several GB over
-#: a slow link rather than for a healthy transfer; callers that need more can
-#: pass their own.
-R2_DOWNLOAD_TIMEOUT_S = 2 * 60 * 60
-
-
-def download_from_r2(
-    uri: str, download_dir: Path, timeout_s: float | None = R2_DOWNLOAD_TIMEOUT_S
-) -> None:
-    """Download an MLCommons-hosted dataset into ``download_dir``.
-
-    Fetches the pinned ``mlc-r2-downloader.sh`` and runs it against the
-    dataset's ``.uri`` metadata. The script MD5-verifies every file it pulls and
-    fails its exit code on mismatch, so callers only need to locate the
-    artifact they expect afterwards.
-
-    Args:
-        uri: The dataset's published ``.uri`` metadata URL.
-        download_dir: Directory the artifact is downloaded into.
-        timeout_s: Ceiling on the downloader subprocess; None waits forever.
-
-    Raises:
-        ValueError: ``uri`` is not https on MLCommons R2 storage.
-        RuntimeError: the downloader exited non-zero or outran ``timeout_s``.
-    """
-    parsed = urlparse(uri)
-    host = parsed.hostname or ""
-    if parsed.scheme != "https" or not (
-        host == R2_ALLOWED_HOST or host.endswith("." + R2_ALLOWED_HOST)
-    ):
-        raise ValueError(
-            f"Refusing to download dataset from untrusted URI '{uri}': "
-            f"expected https on {R2_ALLOWED_HOST}"
-        )
-
-    download_dir.mkdir(parents=True, exist_ok=True)
-    script_path = download_dir / "mlc-r2-downloader.sh"
-    resp = requests.get(
-        "https://raw.githubusercontent.com/mlcommons/r2-downloader/"
-        f"{R2_DOWNLOADER_COMMIT}/mlc-r2-downloader.sh",
-        timeout=30,
-    )
-    resp.raise_for_status()
-    script_path.write_bytes(resp.content)
-    script_path.chmod(0o755)
-
-    logger.info("Downloading %s into %s", uri, download_dir)
-    try:
-        result = subprocess.run(
-            ["bash", str(script_path.resolve()), "-d", str(download_dir), uri],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-            timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"R2 downloader for '{uri}' exceeded {timeout_s}s and was killed; "
-            f"whatever it had written is left under {download_dir}. Raise the "
-            "timeout, or point generate_params at a local copy of the corpus."
-        ) from e
-    finally:
-        script_path.unlink(missing_ok=True)
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"R2 downloader failed with code {result.returncode}: {result.stderr}"
-        )
 
 
 def _check_unsaltable(sample: Any) -> DatasetValidationError.Reason | None:

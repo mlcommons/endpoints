@@ -1,21 +1,11 @@
-# Offline run for MLPerf speech2text (whisper-large-v3 / LibriSpeech)
+# Offline run for MLPerf speech2text (whisper-large-v3 / LibriSpeech).
 #
-# Issues the MLCommons-prepared LibriSpeech corpus against an OpenAI-compatible
-# transcription endpoint (POST /v1/audio/transcriptions) and scores Word Error
-# Rate. Reference accuracy is 97.9329% (WER 2.0671%); a submission needs 99% of
-# that, i.e. >= 96.9536.
+# Needs a server on /v1/audio/transcriptions:
+#   vllm serve openai/whisper-large-v3 --port 8000
 #
-# Prerequisites:
-#   - A server exposing /v1/audio/transcriptions for whisper-large-v3:
-#       vllm serve openai/whisper-large-v3 --port 8000
-#
-# The dataset needs no setup: the MLCommons-prepared corpus (dev-all-repack.json
-# + WAVs) is downloaded into the dataset cache on first run. To use a copy you
-# already have, add generate_params.manifest to both dataset entries (or export
-# $WHISPER_LIBRISPEECH_MANIFEST).
-#
-# The audio bytes are read by the worker inside the measured request, so keep
-# the WAV directory on fast local storage - a network mount inflates latency.
+# The corpus downloads itself on first run. See README.md for the reference
+# accuracy, the storage requirement for the WAVs, how to point at a local
+# manifest, and what api_type validation derives rather than reading here.
 #
 # For a smoke run, set runtime.n_samples_to_issue and both `samples` to 8.
 
@@ -23,17 +13,13 @@ name: "offline-whisper-librispeech"
 version: "1.0"
 type: "offline"
 
+# Streaming, metrics_isl and warmup salt are all settled by api_type
+# validation, so they are deliberately absent below rather than set to the
+# value they would be forced to. README.md ("Notes on the run config") lists
+# what is derived and why.
 model_params:
   name: "openai/whisper-large-v3"
-  # /v1/audio/transcriptions has no SSE mode for Whisper. Stated here for the
-  # reader; config validation also rejects "on" for this api_type and resolves
-  # "auto" to "off", so an online whisper config cannot silently stream.
-  streaming: "off"
   temperature: 0.0
-  # The transcription language is sent on every request (language=en, from the
-  # adapter's DEFAULT_LANGUAGE) so the server builds Whisper's pinned-language
-  # decoder prompt instead of auto-detecting per clip, which is what the MLPerf
-  # reference does. A dataset `language` column overrides it per row.
 
 datasets:
   # setup_benchmark() requires a performance dataset to drive issuance; the
@@ -62,18 +48,7 @@ settings:
     num_workers: 8
 
   warmup:
-    # Salt prepends random hex to a text prompt to defeat prefix caching; an
-    # audio upload has no prompt, so config validation rejects salt for this
-    # api_type. Warmup itself is fine with salt off.
     enabled: false
-    salt: false
-
-  # Audio rows carry no text prompt, so there is no input sequence length to
-  # measure. Validation forces this off for openai_transcriptions, so the line
-  # is documentation rather than a requirement. The load generator still logs
-  # one "ISL is unavailable" warning per run, which is expected here. OSL and
-  # latency are unaffected.
-  metrics_isl: false
 
 endpoint_config:
   endpoints:

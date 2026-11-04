@@ -16,8 +16,8 @@
 """Unit tests for the WhisperLibriSpeech predefined dataset.
 
 The download tests run without network: requests.get (downloader script fetch)
-and subprocess.run (the mlc-r2-downloader invocation) are mocked in
-`dataset.download_from_r2`, so only the loader's own logic runs.
+and subprocess.run (the mlc-r2-downloader invocation) are mocked in the loader's
+own module, so only its logic runs.
 """
 
 import json
@@ -26,7 +26,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from inference_endpoint.dataset_manager import dataset
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.predefined.whisper_librispeech import (
     MANIFEST_FILENAME,
@@ -34,7 +33,7 @@ from inference_endpoint.dataset_manager.predefined.whisper_librispeech import (
     WhisperLibriSpeech,
 )
 
-_MODULE = "inference_endpoint.dataset_manager.dataset"
+_MODULE = "inference_endpoint.dataset_manager.predefined.whisper_librispeech"
 
 
 def _entry(fname: str, transcript: str, duration: float = 29.5) -> dict:
@@ -273,7 +272,9 @@ class TestR2Download:
         ):
             run.side_effect = _fake_run_unpacking
             WhisperLibriSpeech.generate(tmp_path / "cache")
-        assert run.call_args.kwargs["timeout"] == dataset.R2_DOWNLOAD_TIMEOUT_S
+        assert (
+            run.call_args.kwargs["timeout"] == WhisperLibriSpeech.R2_DOWNLOAD_TIMEOUT_S
+        )
 
     def test_a_stalled_download_raises_rather_than_hanging(
         self, tmp_path: Path, no_local_manifest: None

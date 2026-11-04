@@ -62,7 +62,10 @@ class ProbeConfig(BaseModel):
         APIType,
         cyclopts.Parameter(
             alias="--api-type",
-            help="API type: openai, openai_transcriptions, sglang, or videogen",
+            help="API type: openai, openai_completions, or sglang",
+            # cyclopts otherwise renders choices from every APIType member,
+            # including the ones UNSUPPORTED_PROBE_API_TYPES refuses.
+            show_choices=False,
         ),
     ] = APIType.OPENAI
     requests: int = Field(10, ge=1)
