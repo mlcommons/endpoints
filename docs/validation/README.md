@@ -59,6 +59,16 @@ your_check_id:
 A cohort directory's name states which cohort of submissions its checks are for:
 one named directory per cohort.
 
+Composition is by reference, not by inheritance. A cohort's checks are its own
+four scope files; what one cohort shares with another is the packaged `ruleset/`
+catalog its `cohort.yaml` names (the round's model and dataset tables). No
+cohort includes another's rows today: a check two cohorts both need is copied,
+or the shared part moves into a packaged ruleset both name. A general
+`include`/`extends` mechanism is deliberately not part of this version - a
+cohort's rows are its reviewed statement of one round's rules, and an include
+chain would let an edit to one round change another round's verdicts without
+that round's review.
+
 Run a cohort against one submission with the CLI:
 
 ```bash
