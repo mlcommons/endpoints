@@ -159,6 +159,48 @@ class TestExitCodes:
         assert main([str(cohort), str(_upload(tmp_path))]) == 0
 
 
+class TestSubmissionVerdicts:
+    """The per-submission verdict block and the pool roll-up."""
+
+    @pytest.mark.unit
+    def test_a_held_upload_reports_one_accepted_submission(self, tmp_path, capsys):
+        cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
+        assert main([str(cohort), str(_upload(tmp_path))]) == 0
+        out = capsys.readouterr().out
+        assert "submission sys/model: accepted" in out
+        assert "1 submission(s): 1 accepted, 0 rejected, 0 refused" in out
+
+    @pytest.mark.unit
+    def test_a_blocking_finding_rejects_its_submission(self, tmp_path, capsys):
+        cohort = write_cohort(tmp_path / "cohort", point=FAIL_CHECK)
+        assert main([str(cohort), str(_upload(tmp_path))]) == 1
+        out = capsys.readouterr().out
+        assert "submission sys/model: rejected (1 failing, 1 blocking)" in out
+        assert "1 submission(s): 0 accepted, 1 rejected, 0 refused" in out
+
+    @pytest.mark.unit
+    def test_a_refused_pair_keeps_its_siblings_findings_and_verdict(
+        self, tmp_path, capsys
+    ):
+        root = tmp_path / "upload"
+        write_upload(
+            root,
+            {
+                ("sys", "model"): [Run(concurrency=16)],
+                ("sys", "bad-model"): [
+                    Run(concurrency=16, c_min_override=16),
+                    Run(concurrency=32, c_min_override=None),
+                ],
+            },
+        )
+        cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
+        assert main([str(cohort), str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "submission sys/model: accepted" in out
+        assert "submission sys/bad-model: refused (" in out
+        assert "2 submission(s): 1 accepted, 0 rejected, 1 refused" in out
+
+
 class TestReportLines:
     """Marks, per-check instance counts, and the Never-Ran disclosure."""
 

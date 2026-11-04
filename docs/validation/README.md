@@ -111,6 +111,20 @@ A summary (`N finding(s), F failing (B blocking)`) is shown at the end:
   too)
   - `Blocking` is the subset whose check declares severity `fail`
 
+Then one verdict per submission and the pool roll-up, both on stdout:
+
+```text
+submission sys/model: accepted
+submission sys/other: refused (<why>)
+2 submission(s): 1 accepted, 0 rejected, 1 refused
+```
+
+- `accepted` - judged, and nothing blocking failed
+- `rejected (F failing, B blocking)` - judged, with at least one blocking
+  failure
+- `refused (<message>)` - the loader could not judge this submission; its
+  findings are absent by design, and the siblings keep theirs
+
 Specifying `--audit` prints the holds as well, marked `OK` (row label, no
 rule/fix), so the session doubles as the audit trail. Checks that did not run
 print `NEVER-RAN <id>: ...` on stderr with their reason: the `when` conditions

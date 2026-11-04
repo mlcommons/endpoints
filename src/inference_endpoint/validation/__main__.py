@@ -24,7 +24,12 @@ from pathlib import Path
 
 from inference_endpoint.validation.catalog import Catalog
 from inference_endpoint.validation.check import Cohort, Severity
-from inference_endpoint.validation.runner import CheckRun, Finding
+from inference_endpoint.validation.runner import (
+    CheckRun,
+    Finding,
+    SubmissionVerdict,
+    submission_verdicts,
+)
 from inference_endpoint.validation.submission import Submission
 
 
@@ -69,8 +74,36 @@ def _never_ran_cause(run: CheckRun) -> str:
     )
 
 
+def _verdict_mark(verdict: SubmissionVerdict) -> str:
+    """The verdict's report words: refused, accepted, or rejected with counts."""
+    if verdict.refusal is not None:
+        return f"refused ({verdict.refusal})"
+    if verdict.accepted:
+        return "accepted"
+    return f"rejected ({verdict.failing} failing, {verdict.blocking} blocking)"
+
+
+def _submission_label(path: Path, root: Path) -> str:
+    """The submission's report label: its path below the input, `results/` dropped.
+
+    A pool's submissions sit under `<root>/results/<system>/<model>/`; the
+    label names the unit of review (`<system>/<model>`), not the layout above
+    it. A `<system>`-directory input yields `<model>`.
+    """
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        # Outside the input (not expected): the absolute path still names it.
+        return str(path)
+    parts = rel.parts[1:] if rel.parts[:1] == ("results",) else rel.parts
+    return str(Path(*parts)) if parts else str(rel)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one cohort's checks against one submission.
+
+    The report prints one line per failing finding, one verdict per submission
+    (`accepted`, `rejected`, or `refused`), and the pool roll-up.
 
     Returns:
         int: `0` = every applicable check held, or failed only at `warn` severity (a
@@ -112,11 +145,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, OverflowError) as exc:
         print(f"refused: {_escaped(str(exc))}", file=sys.stderr)
         return 2
-    for refused in submission.refused:
-        print(
-            _escaped(f"refused: {refused.path}: {refused.message}"),
-            file=sys.stderr,
-        )
     for note in collected.notes:
         # Shape notes, not findings: numeric-string readings and undeclared keys.
         print(_escaped(note), file=sys.stderr)
@@ -152,9 +180,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _escaped(f"NEVER-RAN {check.id}: {_never_ran_cause(run)}"),
                 file=sys.stderr,
             )
+    verdicts = submission_verdicts(submission, collected)
+    for verdict in verdicts:
+        label = _submission_label(verdict.path, args.submission)
+        print(_escaped(f"submission {label}: {_verdict_mark(verdict)}"))
     print(
         f"{len(collected.findings)} finding(s), {len(failing)} failing "
         f"({len(blocking)} blocking)"
+    )
+    accepted = sum(1 for verdict in verdicts if verdict.accepted)
+    refused = sum(1 for verdict in verdicts if verdict.refusal is not None)
+    print(
+        f"{len(verdicts)} submission(s): {accepted} accepted, "
+        f"{len(verdicts) - accepted - refused} rejected, {refused} refused"
     )
     return 1 if blocking or submission.refused else 0
 

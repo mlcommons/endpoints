@@ -256,10 +256,14 @@ class TestShippedCohortGolden:
     """The packaged cohort decides a client-written upload end to end."""
 
     @pytest.mark.unit
-    def test_a_conforming_upload_exits_zero(self, tmp_path):
+    def test_a_conforming_upload_exits_zero(self, tmp_path, capsys):
         root = tmp_path / "upload"
         _build_upload(root)
         assert main([str(COHORT), str(root)]) == 0
+        out = capsys.readouterr().out
+        # One verdict per submission, beside the pool roll-up.
+        assert f"submission {SYSTEM}/{MODEL}: accepted" in out
+        assert "1 submission(s): 1 accepted, 0 rejected, 0 refused" in out
         # A single Section 8.3 `<system>` directory runs the same cohort: the
         # synthesized system node reads `results/<system>/system_power.json`.
         assert main([str(COHORT), str(root / "results" / SYSTEM)]) == 0

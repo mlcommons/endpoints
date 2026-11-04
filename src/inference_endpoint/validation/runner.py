@@ -36,7 +36,7 @@ from typing import Any
 
 from inference_endpoint.validation.check import Check, Cohort, Severity
 from inference_endpoint.validation.compare import Ref, Verdict
-from inference_endpoint.validation.submission import Point, Submission
+from inference_endpoint.validation.submission import Pareto, Point, Submission
 from inference_endpoint.validation.tree import Node, RuleScopes
 
 
@@ -689,3 +689,91 @@ def _when_rows_hold(check: Check, scopes: Mapping[str, Any], where: Path) -> boo
         if not verdict.ok:
             return False
     return True
+
+
+@dataclass(frozen=True)
+class SubmissionVerdict:
+    """One `<system>/<model>` submission's outcome over a collected run.
+
+    Args:
+        path (Path): The submission's directory.
+        failing (int): Failing findings attributed to it.
+        blocking (int): The `fail`-severity subset.
+        refusal (str | None): Why the loader could not judge it, or `None` when
+            it was judged.
+    """
+
+    path: Path
+    failing: int
+    blocking: int
+    refusal: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        """Whether the submission passed: judged, and nothing blocking failed."""
+        return self.refusal is None and self.blocking == 0
+
+
+def submission_verdicts(
+    submission: Submission, collected: Collected
+) -> tuple[SubmissionVerdict, ...]:
+    """One verdict per submission, in tree order: judged or refused.
+
+    Findings attribute to a submission by node directory: a finding at the
+    pareto's own directory or below it belongs to that submission, one at the
+    system or root directory to every submission below it (system- and
+    submission-scoped checks judge facts the submissions share).
+
+    Args:
+        submission (Submission): The walked input.
+        collected (Collected): The run's findings.
+    Returns:
+        tuple[SubmissionVerdict, ...]: The submissions in tree order, then any
+            refusal whose directory carries no submission (a system directory
+            holding no model directory).
+    """
+    refusals: dict[Path, list[str]] = {}
+    for refused in submission.refused:
+        refusals.setdefault(refused.path, []).append(refused.message)
+    verdicts: list[SubmissionVerdict] = []
+    for pareto in submission.paretos:
+        where = pareto.node.dir
+        refusal = "; ".join(refusals.get(where, ()))
+        failing = blocking = 0
+        if not refusal:
+            for finding in collected.findings:
+                if finding.verdict.ok or not _belongs(finding.node_directory, pareto):
+                    continue
+                failing += 1
+                if finding.severity is Severity.FAIL:
+                    blocking += 1
+        verdicts.append(
+            SubmissionVerdict(
+                path=where,
+                failing=failing,
+                blocking=blocking,
+                refusal=refusal or None,
+            )
+        )
+    judged = {verdict.path for verdict in verdicts}
+    verdicts.extend(
+        SubmissionVerdict(path=path, failing=0, blocking=0, refusal="; ".join(messages))
+        for path, messages in refusals.items()
+        if path not in judged
+    )
+    return tuple(verdicts)
+
+
+def _belongs(finding_dir: Path, pareto: Pareto) -> bool:
+    """Whether `finding_dir` is one of `pareto`'s submission's directories.
+
+    The pareto's own directory, its points below it, and its system/root
+    ancestors: a system-scoped row judges what every submission of the system
+    shares.
+    """
+    node: Node | None = pareto.node
+    while node is not None:
+        if finding_dir == node.dir:
+            return True
+        node = node.parent
+    return pareto.node.dir in finding_dir.parents
