@@ -1,0 +1,227 @@
+# The facts a 2026-10-C1 row may name, declared exactly as the submission's own
+# documents spell them (Endpoints Policy 4ba8224dc746: §8.3 point.yaml, §8.2
+# system_desc.json, §4.1/§8.1 result_summary.json, §4.4 steady state, §4.6 seeds,
+# §4.5.2 system_power.json).
+#
+# `field: dict` declares an open subtree: a row may name any deeper key under it
+# and its values stay unchecked, while the value itself must be a block. A leaf
+# carries the type the document must hold; `required: true` marks the facts the
+# checker refuses a run for omitting at all (the parser-minimum trio plus
+# `point.config.concurrency`); `nullable: true` admits an explicit `null` (the
+# facts the client's own summary writes as null).
+
+point:
+  config:
+    concurrency: { type: int, required: true }
+    offline: { type: str, allowlist: [dedicated, elected, none], default: null }
+    load_pattern:
+      { type: str, allowlist: [concurrency, agentic_inference, max_throughput] }
+    region:
+      {
+        type: str,
+        allowlist:
+          [
+            low_latency,
+            low_concurrency,
+            med_concurrency,
+            high_concurrency,
+            margin,
+            submitters_choice,
+          ],
+      }
+    seed_set: { type: str }
+    target_cohort: { type: str }
+    model_name: { type: str }
+    model_precision: { type: str }
+    model_notes: { type: str }
+    dataset: { type: str }
+    dataset_name: { type: str }
+    dataset_type: { type: str }
+    dataset_link: { type: str }
+    link_to_model: { type: str }
+    link_to_model_transformation: { type: str, nullable: true }
+    shared_src: { type: str }
+    shared_docs: { type: str }
+    division: { type: str }
+    max_supported_concurrency: { type: int }
+    nodes_used: { type: list }
+    dp_shortfall: dict
+    speculative_decoding: dict
+    warmup:
+      duration_s: { type: int }
+      requests_issued: { type: int }
+      requests_completed: { type: int }
+      concurrency: { type: int }
+      logs_retained: { type: bool }
+      data_source: { type: str }
+      salt: { type: bool }
+    steady_state:
+      status:
+        {
+          type: str,
+          allowlist:
+            [
+              windowable,
+              insufficient_duration,
+              insufficient_passes,
+              partial_dataset,
+            ],
+        }
+      verdict:
+        {
+          type: str,
+          allowlist:
+            [steady_state, drifting_up, drifting_down, anomaly, not_found],
+        }
+      window: dict
+      state: dict
+    runtime_settings:
+      # Deliberately copied out of the client's `Settings` model
+      # (src/inference_endpoint/config/schema.py) to maintain per-version
+      # compatibility pending any schema changes: a cohort pins the shape it
+      # validates against, and a later client change lands as a new cohort
+      # revision instead of moving this one.
+      runtime:
+        min_issue_duration_ms: { type: int }
+        max_issue_duration_ms: { type: int }
+        n_samples_to_issue: { type: int }
+        scheduler_random_seed: { type: int }
+        dataloader_random_seed: { type: int }
+      load_pattern:
+        type:
+          {
+            type: str,
+            allowlist:
+              [
+                max_throughput,
+                poisson,
+                concurrency,
+                agentic_inference,
+                burst,
+                step,
+              ],
+          }
+        target_qps: { type: float }
+        target_concurrency: { type: int }
+        use_legacy_loadgen_qps_metrics: { type: bool }
+      client:
+        num_workers: { type: int }
+        log_level: { type: str }
+        warmup_connections: { type: int }
+        auto_warmup_budget_fraction: { type: float }
+        max_concurrent_warmup_connects: { type: int }
+        max_connections: { type: int }
+        transport:
+          type: { type: str, allowlist: [zmq] }
+          recv_buffer_size: { type: int }
+          send_buffer_size: { type: int }
+          io_threads: { type: int }
+          worker_io_threads: { type: int }
+          high_water_mark: { type: int }
+          linger: { type: int }
+          immediate: { type: int }
+        stream_all_chunks: { type: bool }
+        worker_initialization_timeout: { type: float }
+        worker_graceful_shutdown_wait: { type: float }
+        worker_force_kill_timeout: { type: float }
+        insecure: { type: bool }
+        max_idle_time: { type: float }
+        min_required_connections: { type: int }
+        worker_gc_mode: { type: str, allowlist: [disabled, relaxed, system] }
+        endpoint_urls: { type: list }
+        api_type:
+          {
+            type: str,
+            allowlist: [openai, openai_completions, sglang, videogen],
+          }
+        api_key: { type: str, nullable: true }
+        event_logs_dir: { type: str }
+      timeouts:
+        run_timeout_s: { type: float }
+        endpoint_response_idle_timeout_s: { type: float }
+        interrupted_teardown_grace_s: { type: float }
+        service_ready_timeout_s: { type: float }
+        warmup_drain_timeout_s: { type: float }
+        performance_drain_timeout_s: { type: float }
+        accuracy_drain_timeout_s: { type: float }
+        metrics_drain_timeout_s: { type: float }
+      warmup:
+        enabled: { type: bool }
+        n_requests: { type: int }
+        salt: { type: bool }
+        drain: { type: bool }
+        warmup_random_seed: { type: int }
+      profiling:
+        engine: { type: str, allowlist: [vllm] }
+        urls: { type: list }
+      early_stopping:
+        enabled: { type: bool }
+      steady_state:
+        enabled: { type: bool }
+      metrics_tokenizer_workers: { type: int }
+      metrics_isl: { type: bool }
+  system_desc:
+    max_supported_concurrency: { type: int, required: true }
+    c_min_override: { type: int, default: null }
+    division: { type: str }
+    cooling: { type: str }
+    node_sets: { type: list }
+    accelerators: dict
+    tensor_parallel: { type: int }
+    pipeline_parallel: { type: int }
+    expert_parallel: { type: int }
+    data_parallel: { type: int }
+    tps_utilization: { type: float }
+    host_processor_core_count: { type: int }
+    host_processor_vcpu_count: { type: int }
+  result_summary:
+    system_tps: { type: float, required: true }
+    complete: { type: bool }
+    state: { type: str }
+    qps: { type: float, nullable: true }
+    duration_ns: { type: int, nullable: true }
+    n_samples_issued: { type: int }
+    n_samples_completed: { type: int }
+    n_samples_failed: { type: int }
+    n_samples_dropped: { type: int }
+    output_sequence_lengths: dict
+    output_sequence_lengths_full_run: { type: dict, nullable: true }
+    ttft: dict
+    tpot: dict
+    latency: dict
+    percentiles: dict
+    isl: dict
+    osl: dict
+    tps_per_user: { type: float }
+    tps_utilization: { type: float }
+    system_tps_per_kw: { type: float }
+    e2e_avg_interactivity: { type: float, nullable: true }
+    # §4.4's reporting block: the client's `SteadyState` document; the tree's
+    # `system_tps` alias reads `steady_state.window`/`.tps.system` out of it.
+    steady_state: { type: dict, nullable: true }
+    tps: { type: float, nullable: true }
+    # The whole-run aggregate (`tps`) under its own name; `system_tps` is the
+    # §4.4 official reading.
+    full_run_system_tps: { type: float, nullable: true }
+  accuracy_results: dict
+  results: dict
+  system_power:
+    system_desc_id: { type: str }
+    provisioned_power_kw: { type: float }
+    cooling: { type: str }
+    mlc_estimated_power: { type: bool }
+    node_sets: { type: list }
+    scale_out: dict
+    computed: dict
+    notes: { type: str }
+
+system:
+  system_power:
+    system_desc_id: { type: str }
+    provisioned_power_kw: { type: float }
+    cooling: { type: str }
+    mlc_estimated_power: { type: bool }
+    node_sets: { type: list }
+    scale_out: dict
+    computed: dict
+    notes: { type: str }
