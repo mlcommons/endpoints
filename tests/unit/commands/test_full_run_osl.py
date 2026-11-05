@@ -20,6 +20,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
     MessageInput,
     TextInput,
 )
+from inference_endpoint.commands.benchmark import full_run_osl as full_run_osl_module
 from inference_endpoint.commands.benchmark.full_run_osl import (
     compute_full_run_osl,
     full_run_osl_for_report,
@@ -31,7 +32,8 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import TextModelOutput
+from inference_endpoint.core.types import PhaseType, TextModelOutput
+from inference_endpoint.endpoint_client.cpu_affinity import UnsupportedPlatformError
 
 pytestmark = pytest.mark.unit
 
@@ -432,6 +434,91 @@ def test_for_report_fails_closed_without_performance_map(tmp_path: Path) -> None
     # No sample_idx_map.json → load_performance_uuids None → fail closed, before
     # any tokenizer is constructed.
     assert full_run_osl_for_report(tmp_path, "any-tokenizer") is None
+
+
+class _SpyTokenizer:
+    """Stands in for BatchTokenizer: records how it was built, counts by words."""
+
+    built: list[dict] = []
+
+    def __init__(self, tokenizer_name: str, *, live_workers: int, n_workers: int):
+        type(self).built.append(
+            {
+                "tokenizer_name": tokenizer_name,
+                "live_workers": live_workers,
+                "n_workers": n_workers,
+            }
+        )
+
+    def __enter__(self) -> _SpyTokenizer:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def count_batch_sync(self, items):
+        return _word_counts(items)
+
+
+def _perf_report(report_dir: Path) -> None:
+    """A two-turn performance report that full_run_osl_for_report will accept."""
+    _write_events(
+        report_dir / "events.jsonl",
+        [_complete(1, "a"), _complete(3, "b c")],
+    )
+    (report_dir / "sample_idx_map.json").write_bytes(
+        msgspec.json.encode({PhaseType.PERFORMANCE.value: {"u1": 0, "u3": 1}})
+    )
+
+
+@pytest.mark.parametrize("n_cpus", [4, 32, 352])
+def test_for_report_caps_counting_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, n_cpus: int
+) -> None:
+    """Finalize counts on at most one thread per usable CPU, capped where adding
+    threads stops helping, and without tokenizer shards (n_workers=0)."""
+    _perf_report(tmp_path)
+    _SpyTokenizer.built = []
+    monkeypatch.setattr(full_run_osl_module, "BatchTokenizer", _SpyTokenizer)
+    monkeypatch.setattr(
+        full_run_osl_module, "get_all_online_cpus", lambda: list(range(n_cpus))
+    )
+
+    result = full_run_osl_for_report(tmp_path, "tok")
+
+    assert result is not None and result["n_turns_counted"] == 2
+    assert _SpyTokenizer.built == [
+        {
+            "tokenizer_name": "tok",
+            "live_workers": min(n_cpus, full_run_osl_module._MAX_COUNT_THREADS),
+            "n_workers": 0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("cpu_count", "expected"),
+    [(64, full_run_osl_module._MAX_COUNT_THREADS), (8, 8), (None, 1)],
+)
+def test_for_report_threads_without_cpu_affinity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cpu_count: int | None,
+    expected: int,
+) -> None:
+    """Where the affinity API is unsupported, fall back to os.cpu_count()."""
+    _perf_report(tmp_path)
+    _SpyTokenizer.built = []
+    monkeypatch.setattr(full_run_osl_module, "BatchTokenizer", _SpyTokenizer)
+
+    def _unsupported() -> list[int]:
+        raise UnsupportedPlatformError("no affinity here")
+
+    monkeypatch.setattr(full_run_osl_module, "get_all_online_cpus", _unsupported)
+    monkeypatch.setattr(full_run_osl_module.os, "cpu_count", lambda: cpu_count)
+
+    assert full_run_osl_for_report(tmp_path, "tok") is not None
+    assert _SpyTokenizer.built[0]["live_workers"] == expected
 
 
 def test_for_report_skips_without_tokenizer_or_events(tmp_path: Path) -> None:

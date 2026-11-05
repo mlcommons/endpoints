@@ -61,6 +61,10 @@ BatchTokenCounter = Callable[
 
 # Turns counted per tokenizer batch at finalize.
 _DEFAULT_BATCH_SIZE = 1024
+# Counting threads at finalize. Each turn is counted with the aggregator's own
+# per-item logic, whose Python parts hold the GIL: measured throughput levels
+# off by about 32 threads and is slightly lower beyond that.
+_MAX_COUNT_THREADS = 32
 
 
 def _in_population(
@@ -286,13 +290,15 @@ def full_run_osl_for_report(
         logger.info("Full-run OSL skipped: no performance-phase samples to bound to")
         return None
     try:
-        # A batch is encoded across the tokenizer's rayon threads, which
-        # live_workers caps (an exported RAYON_NUM_THREADS still wins): one per
-        # CPU this process may run on, so a taskset-pinned client stays in its set.
+        # A batch is counted on live_workers threads (which also caps the
+        # tokenizer's rayon pool; an exported RAYON_NUM_THREADS still wins): at
+        # most one per CPU this process may run on, so a taskset-pinned client
+        # stays in its set.
         try:
             threads = len(get_all_online_cpus()) or 1
         except UnsupportedPlatformError:
             threads = os.cpu_count() or 1
+        threads = min(threads, _MAX_COUNT_THREADS)
         with BatchTokenizer(
             tokenizer_name, live_workers=threads, n_workers=0
         ) as tokenizer:

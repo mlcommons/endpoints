@@ -139,6 +139,151 @@ def _normalize_prompt_messages_for_template(
 # ---------------------------------------------------------------------------
 
 _WORKER_TEXT_BACKEND: Any = None
+# Full tokenizer + chat-template baseline for the structured (MessageInput /
+# PromptInput) drain path. apply_chat_template is Jinja + Python and holds the
+# GIL, so the in-process thread pool counts one item at a time; shipping the
+# drain's structured items to the shards is what lets it use every core.
+_WORKER_TOKENIZER: Any = None
+_WORKER_PREFIX_LEN = 0
+_WORKER_BASELINE = 0
+_WORKER_FALLBACK_WARNED: set[str] = set()
+
+# Structured drain items per shard task: small enough that pickling one task
+# stays cheap and progress is reported often, large enough to amortize IPC.
+_STRUCTURED_CHUNK_ITEMS = 64
+
+
+def chat_template_baseline(tok: Any) -> tuple[int, int]:
+    """``(prefix_len, baseline)`` used to strip chat framing from message counts.
+
+    Baseline = tokens from a [user, empty-assistant] pair minus the [user]
+    prefix alone, so the assistant frame is subtracted from message counts.
+    Raises if the template cannot render; callers fall back to ``(0, 0)``.
+    """
+    prefix = tok.apply_chat_template(
+        [_PREFIX_USER_MSG],
+        tokenize=True,
+        add_generation_prompt=False,
+        return_dict=False,
+    )
+    with_assistant_tokens = tok.apply_chat_template(
+        [_PREFIX_USER_MSG, {"role": "assistant", "content": ""}],
+        tokenize=True,
+        add_generation_prompt=False,
+        return_dict=False,
+    )
+    return len(prefix), len(with_assistant_tokens) - len(prefix)
+
+
+def count_message_tokens(
+    tok: Any,
+    prefix_len: int,
+    baseline: int,
+    content: str,
+    reasoning: str | None,
+    tool_calls: tuple[dict[str, Any], ...] | None,
+    on_fallback: Callable[[Exception, str], None],
+) -> int:
+    """Count one assistant output without surrounding chat-template framing.
+
+    Render the structured assistant content, reasoning, and tool calls with
+    a minimal user prefix, then subtract both that prefix and the empty
+    assistant frame. The result is the assistant payload count used for
+    OSL and TPOT. Shared by the in-process lane and the drain shards so both
+    produce identical numbers.
+    """
+    msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
+    if reasoning:
+        msg["reasoning_content"] = reasoning
+    if tool_calls:
+        msg["tool_calls"] = _normalize_tool_calls_for_template(tool_calls)
+    try:
+        encoded = tok.apply_chat_template(
+            [_PREFIX_USER_MSG, msg],
+            tokenize=True,
+            add_generation_prompt=False,
+            return_dict=False,
+        )
+        return max(0, len(encoded) - prefix_len - baseline)
+    except Exception as exc:
+        on_fallback(exc, "Tool-call OSL/TPOT may diverge.")
+        tool_calls_json = (
+            msgspec.json.encode(list(tool_calls)).decode() if tool_calls else None
+        )
+        parts = [p for p in (content or None, reasoning or None, tool_calls_json) if p]
+        return len(tok.tokenize("\n".join(parts)))
+
+
+def count_prompt_tokens(
+    tok: Any,
+    messages: tuple[dict[str, Any], ...],
+    tools: tuple[dict[str, Any], ...] | None,
+    chat_template_kwargs: dict[str, Any] | None,
+    chat_template: str | None,
+    tool_choice: str | dict[str, Any] | None,
+    on_fallback: Callable[[Exception, str], None],
+) -> int:
+    """Count a complete structured input prompt for ISL.
+
+    Render the full message history and optional tools using the selected
+    chat template and model-specific keyword arguments. Unlike assistant
+    output counting, this keeps all conversation framing and appends the
+    generation prompt because those tokens are part of the server input.
+    """
+    kwargs = dict(chat_template_kwargs or {})
+    kwargs.update(
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=False,
+    )
+    if tools is not None:
+        kwargs["tools"] = list(tools)
+    if chat_template is not None:
+        kwargs["chat_template"] = chat_template
+    if tool_choice is not None:
+        kwargs["tool_choice"] = tool_choice
+    prompt_messages = _normalize_prompt_messages_for_template(messages)
+    try:
+        return len(tok.apply_chat_template(prompt_messages, **kwargs))
+    except Exception as exc:
+        on_fallback(exc, "Structured ISL may diverge.")
+        prompt = {"messages": prompt_messages}
+        if tools is not None:
+            prompt["tools"] = list(tools)
+        return len(tok.tokenize(msgspec.json.encode(prompt).decode()))
+
+
+def count_structured_item(
+    tok: Any,
+    prefix_len: int,
+    baseline: int,
+    item: MessageInput | PromptInput,
+    on_fallback: Callable[[Exception, str], None],
+) -> int:
+    """Count one structured input with the logic that matches its kind.
+
+    The single dispatch shared by the in-process thread and the drain shards,
+    so a sample gets the same number whichever lane counts it.
+    """
+    match item:
+        case MessageInput(content, reasoning, tool_calls):
+            return count_message_tokens(
+                tok, prefix_len, baseline, content, reasoning, tool_calls, on_fallback
+            )
+        case PromptInput(
+            messages, tools, chat_template_kwargs, chat_template, tool_choice
+        ):
+            return count_prompt_tokens(
+                tok,
+                messages,
+                tools,
+                chat_template_kwargs,
+                chat_template,
+                tool_choice,
+                on_fallback,
+            )
+        case _:
+            raise TypeError(f"unsupported structured input: {type(item).__name__}")
 
 
 def load_reference_tokenizer(tokenizer_name: str) -> Any:
@@ -182,8 +327,14 @@ def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
             # unpinned shards from oversubscribing each other.
             logger.debug("could not pin tokenizer worker to %s", core_set)
     transformers_logging.set_verbosity_error()
-    global _WORKER_TEXT_BACKEND
-    _WORKER_TEXT_BACKEND = load_reference_backend(tokenizer_name)
+    global _WORKER_TEXT_BACKEND, _WORKER_TOKENIZER, _WORKER_PREFIX_LEN, _WORKER_BASELINE
+    _WORKER_TOKENIZER = load_reference_tokenizer(tokenizer_name)
+    _WORKER_TEXT_BACKEND = getattr(_WORKER_TOKENIZER, "backend_tokenizer", None)
+    try:
+        _WORKER_PREFIX_LEN, _WORKER_BASELINE = chat_template_baseline(_WORKER_TOKENIZER)
+    except Exception:
+        # Same fallback as the parent (BatchTokenizer._load_tokenizer).
+        _WORKER_PREFIX_LEN, _WORKER_BASELINE = 0, 0
     if _WORKER_TEXT_BACKEND is not None:
         _WORKER_TEXT_BACKEND.encode("warmup", add_special_tokens=False)
 
@@ -201,6 +352,46 @@ def _worker_encode_lengths(texts: list[str]) -> list[int]:
     if backend is None:
         raise RuntimeError("tokenizer worker backend unavailable")
     return encode_lengths(backend, texts)
+
+
+def _worker_warn_fallback(exc: Exception, impact: str) -> None:
+    key = type(exc).__name__
+    if key in _WORKER_FALLBACK_WARNED:
+        return
+    _WORKER_FALLBACK_WARNED.add(key)
+    logger.warning(
+        "apply_chat_template failed in tokenizer shard (%s: %s); falling back "
+        "to whitespace tokenization. %s",
+        key,
+        exc,
+        impact,
+    )
+
+
+def _worker_count_structured(
+    items: list[MessageInput | PromptInput],
+) -> list[int | Exception]:
+    """Per-item counts for structured inputs; a failing item is returned as
+    its exception so it does not poison the rest of the chunk."""
+    tok = _WORKER_TOKENIZER
+    if tok is None:
+        raise RuntimeError("tokenizer worker tokenizer unavailable")
+    out: list[int | Exception] = []
+    for item in items:
+        try:
+            out.append(
+                count_structured_item(
+                    tok,
+                    _WORKER_PREFIX_LEN,
+                    _WORKER_BASELINE,
+                    item,
+                    _worker_warn_fallback,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - isolate this input.
+            # Exceptions from tokenizers/jinja may not pickle; send a plain one.
+            out.append(RuntimeError(f"{type(exc).__name__}: {exc}"))
+    return out
 
 
 def _worker_ready(_: int) -> bool:
@@ -289,26 +480,7 @@ class BatchTokenizer:
         # Baseline = tokens from a [user, empty-assistant] pair minus the [user]
         # prefix alone, so the assistant frame is subtracted from message counts.
         try:
-            prefix = cast(
-                list[int],
-                tok.apply_chat_template(
-                    [_PREFIX_USER_MSG],
-                    tokenize=True,
-                    add_generation_prompt=False,
-                    return_dict=False,
-                ),
-            )
-            self._prefix_len = len(prefix)
-            with_assistant_tokens = cast(
-                list[int],
-                tok.apply_chat_template(
-                    [_PREFIX_USER_MSG, {"role": "assistant", "content": ""}],
-                    tokenize=True,
-                    add_generation_prompt=False,
-                    return_dict=False,
-                ),
-            )
-            self._baseline = len(with_assistant_tokens) - self._prefix_len
+            self._prefix_len, self._baseline = chat_template_baseline(tok)
         except Exception:
             self._prefix_len = 0
             self._baseline = 0
@@ -460,72 +632,62 @@ class BatchTokenizer:
             impact,
         )
 
-    def _maybe_apply_chat_template(
-        self,
-        content: str,
-        reasoning: str | None,
-        tool_calls: tuple[dict[str, Any], ...] | None,
-    ) -> tuple[str, bool]:
-        """Apply the chat template to content, reasoning and tool_calls if the model
-        provides one, otherwise fall back to a plain string join.
+    async def _fan_out_structured(
+        self, structured: list[tuple[int, MessageInput | PromptInput]]
+    ) -> list[tuple[int, int | Exception]]:
+        """Drain-path structured counting across every shard.
 
-        Returns the text and whether the template rendered it.
+        Items are cut into small chunks dealt round-robin to the shards, so one
+        shard does not end up with all the long agentic prompts. A failed chunk
+        (e.g. a broken worker) marks only its own items as failed. Progress is
+        logged because this phase can run for many minutes with no other output.
         """
-        msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
-        if reasoning:
-            msg["reasoning_content"] = reasoning
-        if tool_calls:
-            msg["tool_calls"] = _normalize_tool_calls_for_template(tool_calls)
-        try:
-            rendered = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
-                [_PREFIX_USER_MSG, msg],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            return cast(str, rendered), True
-        except Exception as exc:
-            self._warn_template_fallback(exc, "Tool-call OSL/TPOT may diverge.")
-            tool_calls_json = (
-                msgspec.json.encode(list(tool_calls)).decode() if tool_calls else None
-            )
-            parts = [
-                p for p in (content or None, reasoning or None, tool_calls_json) if p
-            ]
-            return "\n".join(parts), False
+        procs = self._procs
+        chunks = [
+            structured[i : i + _STRUCTURED_CHUNK_ITEMS]
+            for i in range(0, len(structured), _STRUCTURED_CHUNK_ITEMS)
+        ]
+        total = len(structured)
+        done = 0
+        next_log = time.monotonic() + 30.0
+        t0 = time.monotonic()
 
-    def _maybe_apply_prompt_template(
-        self,
-        messages: tuple[dict[str, Any], ...],
-        tools: tuple[dict[str, Any], ...] | None,
-        chat_template_kwargs: dict[str, Any] | None,
-        chat_template: str | None,
-        tool_choice: str | dict[str, Any] | None,
-    ) -> tuple[str, bool]:
-        """Apply the chat template to a complete input prompt if the model
-        provides one, otherwise fall back to its JSON encoding.
+        async def run(k: int, chunk: list[tuple[int, MessageInput | PromptInput]]):
+            nonlocal done, next_log
+            ex = procs[k % len(procs)]
+            try:
+                counts = await asyncio.wrap_future(
+                    ex.submit(_worker_count_structured, [item for _, item in chunk])
+                )
+                if len(counts) != len(chunk):
+                    raise RuntimeError(
+                        f"tokenizer shard returned {len(counts)} counts for "
+                        f"{len(chunk)} inputs"
+                    )
+                result = [
+                    (index, c) for (index, _), c in zip(chunk, counts, strict=True)
+                ]
+            except Exception as exc:  # noqa: BLE001 - isolate this chunk.
+                result = [(index, exc) for index, _ in chunk]
+            done += len(chunk)
+            if time.monotonic() >= next_log:
+                next_log = time.monotonic() + 30.0
+                logger.info(
+                    "Structured tokenization drain: %d/%d (%.0fs)",
+                    done,
+                    total,
+                    time.monotonic() - t0,
+                )
+            return result
 
-        Returns the text and whether the template rendered it.
-        """
-        kwargs = dict(chat_template_kwargs or {})
-        kwargs.update(tokenize=False, add_generation_prompt=True)
-        if tools is not None:
-            kwargs["tools"] = list(tools)
-        if chat_template is not None:
-            kwargs["chat_template"] = chat_template
-        if tool_choice is not None:
-            kwargs["tool_choice"] = tool_choice
-        prompt_messages = _normalize_prompt_messages_for_template(messages)
-        try:
-            rendered = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
-                prompt_messages, **kwargs
-            )
-            return cast(str, rendered), True
-        except Exception as exc:
-            self._warn_template_fallback(exc, "Structured ISL may diverge.")
-            prompt = {"messages": prompt_messages}
-            if tools is not None:
-                prompt["tools"] = list(tools)
-            return msgspec.json.encode(prompt).decode(), False
+        results = await asyncio.gather(*(run(k, c) for k, c in enumerate(chunks)))
+        logger.info(
+            "Structured tokenization drain done: %d items on %d shards in %.1fs",
+            total,
+            len(procs),
+            time.monotonic() - t0,
+        )
+        return list(chain.from_iterable(results))
 
     async def _count_indexed_texts_async(
         self,
@@ -553,86 +715,116 @@ class BatchTokenizer:
             for (index, _), count in zip(indexed_texts, counts, strict=True)
         ]
 
-    def _render_structured(
-        self, item: TokenizationInput
-    ) -> tuple[str, int] | Exception:
-        """The text to encode for an assistant output or input prompt and the
-        tokens to subtract from its count, or the exception that stopped it.
+    async def _count_structured_async(
+        self,
+        structured: list[tuple[int, MessageInput | PromptInput]],
+        loop: asyncio.AbstractEventLoop,
+        *,
+        live: bool,
+    ) -> list[tuple[int, int | Exception]]:
+        """Count structured inputs and pair each outcome with its input index.
 
-        Assistant output token counting needs an offset to calculate tokens
-        correctly, while prompt token counting doesn't need an offset subtraction.
+        Routed like :meth:`_count_indexed_texts_async`: ``live=True`` (mid-run)
+        never touches the shard processes and counts on the in-process thread;
+        the drain fans out across every shard. Both lanes count with the same
+        ``count_message_tokens`` / ``count_prompt_tokens`` logic, so a sample
+        gets the same number whichever lane handles it.
         """
-        try:
-            match item:
-                case MessageInput(content, reasoning, tool_calls):
-                    text, template_applied = self._maybe_apply_chat_template(
-                        content, reasoning, tool_calls
-                    )
-                    # counting output token from model needs an offset subtraction
-                    offset = (
-                        self._prefix_len + self._baseline if template_applied else 0
-                    )
-                    return text, offset
-                case PromptInput(
-                    messages, tools, chat_template_kwargs, chat_template, tool_choice
-                ):
-                    text, _ = self._maybe_apply_prompt_template(
-                        messages,
-                        tools,
-                        chat_template_kwargs,
-                        chat_template,
-                        tool_choice,
-                    )
-                    # counting prompt token from model doesn't need an offset subtraction
-                    return text, 0
-                case _:
-                    raise TypeError(
-                        f"unsupported tokenization input: {type(item).__name__}"
-                    )
-        except Exception as exc:  # noqa: BLE001 - isolate this input.
-            return exc
+        if self._procs and not live:
+            # Draining will call this path for multiprocessing
+            return await self._fan_out_structured(structured)
+        # during benchmarking, we will call this path to the in-process thread pool
+        return await self._count_structured_inproc(structured, loop)
+
+    async def _count_structured_inproc(
+        self,
+        structured: list[tuple[int, MessageInput | PromptInput]],
+        loop: asyncio.AbstractEventLoop,
+    ) -> list[tuple[int, int | Exception]]:
+        """Count structured inputs one at a time on the in-process thread.
+
+        The live lane, and the drain when there are no shards (``n_workers=0``).
+        ``apply_chat_template`` holds the GIL, so each item is its own executor
+        call, which keeps cancellation points between items.
+        """
+        results: list[tuple[int, int | Exception]] = []
+        for index, item in structured:
+            if self._thread is None:
+                results.append((index, RuntimeError("BatchTokenizer is closed")))
+                continue
+            try:
+                count = await loop.run_in_executor(
+                    self._thread,
+                    count_structured_item,
+                    self._tokenizer,
+                    self._prefix_len,
+                    self._baseline,
+                    item,
+                    self._warn_template_fallback,
+                )
+                results.append((index, count))
+            except Exception as exc:  # noqa: BLE001 - isolate this input.
+                results.append((index, exc))
+        return results
 
     def count_batch_sync(
         self, items: Sequence[TokenizationInput]
     ) -> list[int | Exception]:
-        """Count many inputs on the calling thread, in input order.
+        """Count many inputs on this tokenizer's thread pool, in input order.
 
         The post-run counterpart to :meth:`count_batch_async`, for callers that
-        run after the event loop is gone (full-run OSL at finalize). The chat
-        template is applied to each input serially, since it costs little next
-        to encoding; the resulting texts are then encoded in parallel.
+        run after the event loop is gone (full-run OSL at finalize). Structured
+        inputs are counted one per task with :func:`count_structured_item`, the
+        logic the aggregator's live lane and drain shards use, so a turn gets
+        byte-identical counts here and in the aggregator. The ``live_workers``
+        threads overlap the tokenizer work of different turns. Plain text is
+        encoded in one batch, as the aggregator does.
         """
-        # Each input's count or exception, or None while its text awaits the
-        # encoder; offsets[i] is subtracted from texts[i]'s count.
-        plan: list[int | Exception | None] = []
+        if self._thread is None:
+            raise RuntimeError("BatchTokenizer is closed")
+        outcomes: list[int | Exception | None] = [None] * len(items)
+        text_slots: list[int] = []
         texts: list[str] = []
-        offsets: list[int] = []
-        for item in items:
-            if isinstance(item, TokenIdsInput):
-                plan.append(len(item.token_ids))
-                continue
-            if isinstance(item, TextInput):
-                rendered_text, rendered_offset = item.text, 0
-            else:
-                rendered = self._render_structured(item)
-                if isinstance(rendered, Exception):
-                    plan.append(rendered)
-                    continue
-                rendered_text, rendered_offset = rendered
-            plan.append(None)
-            texts.append(rendered_text)
-            offsets.append(rendered_offset)
-        # parallel encoding gives the speed up
-        counts = self._encode_lengths_inproc(texts) if texts else []
-        token_counts: list[int | Exception] = []
-        next_text = 0
-        for token_count in plan:
-            if token_count is None:
-                # This input's text was encoded: take its count, less the offset.
-                token_count = max(0, counts[next_text] - offsets[next_text])
-                next_text += 1
-            token_counts.append(token_count)
-        return token_counts
+        structured_slots: list[int] = []
+        structured: list[MessageInput | PromptInput] = []
+        for slot, item in enumerate(items):
+            match item:
+                case TokenIdsInput(token_ids=token_ids):
+                    outcomes[slot] = len(token_ids)
+                case TextInput(text=text):
+                    text_slots.append(slot)
+                    texts.append(text)
+                case MessageInput() | PromptInput():
+                    structured_slots.append(slot)
+                    structured.append(item)
+                case _:
+                    outcomes[slot] = TypeError(
+                        f"unsupported tokenization input: {type(item).__name__}"
+                    )
+
+        def count_one(item: MessageInput | PromptInput) -> int | Exception:
+            try:
+                return count_structured_item(
+                    self._tokenizer,
+                    self._prefix_len,
+                    self._baseline,
+                    item,
+                    self._warn_template_fallback,
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate this input.
+                return exc
+
+        # Start the structured turns first so the pool works while the calling
+        # thread encodes the (few) plain texts.
+        futures = [self._thread.submit(count_one, item) for item in structured]
+        if texts:
+            for slot, count in zip(
+                text_slots, self._encode_lengths_inproc(texts), strict=True
+            ):
+                outcomes[slot] = count
+        for slot, future in zip(structured_slots, futures, strict=True):
+            outcomes[slot] = future.result()
+        return cast(list[int | Exception], outcomes)
 
     async def count_batch_async(
         self,
@@ -663,32 +855,12 @@ class BatchTokenizer:
             for index, outcome in text_outcomes:
                 outcomes[index] = outcome
 
-        if structured and self._thread is None:
-            for index, _ in structured:
-                outcomes[index] = RuntimeError("BatchTokenizer is closed")
-        elif structured:
-            # Render serially on the tokenizer thread (the event loop stays free),
-            # then encode the texts in one batch: the bounded live lane mid-run,
-            # the shard pool at the end-of-run drain.
-            rendered = await loop.run_in_executor(
-                self._thread,
-                lambda: [self._render_structured(item) for _, item in structured],
+        if structured:
+            structured_outcomes = await self._count_structured_async(
+                structured, loop, live=live
             )
-            rendered_texts: list[tuple[int, str]] = []
-            offsets: dict[int, int] = {}
-            for (index, _), result in zip(structured, rendered, strict=True):
-                if isinstance(result, Exception):
-                    outcomes[index] = result
-                    continue
-                rendered_texts.append((index, result[0]))  # rendered text
-                offsets[index] = result[1]  # offset
-            if rendered_texts:
-                for index, outcome in await self._count_indexed_texts_async(
-                    rendered_texts, loop, live=live
-                ):
-                    if not isinstance(outcome, Exception):
-                        outcome = max(0, outcome - offsets[index])
-                    outcomes[index] = outcome
+            for index, outcome in structured_outcomes:
+                outcomes[index] = outcome
 
         if any(outcome is None for outcome in outcomes):
             raise AssertionError("unhandled TokenizationInput variant")
