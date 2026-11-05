@@ -276,6 +276,7 @@ def test_sigint_grace_expiry_abandons_wedged_drain(mock_http_echo_server, tmp_pa
     """
     report_dir = tmp_path / "report"
     config_path = tmp_path / "bench.yaml"
+    log_file = tmp_path / "run.log"
     _write_config(
         report_dir,
         mock_http_echo_server.url,
@@ -286,10 +287,18 @@ def test_sigint_grace_expiry_abandons_wedged_drain(mock_http_echo_server, tmp_pa
     agg_pid: int | None = None
     try:
         with _benchmark_proc(
-            [_cli(), "benchmark", "from-config", "-c", str(config_path)]
+            [_cli(), "benchmark", "from-config", "-c", str(config_path)],
+            log_file,
         ) as proc:
             _wait_services_ready(proc, report_dir)
-            time.sleep(3.0)  # comfortably inside the ~120 s performance phase
+            # Service readiness precedes client startup. Wait for the session
+            # before allowing live metrics ticks to reach the parent.
+            deadline = time.monotonic() + 60.0
+            while "Starting phase:" not in log_file.read_text(errors="replace"):
+                assert proc.poll() is None, log_file.read_text(errors="replace")
+                assert time.monotonic() < deadline, "performance phase never started"
+                time.sleep(0.05)
+            time.sleep(3.0)
 
             agg_pid = _pid_of_child("metrics_aggregator", str(report_dir))
             assert agg_pid is not None, "aggregator child not found"
