@@ -512,6 +512,7 @@ class MetricsRegistry:
         state: SessionState,
         n_pending_tasks: int,
         steady_state: dict | None = None,
+        session_started_ns: int | None = None,
     ) -> MetricsSnapshot:
         # Exact (raw-values) computation is reserved for the COMPLETE snapshot;
         # live and draining snapshots use the cheap HDR path.
@@ -529,6 +530,7 @@ class MetricsRegistry:
             n_pending_tasks=n_pending_tasks,
             metrics=metrics,
             steady_state=steady_state,
+            session_started_ns=session_started_ns,
         )
 
     # -- introspection (mostly for tests) --------------------------------
