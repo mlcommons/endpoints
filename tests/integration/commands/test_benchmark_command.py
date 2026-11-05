@@ -15,6 +15,8 @@
 
 """Integration tests for benchmark commands against echo server."""
 
+import contextlib
+import dataclasses
 import json
 import re
 from pathlib import Path
@@ -23,6 +25,7 @@ import pytest
 import yaml
 from inference_endpoint.commands.audit import run_audit
 from inference_endpoint.commands.benchmark.execute import run_benchmark
+from inference_endpoint.compliance.audit_test import output_caching_test
 from inference_endpoint.config.schema import (
     AuditConfig,
     AuditTestId,
@@ -41,6 +44,7 @@ from inference_endpoint.config.schema import (
     Timeouts,
 )
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
+from inference_endpoint.exceptions import CLIError
 
 _TEST_SETTINGS = Settings(
     load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
@@ -267,11 +271,18 @@ class TestBenchmarkCommandIntegration:
         assert result_json["passed"] is True
 
     @pytest.mark.integration
+    @pytest.mark.parametrize("verdict", [True, False], ids=["pass", "fail"])
     def test_cli_run_dispatches_main_run_before_audit(
-        self, mock_http_echo_server, ds_dataset_path, tmp_path, monkeypatch
+        self, mock_http_echo_server, ds_dataset_path, tmp_path, monkeypatch, verdict
     ):
         """cli._run must dispatch the main benchmark run before the audit
-        (upstream MLPerf order)."""
+        (upstream MLPerf order), whatever the audit verdict.
+
+        A five-request QPS comparison on an echo server is too noisy to decide
+        the verdict, so it is pinned here after the real phases and the real
+        verify run. FAIL must still leave the shared artifacts and map to
+        CLIError.
+        """
         from inference_endpoint.commands.benchmark import cli
 
         config = BenchmarkConfig(
@@ -307,14 +318,29 @@ class TestBenchmarkCommandIntegration:
             call_order.append("benchmark")
             return real_run_benchmark(cfg, mode)
 
+        real_verify = output_caching_test.verify_output_caching
+
+        def _pinned_verify(*args, **kwargs):
+            return dataclasses.replace(real_verify(*args, **kwargs), passed=verdict)
+
         monkeypatch.setattr(cli, "run_audit", _spy_run_audit)
         monkeypatch.setattr(cli, "run_benchmark", _spy_run_benchmark)
+        monkeypatch.setattr(
+            output_caching_test, "verify_output_caching", _pinned_verify
+        )
 
-        cli._run(config, [], TestMode.PERF)
+        expect = (
+            contextlib.nullcontext()
+            if verdict
+            else pytest.raises(CLIError, match="output_caching_test FAILED")
+        )
+        with expect:
+            cli._run(config, [], TestMode.PERF)
 
         assert call_order == ["benchmark", "audit"]
         # Both phases still land under the one shared report_dir.
-        assert (tmp_path / "audit" / "audit_output_caching_test.json").exists()
+        result_path = tmp_path / "audit" / "audit_output_caching_test.json"
+        assert json.loads(result_path.read_text())["passed"] is verdict
         assert (tmp_path / "config.yaml").exists()
 
 
