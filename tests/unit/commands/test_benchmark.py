@@ -3303,9 +3303,16 @@ class TestSetupBenchmark:
 
 class TestReportConfigSecretRedaction:
     @pytest.mark.unit
-    @pytest.mark.parametrize("test_mode", [TestMode.PERF, TestMode.ACC])
-    def test_report_config_redacts_secrets_without_mutating_runtime(
-        self, tmp_path, test_mode
+    @pytest.mark.parametrize(
+        ("test_mode", "expected_types"),
+        [
+            (TestMode.PERF, ["performance"]),
+            (TestMode.ACC, ["accuracy"]),
+            (TestMode.BOTH, ["accuracy", "performance"]),
+        ],
+    )
+    def test_report_config_matches_mode_and_redacts_secrets(
+        self, tmp_path, test_mode, expected_types
     ):
         endpoint_key = "sentinel-endpoint-key"
         service_token = "sentinel-service-token"
@@ -3327,7 +3334,8 @@ class TestReportConfigSecretRedaction:
                             "swebench_service_auth_token": service_token,
                         },
                     },
-                }
+                },
+                {"name": "random", "type": "performance", "path": "unused.jsonl"},
             ],
             report_dir=str(tmp_path),
         )
@@ -3351,7 +3359,10 @@ class TestReportConfigSecretRedaction:
         persisted = (tmp_path / "config.yaml").read_text()
         assert endpoint_key not in persisted
         assert service_token not in persisted
-        assert persisted.count("<redacted>") >= 2
+        assert persisted.count("<redacted>") >= (1 if test_mode == TestMode.PERF else 2)
+        saved = BenchmarkConfig.from_yaml_file(tmp_path / "config.yaml")
+        assert [ds.type.value for ds in saved.datasets] == expected_types
+        assert len(config.datasets) == 2
         assert ctx.config.endpoint_config.api_key == endpoint_key
         assert (
             ctx.config.datasets[0].accuracy_config.extras["swebench_service_auth_token"]

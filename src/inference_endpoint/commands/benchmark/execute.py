@@ -509,7 +509,14 @@ def setup_benchmark(
     # Report directory
     report_dir = resolve_report_dir(config)
     report_dir.mkdir(parents=True, exist_ok=True)
-    config.to_yaml_file(report_dir / "config.yaml", redact_secrets=True)
+    datasets = config.datasets
+    if test_mode == TestMode.PERF:
+        datasets = [ds for ds in datasets if ds.type == DatasetType.PERFORMANCE]
+    elif test_mode == TestMode.ACC:
+        datasets = [ds for ds in datasets if ds.type == DatasetType.ACCURACY]
+    config.with_updates(datasets=datasets).to_yaml_file(
+        report_dir / "config.yaml", redact_secrets=True
+    )
 
     # Tokenizer check (light API call, no download)
     model_name = config.model_params.name
