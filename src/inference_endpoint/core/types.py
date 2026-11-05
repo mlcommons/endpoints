@@ -79,9 +79,6 @@ class APIType(str, Enum):
         return self not in _NO_TEXT_PROMPT_API_TYPES
 
 
-#: Listed rather than derived: a new api_type defaults to the generic text path,
-#: which is the safe assumption, and ``default_route`` already forces an author
-#: adding one to visit this class.
 _NON_STREAMING_API_TYPES = frozenset({APIType.OPENAI_TRANSCRIPTIONS, APIType.VIDEOGEN})
 
 #: Audio in, transcript out — no prompt column exists to measure or salt.

@@ -34,16 +34,4 @@ This section lists third-party assets and their attributions.
   parser, and model extension are derived from mini-swe-agent v2.3.0. The full
   upstream notice is retained in the swebench_service package.
 
-### MLPerf Inference speech2text
-
-- Source: https://github.com/mlcommons/inference/tree/master/speech2text
-- License: Apache-2.0
-- Copyright: Copyright 2025 The MLPerf Authors; Copyright (c) 2019 NVIDIA
-  CORPORATION and Myrtle Software
-- Description: `src/inference_endpoint/evaluation/wer.py` ports the benchmark's
-  Word Error Rate definition — `helpers.compute_wer_with_concatenation`,
-  `legacy_helpers.__levenshtein`, and the character-label projection applied by
-  `accuracy_eval.py` — so the reported number is comparable to the MLPerf
-  reference.
-
 For a complete list of dependencies and their licenses, see the requirements files in the `requirements/` directory.

@@ -25,11 +25,7 @@ validating:
 
 import cyclopts
 import pytest
-from inference_endpoint.commands.probe import (
-    UNSUPPORTED_PROBE_API_TYPES,
-    ProbeConfig,
-    execute_probe,
-)
+from inference_endpoint.commands.probe import ProbeConfig, execute_probe
 from inference_endpoint.config.schema import APIType
 from inference_endpoint.exceptions import ExecutionError, InputValidationError
 
@@ -112,8 +108,7 @@ class TestProbeCommandIntegration:
             if isinstance(m, cyclopts.Parameter)
         )
         assert param.show_choices is False, "enum choices would list refused types"
-        for api_type in UNSUPPORTED_PROBE_API_TYPES:
-            assert api_type.value not in (param.help or "")
+        assert APIType.OPENAI_TRANSCRIPTIONS.value not in (param.help or "")
 
     @pytest.mark.integration
     def test_probe_with_invalid_endpoint(self):

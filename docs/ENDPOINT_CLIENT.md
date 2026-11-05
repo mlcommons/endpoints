@@ -280,10 +280,8 @@ model validator.
 ```python
 class APIType(str, Enum):
     OPENAI = "openai"
-    OPENAI_COMPLETIONS = "openai_completions"
     OPENAI_TRANSCRIPTIONS = "openai_transcriptions"
     SGLANG = "sglang"
-    VIDEOGEN = "videogen"
 
 class HTTPClientConfig(BaseModel):
     # Target endpoint URLs; workers assigned round-robin at spawn time

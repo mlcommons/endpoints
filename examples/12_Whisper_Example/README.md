@@ -78,12 +78,12 @@ prefix of the full corpus — but a partial perf phase is not a reportable resul
 
 ```json
 {
-  "score": 97.93,
+  "score": 98.1,
   "complete": true,
   "breakdown": {
-    "wer_percent": 2.07,
-    "edit_distance": 1241,
-    "reference_words": 60000,
+    "wer_percent": 1.897,
+    "edit_distance": 1993,
+    "reference_words": 105077,
     "empty_responses": 0,
     "missing_samples": 0
   }
@@ -97,8 +97,10 @@ run shows up as a depressed score rather than as a flattering one, and
 `complete` goes `false`. `empty_responses` is the separate case of a sample that
 did answer, with nothing in it.
 
-A WER far above 2.07% usually points at the dataset rather than the endpoint —
-most often a manifest that is not the repackaged `dev-all-repack.json`.
+Those are the figures from a healthy full-corpus run; `reference_words` is fixed
+at 105077 by the corpus, so a different value there means the manifest is not
+the repackaged `dev-all-repack.json`. A WER well above the reference 2.0671%
+points at the dataset rather than the endpoint for the same reason.
 
 ## How it maps onto the framework
 
@@ -109,9 +111,11 @@ most often a manifest that is not the repackaged `dev-all-repack.json`.
 | Metric                   | `evaluation/wer.py` + `WERScorer` (`eval_method: wer`)                 |
 | Reference numbers        | `config/rulesets/mlcommons/models.py` (`Whisper_large_v3`)             |
 
-Notes on the run config. All three constraints below are enforced by config
-validation keyed on `api_type: openai_transcriptions`, so a hand-written config
-gets an error rather than a silently odd run:
+### Notes on the run config
+
+The first three are enforced by config validation keyed on
+`api_type: openai_transcriptions`, so a hand-written config gets an error rather
+than a silently odd run. The fourth is an adapter default, not a constraint:
 
 - **Non-streaming.** OpenAI does not support `stream` for Whisper-class models.
   `streaming: on` is rejected and `auto` resolves to `off` even in online mode.
@@ -145,11 +149,10 @@ checker's job.
 
 ### Expect a score a little above the reference
 
-A healthy run scores slightly better than 97.9329%, not equal to it. The scoring
-is bit-exact with upstream — `evaluation/wer.py` reproduces
-`compute_wer_with_concatenation` from the MLCommons reference
-(https://github.com/mlcommons/inference/tree/master/speech2text) with zero
-per-sample disagreement over the full 1633-clip corpus, and the two candidate
+A healthy run scores slightly better than the reference, not equal to it. The
+scoring is not the reason: `evaluation/wer.py` reproduces
+`compute_wer_with_concatenation` from the MLCommons reference with zero
+per-sample disagreement over the full corpus, and the two candidate
 `EnglishTextNormalizer` implementations (`transformers` and `openai-whisper`)
 give the same corpus WER. The difference is the serving path, and it is inherent
 to benchmarking an endpoint:

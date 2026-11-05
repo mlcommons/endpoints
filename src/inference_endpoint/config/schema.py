@@ -1171,9 +1171,8 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             self.benchmark_mode if self.type == TestType.SUBMISSION else self.type
         )
 
-        # Some endpoints have no SSE mode at all, so streaming is a property of
-        # the api_type rather than of the test type: AUTO must not resolve to ON
-        # for them the way it does for an online text run.
+        # Streaming is a property of the api_type as well as the test type: AUTO
+        # must not resolve to ON for a protocol with no SSE mode.
         api_type = self.endpoint_config.api_type
         if self.model_params.streaming == StreamingMode.AUTO:
             mp_updates["streaming"] = (
@@ -1204,23 +1203,16 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
 
-        # Keyed on the absence of a text prompt, not on the absence of
-        # streaming: videogen is non-streaming but is text-to-video, so it
-        # keeps both of these.
         if not api_type.has_text_prompt:
-            # No prompt means no input sequence length to measure. Left on, the
-            # aggregator registers an ISL series that can only stay empty.
-            # Derived rather than demanded of the user: metrics_isl defaults to
-            # True, so every such config would otherwise turn it off by hand.
+            # No prompt means no ISL to measure, and the aggregator would
+            # register a series that can only stay empty. Derived rather than
+            # demanded of the user, since metrics_isl defaults to True.
             if self.settings.metrics_isl:
                 object.__setattr__(
                     self,
                     "settings",
                     self.settings.model_copy(update={"metrics_isl": False}),
                 )
-            # Salt exists to defeat prefix caching by prepending random hex to a
-            # text prompt. With no prompt, salting cannot do that job, and a row
-            # without one is a hard error later.
             if self.settings.warmup.salt:
                 raise ValueError(
                     f"settings.warmup.salt is not supported with "

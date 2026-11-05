@@ -39,16 +39,6 @@ from inference_endpoint.exceptions import (
 
 logger = logging.getLogger(__name__)
 
-#: api_types the probe cannot exercise, mapped to the reason shown to the user.
-#: Each one breaks an assumption the probe is built on: a text prompt in, chat
-#: tokens out, and a response inside the 60 s probe timeout.
-UNSUPPORTED_PROBE_API_TYPES: dict[APIType, str] = {
-    APIType.VIDEOGEN: "per-request latencies exceed the probe timeout",
-    APIType.OPENAI_TRANSCRIPTIONS: (
-        "the request body is an audio upload, not a text prompt"
-    ),
-}
-
 
 @cyclopts.Parameter(name="*")
 class ProbeConfig(BaseModel):
@@ -64,7 +54,7 @@ class ProbeConfig(BaseModel):
             alias="--api-type",
             help="API type: openai, openai_completions, or sglang",
             # cyclopts otherwise renders choices from every APIType member,
-            # including the ones UNSUPPORTED_PROBE_API_TYPES refuses.
+            # including the ones _probe_async rejects below.
             show_choices=False,
         ),
     ] = APIType.OPENAI
@@ -100,13 +90,23 @@ async def _probe_async(config: ProbeConfig) -> None:
     test_prompt = config.prompt
     api_type = config.api_type
 
-    # Probe assumes second-scale latencies (probe_timeout=60s below) and text
-    # prompt/response semantics. Reject upfront rather than emitting a
-    # misleading "0/N requests successful" failure after the timeout.
-    if api_type in UNSUPPORTED_PROBE_API_TYPES:
+    # Probe assumes second-scale latencies (probe_timeout=60s below) and
+    # text prompt/response semantics — neither holds for video generation,
+    # where each request takes minutes and there are no chat tokens to
+    # display. Reject upfront rather than emitting a misleading
+    # "0/N requests successful" failure after the timeout.
+    if api_type == APIType.VIDEOGEN:
         raise InputValidationError(
-            f"Probe does not support api_type={api_type.value} "
-            f"({UNSUPPORTED_PROBE_API_TYPES[api_type]}). "
+            "Probe does not support api_type=videogen "
+            "(per-request latencies exceed the probe timeout). "
+            "Use a dedicated health check or a benchmark from-config run instead."
+        )
+    # The transcriptions body is a multipart audio upload built from a dataset
+    # row, so the probe's text prompt has nowhere to go.
+    if api_type == APIType.OPENAI_TRANSCRIPTIONS:
+        raise InputValidationError(
+            "Probe does not support api_type=openai_transcriptions "
+            "(the request body is an audio upload, not a text prompt). "
             "Use a dedicated health check or a benchmark from-config run instead."
         )
 
