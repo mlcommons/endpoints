@@ -64,7 +64,7 @@ def make_response_bytes(text: str, n_tokens: int) -> bytes:
                 "finish_reason": {"type": "stop"},
                 "prompt_tokens": 10,
                 "weight_version": "v1",
-                "total_retractions": 0,
+                "num_retractions": 0,
                 "completion_tokens": n_tokens,
                 "cached_tokens": 0,
                 "e2e_latency": 0.1,

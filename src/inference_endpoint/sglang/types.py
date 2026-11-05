@@ -52,13 +52,13 @@ class SGLangGenerateRequest(
 
 class MetaInfo(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False):  # type: ignore[call-arg]
     id: str
-    finish_reason: dict[str, Any]
+    finish_reason: dict[str, Any] | None
     prompt_tokens: int
     weight_version: str
-    total_retractions: int
+    num_retractions: int
     completion_tokens: int
     cached_tokens: int
-    e2e_latency: float
+    e2e_latency: float | None = None
 
 
 class SGLangGenerateResponse(
