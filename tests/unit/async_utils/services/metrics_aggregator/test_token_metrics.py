@@ -18,6 +18,7 @@
 import asyncio
 import logging
 import multiprocessing
+import os
 import signal
 import time
 from concurrent.futures import Future, ProcessPoolExecutor
@@ -27,6 +28,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from inference_endpoint.async_utils.services.metrics_aggregator import (
+    __main__ as aggregator_main,
+)
 from inference_endpoint.async_utils.services.metrics_aggregator import (
     token_metrics as token_metrics_module,
 )
@@ -698,17 +702,48 @@ class TestQueueLiveLoop:
 
 @pytest.mark.unit
 class TestRayonCaps:
-    def test_ctor_caps_rayon_to_live_workers(self, monkeypatch):
-        monkeypatch.delenv("RAYON_NUM_THREADS", raising=False)
+    @staticmethod
+    def _unset_rayon_cap(monkeypatch):
+        """Make RAYON_NUM_THREADS absent for the test and restore it afterwards.
+
+        setenv-then-delenv registers the original state (absent) for undo, so a
+        variable the code under test writes does not outlive the test.
+        """
+        monkeypatch.setenv("RAYON_NUM_THREADS", "placeholder")
+        monkeypatch.delenv("RAYON_NUM_THREADS")
+
+    def test_ctor_leaves_the_environment_alone(self, monkeypatch):
+        """Built in the CLI at finalize, a constructor that wrote the cap would
+        leak it into children started later (the audit run's aggregator)."""
+        self._unset_rayon_cap(monkeypatch)
+        before = dict(os.environ)
         with patch(_MOCK_TARGET, _FakeTokenizer):
             with BatchTokenizer("fake", n_workers=0, live_workers=3):
-                assert token_metrics_module.os.environ["RAYON_NUM_THREADS"] == "3"
+                assert dict(os.environ) == before
+        assert "RAYON_NUM_THREADS" not in os.environ
 
-    def test_ctor_respects_operator_exported_cap(self, monkeypatch):
+    def test_ctor_does_not_overwrite_an_exported_cap(self, monkeypatch):
         monkeypatch.setenv("RAYON_NUM_THREADS", "7")
         with patch(_MOCK_TARGET, _FakeTokenizer):
             with BatchTokenizer("fake", n_workers=0, live_workers=3):
-                assert token_metrics_module.os.environ["RAYON_NUM_THREADS"] == "7"
+                assert os.environ["RAYON_NUM_THREADS"] == "7"
+
+    def test_aggregator_caps_the_live_lane_to_tokenizer_workers(self, monkeypatch):
+        self._unset_rayon_cap(monkeypatch)
+        aggregator_main._cap_live_lane_rayon_pool(3)
+        assert os.environ["RAYON_NUM_THREADS"] == "3"
+
+    def test_aggregator_cap_never_reads_as_rayon_default(self, monkeypatch):
+        """--tokenizer-workers 0 must not become RAYON_NUM_THREADS=0, which
+        rayon treats as "use every CPU"."""
+        self._unset_rayon_cap(monkeypatch)
+        aggregator_main._cap_live_lane_rayon_pool(0)
+        assert os.environ["RAYON_NUM_THREADS"] == "1"
+
+    def test_aggregator_cap_respects_an_operator_exported_cap(self, monkeypatch):
+        monkeypatch.setenv("RAYON_NUM_THREADS", "7")
+        aggregator_main._cap_live_lane_rayon_pool(3)
+        assert os.environ["RAYON_NUM_THREADS"] == "7"
 
     def test_init_worker_overrides_inherited_cap_with_block_size(self, monkeypatch):
         """Spawn children inherit the parent's live cap; each shard must

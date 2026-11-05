@@ -37,7 +37,12 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
     TextInput,
     extract_tokenization_input,
 )
-from inference_endpoint.core.record import EventRecord, EventType
+from inference_endpoint.core.record import (
+    EventRecord,
+    EventType,
+    SampleEventType,
+    leading_event_topic,
+)
 from inference_endpoint.core.types import PhaseType, TextModelOutput
 from inference_endpoint.endpoint_client.cpu_affinity import (
     UnsupportedPlatformError,
@@ -47,10 +52,11 @@ from inference_endpoint.metrics.report import series_metric_dict
 
 logger = logging.getLogger(__name__)
 
-# Matched against each line's leading bytes so the 6+ GB of prompt and response
-# payload in a large run is never decoded just to classify the record.
-_COMPLETE_MARKER = b'"event_type":"sample.complete"'
-_PREFIX_BYTES = 256
+# A line in the writer's compact layout is classified from its leading bytes, so
+# the 6+ GB of prompt and response payload in a large run is never decoded just
+# to find the COMPLETE records. Any other layout is decoded and classified by its
+# decoded event_type (see compute_full_run_osl).
+_COMPLETE_TOPIC: bytes = SampleEventType.COMPLETE.topic_bytes  # type: ignore[attr-defined]
 # AgenticInferenceInlineScorer's dataset_name; the key its turns live under in
 # sample_idx_map.json.
 
@@ -130,10 +136,20 @@ def compute_full_run_osl(
 
     def count_pending() -> None:
         nonlocal n_errors, first_error
+        n_pending = len(pending)
         try:
             outcomes = count_batch(pending)
         except Exception as e:  # noqa: BLE001 - charge the batch, keep the stat
-            outcomes = [e] * len(pending)
+            outcomes = [e] * n_pending
+        if len(outcomes) != n_pending:
+            # One outcome per turn is the counter's contract. A different number
+            # cannot be matched back to its turns, so charge the whole batch
+            # (the block turns partial) rather than average an unknown subset.
+            mismatch = RuntimeError(
+                f"token counter returned {len(outcomes)} outcomes for "
+                f"{n_pending} turns"
+            )
+            outcomes = [mismatch] * n_pending
         for outcome in outcomes:
             if isinstance(outcome, Exception):
                 n_errors += 1
@@ -145,7 +161,13 @@ def compute_full_run_osl(
 
     with events_path.open("rb") as events_file:
         for line in events_file:
-            if _COMPLETE_MARKER not in line[:_PREFIX_BYTES]:
+            topic = leading_event_topic(line)
+            if topic is None:
+                # Not the compact layout (spaces, reordered fields, ...): decode
+                # the line and classify it below by its decoded event_type.
+                if not line.strip():
+                    continue
+            elif topic != _COMPLETE_TOPIC:
                 continue
             # Decode before the population filter so a corrupt line — which we
             # cannot attribute to the performance population — is skipped rather
@@ -154,6 +176,8 @@ def compute_full_run_osl(
                 record = decoder.decode(line)
             except msgspec.DecodeError:
                 n_undecodable += 1
+                continue
+            if record.event_type != SampleEventType.COMPLETE:
                 continue
             if not _in_population(record, performance_uuids):
                 continue
@@ -290,10 +314,6 @@ def full_run_osl_for_report(
         logger.info("Full-run OSL skipped: no performance-phase samples to bound to")
         return None
     try:
-        # A batch is counted on live_workers threads (which also caps the
-        # tokenizer's rayon pool; an exported RAYON_NUM_THREADS still wins): at
-        # most one per CPU this process may run on, so a taskset-pinned client
-        # stays in its set.
         try:
             threads = len(get_all_online_cpus()) or 1
         except UnsupportedPlatformError:

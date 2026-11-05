@@ -449,9 +449,6 @@ class BatchTokenizer:
         n_workers: int = -1,
     ) -> None:
         self._tokenizer_name = tokenizer_name
-        # The live lane runs in-process: cap the Hugging Face rayon pool before
-        # its first encode. setdefault lets an operator-exported HF cap win.
-        os.environ.setdefault("RAYON_NUM_THREADS", str(max(1, live_workers)))
         self._fallback_warned: set[str] = set()
         self._tokenizer: PreTrainedTokenizerBase | None = None
         self._text_backend: Any | None = None

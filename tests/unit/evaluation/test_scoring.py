@@ -16,13 +16,21 @@
 """Unit tests for evaluation scoring module."""
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import msgspec
 import pandas as pd
 import pytest
-from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
+from inference_endpoint.async_utils.services.event_logger.file_writer import JSONLWriter
+from inference_endpoint.core.record import (
+    ErrorEventType,
+    EventRecord,
+    EventType,
+    SampleEventType,
+    SessionEventType,
+)
 from inference_endpoint.core.types import PromptData, TextModelOutput
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
@@ -230,6 +238,44 @@ class TestShopifyCategoryF1Scorer:
             )
 
 
+_LINE_ENCODER = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+# Long enough that a layout putting event_type after it starts it past byte 256.
+_LONG_ID = "conv-" + "c" * 300
+
+
+def _compact(record: EventRecord) -> bytes:
+    """The line JSONLWriter writes: event_type first, no spaces."""
+    return _LINE_ENCODER.encode(record) + b"\n"
+
+
+def _spaced(record: EventRecord) -> bytes:
+    """The same record as valid JSON with json.dumps' default spacing."""
+    return json.dumps(json.loads(_LINE_ENCODER.encode(record))).encode() + b"\n"
+
+
+def _event_type_last(record: EventRecord) -> bytes:
+    """The same record with its fields reversed, so event_type comes last."""
+    fields = json.loads(_LINE_ENCODER.encode(record))
+    reordered = dict(reversed(fields.items()))
+    return json.dumps(reordered, separators=(",", ":")).encode() + b"\n"
+
+
+def _event_type_past_the_lead(record: EventRecord) -> bytes:
+    """event_type after the (long) conversation_id, beyond the first 256 bytes."""
+    fields = json.loads(_LINE_ENCODER.encode(record))
+    reordered = {"conversation_id": fields.pop("conversation_id"), **fields}
+    return json.dumps(reordered, separators=(",", ":")).encode() + b"\n"
+
+
+# Valid layouts of one record: only the first is what the writer emits today.
+_LAYOUTS = {
+    "compact": _compact,
+    "spaced": _spaced,
+    "event_type_last": _event_type_last,
+    "event_type_past_the_lead": _event_type_past_the_lead,
+}
+
+
 @pytest.mark.unit
 class TestGuessAndDecode:
     @staticmethod
@@ -291,6 +337,297 @@ class TestGuessAndDecode:
         )
 
         assert guess_and_decode(line) is None
+
+    @pytest.mark.parametrize("layout", list(_LAYOUTS))
+    def test_complete_line_in_any_layout(self, layout):
+        record = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            sample_uuid="u1",
+            conversation_id=_LONG_ID,
+            turn=3,
+            data=TextModelOutput(output="done"),
+        )
+
+        assert guess_and_decode(_LAYOUTS[layout](record)) == record
+
+    @pytest.mark.parametrize("layout", list(_LAYOUTS))
+    def test_issued_line_in_any_layout(self, layout):
+        record = EventRecord(
+            event_type=SampleEventType.ISSUED,
+            sample_uuid="u1",
+            conversation_id=_LONG_ID,
+            turn=3,
+            data=PromptData(messages=({"role": "user", "content": "hello"},)),
+        )
+
+        assert guess_and_decode(_LAYOUTS[layout](record)) == _IssuedKey(
+            sample_uuid="u1", conversation_id=_LONG_ID, turn=3
+        )
+
+    @pytest.mark.parametrize("layout", list(_LAYOUTS))
+    def test_other_event_in_any_layout_returns_none(self, layout):
+        record = EventRecord(
+            event_type=SampleEventType.RECV_FIRST,
+            sample_uuid="u1",
+            conversation_id=_LONG_ID,
+            turn=3,
+        )
+
+        assert guess_and_decode(_LAYOUTS[layout](record)) is None
+
+    def test_complete_whose_payload_mentions_the_issued_marker_stays_complete(self):
+        """The event type comes from the line's lead, never from payload bytes."""
+        record = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            sample_uuid="u1",
+            conversation_id="c",
+            turn=1,
+            data=TextModelOutput(tool_calls=[{"event_type": "sample.issued"}]),
+        )
+        line = self._line(record)
+        # Searching the first bytes for the marker would read this as ISSUED.
+        assert b'"event_type":"sample.issued"' in line[:256]
+
+        assert guess_and_decode(line) == record
+
+    def test_issued_cut_inside_a_nested_object_falls_back_to_the_whole_line(self):
+        """A "data" key nested before the top-level one is not a field boundary."""
+        line = (
+            b'{"event_type":"sample.issued","timestamp_ns":1,"sample_uuid":"u1",'
+            b'"conversation_id":"c1","turn":1,"meta":{"x":1,"data":2},"data":null}\n'
+        )
+        cut = line[: line.find(b',"data":')] + b"}"
+        with pytest.raises(msgspec.DecodeError):
+            msgspec.json.decode(cut)  # the optimization's cut is not valid JSON
+
+        assert guess_and_decode(line) == _IssuedKey(
+            sample_uuid="u1", conversation_id="c1", turn=1
+        )
+
+    @pytest.mark.parametrize("line", [b"\n", b"   \n", b""])
+    def test_blank_line_returns_none(self, line):
+        assert guess_and_decode(line) is None
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            b"not json\n",
+            b'{"event_type":"sample.complete","time\n',  # truncated, compact lead
+            b'{"event_type": "sample.complete", "time\n',  # truncated, spaced
+        ],
+    )
+    def test_invalid_line_raises(self, line):
+        with pytest.raises(msgspec.DecodeError):
+            guess_and_decode(line)
+
+
+def _write_event_lines(report_dir: Path, lines: list[bytes]) -> None:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "sample_idx_map.json").write_bytes(
+        msgspec.json.encode({"performance": {}})
+    )
+    (report_dir / "events.jsonl").write_bytes(b"".join(lines))
+
+
+@pytest.mark.unit
+class TestEventLogContract:
+    """What the event logger writes is what the scorer reads.
+
+    The scorer classifies log lines from their leading bytes. These tests feed it
+    the real ``JSONLWriter`` output, and other valid layouts of the same records,
+    so a change to the writer or a differently formatted log cannot silently drop
+    events or change a score.
+    """
+
+    @staticmethod
+    def _bash_tool_call(call_id: str, command: str) -> dict:
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": "bash", "arguments": json.dumps({"cmd": command})},
+        }
+
+    @classmethod
+    def _dataset(cls) -> AgenticInferenceDataset:
+        return AgenticInferenceDataset(
+            pd.DataFrame(
+                [
+                    {
+                        "conversation_id": "code1",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "run the tests",
+                    },
+                    {
+                        "conversation_id": "code1",
+                        "turn": 2,
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            cls._bash_tool_call("expected-code", "python -m pytest")
+                        ],
+                    },
+                    {
+                        "conversation_id": "sim_1",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "choose the next workflow action",
+                    },
+                    {
+                        "conversation_id": "sim_1",
+                        "turn": 2,
+                        "role": "assistant",
+                        "content": "expected workflow action",
+                        "intent_codes": ["I042"],
+                    },
+                ]
+            )
+        )
+
+    @classmethod
+    def _records(cls) -> list[EventRecord]:
+        """Both turns scored correctly, with an unrelated event in between."""
+        return [
+            EventRecord(event_type=SessionEventType.STARTED),
+            EventRecord(
+                event_type=SampleEventType.ISSUED,
+                sample_uuid="code-response",
+                conversation_id="code1",
+                turn=1,
+                data=PromptData(messages=({"role": "user", "content": "run it"},)),
+            ),
+            EventRecord(
+                event_type=SampleEventType.RECV_FIRST,
+                sample_uuid="code-response",
+                conversation_id="code1",
+                turn=1,
+            ),
+            EventRecord(
+                event_type=SampleEventType.COMPLETE,
+                sample_uuid="code-response",
+                conversation_id="code1",
+                turn=1,
+                data=TextModelOutput(
+                    tool_calls=[cls._bash_tool_call("model-code", "python test.py")]
+                ),
+            ),
+            EventRecord(
+                event_type=SampleEventType.ISSUED,
+                sample_uuid="workflow-response",
+                conversation_id="sim_1",
+                turn=1,
+            ),
+            EventRecord(
+                event_type=SampleEventType.COMPLETE,
+                sample_uuid="workflow-response",
+                conversation_id="sim_1",
+                turn=1,
+                data=TextModelOutput(output="intent: I042"),
+            ),
+            EventRecord(event_type=SessionEventType.ENDED),
+        ]
+
+    def _assert_scored_in_full(self, report_dir: Path) -> None:
+        score, repeats = AgenticInferenceInlineScorer(
+            "performance", self._dataset(), report_dir
+        ).score()
+        assert (score, repeats) == (1.0, 1)
+        scores = json.loads((report_dir / "scores.json").read_text())
+        assert scores["turns"]["scored"] == 2
+
+    def test_every_event_type_the_writer_emits_classifies_like_a_full_decode(
+        self, tmp_path
+    ):
+        records = [
+            *(EventRecord(event_type=t, sample_uuid="u") for t in SessionEventType),
+            *(EventRecord(event_type=t, sample_uuid="u") for t in SampleEventType),
+            *(EventRecord(event_type=t, sample_uuid="u") for t in ErrorEventType),
+            *self._records(),
+        ]
+        writer = JSONLWriter(tmp_path / "events", flush_interval=1)
+        try:
+            for record in records:
+                writer.write(record)
+        finally:
+            writer.close()
+        lines = (tmp_path / "events.jsonl").read_bytes().splitlines(keepends=True)
+        assert len(lines) == len(records)
+        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+
+        for line in lines:
+            full = decoder.decode(line)
+            got = guess_and_decode(line)
+            if full.event_type == SampleEventType.ISSUED:
+                assert got == _IssuedKey(
+                    full.sample_uuid, full.conversation_id, full.turn
+                )
+            elif full.event_type == SampleEventType.COMPLETE:
+                assert got == full
+            else:
+                assert got is None
+
+    def test_real_writer_output_is_scored(self, tmp_path):
+        report_dir = tmp_path / "report"
+        report_dir.mkdir()
+        (report_dir / "sample_idx_map.json").write_bytes(
+            msgspec.json.encode({"performance": {}})
+        )
+        writer = JSONLWriter(report_dir / "events", flush_interval=1)
+        try:
+            for record in self._records():
+                writer.write(record)
+        finally:
+            writer.close()
+
+        self._assert_scored_in_full(report_dir)
+
+    @pytest.mark.parametrize("layout", list(_LAYOUTS))
+    def test_any_layout_scores_the_same(self, tmp_path, layout):
+        report_dir = tmp_path / "report"
+        _write_event_lines(
+            report_dir, [_LAYOUTS[layout](record) for record in self._records()]
+        )
+
+        self._assert_scored_in_full(report_dir)
+
+    def test_iter_complete_reads_every_layout_and_skips_blank_and_bad_lines(
+        self, tmp_path, caplog
+    ):
+        def complete(uuid: str) -> EventRecord:
+            return EventRecord(
+                event_type=SampleEventType.COMPLETE,
+                sample_uuid=uuid,
+                conversation_id="c1",
+                turn=1,
+                data=TextModelOutput(output=uuid),
+            )
+
+        report_dir = tmp_path / "report"
+        _write_event_lines(
+            report_dir,
+            [
+                _compact(complete("u1")),
+                _spaced(complete("u2")),
+                _event_type_last(complete("u3")),
+                b"\n",
+                b"not json\n",
+                _compact(
+                    EventRecord(
+                        event_type=SampleEventType.ISSUED,
+                        sample_uuid="u4",
+                        conversation_id="c1",
+                        turn=1,
+                    )
+                ),
+            ],
+        )
+        scorer = AgenticInferenceInlineScorer("performance", MagicMock(), report_dir)
+
+        with caplog.at_level(logging.WARNING, logger=scoring_mod.logger.name):
+            uuids = [uuid for uuid, _ in scorer._iter_complete()]
+
+        assert uuids == ["u1", "u2", "u3"]
+        assert [r.getMessage() for r in caplog.records if "line 5" in r.getMessage()]
 
 
 @pytest.mark.unit

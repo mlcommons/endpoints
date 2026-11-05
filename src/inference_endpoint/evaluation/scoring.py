@@ -49,7 +49,7 @@ except ImportError:
     _evaluate = None
     _nltk = None
 
-from ..core.record import EventRecord, EventType, SampleEventType
+from ..core.record import EventRecord, EventType, SampleEventType, leading_event_topic
 from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
@@ -62,11 +62,14 @@ from .extractor import (
 
 logger = logging.getLogger(__name__)
 
-# Every events.jsonl line starts with its event_type, so a line can be
-# classified from its leading bytes without decoding its payload.
-_EVENT_TYPE_PREFIX_BYTES = 256
-_ISSUED_MARKER = b'"event_type":"sample.issued"'
-_COMPLETE_MARKER = b'"event_type":"sample.complete"'
+# The compact layout JSONLWriter emits puts event_type first, so a line can be
+# classified from its leading bytes (leading_event_topic) without decoding its
+# payload. Any other layout is decoded whole; see guess_and_decode.
+_ISSUED_TOPIC: bytes = SampleEventType.ISSUED.topic_bytes  # type: ignore[attr-defined]
+_COMPLETE_TOPIC: bytes = SampleEventType.COMPLETE.topic_bytes  # type: ignore[attr-defined]
+# An ISSUED line's key fields come before "data"; the cut is only attempted when
+# "data" starts within this many bytes.
+_ISSUED_KEY_WINDOW_BYTES = 1024
 _DATA_FIELD = b',"data":'
 _KEY_FIELDS = (b'"sample_uuid":', b'"conversation_id":', b'"turn":')
 
@@ -83,27 +86,48 @@ _EVENT_DECODER = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decod
 _ISSUED_DECODER = msgspec.json.Decoder(_IssuedKey)
 
 
+def _decode_issued_key(line: bytes) -> _IssuedKey:
+    """The key fields of an ISSUED line, decoding only what is needed.
+
+    The cut at "data" is an optimization: it applies when the key fields precede
+    "data" (the writer's field order) and the cut is valid JSON. In every other
+    case, including a cut that landed inside a nested object, the whole line is
+    decoded, which always works for a valid line.
+    """
+    end = line.find(_DATA_FIELD, 0, _ISSUED_KEY_WINDOW_BYTES)
+    if end != -1 and all(field in line[:end] for field in _KEY_FIELDS):
+        try:
+            return _ISSUED_DECODER.decode(line[:end] + b"}")
+        except msgspec.DecodeError:
+            pass  # "data" was not at the top level here: decode the whole line
+    return _ISSUED_DECODER.decode(line)
+
+
 def guess_and_decode(line: bytes) -> EventRecord | _IssuedKey | None:
     """Decode the ISSUED and COMPLETE events of one ``events.jsonl`` line.
 
-    The event type is guessed from the leading 1024 bytes, and other events return
-    ``None`` undecoded. An ISSUED line, which carries the whole prompt after
-    "data", decodes only the fields before it into an ``_IssuedKey``.
+    A line in the writer's compact layout (``event_type`` first) is classified
+    from those leading bytes alone, so other events return ``None`` undecoded and
+    an ISSUED line, which carries the whole prompt after "data", decodes only its
+    key fields into an ``_IssuedKey``. Any other layout (spaces, reordered fields,
+    ``event_type`` past the lead) is decoded whole and classified by its decoded
+    ``event_type``, so a change in how the log is written cannot silently drop
+    events. A blank line returns ``None``.
 
     Raises:
         msgspec.DecodeError: the line is not a valid event.
     """
-    head = line[:_EVENT_TYPE_PREFIX_BYTES]
-    if _ISSUED_MARKER in head:
-        # EventRecord encodes "data" after the key fields, which is the basis for guessing.
-        end = line.find(_DATA_FIELD, 0, 4 * _EVENT_TYPE_PREFIX_BYTES)
-        if end != -1 and all(field in line[:end] for field in _KEY_FIELDS):
-            # guess successful, decode only front portion
-            return _ISSUED_DECODER.decode(line[:end] + b"}")
-        # guess failed, decode the whole line
-        return _ISSUED_DECODER.decode(line)
-    # complete event always need the whole line decoded
-    if _COMPLETE_MARKER in head:
+    topic = leading_event_topic(line)
+    if topic is None:
+        if not line.strip():
+            return None
+        record = _EVENT_DECODER.decode(line)
+        if record.event_type == SampleEventType.ISSUED:
+            return _IssuedKey(record.sample_uuid, record.conversation_id, record.turn)
+        return record if record.event_type == SampleEventType.COMPLETE else None
+    if topic == _ISSUED_TOPIC:
+        return _decode_issued_key(line)
+    if topic == _COMPLETE_TOPIC:
         return _EVENT_DECODER.decode(line)
     return None
 
@@ -219,13 +243,30 @@ class Scorer(ABC):
         if not events_log_path.exists():
             raise FileNotFoundError(f"Events log file not found at {events_log_path}")
 
-        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
         with events_log_path.open("rb") as f:
-            for line in f:
-                # Skip other events (ISSUED lines carry the whole prompt) undecoded.
-                if _COMPLETE_MARKER not in line[:_EVENT_TYPE_PREFIX_BYTES]:
+            for line_no, line in enumerate(f, 1):
+                topic = leading_event_topic(line)
+                if topic is None:
+                    # Not the compact layout: decode the line and classify it by
+                    # its decoded event_type rather than dropping it unseen.
+                    if not line.strip():
+                        continue
+                    try:
+                        record = _EVENT_DECODER.decode(line)
+                    except msgspec.DecodeError as exc:
+                        logger.warning(
+                            "Skipping undecodable event log line %d in %s: %s",
+                            line_no,
+                            events_log_path,
+                            exc,
+                        )
+                        continue
+                elif topic == _COMPLETE_TOPIC:
+                    record = _EVENT_DECODER.decode(line)
+                else:
+                    # Other events (ISSUED lines carry the whole prompt) are
+                    # skipped undecoded.
                     continue
-                record = decoder.decode(line)
                 if record.event_type == SampleEventType.COMPLETE:
                     yield record.sample_uuid, record.data
 

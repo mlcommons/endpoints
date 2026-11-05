@@ -11,6 +11,7 @@ trajectory, so every turn issued afterwards is invisible to the perf-side
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -366,6 +367,37 @@ def test_failed_batch_charges_each_of_its_turns(tmp_path: Path) -> None:
     assert result["partial"] is True
 
 
+@pytest.mark.parametrize("n_outcomes", [0, 1, 4], ids=["none", "short", "long"])
+def test_counter_returning_the_wrong_number_of_outcomes_charges_its_batch(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, n_outcomes: int
+) -> None:
+    """One outcome per turn is the counter's contract. Any other number cannot be
+    matched back to its turns, so the batch is charged to n_errors and the block
+    is partial, not published as complete over an unknown subset."""
+    events = _five_turns(tmp_path)
+    batch_sizes: list[int] = []
+
+    def wrong_count_on_first_batch(items):
+        batch_sizes.append(len(items))
+        if len(batch_sizes) == 1:
+            return [1] * n_outcomes
+        return _word_counts(items)
+
+    with caplog.at_level(logging.WARNING):
+        result = compute_full_run_osl(events, wrong_count_on_first_batch, batch_size=2)
+
+    assert batch_sizes == [2, 2, 1]
+    assert result is not None
+    assert result["n_errors"] == 2  # the first batch's two turns
+    assert result["n_turns_counted"] == 3
+    assert result["output_sequence_lengths"]["total"] == 3 + 4 + 5
+    assert result["partial"] is True
+    assert any(
+        f"returned {n_outcomes} outcomes for 2 turns" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 def test_all_empty_population_returns_a_visible_block(tmp_path: Path) -> None:
     """A population with records but nothing countable returns a block (not None)
     so the run is visible rather than looking uncomputed."""
@@ -410,6 +442,60 @@ def test_undecodable_complete_line_is_skipped(
     assert result["n_undecodable"] == 1
     messages = [r.getMessage() for r in caplog.records]
     assert sum("undecodable COMPLETE line" in m for m in messages) == 1
+
+
+def _spaced_line(record: EventRecord) -> bytes:
+    """The record as valid JSON with json.dumps' default spacing."""
+    return json.dumps(json.loads(_ENCODER.encode(record))).encode()
+
+
+def _event_type_last_line(record: EventRecord) -> bytes:
+    """The record with its fields reversed, so event_type comes last."""
+    fields = json.loads(_ENCODER.encode(record))
+    return json.dumps(dict(reversed(fields.items())), separators=(",", ":")).encode()
+
+
+def test_complete_lines_in_other_valid_layouts_are_counted(tmp_path: Path) -> None:
+    """The reader must not depend on the writer's compact layout: spaced and
+    reordered COMPLETE lines count like compact ones, and blank lines and other
+    events in any layout are skipped, not charged."""
+    path = tmp_path / "events.jsonl"
+    lines = [
+        _ENCODER.encode(_complete(1, "a b")),
+        _spaced_line(_complete(3, "c d e")),
+        _event_type_last_line(_complete(5, "f")),
+        _spaced_line(_session(SessionEventType.ENDED)),
+        b"",
+    ]
+    path.write_bytes(b"\n".join(lines) + b"\n")
+
+    result = compute_full_run_osl(
+        path, _word_counts, performance_uuids={"u1", "u3", "u5"}
+    )
+
+    assert result is not None
+    assert result["n_turns_counted"] == 3
+    assert result["output_sequence_lengths"]["total"] == 6  # 2 + 3 + 1 words
+    assert result["n_missing"] == 0
+    assert result["n_undecodable"] == 0
+    assert result["partial"] is False
+
+
+def test_unreadable_line_that_does_not_decode_is_charged_as_undecodable(
+    tmp_path: Path,
+) -> None:
+    """A line whose event type cannot be read from its lead and that is not a
+    valid event may have been a COMPLETE turn, so it is charged (and the block
+    marked partial) rather than skipped unseen."""
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(_ENCODER.encode(_complete(1, "one")) + b"\nnot json\n")
+
+    result = compute_full_run_osl(path, _word_counts)
+
+    assert result is not None
+    assert result["n_turns_counted"] == 1
+    assert result["n_undecodable"] == 1
+    assert result["partial"] is True
 
 
 def test_all_undecodable_returns_visible_block(tmp_path: Path) -> None:
@@ -519,6 +605,53 @@ def test_for_report_threads_without_cpu_affinity(
 
     assert full_run_osl_for_report(tmp_path, "tok") is not None
     assert _SpyTokenizer.built[0]["live_workers"] == expected
+
+
+def test_for_report_empty_cpu_list_counts_on_one_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that finds no CPUs must not ask for zero counting threads."""
+    _perf_report(tmp_path)
+    _SpyTokenizer.built = []
+    monkeypatch.setattr(full_run_osl_module, "BatchTokenizer", _SpyTokenizer)
+    monkeypatch.setattr(full_run_osl_module, "get_all_online_cpus", lambda: [])
+
+    assert full_run_osl_for_report(tmp_path, "tok") is not None
+    assert _SpyTokenizer.built[0]["live_workers"] == 1
+
+
+class _FailingTokenizer(_SpyTokenizer):
+    """A tokenizer that cannot be constructed."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("tokenizer could not be loaded")
+
+
+@pytest.mark.parametrize("failure", ["cpu_probe", "tokenizer"])
+def test_for_report_failure_drops_the_block_with_a_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    """The block is best-effort: whatever fails while counting (the CPU probe,
+    the tokenizer), finalize gets None and a warning, not an exception."""
+    _perf_report(tmp_path)
+    if failure == "cpu_probe":
+
+        def _broken_probe() -> list[int]:
+            raise RuntimeError("probe broke")
+
+        monkeypatch.setattr(full_run_osl_module, "BatchTokenizer", _SpyTokenizer)
+        monkeypatch.setattr(full_run_osl_module, "get_all_online_cpus", _broken_probe)
+    else:
+        monkeypatch.setattr(full_run_osl_module, "BatchTokenizer", _FailingTokenizer)
+        monkeypatch.setattr(full_run_osl_module, "get_all_online_cpus", lambda: [0, 1])
+
+    with caplog.at_level(logging.WARNING):
+        assert full_run_osl_for_report(tmp_path, "tok") is None
+
+    assert any("Full-run OSL skipped" in r.getMessage() for r in caplog.records)
 
 
 def test_for_report_skips_without_tokenizer_or_events(tmp_path: Path) -> None:
