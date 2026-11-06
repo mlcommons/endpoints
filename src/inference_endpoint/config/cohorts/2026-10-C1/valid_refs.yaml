@@ -40,7 +40,7 @@ point:
     model_name: { type: str, nullable: true }
     model_precision: { type: str, nullable: true }
     model_notes: { type: str, nullable: true }
-    dataset: { type: str }
+    dataset: { type: str, default: "" }
     dataset_name: { type: str, nullable: true }
     dataset_type: { type: str, nullable: true }
     dataset_link: { type: str, nullable: true }
@@ -101,7 +101,8 @@ point:
     runtime_settings:
       load_pattern:
         # §6.1's patterns; the schema's own default is `concurrency` (which
-        # `Point.from_node` reads for the derivations too), and
+        # `Point.from_node` reads for the derivations too -- from the missing
+        # block and the block without the key alike), and
         # `max_throughput` appears only on a dedicated Offline point, which
         # §6.1 exempts - the row enforces that pairing.
         {

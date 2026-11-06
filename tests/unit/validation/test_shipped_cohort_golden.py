@@ -290,6 +290,31 @@ class TestShippedCohortGolden:
         assert "FAIL pareto_metric_consistency" not in out
 
     @pytest.mark.unit
+    def test_an_omitted_completion_marker_still_fails_the_row(self, tmp_path, capsys):
+        """A client-shaped summary cannot dodge the row by dropping `complete`.
+
+        The summary keeps its `state` marker -- the field that switches the
+        gate on -- while the completion marker is deleted, the shape a run
+        could use to slip an interrupted run past the blocking row.
+        """
+        root = tmp_path / "upload"
+        _build_upload(root)
+        summary_path = (
+            root
+            / "results"
+            / SYSTEM
+            / MODEL
+            / f"r{FIXED_POINTS[0]}"
+            / "result_summary.json"
+        )
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["state"] = "complete"
+        del summary["complete"]
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        assert main([str(COHORT), str(root)]) == 1
+        assert "point_run_complete" in capsys.readouterr().out
+
+    @pytest.mark.unit
     def test_dropping_the_offline_run_fails_the_cohort(self, tmp_path, capsys):
         root = tmp_path / "upload"
         _build_upload(root)

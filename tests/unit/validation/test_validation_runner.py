@@ -1030,3 +1030,43 @@ class TestSubmissionVerdicts:
         collected = Finding.collect(Cohort((check,)), submission)
         verdicts = submission_verdicts(submission, collected)
         assert [verdict.accepted for verdict in verdicts] == [False, False]
+
+
+class TestRefusedClaims:
+    """A refused instance below a claim is an unsatisfied claim, never a silence."""
+
+    @pytest.mark.unit
+    def test_a_refused_sibling_blocks_a_needs_claim(self, tmp_path):
+        root = tmp_path / "upload"
+        submission = write_upload(
+            root,
+            {
+                ("sysgood", "model"): [Run(concurrency=16)],
+                ("sysbad", "model"): [
+                    Run(concurrency=16, c_min_override=16),
+                    Run(concurrency=32, c_min_override=None),
+                ],
+            },
+        )
+        point_check = _check(
+            "point_floor",
+            assert_=[
+                {
+                    "left": "point.result_summary.n_samples_completed",
+                    "op": "gt",
+                    "right": 0,
+                }
+            ],
+        )
+        submission_check = _check(
+            "pool_total",
+            scope="submission",
+            needs=["point_floor"],
+            assert_=[LITERAL_ROW],
+        )
+        findings = Finding.collect(
+            Cohort((point_check, submission_check)), submission
+        ).findings
+        dependent = [f for f in findings if f.check_id == "pool_total"]
+        assert dependent
+        assert all(not finding.verdict.ok for finding in dependent)

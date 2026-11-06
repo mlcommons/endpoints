@@ -475,6 +475,13 @@ class _GateResolver:
                 self._evaluate(upstream, upstream_node, trail)
                 for upstream_node in _chain_nodes(upstream.scope, node)
             ]
+            if _refused_below(node, upstream.scope):
+                # A refused instance below the dependent is no claim: the
+                # evidence was never judged, so the chain cannot vouch and the
+                # block is named -- the report says why instead of reading the
+                # dropped subtree as an inert, silent gap.
+                holds = False
+                failed.append(token)
             claims = [
                 evaluation
                 for evaluation in evaluations
@@ -563,6 +570,23 @@ def _chain_nodes(scope: RuleScopes, node: Node) -> tuple[Node, ...]:
     return tuple(
         candidate for candidate in _below(node, scope) if not _is_refused(candidate)
     )
+
+
+def _refused_below(node: Node, scope: RuleScopes) -> bool:
+    """Whether any `scope`-kind node in `node`'s subtree belongs to a refused submission.
+
+    `_chain_nodes` drops refused nodes from a scope's claim set; a dependent
+    that ignored the drop could read HOLDS over evidence never judged, so its
+    caller counts the drop as an unsatisfied claim instead.
+
+    Args:
+        node (Node): The dependent node whose subtree is walked.
+        scope (RuleScopes): The finer claim scope to look for below it.
+
+    Returns:
+        bool: Whether at least one `scope`-kind node below `node` is refused.
+    """
+    return any(_is_refused(candidate) for candidate in _below(node, scope))
 
 
 def _below(node: Node, scope: RuleScopes) -> Iterator[Node]:

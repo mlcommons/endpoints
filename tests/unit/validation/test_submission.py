@@ -1152,6 +1152,7 @@ class TestDerivedExposure:
             "accuracy_gate_misses",
             "structure_misses",
             "entryless_accuracy_points",
+            "input_shape",
             "unresolved_shared_paths",
             "unapproved_drafter_points",
         }
@@ -1492,3 +1493,35 @@ class TestAccuracyGateEdges:
             ],
         )
         assert pareto.system_tps_mismatch_points() == (16,)
+
+
+class TestLoadPatternAbsence:
+    """The declared absent state reads the same for both spellings of absence."""
+
+    @pytest.mark.unit
+    def test_a_missing_runtime_settings_block_still_votes_concurrency(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(concurrency=16),
+                Run(
+                    concurrency=32,
+                    config_extra={"runtime_settings": {"load_pattern": "poisson"}},
+                ),
+            ],
+        )
+        assert pareto.conflicting_load_patterns() == ("concurrency", "poisson")
+
+
+class TestInputShape:
+    """The structure rows know whether the walk root is a submission root."""
+
+    @pytest.mark.unit
+    def test_a_system_directory_input_reads_as_the_system_shape(self, tmp_path):
+        root = tmp_path / "upload"
+        upload = write_upload(root, {SYSTEM: [Run(concurrency=16)]})
+        system = upload.paretos[0].node
+        assert system is not None
+        grouped = Submission.from_directory(Path(system.dir).parent)
+        assert grouped.paretos[0].input_shape() == "system"
+        assert upload.paretos[0].input_shape() == "submission"

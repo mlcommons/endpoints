@@ -34,12 +34,14 @@ point_run_complete:
   rule: "Endpoints Policy §9.1, Automated Checks; §1, Submission completeness."
   fix: "Re-run this point to completion (`complete: false` marks a drain timeout or an interrupted run)."
   severity: fail
-  # The completion marker the client's own summary writes; a canonical
-  # `result_summary.json` (PointSummary) carries none, so this row judges the
-  # marker where a run recorded it.
+  # The client's own summary always carries `state` (a canonical `PointSummary`
+  # carries neither field), so the gate keys on `state` and the marker's own
+  # omission on a client-shaped summary fails the row instead of switching it
+  # off.
   when:
-    - { left: point.result_summary.complete, op: exists }
+    - { left: point.result_summary.state, op: exists }
   assert:
+    - { left: point.result_summary.complete, op: exists }
     - { left: point.result_summary.complete, op: eq, right: true }
 
 point_target_cohort_shape:

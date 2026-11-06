@@ -349,6 +349,11 @@ def _resolves_shared_path(root: Path, value: str) -> Path | None:
 
 
 # Section 2.9.4's lead time: two cohorts after the entry's approval.
+
+# The schema's own default for the load pattern (declared in valid_refs.yaml
+# beside the fact): `Point.from_node` reads it for both spellings of the
+# absence -- the missing `runtime_settings` block and the block without the key.
+_LOAD_PATTERN_DEFAULT = "concurrency"
 _DRAFTER_APPROVAL_LEAD_COHORTS = 2
 
 
@@ -581,11 +586,8 @@ class Point:
             summary, "system_tps", f"{node.dir}/result_summary.json"
         )
         runtime_settings = config.get("runtime_settings")
-        pattern = (
-            runtime_settings.get("load_pattern", "concurrency")
-            if isinstance(runtime_settings, Mapping)
-            else None
-        )
+        settings = runtime_settings if isinstance(runtime_settings, Mapping) else {}
+        pattern = settings.get("load_pattern", _LOAD_PATTERN_DEFAULT)
         return cls(
             offline=offline,
             concurrency=concurrency,
@@ -1302,7 +1304,12 @@ class Pareto:
         if not src_dir.is_dir():
             misses.append("src/ is missing")
             return tuple(misses)
-        implementations = [path for path in sorted(src_dir.iterdir()) if path.is_dir()]
+        try:
+            implementations = [
+                path for path in sorted(src_dir.iterdir()) if path.is_dir()
+            ]
+        except OSError as error:
+            return (*misses, f"src/ is unreadable ({error.strerror or error})")
         if not implementations:
             misses.append("src/ holds no implementation directory")
         for implementation in implementations:
@@ -1317,6 +1324,19 @@ class Pareto:
             if readme is None:
                 misses.append(f"src/{implementation.name}/ carries no README.md")
         return tuple(misses)
+
+    def input_shape(self) -> str:
+        """`"submission"` when the walk root carries `results/`, else `"system"`.
+
+        The loader accepts either the submission root or one `<system>`
+        directory below it. The tree-structure rows judge the submission root's
+        siblings, so they gate on this fact instead of reading a system-shaped
+        tree as one whose `docs/` and `src/` merely went missing.
+        """
+        if self.node is None:
+            return "system"
+        root = Path(self.node.root().dir)
+        return "submission" if (root / "results").is_dir() else "system"
 
     def unresolved_shared_paths(self) -> tuple[str, ...]:
         """The `shared_src`/`shared_docs` pointers that do not resolve (§9.1).
@@ -1778,6 +1798,7 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "unresolved_shared_paths": Pareto.unresolved_shared_paths,
     "unapproved_drafter_points": Pareto.unapproved_drafter_points,
     "entryless_accuracy_points": Pareto.entryless_accuracy_points,
+    "input_shape": Pareto.input_shape,
     "uncovered_regions": Pareto.uncovered_regions,
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,

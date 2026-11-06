@@ -200,6 +200,26 @@ class TestSubmissionVerdicts:
         assert "submission sys/bad-model: refused (" in out
         assert "2 submission(s): 1 accepted, 0 rejected, 1 refused" in out
 
+    @pytest.mark.unit
+    def test_an_all_refused_pool_reports_the_refusal_and_the_roll_up(
+        self, tmp_path, capsys
+    ):
+        root = tmp_path / "upload"
+        write_upload(
+            root,
+            {
+                ("sys", "bad-model"): [
+                    Run(concurrency=16, c_min_override=16),
+                    Run(concurrency=32, c_min_override=None),
+                ],
+            },
+        )
+        cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
+        assert main([str(cohort), str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "submission sys/bad-model: refused (" in out
+        assert "1 submission(s): 0 accepted, 0 rejected, 1 refused" in out
+
 
 class TestReportLines:
     """Marks, per-check instance counts, and the Never-Ran disclosure."""
