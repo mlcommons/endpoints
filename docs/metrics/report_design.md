@@ -74,7 +74,7 @@ returns `{}` (or an all-null early-stopping map if the feature is enabled).
 
 ### `Report` (frozen `msgspec.Struct`)
 
-Fields: `version`, `git_sha`, `test_started_at`,
+Fields: `version`, `git_sha`, `git_sha_source`, `test_started_at`,
 `n_samples_issued/completed/failed`, `duration_ns`, `state`, `complete`, the
 five rollup dicts (`ttft`, `tpot`, `latency`, `input_sequence_lengths`,
 `output_sequence_lengths`), `legacy_loadgen_window_duration_ns`, `qps`, `tps`,
