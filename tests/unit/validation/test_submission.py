@@ -1154,6 +1154,9 @@ class TestDerivedExposure:
             "entryless_accuracy_points",
             "input_shape",
             "model_dir_name_mismatches",
+            "nodes_used_problems",
+            "maximal_engagement_problems",
+            "tps_per_kw_mismatches",
             "unresolved_shared_paths",
             "unapproved_drafter_points",
         }
@@ -1551,3 +1554,197 @@ class TestModelDirNameConsistency:
     def test_an_undeclared_name_leaves_the_row_to_the_disclosure_checks(self, tmp_path):
         pareto = _pareto(tmp_path, [Run(concurrency=16)])
         assert pareto.model_dir_name_mismatches() == ()
+
+
+class TestPointPower:
+    """Appendix E / §9.1: node declarations, maximal engagement, the denominator."""
+
+    @staticmethod
+    def _pareto(tmp_path, runs, power):
+        root = tmp_path / "upload"
+        write_upload(root, {SYSTEM: runs})
+        system_dir = root / "results" / SYSTEM[0]
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "system_power.json").write_text(
+            json.dumps(power), encoding="utf-8"
+        )
+        # The walk reads artifacts eagerly: the power descriptor must exist
+        # before the tree is built for a row to see it.
+        return Submission.from_directory(root).paretos[0]
+
+    @pytest.mark.unit
+    def test_a_valid_node_declaration_holds_every_row(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [
+                {
+                    "system_node_ensemble_id": "ensemble-a",
+                    "nodes": 4,
+                    "accelerators_per_node": 8,
+                }
+            ],
+        }
+        pareto = self._pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_tps=1000.0,
+                    system_desc_extra={
+                        "tensor_parallel": 2,
+                        "data_parallel": 2,
+                    },
+                    config_extra={
+                        "nodes_used": [
+                            {"system_node_ensemble_id": "ensemble-a", "nodes": 2}
+                        ],
+                        "dp_shortfall": {
+                            "dp_actual": 2,
+                            "dp_formula": 16,
+                            "reason": "memory",
+                        },
+                    },
+                    summary_extra={"system_tps_per_kw": 20.0},
+                )
+            ],
+            power,
+        )
+        assert pareto.nodes_used_problems() == ()
+        assert pareto.maximal_engagement_problems() == ()
+        assert pareto.tps_per_kw_mismatches() == ()
+
+    @pytest.mark.unit
+    def test_an_unknown_ensemble_is_named(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [{"system_node_ensemble_id": "ensemble-a", "nodes": 4}],
+        }
+        pareto = self._pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    config_extra={
+                        "nodes_used": [
+                            {"system_node_ensemble_id": "ensemble-z", "nodes": 1}
+                        ]
+                    },
+                )
+            ],
+            power,
+        )
+        assert pareto.nodes_used_problems() == ("c16: ensemble-z names 0 node sets",)
+
+    @pytest.mark.unit
+    def test_overflowing_the_provisioned_nodes_is_named(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [{"system_node_ensemble_id": "ensemble-a", "nodes": 4}],
+        }
+        pareto = self._pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    config_extra={
+                        "nodes_used": [
+                            {"system_node_ensemble_id": "ensemble-a", "nodes": 9}
+                        ]
+                    },
+                )
+            ],
+            power,
+        )
+        assert pareto.nodes_used_problems() == ("c16: ensemble-a engages 9 of 4 nodes",)
+
+    @pytest.mark.unit
+    def test_a_short_capacity_is_named(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [
+                {
+                    "system_node_ensemble_id": "ensemble-a",
+                    "nodes": 2,
+                    "accelerators_per_node": 8,
+                }
+            ],
+        }
+        pareto = self._pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_desc_extra={"tensor_parallel": 8, "data_parallel": 8},
+                    config_extra={
+                        "nodes_used": [
+                            {"system_node_ensemble_id": "ensemble-a", "nodes": 2}
+                        ]
+                    },
+                )
+            ],
+            power,
+        )
+        problems = pareto.nodes_used_problems()
+        assert len(problems) == 1
+        assert "cannot hold" in problems[0]
+
+    @pytest.mark.unit
+    def test_engaging_past_the_maximum_dp_is_named(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [
+                {
+                    "system_node_ensemble_id": "ensemble-a",
+                    "nodes": 2,
+                    "accelerators_per_node": 8,
+                }
+            ],
+        }
+        pareto = self._pareto(
+            tmp_path,
+            [Run(concurrency=16, system_desc_extra={"data_parallel": 20})],
+            power,
+        )
+        assert pareto.maximal_engagement_problems() == (
+            "c16: DP 20 engages 20 of 16 provisioned accelerators (max DP 16)",
+        )
+
+    @pytest.mark.unit
+    def test_a_tps_per_kw_outside_one_percent_is_named(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [
+                {
+                    "system_node_ensemble_id": "ensemble-a",
+                    "nodes": 4,
+                    "accelerators_per_node": 8,
+                }
+            ],
+        }
+        pareto = self._pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_tps=1000.0,
+                    config_extra={
+                        "nodes_used": [
+                            {"system_node_ensemble_id": "ensemble-a", "nodes": 2}
+                        ]
+                    },
+                    summary_extra={"system_tps_per_kw": 25.0},
+                )
+            ],
+            power,
+        )
+        mismatches = pareto.tps_per_kw_mismatches()
+        assert len(mismatches) == 1
+        assert "against 20.0" in mismatches[0]
+
+    @pytest.mark.unit
+    def test_a_missing_power_declaration_skips_the_denominator(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16, system_tps=1000.0)],
+        )
+        assert pareto.tps_per_kw_mismatches() == ()

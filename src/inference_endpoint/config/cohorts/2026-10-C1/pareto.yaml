@@ -279,3 +279,37 @@ pareto_model_name_consistency:
         op: eq,
         value: 0,
       }
+
+pareto_nodes_used:
+  description: Every point's nodes_used names provisions the system has and holds the accelerators its parallelism engages (§4.5.3).
+  rule: "Endpoints Policy §9.1, Automated Checks; §4.5.3, Power Normalization; Appendix E, Power Descriptor."
+  fix: Declare nodes_used against the node sets in system_power.json, within each set's provisioned count and holding the engaged accelerators.
+  severity: fail
+  assert:
+    - { over: derived.nodes_used_problems, aggregate: count, op: eq, value: 0 }
+
+pareto_maximal_engagement:
+  description: Every point's DP reaches floor(A_provisioned / A_replica), or declares why it cannot (§9.1).
+  rule: "Endpoints Policy §9.1, Automated Checks; §4.5.3, Power Normalization."
+  fix: Replicate data-parallel to the maximum, or declare a dp_shortfall naming the actual and formula DP.
+  severity: fail
+  assert:
+    - {
+        over: derived.maximal_engagement_problems,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }
+
+pareto_tps_per_kw:
+  description: Every stored system_tps_per_kw equals system_tps / point_power_kw within one percent (§9.1).
+  rule: "Endpoints Policy §9.1, Automated Checks; §4.5.2, Power Reporting; §4.5.3, Power Normalization."
+  fix: Recompute the point denominator from the declared nodes_used and re-export result_summary.json.
+  severity: fail
+  assert:
+    - {
+        over: derived.tps_per_kw_mismatches,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }

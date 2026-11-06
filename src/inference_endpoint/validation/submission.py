@@ -529,6 +529,11 @@ class Point:
         region (str | None): The declared `region` (§8.3) verbatim: a band name
             or `submitters_choice`. `None` when the artifact omits it or spells
             another type. (Default: None)
+        nodes_used (tuple[Mapping[str, Any], ...] | None): The §9.1 per-point node
+            declaration entries (Appendix E's `system_node_ensemble_id`/`nodes`
+            blocks). `None` when the point declares none. (Default: None)
+        dp_shortfall (Mapping[str, Any] | None): The §9.1 shortfall declaration
+            (`dp_actual`/`dp_formula`/`reason`). (Default: None)
     """
 
     offline: Literal["dedicated", "elected"] | None
@@ -543,6 +548,8 @@ class Point:
     dataset: str | None = None
     seed_set: str | None = None
     region: str | None = None
+    nodes_used: tuple[Mapping[str, Any], ...] | None = None
+    dp_shortfall: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.offline not in (None, "dedicated", "elected"):
@@ -608,6 +615,20 @@ class Point:
             ),
             region=(
                 config.get("region") if isinstance(config.get("region"), str) else None
+            ),
+            nodes_used=(
+                tuple(
+                    entry
+                    for entry in config.get("nodes_used", ())
+                    if isinstance(entry, Mapping)
+                )
+                if isinstance(config.get("nodes_used"), list)
+                else None
+            ),
+            dp_shortfall=(
+                config.get("dp_shortfall")
+                if isinstance(config.get("dp_shortfall"), Mapping)
+                else None
             ),
         )
 
@@ -979,6 +1000,250 @@ class Pareto:
         if declared == directory:
             return ()
         return (f"{declared} != {directory}",)
+
+    def _point_power_facts(
+        self, point: Point
+    ) -> tuple[_Parallelism | None, tuple[tuple[str, int], ...], list[str]]:
+        """One point's power inputs: its parallelism, its validated node split, problems.
+
+        Returns `(parallelism, ((ensemble, nodes), ...), problems)`: the split is
+        the point's `nodes_used` resolved against the system's node sets (an
+        empty split engages everything, §4.5.3's conservative default), and the
+        problems are the declaration faults that keep it from being used.
+        """
+        parallelism = _point_parallelism(point)
+        declared = point.nodes_used
+        problems: list[str] = []
+        if declared is None:
+            return parallelism, (), problems
+        if not isinstance(declared, list | tuple):
+            return parallelism, (), [f"c{point.concurrency}: nodes_used is no list"]
+        sets = self._system_node_sets()
+        split: list[tuple[str, int]] = []
+        seen: set[str] = set()
+        for entry in declared:
+            if not isinstance(entry, Mapping):
+                problems.append(f"c{point.concurrency}: nodes_used entry is no block")
+                continue
+            ensemble = entry.get("system_node_ensemble_id")
+            nodes = entry.get("nodes")
+            if not isinstance(ensemble, str):
+                problems.append(
+                    f"c{point.concurrency}: nodes_used entry names no ensemble"
+                )
+                continue
+            if ensemble in seen:
+                problems.append(f"c{point.concurrency}: {ensemble} is declared twice")
+                continue
+            seen.add(ensemble)
+            matches = [
+                node_set
+                for node_set in sets
+                if node_set.get("system_node_ensemble_id") == ensemble
+            ]
+            if len(matches) != 1:
+                problems.append(
+                    f"c{point.concurrency}: {ensemble} names {len(matches)} node sets"
+                )
+                continue
+            provisioned = matches[0].get("nodes")
+            if (
+                not isinstance(nodes, int)
+                or isinstance(nodes, bool)
+                or not isinstance(provisioned, int)
+                or nodes < 1
+                or nodes > provisioned
+            ):
+                problems.append(
+                    f"c{point.concurrency}: {ensemble} engages {nodes} of {provisioned} nodes"
+                )
+                continue
+            split.append((ensemble, nodes))
+        if not problems:
+            problems.extend(self._capacity_problems(point, parallelism, split, sets))
+        return parallelism, tuple(split), problems
+
+    def _system_node_sets(self) -> list[Mapping[str, Any]]:
+        """The system's Appendix E node-set blocks, empty when undeclared."""
+        if self.node is None or self.node.parent is None:
+            return []
+        value, error = self.node.parent.read("system_power.json")
+        if error is not None or not isinstance(value, Mapping):
+            return []
+        node_sets = value.get("node_sets")
+        if not isinstance(node_sets, list):
+            return []
+        return [node_set for node_set in node_sets if isinstance(node_set, Mapping)]
+
+    def _capacity_problems(
+        self,
+        point: Point,
+        parallelism: _Parallelism | None,
+        split: tuple[tuple[str, int], ...],
+        sets: list[Mapping[str, Any]],
+    ) -> list[str]:
+        """The declared nodes must hold every accelerator the parallelism engages."""
+        if parallelism is None or parallelism.disaggregated:
+            return []
+        per_node = [node_set.get("accelerators_per_node") for node_set in sets]
+        if any(value is None for value in per_node):
+            return []
+        engaged = dict(split)
+        capacity = sum(
+            engaged.get(
+                str(node_set.get("system_node_ensemble_id")),
+                node_set.get("nodes") if isinstance(node_set.get("nodes"), int) else 0,
+            )
+            * (node_set.get("accelerators_per_node") or 0)
+            for node_set in sets
+        )
+        used = parallelism.accelerators_used
+        if capacity < used:
+            return [
+                f"c{point.concurrency}: {capacity} engaged accelerators cannot hold "
+                f"DP {parallelism.data_parallel} x replica {parallelism.replica} = {used}"
+            ]
+        return []
+
+    def nodes_used_problems(self) -> tuple[str, ...]:
+        """§9.1's per-point node declaration: known sets, within N_s, holding A_used.
+
+        Appendix E's `system_power.json` names the node sets; a point's
+        `nodes_used` must name those sets, stay within each set's provisioned
+        count, and hold every accelerator its parallelism engages. A point that
+        declares nothing engages everything, so it has no problem to report.
+
+        Returns:
+            tuple[str, ...]: One line per fault, empty when every declaration holds.
+        """
+        problems: list[str] = []
+        for point in self.points:
+            _, _, point_problems = self._point_power_facts(point)
+            problems.extend(point_problems)
+        return tuple(problems)
+
+    def maximal_engagement_problems(self) -> tuple[str, ...]:
+        """§9.1's maximal engagement: `DP = floor(A_provisioned / A_replica)`.
+
+        A point replicating past the provisioning, or below the maximum without
+        a `dp_shortfall` that explains it, misstates the deployment §4.5.3
+        normalizes against. Disaggregated deployments and points declaring no
+        parallelism are left out: the rules do not say what a replica is there.
+
+        Returns:
+            tuple[str, ...]: One line per fault, empty when each declared DP
+                reaches its maximum or declares why not.
+        """
+        problems: list[str] = []
+        for point in self.points:
+            parallelism, _, declaration_problems = self._point_power_facts(point)
+            if parallelism is None or parallelism.disaggregated:
+                continue
+            if declaration_problems:
+                # An invalid nodes_used leaves no denominator to hold DP against.
+                continue
+            provisioned = self._a_provisioned()
+            if provisioned is None:
+                continue
+            replica = parallelism.replica
+            dp = parallelism.data_parallel
+            if replica < 1 or dp < 1:
+                continue
+            dp_max = provisioned // replica
+            shortfall = point.dp_shortfall
+            if dp > dp_max:
+                problems.append(
+                    f"c{point.concurrency}: DP {dp} engages {dp * replica} of "
+                    f"{provisioned} provisioned accelerators (max DP {dp_max})"
+                )
+            elif dp < dp_max and shortfall is None:
+                problems.append(
+                    f"c{point.concurrency}: DP {dp} below floor({provisioned} / "
+                    f"{replica}) = {dp_max} without a dp_shortfall"
+                )
+            elif isinstance(shortfall, Mapping) and (
+                shortfall.get("dp_actual") != dp
+                or shortfall.get("dp_formula") != dp_max
+            ):
+                problems.append(
+                    f"c{point.concurrency}: dp_shortfall names DP "
+                    f"{shortfall.get('dp_actual')}/{shortfall.get('dp_formula')} "
+                    f"where the declaration is {dp}/{dp_max}"
+                )
+        return tuple(problems)
+
+    def _a_provisioned(self) -> int | None:
+        """`A_provisioned`: Σ N_s x accelerators per node, if every set states it."""
+        sets = self._system_node_sets()
+        per_node = [node_set.get("accelerators_per_node") for node_set in sets]
+        if not sets or any(value is None for value in per_node):
+            return None
+        return sum(
+            (node_set.get("nodes") or 0) * (node_set.get("accelerators_per_node") or 0)
+            for node_set in sets
+        )
+
+    def tps_per_kw_mismatches(self) -> tuple[str, ...]:
+        """§9.1's per-point denominator: `system_tps_per_kw = system_tps / point_power_kw`.
+
+        The stored value is checked against the point's own denominator (the
+        system's provisioned power scaled by the largest engaged node fraction)
+        within one percent, the tolerance §4.5.2's one-decimal reporting needs.
+        A point without a stored value, a valid node split or a usable power
+        declaration has nothing to check.
+
+        Returns:
+            tuple[str, ...]: One line per mismatch, empty when each stored value holds.
+        """
+        power, _ = self._system_power()
+        provisioned_kw = power.get("provisioned_power_kw") if power else None
+        if not isinstance(provisioned_kw, int | float) or isinstance(
+            provisioned_kw, bool
+        ):
+            return ()
+        sets = self._system_node_sets()
+        mismatches: list[str] = []
+        for point in self.points:
+            _, split, declaration_problems = self._point_power_facts(point)
+            if declaration_problems or point.system_tps is None:
+                continue
+            stored = point.node.read("result_summary.json")[0] if point.node else None
+            stored = (
+                decode_number(stored.get("system_tps_per_kw"), "float")
+                if isinstance(stored, Mapping)
+                else None
+            )
+            if not isinstance(stored, int | float) or isinstance(stored, bool):
+                continue
+            fractions = [
+                (
+                    dict(split).get(str(node_set.get("system_node_ensemble_id")), 0)
+                    if split
+                    else node_set.get("nodes")
+                )
+                / node_set.get("nodes")
+                for node_set in sets
+                if isinstance(node_set.get("nodes"), int) and node_set.get("nodes")
+            ]
+            if not fractions:
+                continue
+            kw = float(provisioned_kw) * max(fractions)
+            if kw <= 0:
+                continue
+            derived = float(point.system_tps) / kw
+            if abs(float(stored) - derived) / max(abs(derived), 1e-9) > 0.01:
+                mismatches.append(
+                    f"c{point.concurrency}: system_tps_per_kw {stored} against "
+                    f"{derived:.4f} (system_tps {point.system_tps} / {kw:.2f} kW)"
+                )
+        return tuple(mismatches)
+
+    def _system_power(self) -> tuple[Mapping[str, Any] | None, str | None]:
+        """The system's `system_power.json` value and parse error, both optional."""
+        if self.node is None or self.node.parent is None:
+            return None, None
+        value, error = self.node.parent.read("system_power.json")
+        return (value if isinstance(value, Mapping) else None), error
 
     def conflicting_datasets(self) -> tuple[str, ...]:
         """The distinct `dataset` ids when the points disagree (§9.1).
@@ -1840,6 +2105,9 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "model_dir_name_mismatches": Pareto.model_dir_name_mismatches,
     "conflicting_load_patterns": Pareto.conflicting_load_patterns,
     "conflicting_model_names": Pareto.conflicting_model_names,
+    "nodes_used_problems": Pareto.nodes_used_problems,
+    "maximal_engagement_problems": Pareto.maximal_engagement_problems,
+    "tps_per_kw_mismatches": Pareto.tps_per_kw_mismatches,
     "conflicting_datasets": Pareto.conflicting_datasets,
     "conflicting_seed_sets": Pareto.conflicting_seed_sets,
     "inconsistent_system_desc_keys": Pareto.inconsistent_system_desc_keys,
@@ -1848,3 +2116,60 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
 
 # The `derived.<name>` names a row may name (single owner: the table above).
 DERIVATION_NAMES: tuple[str, ...] = tuple(_DERIVATION_METHODS)
+
+
+@dataclass(frozen=True)
+class _Parallelism:
+    """One point's §8.2 parallelism: `A_replica = TP x PP x EP`, `A_used = DP x A_replica`."""
+
+    tensor_parallel: int = 1
+    pipeline_parallel: int = 1
+    expert_parallel: int = 1
+    data_parallel: int = 1
+    disaggregated: bool = False
+
+    @property
+    def replica(self) -> int:
+        """§4.5.3's `A_replica = TP x PP x EP`."""
+        return self.tensor_parallel * self.pipeline_parallel * self.expert_parallel
+
+    @property
+    def accelerators_used(self) -> int:
+        """§4.5.3's `accelerators_used = DP x A_replica`."""
+        return self.data_parallel * self.replica
+
+
+_PARALLELISM_FIELDS = (
+    "tensor_parallel",
+    "pipeline_parallel",
+    "expert_parallel",
+    "data_parallel",
+    "disaggregated",
+)
+
+
+def _point_parallelism(point: Point) -> _Parallelism | None:
+    """The point's declared parallelism from its own `system_desc.json` (§8.2), or `None`.
+
+    §8.1 places `system_desc.json` beside every point, and §4.5.3's worked
+    example changes the replica size from point to point, so it is read per
+    point. A description declaring none of the fields carries no parallelism to
+    check.
+    """
+    desc = point.system_desc
+    if not any(field in desc for field in _PARALLELISM_FIELDS):
+        return None
+
+    def _positive(field: str) -> int:
+        value = desc.get(field, 1)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return 1
+
+    return _Parallelism(
+        tensor_parallel=_positive("tensor_parallel"),
+        pipeline_parallel=_positive("pipeline_parallel"),
+        expert_parallel=_positive("expert_parallel"),
+        data_parallel=_positive("data_parallel"),
+        disaggregated=desc.get("disaggregated") is True,
+    )
