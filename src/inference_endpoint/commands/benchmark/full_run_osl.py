@@ -22,7 +22,8 @@ See mlcommons/endpoints#500.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Collection
+import os
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -36,20 +37,40 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
     TextInput,
     extract_tokenization_input,
 )
-from inference_endpoint.core.record import EventRecord, EventType
+from inference_endpoint.core.record import (
+    EventRecord,
+    EventType,
+    SampleEventType,
+    leading_event_topic,
+)
 from inference_endpoint.core.types import PhaseType, TextModelOutput
+from inference_endpoint.endpoint_client.cpu_affinity import (
+    UnsupportedPlatformError,
+    get_all_online_cpus,
+)
 from inference_endpoint.metrics.report import series_metric_dict
 
 logger = logging.getLogger(__name__)
 
-# Matched against each line's leading bytes so the 6+ GB of prompt and response
-# payload in a large run is never decoded just to classify the record.
-_COMPLETE_MARKER = b'"event_type":"sample.complete"'
-_PREFIX_BYTES = 256
+# A line in the writer's compact layout is classified from its leading bytes, so
+# the 6+ GB of prompt and response payload in a large run is never decoded just
+# to find the COMPLETE records. Any other layout is decoded and classified by its
+# decoded event_type (see compute_full_run_osl).
+_COMPLETE_TOPIC: bytes = SampleEventType.COMPLETE.topic_bytes  # type: ignore[attr-defined]
 # AgenticInferenceInlineScorer's dataset_name; the key its turns live under in
 # sample_idx_map.json.
 
-TokenCounter = Callable[[MessageInput | TextInput], int]
+# Counts a batch of turns, returning a count or the exception for each turn.
+BatchTokenCounter = Callable[
+    [Sequence[MessageInput | TextInput]], list[int | Exception]
+]
+
+# Turns counted per tokenizer batch at finalize.
+_DEFAULT_BATCH_SIZE = 1024
+# Counting threads at finalize. Each turn is counted with the aggregator's own
+# per-item logic, whose Python parts hold the GIL: measured throughput levels
+# off by about 32 threads and is slightly lower beyond that.
+_MAX_COUNT_THREADS = 32
 
 
 def _in_population(
@@ -85,9 +106,10 @@ def _in_population(
 
 def compute_full_run_osl(
     events_path: Path,
-    count_tokens: TokenCounter,
+    count_batch: BatchTokenCounter,
     *,
     performance_uuids: Collection[str] | None = None,
+    batch_size: int = _DEFAULT_BATCH_SIZE,
 ) -> dict[str, Any] | None:
     """Roll up OSL over every completed turn in ``events_path``.
 
@@ -109,10 +131,43 @@ def compute_full_run_osl(
     n_undecodable = 0
     first_error: str | None = None
     seen_uuids: set[str] = set()
+    batch_size = max(1, batch_size)
+    pending: list[MessageInput | TextInput] = []
+
+    def count_pending() -> None:
+        nonlocal n_errors, first_error
+        n_pending = len(pending)
+        try:
+            outcomes = count_batch(pending)
+        except Exception as e:  # noqa: BLE001 - charge the batch, keep the stat
+            outcomes = [e] * n_pending
+        if len(outcomes) != n_pending:
+            # One outcome per turn is the counter's contract. A different number
+            # cannot be matched back to its turns, so charge the whole batch
+            # (the block turns partial) rather than average an unknown subset.
+            mismatch = RuntimeError(
+                f"token counter returned {len(outcomes)} outcomes for "
+                f"{n_pending} turns"
+            )
+            outcomes = [mismatch] * n_pending
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                n_errors += 1
+                if first_error is None:
+                    first_error = str(outcome)
+            else:
+                lengths.append(outcome)
+        pending.clear()
 
     with events_path.open("rb") as events_file:
         for line in events_file:
-            if _COMPLETE_MARKER not in line[:_PREFIX_BYTES]:
+            topic = leading_event_topic(line)
+            if topic is None:
+                # Not the compact layout (spaces, reordered fields, ...): decode
+                # the line and classify it below by its decoded event_type.
+                if not line.strip():
+                    continue
+            elif topic != _COMPLETE_TOPIC:
                 continue
             # Decode before the population filter so a corrupt line — which we
             # cannot attribute to the performance population — is skipped rather
@@ -121,6 +176,8 @@ def compute_full_run_osl(
                 record = decoder.decode(line)
             except msgspec.DecodeError:
                 n_undecodable += 1
+                continue
+            if record.event_type != SampleEventType.COMPLETE:
                 continue
             if not _in_population(record, performance_uuids):
                 continue
@@ -142,11 +199,15 @@ def compute_full_run_osl(
                 if tokenization_input is None:
                     n_empty += 1
                     continue
-                lengths.append(count_tokens(tokenization_input))
+                pending.append(tokenization_input)
+                if len(pending) >= batch_size:
+                    count_pending()
             except Exception as e:  # noqa: BLE001 - one bad turn must not void the stat
                 n_errors += 1
                 if first_error is None:
                     first_error = str(e)
+    if pending:
+        count_pending()
 
     # A performance turn whose COMPLETE record never reached the log is invisible
     # to the counters above; reconcile observed UUIDs against the expected
@@ -253,10 +314,17 @@ def full_run_osl_for_report(
         logger.info("Full-run OSL skipped: no performance-phase samples to bound to")
         return None
     try:
-        with BatchTokenizer(tokenizer_name, live_workers=1, n_workers=0) as tokenizer:
+        try:
+            threads = len(get_all_online_cpus()) or 1
+        except UnsupportedPlatformError:
+            threads = os.cpu_count() or 1
+        threads = min(threads, _MAX_COUNT_THREADS)
+        with BatchTokenizer(
+            tokenizer_name, live_workers=threads, n_workers=0
+        ) as tokenizer:
             return compute_full_run_osl(
                 events_path,
-                tokenizer.count_sync,
+                tokenizer.count_batch_sync,
                 performance_uuids=performance_uuids,
             )
     except Exception as e:  # noqa: BLE001 - optional block; never fail finalize
