@@ -1,13 +1,22 @@
+# `pre-commit install` also installs the pre-push hook (gitleaks-push below).
+# Every other hook is commit-only so a push runs just the secret scan; hooks
+# whose upstream manifest opts into pre-push are pinned with `stages` below.
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
     hooks:
       - id: trailing-whitespace
+        stages: [pre-commit]
         exclude: ^(src/inference_endpoint/openai/openai_types_gen.py|src/inference_endpoint/openai/openapi.yaml|src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/mlperf_eval/.*)$
       - id: end-of-file-fixer
+        stages: [pre-commit]
         exclude: ^(src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/mlperf_eval/.*)$
       - id: check-yaml
       - id: check-added-large-files
+        stages: [pre-commit]
         exclude: ^(src/inference_endpoint/openai/openai_types_gen.py|src/inference_endpoint/openai/openapi.yaml|docs/res/.*)$
       - id: check-merge-conflict
       - id: debug-statements
@@ -38,6 +47,20 @@ repos:
         # Markdown prose wraps at 80 columns via .prettierrc.yaml.
         types_or: [yaml, json, markdown]
         exclude: ^(src/inference_endpoint/openai/openai_types_gen.py|src/inference_endpoint/openai/openapi.yaml|src/inference_endpoint/config/templates/)
+
+  # Secret scanning; rules in .gitleaks.toml. CI runs the same scan in
+  # .github/workflows/secret-scan.yml, so the pre-commit CI jobs skip these.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+      # Rescans the commits being pushed, which catches commits made with
+      # `git commit --no-verify`.
+      - id: gitleaks
+        alias: gitleaks-push
+        name: Detect hardcoded secrets in pushed commits
+        entry: bash -c 'gitleaks git --redact --verbose --log-opts="$PRE_COMMIT_FROM_REF..$PRE_COMMIT_TO_REF"'
+        stages: [pre-push]
 
   - repo: local
     hooks:

@@ -1,0 +1,4 @@
+# Findings reviewed and accepted. Format: <commit>:<file>:<rule>:<line>
+
+# Temporary loopback token for the local SWE-bench service example.
+3f7b387419062a753e492d81f3dd20a3be905e3d:examples/10_Agentic_Inference/dsv4_agentic_benchmark.yaml:generic-api-key:42

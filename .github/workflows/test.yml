@@ -12,6 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # For tests/unit/test_gitleaks_config.py, which skips without it.
+      - uses: ./.github/actions/install-gitleaks
+
       - name: Install uv
         uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
         with:
