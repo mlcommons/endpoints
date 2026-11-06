@@ -500,6 +500,10 @@ class BenchmarkSession:
 
     async def _run_phase(self, phase: PhaseConfig) -> PhaseResult | None:
         """Run a single phase. Returns PhaseResult or None for warmup."""
+        # Tests key on this log line: tests/integration/commands/test_sigint.py
+        # waits for it as the "workers up, STARTED published" signal, and
+        # tests/integration/commands/test_benchmark_command.py asserts on it.
+        # Update them if the wording changes.
         logger.info("Starting phase: %s (%s)", phase.name, phase.phase_type.value)
         phase_start = time.monotonic_ns()
         # Per-phase stop flag is scoped to this phase; clear any cap left set by
