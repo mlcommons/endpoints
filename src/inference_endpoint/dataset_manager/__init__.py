@@ -39,6 +39,7 @@ from .predefined.shopify_product_catalogue import (
     ShopifyProductCatalogue8k,
 )
 from .predefined.swe_bench import SWEBench
+from .predefined.whisper_librispeech import WhisperLibriSpeech
 from .transforms import (
     AddStaticColumns,
     ColumnFilter,
@@ -72,5 +73,6 @@ __all__ = [
     "ShopifyProductCatalogue",
     "ShopifyProductCatalogue8k",
     "SWEBench",
+    "WhisperLibriSpeech",
     "AgenticInferenceDataset",
 ]

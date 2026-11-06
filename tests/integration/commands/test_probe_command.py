@@ -23,6 +23,7 @@ validating:
 - Error handling with failing endpoints
 """
 
+import cyclopts
 import pytest
 from inference_endpoint.commands.probe import ProbeConfig, execute_probe
 from inference_endpoint.config.schema import APIType
@@ -97,6 +98,17 @@ class TestProbeCommandIntegration:
         )
         with pytest.raises(InputValidationError, match="videogen"):
             execute_probe(config)
+
+    @pytest.mark.integration
+    def test_api_type_help_omits_unsupported_types(self):
+        """The --api-type help must not advertise an api_type the probe refuses."""
+        param = next(
+            m
+            for m in ProbeConfig.model_fields["api_type"].metadata
+            if isinstance(m, cyclopts.Parameter)
+        )
+        assert param.show_choices is False, "enum choices would list refused types"
+        assert APIType.OPENAI_TRANSCRIPTIONS.value not in (param.help or "")
 
     @pytest.mark.integration
     def test_probe_with_invalid_endpoint(self):

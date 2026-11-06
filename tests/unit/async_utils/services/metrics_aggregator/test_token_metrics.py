@@ -331,6 +331,37 @@ class TestBatchTokenizerMessageTokenization:
                 )[0]
                 assert count > 0
 
+    def test_baseline_failure_without_chat_template_is_not_an_error(self, caplog):
+        """ASR tokenizers (Whisper) have no chat template; baseline 0 is expected."""
+
+        class _NoTemplateTokenizer(_FakeTokenizer):
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise ValueError("tokenizer.chat_template is not set")
+
+        with patch(_MOCK_TARGET, _NoTemplateTokenizer):
+            with caplog.at_level(logging.DEBUG):
+                with BatchTokenizer("fake", n_workers=0, live_workers=1) as tok:
+                    assert tok._baseline == 0
+        records = [r for r in caplog.records if "baseline" in r.message]
+        assert records and all(r.levelno == logging.DEBUG for r in records)
+
+    def test_baseline_failure_with_a_chat_template_is_logged_as_an_error(self, caplog):
+        """A tokenizer that has a template but fails still surfaces the problem."""
+
+        class _BrokenTemplateTokenizer(_FakeTokenizer):
+            chat_template = "{{ broken }}"
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise ValueError("render failed")
+
+        with patch(_MOCK_TARGET, _BrokenTemplateTokenizer):
+            with caplog.at_level(logging.DEBUG):
+                with BatchTokenizer("fake", n_workers=0, live_workers=1) as tok:
+                    assert tok._baseline == 0
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+
     def test_token_count_prompt_falls_back_on_template_error(self):
         class _TextOnlyTemplateTokenizer(_FakeTokenizerWithTemplate):
             def apply_chat_template(self, messages, **kwargs):

@@ -143,6 +143,7 @@ class ScorerMethod(str, Enum):
     BFCL_V4 = "bfcl_v4"
     LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
     SWE_BENCH = "swe_bench_scorer"
+    WER = "wer"
 
 
 # Audit configuration; runnable test registry lives in compliance/.
@@ -1067,7 +1068,8 @@ class EndpointConfig(BaseModel):
     api_type: Annotated[
         APIType,
         cyclopts.Parameter(
-            alias="--api-type", help="API type: openai, sglang, or videogen"
+            alias="--api-type",
+            help="API type: openai, openai_transcriptions, sglang, or videogen",
         ),
     ] = APIType.OPENAI
 
@@ -1169,11 +1171,23 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             self.benchmark_mode if self.type == TestType.SUBMISSION else self.type
         )
 
+        # Streaming is a property of the api_type as well as the test type: AUTO
+        # must not resolve to ON for a protocol with no SSE mode.
+        api_type = self.endpoint_config.api_type
         if self.model_params.streaming == StreamingMode.AUTO:
             mp_updates["streaming"] = (
                 StreamingMode.OFF
-                if effective_mode in (TestType.OFFLINE,)
+                if not api_type.supports_streaming
+                or effective_mode in (TestType.OFFLINE,)
                 else StreamingMode.ON
+            )
+        elif (
+            not api_type.supports_streaming
+            and self.model_params.streaming == StreamingMode.ON
+        ):
+            raise ValueError(
+                f"endpoint_config.api_type={api_type.value} has no streaming "
+                "mode; set model_params.streaming to 'off' or leave it 'auto'"
             )
 
         if not self.model_params.name and self.submission_ref:
@@ -1188,6 +1202,23 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
+
+        if not api_type.has_text_prompt:
+            # No prompt means no ISL to measure, and the aggregator would
+            # register a series that can only stay empty. Derived rather than
+            # demanded of the user, since metrics_isl defaults to True.
+            if self.settings.metrics_isl:
+                object.__setattr__(
+                    self,
+                    "settings",
+                    self.settings.model_copy(update={"metrics_isl": False}),
+                )
+            if self.settings.warmup.salt:
+                raise ValueError(
+                    f"settings.warmup.salt is not supported with "
+                    f"endpoint_config.api_type={api_type.value}: the request "
+                    "carries no text prompt to salt"
+                )
 
         uses_swe_bench = any(
             dataset.accuracy_config is not None

@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import re
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import msgspec
 
@@ -45,6 +45,12 @@ class HttpRequestAdapter(ABC):
     # Pre-compiled regex for extracting SSE data fields with JSON content
     # Matches "data: {json content}" and captures the JSON part
     SSE_DATA_PATTERN: re.Pattern[bytes] = re.compile(rb"data:\s*(\{[^\n]+\})")
+
+    # Media type of the bytes returned by encode_query(). The worker folds this
+    # into the pre-encoded request prefix once at setup, so adapters that send
+    # something other than JSON (e.g. a multipart audio upload) declare it here
+    # rather than emitting a per-request header.
+    CONTENT_TYPE: ClassVar[str] = "application/json"
 
     @classmethod
     @abstractmethod

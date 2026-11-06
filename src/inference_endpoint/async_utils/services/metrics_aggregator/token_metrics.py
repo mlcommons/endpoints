@@ -481,11 +481,21 @@ class BatchTokenizer:
         except Exception:
             self._prefix_len = 0
             self._baseline = 0
-            logger.exception(
-                "Failed to compute chat-template baseline for %s; tool-call "
-                "token counts may be over-estimated",
-                self._tokenizer_name,
-            )
+            if getattr(tok, "chat_template", None) is None:
+                # A tokenizer with no chat template (e.g. Whisper and other ASR
+                # tokenizers) has no assistant frame to subtract and never takes
+                # the messages counting path, so a zero baseline is correct -
+                # not a failure worth a stack trace on every run.
+                logger.debug(
+                    "Tokenizer %s has no chat template; baseline is 0",
+                    self._tokenizer_name,
+                )
+            else:
+                logger.exception(
+                    "Failed to compute chat-template baseline for %s; tool-call "
+                    "token counts may be over-estimated",
+                    self._tokenizer_name,
+                )
 
     def _setup_shards(self, cores_per_worker: int, n_workers: int) -> None:
         """Spawn one pinned single-worker process per core block.

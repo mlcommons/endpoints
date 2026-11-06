@@ -36,6 +36,8 @@ import numpy as np
 import pandas as pd
 from pydantic import ValidationError
 from tqdm import tqdm
+from transformers import AutoTokenizer
+from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 try:
     import websocket
@@ -54,11 +56,13 @@ from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
+from ..exceptions import InputValidationError
 from .accuracy_results import build_breakdown
 from .extractor import (
     Extractor,
     PythonCodeExtractor,
 )
+from .wer import project_to_labels, wer_counts
 
 logger = logging.getLogger(__name__)
 
@@ -490,6 +494,150 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         # TODO: return only rouge1 for now to align with other scorers
         # Return the rest of the metrics later
         return result, 1
+
+
+class WERScorer(Scorer, scorer_id="wer"):
+    """Word Error Rate as defined by the MLPerf speech2text benchmark.
+
+    Reports ``100 - WER%`` so the headline number is higher-is-better and on the
+    percentage scale the compliance accuracy gate assumes. The MLPerf reference
+    is WER 2.0671% (accuracy 97.9329%); a submission needs 99% of that.
+
+    Scoring order matches the reference exactly: project both sides through the
+    character-label inventory, apply Whisper's ``EnglishTextNormalizer``, split
+    on whitespace, then accumulate the concatenation-aware edit distance. See
+    :mod:`inference_endpoint.evaluation.wer`.
+
+    An issued sample with no COMPLETE event is scored as an empty hypothesis:
+    its reference words enter the denominator and every one of them counts as a
+    deletion, exactly as a completed-but-blank response already does. Skipping
+    it instead would shrink the denominator, so dropping the samples a SUT
+    handles worst would *raise* the score. This matches the reference number
+    whenever nothing is missing, and ``complete`` is set False when something
+    is, so a partial run is machine-detectable rather than needing a reader to
+    notice ``missing_samples``.
+    """
+
+    REQUIRES_EXTRACTOR = False
+
+    #: Repo (or local dir) supplying ``normalizer.json`` for the English text
+    #: normalizer. Whisper ships the same mapping across model sizes. The HF
+    #: copy is a superset of ``whisper/normalizers/english.json`` by one key
+    #: (``mm``) with no conflicting values, and `transformers`'
+    #: ``EnglishTextNormalizer`` is output-identical to the one in the
+    #: ``openai-whisper`` package.
+    DEFAULT_NORMALIZER_SOURCE = "openai/whisper-large-v3"
+
+    def __init__(self, *args, normalizer_source: str | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.extractor is not None:
+            raise InputValidationError(
+                f"accuracy_config.extractor is not supported by "
+                f"{type(self).__name__}: WER scores the transcript verbatim, so "
+                "an extractor would be silently ignored. Remove it."
+            )
+        self.normalizer_source = normalizer_source or self.DEFAULT_NORMALIZER_SOURCE
+        self._breakdown: dict[str, Any] | None = None
+
+    @classmethod
+    def preflight(cls, extras: dict[str, Any]) -> None:
+        """Resolve the normalizer before the run, not after it.
+
+        ``_normalizer`` needs network access or a warm HF cache. Scoring happens
+        after the whole performance phase, so a cold cache in an air-gapped
+        submission environment would otherwise fail the run at its very last
+        step, with the endpoint work already spent.
+        """
+        cls._load_normalizer(extras.get("normalizer_source"))
+
+    @classmethod
+    def _load_normalizer(cls, source: str | None) -> EnglishTextNormalizer:
+        resolved = source or cls.DEFAULT_NORMALIZER_SOURCE
+        tokenizer = AutoTokenizer.from_pretrained(resolved)
+        spelling_map = getattr(tokenizer, "english_spelling_normalizer", None)
+        if not spelling_map:
+            raise ValueError(
+                f"Tokenizer {resolved!r} carries no "
+                "english_spelling_normalizer (normalizer.json). Point "
+                "accuracy_config.extras.normalizer_source at a Whisper "
+                "tokenizer repo or local directory."
+            )
+        return EnglishTextNormalizer(spelling_map)
+
+    def _normalizer(self) -> EnglishTextNormalizer:
+        return self._load_normalizer(self.normalizer_source)
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "WER is a corpus-level metric: errors and reference words are summed "
+            "across the dataset before dividing. Call score() instead."
+        )
+
+    def score(self) -> tuple[float | None, int]:
+        df = self.get_scoring_outputs()
+        df = df[df["sample_uuid"].isin(self.sample_index_map.keys())]
+
+        issued = len(self.sample_index_map)
+        if issued == 0:
+            self.complete = False
+            return None, 0
+        n_repeats = issued // self.dataset.num_samples()
+
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+
+        normalizer = self._normalizer()
+        references = self.dataset.dataframe[self.ground_truth_column].to_numpy()
+        outputs = dict(zip(df["sample_uuid"], df["output"], strict=True))
+
+        # Iterate the issued samples, not the returned ones: a sample with no
+        # COMPLETE event is scored as an empty hypothesis (all of its reference
+        # words count as deletions) rather than dropped from the denominator.
+        distance = 0
+        words = 0
+        empty = 0
+        missing = 0
+        for sample_uuid, index in self.sample_index_map.items():
+            hypothesis = outputs.get(sample_uuid)
+            if hypothesis is None:
+                missing += 1
+                hypothesis = ""
+            elif not hypothesis:
+                empty += 1
+            hyp_words = normalizer(project_to_labels(hypothesis)).split()
+            ref_words = normalizer(project_to_labels(str(references[index]))).split()
+            sample_distance, sample_words = wer_counts(hyp_words, ref_words)
+            distance += sample_distance
+            words += sample_words
+
+        self.complete = missing == 0
+        if words == 0:
+            self._breakdown = {"wer_percent": None, "missing_samples": missing}
+            return None, n_repeats
+
+        wer = distance / words
+        self._breakdown = {
+            "wer_percent": wer * 100.0,
+            "edit_distance": distance,
+            "reference_words": words,
+            "empty_responses": empty,
+            "missing_samples": missing,
+        }
+        if missing:
+            logger.warning(
+                "%d of %d issued samples produced no output and were scored as "
+                "empty transcripts; this run is reported as incomplete.",
+                missing,
+                issued,
+            )
+        return 100.0 - wer * 100.0, n_repeats
+
+    def score_breakdown(self) -> dict[str, Any] | None:
+        return self._breakdown
 
 
 def _uv_subproject_env(project_path: os.PathLike | str) -> dict[str, str]:
