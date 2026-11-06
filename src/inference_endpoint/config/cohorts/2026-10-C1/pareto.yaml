@@ -266,3 +266,16 @@ pareto_accuracy_entries:
         op: eq,
         value: 0,
       }
+
+pareto_model_name_consistency:
+  description: The `<model>` directory is named after the points' declared model_name (§8.1).
+  rule: "Endpoints Policy §8.1, Submission Layout; §8.5, Curve Consistency; §8.3, Measurement Point."
+  fix: Rename the model directory to the declared model_name (or correct the declaration).
+  severity: fail
+  assert:
+    - {
+        over: derived.model_dir_name_mismatches,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }

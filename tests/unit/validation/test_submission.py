@@ -1153,6 +1153,7 @@ class TestDerivedExposure:
             "structure_misses",
             "entryless_accuracy_points",
             "input_shape",
+            "model_dir_name_mismatches",
             "unresolved_shared_paths",
             "unapproved_drafter_points",
         }
@@ -1525,3 +1526,28 @@ class TestInputShape:
         grouped = Submission.from_directory(Path(system.dir).parent)
         assert grouped.paretos[0].input_shape() == "system"
         assert upload.paretos[0].input_shape() == "submission"
+
+
+class TestModelDirNameConsistency:
+    """The `<model>` directory must be named after the declared model_name (§8.1)."""
+
+    @pytest.mark.unit
+    def test_a_mismatched_directory_name_is_named(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16, config_extra={"model_name": "gpt-oss-120b"})],
+        )
+        assert pareto.model_dir_name_mismatches() == ("gpt-oss-120b != model",)
+
+    @pytest.mark.unit
+    def test_a_matching_directory_name_holds_its_row(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16, config_extra={"model_name": "model"})],
+        )
+        assert pareto.model_dir_name_mismatches() == ()
+
+    @pytest.mark.unit
+    def test_an_undeclared_name_leaves_the_row_to_the_disclosure_checks(self, tmp_path):
+        pareto = _pareto(tmp_path, [Run(concurrency=16)])
+        assert pareto.model_dir_name_mismatches() == ()

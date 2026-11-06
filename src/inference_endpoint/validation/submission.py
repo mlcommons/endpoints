@@ -957,6 +957,29 @@ class Pareto:
         names = {point.model_name for point in self.points if point.model_name}
         return tuple(sorted(names)) if len(names) > 1 else ()
 
+    def model_dir_name_mismatches(self) -> tuple[str, ...]:
+        """The `<model>` directory name versus the declared `model_name` (§8.1).
+
+        Section 8.1 names the directory `results/<system>/<model_name>/` and
+        §8.5 sources that name from the point files, so the first declared name
+        must equal the directory's; the comparison is exact, as the round's
+        checker reads it. Empty when nothing is declared (the disclosure rows
+        report that absence) or when the declared name matches.
+
+        Returns:
+            tuple[str, ...]: One `<declared> != <directory>` line per mismatch,
+                otherwise empty.
+        """
+        declared = next(
+            (point.model_name for point in self.points if point.model_name), None
+        )
+        if declared is None or self.node is None:
+            return ()
+        directory = Path(self.node.dir).name
+        if declared == directory:
+            return ()
+        return (f"{declared} != {directory}",)
+
     def conflicting_datasets(self) -> tuple[str, ...]:
         """The distinct `dataset` ids when the points disagree (§9.1).
 
@@ -1814,6 +1837,7 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,
     "model_name_admitted": Pareto.model_name_admitted,
+    "model_dir_name_mismatches": Pareto.model_dir_name_mismatches,
     "conflicting_load_patterns": Pareto.conflicting_load_patterns,
     "conflicting_model_names": Pareto.conflicting_model_names,
     "conflicting_datasets": Pareto.conflicting_datasets,
