@@ -339,7 +339,13 @@ def _resolves_shared_path(root: Path, value: str) -> Path | None:
     if not parts or any(part == ".." for part in parts):
         return None
     candidate = root.joinpath(*parts)
-    return candidate if candidate.is_dir() else None
+    if not candidate.is_dir():
+        return None
+    # A symlink anywhere along the path can point outside the root; the pointer
+    # must resolve to a directory still below it.
+    if not candidate.resolve().is_relative_to(root.resolve()):
+        return None
+    return candidate
 
 
 # Section 2.9.4's lead time: two cohorts after the entry's approval.

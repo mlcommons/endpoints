@@ -687,8 +687,16 @@ def _check_values(
 
 
 def _quoted(entry: Any, value: Any) -> str:
-    """`value` as a refusal message may quote it: a sensitive leaf never repeats it."""
-    return "(redacted)" if isinstance(entry, _Fact) and entry.sensitive else repr(value)
+    """`value` as a refusal message may quote it: a sensitive leaf never repeats it.
+
+    A block-shaped entry redacts too: its own refusal must not echo a value that
+    the block's declaration marks as a sensitive leaf.
+    """
+    if isinstance(entry, _Fact) and entry.sensitive:
+        return "(redacted)"
+    if isinstance(entry, Mapping) and _carries_sensitive(entry):
+        return "(redacted)"
+    return repr(value)
 
 
 def _carries_sensitive(declared: Mapping[str, Any]) -> bool:

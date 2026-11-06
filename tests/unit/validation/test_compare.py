@@ -551,6 +551,21 @@ class TestCompareVerdict:
         assert "(redacted)" in message
 
     @pytest.mark.unit
+    def test_a_block_shaped_refusal_redacts_a_sensitive_block(self, tmp_path):
+        path = tmp_path / "valid_refs.yaml"
+        path.write_text(
+            "point:\n  config:\n    client:\n"
+            "      api_key: { type: str, sensitive: true }\n",
+            encoding="utf-8",
+        )
+        table = RefTable.from_yaml(path)
+        with pytest.raises(ValueError) as caught:
+            table.validate_values("point", {"config": {"client": "sk-live-abc123"}})
+        message = str(caught.value)
+        assert "sk-live-abc123" not in message
+        assert "(redacted)" in message
+
+    @pytest.mark.unit
     def test_incommensurable_ordering_pair_fails_with_why(self):
         verdict = Verdict.evaluate(_compare(op="gt", left=5, right=None), SCOPES)
         assert verdict.ok is False

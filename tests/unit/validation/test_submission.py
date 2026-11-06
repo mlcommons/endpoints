@@ -1188,6 +1188,22 @@ class TestDerivedExposure:
         assert pareto.unresolved_shared_paths() == ("shared_src=../outside",)
 
     @pytest.mark.unit
+    def test_a_symlinked_pointer_must_resolve_below_the_root(self, tmp_path):
+        root = tmp_path / "upload"
+        runs = [Run(concurrency=16, config_extra={"shared_src": "src/impl"})]
+        pareto = write_upload(root, {SYSTEM: runs}).paretos[0]
+        inner = root / "src" / "real"
+        inner.mkdir(parents=True)
+        link = root / "src" / "impl"
+        link.symlink_to(inner, target_is_directory=True)
+        assert pareto.unresolved_shared_paths() == ()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        link.unlink()
+        link.symlink_to(outside, target_is_directory=True)
+        assert pareto.unresolved_shared_paths() == ("shared_src=src/impl",)
+
+    @pytest.mark.unit
     def test_a_drafter_must_be_approved_and_old_enough(self, tmp_path):
         weight = "git-sha1:" + "a" * 40
         target = "git-sha1:" + "b" * 40
