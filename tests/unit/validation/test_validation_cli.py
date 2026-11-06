@@ -220,6 +220,71 @@ class TestSubmissionVerdicts:
         assert "submission sys/bad-model: refused (" in out
         assert "1 submission(s): 0 accepted, 0 rejected, 1 refused" in out
 
+    @pytest.mark.unit
+    def test_a_broken_artifact_refuses_only_its_own_submission(self, tmp_path, capsys):
+        root = tmp_path / "upload"
+        write_upload(
+            root,
+            {
+                ("sys", "model"): [Run(concurrency=16)],
+                ("sys", "bad-model"): [Run(concurrency=16)],
+            },
+        )
+        (
+            root / "results" / "sys" / "bad-model" / "r16" / "result_summary.json"
+        ).write_text("{", encoding="utf-8")
+        cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
+        assert main([str(cohort), str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "submission sys/model: accepted" in out
+        assert "submission sys/bad-model: refused (" in out
+        assert "2 submission(s): 1 accepted, 0 rejected, 1 refused" in out
+
+    @pytest.mark.unit
+    def test_a_declared_value_fault_refuses_only_its_own_submission(
+        self, tmp_path, capsys
+    ):
+        refs = "point:\n  config:\n    dataset: { type: str }\n"
+        root = tmp_path / "upload"
+        write_upload(
+            root,
+            {
+                ("sys", "model"): [Run(concurrency=16)],
+                ("sys", "bad-model"): [
+                    Run(concurrency=16, config_extra={"dataset": 123})
+                ],
+            },
+        )
+        cohort = write_cohort(tmp_path / "cohort", refs=refs, point=HOLD_CHECK)
+        assert main([str(cohort), str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "submission sys/model: accepted" in out
+        assert "submission sys/bad-model: refused (" in out
+
+    @pytest.mark.unit
+    def test_a_system_level_artifact_fault_refuses_every_tuple_below(
+        self, tmp_path, capsys
+    ):
+        root = tmp_path / "upload"
+        write_upload(
+            root,
+            {
+                ("sys", "model"): [Run(concurrency=16)],
+                ("sys", "other-model"): [Run(concurrency=16)],
+                ("other", "model"): [Run(concurrency=16)],
+            },
+        )
+        (root / "results" / "sys" / "system_power.json").write_text(
+            "{", encoding="utf-8"
+        )
+        cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
+        assert main([str(cohort), str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "submission other/model: accepted" in out
+        assert "submission sys/model: refused (" in out
+        assert "submission sys/other-model: refused (" in out
+        assert "3 submission(s): 1 accepted, 0 rejected, 2 refused" in out
+
 
 class TestReportLines:
     """Marks, per-check instance counts, and the Never-Ran disclosure."""

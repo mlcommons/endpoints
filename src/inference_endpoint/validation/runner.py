@@ -36,7 +36,12 @@ from typing import Any
 
 from inference_endpoint.validation.check import Check, Cohort, Severity
 from inference_endpoint.validation.compare import Ref, Verdict
-from inference_endpoint.validation.submission import Pareto, Point, Submission
+from inference_endpoint.validation.submission import (
+    Pareto,
+    Point,
+    Submission,
+    refused_submissions,
+)
 from inference_endpoint.validation.tree import Node, RuleScopes
 
 
@@ -249,22 +254,35 @@ def _tree_root(submission: Submission) -> Node:
     return submission.tree
 
 
+def _refusal_unit(node: Node) -> Node:
+    """The node one refusal covers: the nearest `<system, model>` above, else `node`.
+
+    A point-level fault refuses its own tuple; a system-level one (a
+    `system_power.json` that failed to parse) refuses every tuple below it; a
+    root-level one has no tuple above it and stays on the root.
+    """
+    probe: Node | None = node
+    while probe is not None and probe.kind is not RuleScopes.PARETO:
+        probe = probe.parent
+    return node if probe is None else probe
+
+
 def _validate_artifacts(submission: Submission) -> None:
-    """Fail loud on any artifact that failed to parse anywhere in the tree.
+    """Refuse every artifact that failed to parse anywhere in the tree.
 
     A corrupt artifact must never read as an absent fact: that would silently
-    switch `when`-gated checks off and pass the submission by omission.
+    switch `when`-gated checks off and pass the submission by omission. The
+    fault is recorded on the `<system, model>` that contains it, so one broken
+    run cannot take its siblings' verdicts down with it.
     """
-    root = _tree_root(submission)
-    broken = [
-        f"{node.dir / name}: {error}"
-        for node in _all_nodes(root)
-        if not _is_refused(node)
-        for name, (value, error) in sorted(node.artifacts.items())
-        if error is not None
-    ]
-    if broken:
-        raise ValueError("unreadable artifacts: " + "; ".join(broken))
+    for node in _all_nodes(_tree_root(submission)):
+        if _is_refused(node):
+            continue
+        for name, (_, error) in sorted(node.artifacts.items()):
+            if error is None:
+                continue
+            unit = _refusal_unit(node)
+            unit.refusals = (*unit.refusals, f"{node.dir / name}: {error}")
 
 
 def _validate_declared_values(
@@ -294,8 +312,12 @@ def _validate_declared_values(
             shape_notes = cohort.refs.validate_values(node.kind.value, fields)
         except ValueError as exc:
             # The run directory names the offending node: a multi-pareto upload
-            # has many `point.config.…` paths, one per run.
-            raise ValueError(f"{node.dir}: {exc}") from exc
+            # has many `point.config.…` paths, one per run. A fault below a
+            # `<system, model>` refuses that tuple and leaves the siblings to
+            # their own verdicts.
+            unit = _refusal_unit(node)
+            unit.refusals = (*unit.refusals, f"{node.dir}: {exc}")
+            continue
         notes.extend(f"{kind}: {node.dir}: {message}" for kind, message in shape_notes)
     return tuple(notes)
 
@@ -761,8 +783,9 @@ def submission_verdicts(
             holding no model directory).
     """
     refusals: dict[Path, list[str]] = {}
-    for refused in submission.refused:
-        refusals.setdefault(refused.path, []).append(refused.message)
+    for node in _all_nodes(submission.tree):
+        for refused in refused_submissions(node):
+            refusals.setdefault(refused.path, []).append(refused.message)
     verdicts: list[SubmissionVerdict] = []
     for pareto in submission.paretos:
         where = pareto.node.dir

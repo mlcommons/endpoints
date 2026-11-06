@@ -194,7 +194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{len(verdicts)} submission(s): {accepted} accepted, "
         f"{len(verdicts) - accepted - refused} rejected, {refused} refused"
     )
-    return 1 if blocking or submission.refused else 0
+    return 1 if blocking or refused else 0
 
 
 if __name__ == "__main__":

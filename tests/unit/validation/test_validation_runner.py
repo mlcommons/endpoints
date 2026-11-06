@@ -276,17 +276,12 @@ class TestDeclaredValueChecking:
             refs={"point": {"config": {"warmup": {"duration_s": {"type": "int"}}}}},
             point=PLAIN_CHECK,
         )
-        with pytest.raises(
-            ValueError,
-            match=r"point\.config\.warmup\.duration_s: 'x' "
-            r"does not match its declared type",
-        ):
-            Finding.collect(
-                cohort,
-                _submission(
-                    tmp_path, [16], extras={16: {"warmup": {"duration_s": "x"}}}
-                ),
-            )
+        submission = _submission(
+            tmp_path, [16], extras={16: {"warmup": {"duration_s": "x"}}}
+        )
+        collected = Finding.collect(cohort, submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert "does not match its declared type" in (verdicts[0].refusal or "")
 
     @pytest.mark.unit
     def test_a_bool_value_fails_an_int_leaf(self, tmp_path):
@@ -296,13 +291,12 @@ class TestDeclaredValueChecking:
             refs={"point": {"config": {"warmup": {"duration_s": {"type": "int"}}}}},
             point=PLAIN_CHECK,
         )
-        with pytest.raises(ValueError, match="does not match its declared type"):
-            Finding.collect(
-                cohort,
-                _submission(
-                    tmp_path, [16], extras={16: {"warmup": {"duration_s": True}}}
-                ),
-            )
+        submission = _submission(
+            tmp_path, [16], extras={16: {"warmup": {"duration_s": True}}}
+        )
+        collected = Finding.collect(cohort, submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert "does not match its declared type" in (verdicts[0].refusal or "")
 
     @pytest.mark.unit
     def test_a_float_leaf_accepts_an_int_value(self, tmp_path):
@@ -347,17 +341,12 @@ class TestDeclaredValueChecking:
             refs={"point": {"config": {"warmup": {"duration_s": {"type": "int"}}}}},
             point=PLAIN_CHECK,
         )
-        with pytest.raises(
-            ValueError,
-            match=r"point\.config\.warmup\.duration_s: '5 s' "
-            r"does not match its declared type",
-        ):
-            Finding.collect(
-                cohort,
-                _submission(
-                    tmp_path, [16], extras={16: {"warmup": {"duration_s": "5 s"}}}
-                ),
-            )
+        submission = _submission(
+            tmp_path, [16], extras={16: {"warmup": {"duration_s": "5 s"}}}
+        )
+        collected = Finding.collect(cohort, submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert "does not match its declared type" in (verdicts[0].refusal or "")
 
     @pytest.mark.unit
     def test_a_declaration_judges_a_numeric_equivalent_key(self, tmp_path):
@@ -373,19 +362,14 @@ class TestDeclaredValueChecking:
             },
             point=PLAIN_CHECK,
         )
-        with pytest.raises(
-            ValueError,
-            match=r"point\.config\.warmup\.percentiles\.90: 'x' "
-            r"does not match its declared type",
-        ):
-            Finding.collect(
-                cohort,
-                _submission(
-                    tmp_path,
-                    [16],
-                    extras={16: {"warmup": {"percentiles": {"90.0": "x"}}}},
-                ),
-            )
+        submission = _submission(
+            tmp_path,
+            [16],
+            extras={16: {"warmup": {"percentiles": {"90.0": "x"}}}},
+        )
+        collected = Finding.collect(cohort, submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert "does not match its declared type" in (verdicts[0].refusal or "")
 
     @pytest.mark.unit
     def test_a_present_leaf_value_must_be_in_its_allowlist(self, tmp_path):
@@ -409,13 +393,10 @@ class TestDeclaredValueChecking:
             },
             point=PLAIN_CHECK,
         )
-        with pytest.raises(
-            ValueError,
-            match=r"point\.config\.region: 'bogus' is not one of",
-        ):
-            Finding.collect(
-                cohort, _submission(tmp_path, [16], extras={16: {"region": "bogus"}})
-            )
+        submission = _submission(tmp_path, [16], extras={16: {"region": "bogus"}})
+        collected = Finding.collect(cohort, submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert "is not one of" in (verdicts[0].refusal or "")
 
     @pytest.mark.unit
     def test_a_value_must_be_a_block_where_the_table_declares_one(self, tmp_path):
@@ -424,13 +405,10 @@ class TestDeclaredValueChecking:
             refs={"point": {"config": {"warmup": {"duration_s": "int"}}}},
             point=PLAIN_CHECK,
         )
-        with pytest.raises(
-            ValueError,
-            match=r"point\.config\.warmup: 'foo' is no block",
-        ):
-            Finding.collect(
-                cohort, _submission(tmp_path, [16], extras={16: {"warmup": "foo"}})
-            )
+        submission = _submission(tmp_path, [16], extras={16: {"warmup": "foo"}})
+        collected = Finding.collect(cohort, submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert "is no block" in (verdicts[0].refusal or "")
 
     @pytest.mark.unit
     def test_a_dict_subtree_keeps_its_junk_unchecked(self, tmp_path):
@@ -466,10 +444,9 @@ class TestDeclaredValueChecking:
                 ]
             },
         )
-        with pytest.raises(
-            ValueError, match=r"point\.result_summary\.percentiles: 17 is no block"
-        ):
-            Finding.collect(cohort, submission)
+        collected = Finding.collect(cohort, submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert "is no block" in (verdicts[0].refusal or "")
 
     @pytest.mark.unit
     def test_a_client_shaped_summary_satisfies_a_system_tps_row(self, tmp_path):
@@ -525,12 +502,9 @@ tps_row:
                 ]
             },
         )
-        with pytest.raises(
-            ValueError,
-            match=r"point\.config\.warmup\.duration_s: 'x' "
-            r"does not match its declared type",
-        ):
-            Finding.collect(cohort, submission)
+        collected = Finding.collect(cohort, submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert "does not match its declared type" in (verdicts[0].refusal or "")
 
 
 class TestNeedsGate:
@@ -841,8 +815,9 @@ class TestCollectFailsLoud:
         (run_dir / "config.yaml").write_text("{bad", encoding="utf-8")
         submission = Submission.from_directory(tmp_path / "acme")
         check = _check("cap", assert_=[LITERAL_ROW])
-        with pytest.raises(ValueError, match="unreadable artifacts"):
-            Finding.collect(Cohort((check,)), submission)
+        collected = Finding.collect(Cohort((check,)), submission)
+        verdicts = submission_verdicts(submission, collected)
+        assert "parse error" in (verdicts[0].refusal or "")
 
     @pytest.mark.unit
     def test_a_cohort_naming_the_ruleset_root_needs_one(self, tmp_path):

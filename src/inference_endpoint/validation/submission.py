@@ -1559,14 +1559,25 @@ def _refuse(node: Node, message: str) -> None:
     node.refusals = (*node.refusals, message)
 
 
-def _refused_submissions(node: Node) -> list[RefusedSubmission]:
+def _paretos_below(node: Node) -> Iterator[Node]:
+    """Every `<system, model>` node anywhere in `node`'s subtree."""
+    for child in node.children:
+        if child.kind is RuleScopes.PARETO:
+            yield child
+        else:
+            yield from _paretos_below(child)
+
+
+def refused_submissions(node: Node) -> list[RefusedSubmission]:
     """`node`'s refusals as per-submission records, one per pareto below it.
 
     A refused node with no pareto below it (a system directory holding no
     model directory) keeps one record of its own: the refusal is real and must
-    be reported even though no submission can carry it.
+    be reported even though no submission can carry it. A refusal on the root
+    itself fans out to every submission's record, so a root-level fault refuses
+    every tuple rather than vanishing behind a bare directory name.
     """
-    paretos = [child for child in node.children if child.kind is RuleScopes.PARETO]
+    paretos = list(_paretos_below(node))
     if not paretos:
         return [RefusedSubmission(node.dir, refusal) for refusal in node.refusals]
     return [
@@ -1634,28 +1645,28 @@ class Submission:
         refused: list[RefusedSubmission] = []
         for system in tree.children:
             if system.refusals:
-                refused.extend(_refused_submissions(system))
+                refused.extend(refused_submissions(system))
                 continue
             if not system.children:
                 _refuse(system, f"{system.dir} has no model directories to check")
-                refused.extend(_refused_submissions(system))
+                refused.extend(refused_submissions(system))
                 continue
             for pareto_node in system.children:
                 if pareto_node.refusals:
-                    refused.extend(_refused_submissions(pareto_node))
+                    refused.extend(refused_submissions(pareto_node))
                     continue
                 if not pareto_node.children:
                     _refuse(
                         pareto_node,
                         f"{pareto_node.dir} has no run directories (r<N>) to check",
                     )
-                    refused.extend(_refused_submissions(pareto_node))
+                    refused.extend(refused_submissions(pareto_node))
                     continue
                 try:
                     paretos.append(Pareto.from_nodes(pareto_node))
                 except ValueError as exc:
                     _refuse(pareto_node, str(exc))
-                    refused.extend(_refused_submissions(pareto_node))
+                    refused.extend(refused_submissions(pareto_node))
         if not paretos and not refused:
             raise ValueError(
                 f"{root} holds no paretos: a pool root expects "

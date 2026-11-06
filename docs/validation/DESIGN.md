@@ -203,7 +203,9 @@ for.
     reads the system's own `system_power.json`; a `<system>` with no model
     directories and a pool holding no paretos are refused (an empty system
     cannot hide from system-scoped checks); `pareto_at(node)` locates the pareto
-    a tree node belongs to.
+    a tree node belongs to. A refusal is recorded on the node it covers and fans
+    down through `refused_submissions(node)`, so one broken submission reads
+    `refused` while its siblings keep their own verdicts.
 
 - **`runner.py`** — `Finding` (the audit-trail record: `check_id`/`severity`/
   `scope`/`node_directory`/`verdict`/`rule`), `Finding.collect` (whose phases
@@ -311,7 +313,7 @@ flowchart LR
   CAT["Catalog.from_ruleset → ruleset root"]
   COH["Cohort.from_directory → RefTable.from_yaml (valid_refs.yaml first) + cohort.yaml ruleset, then Cohort((Check, …), refs, ruleset). id = key, scope = filename"]
   MAIN["__main__.main (CLI wiring)"]
-  RUN["Finding.collect(cohort, submission). _validate_* refuse loud; _GateResolver; Verdict.evaluate"]
+  RUN["Finding.collect(cohort, submission). _validate_* refuse the covered tuple; _GateResolver; Verdict.evaluate"]
   OUT["(Finding, …) → report lines + exit 0 / 1 / 2"]
 
   usd --> TREE
@@ -350,19 +352,23 @@ flowchart LR
 findings plus one `CheckRun` per check) and runs four phases, then the walk.
 
 1. **Contract validation.** `_validate_points`, `_validate_artifacts`,
-   `_validate_declared_values` and `_validate_ruleset_needs` fail loud wherever
-   the walk cannot happen: no points, or a point without its node; an artifact
-   that failed to parse (a corrupt file must never read as an absent fact and
-   switch checks off); a present value its `valid_refs.yaml` declaration will
-   not carry (one per-node `RefTable.validate_values` pass, whose numeric-string
-   shape notes come back on `Collected.notes`); or a cohort naming the `ruleset`
-   namespace the tree was built without (`derived`/`regions` are per-pareto and
-   always present at their nodes). The rule behind all four: silence must never
-   be the verdict. A `when` row that failed to evaluate is refused loudly for
-   the same reason — `Verdict.broken` separates "judged false" from "could not
-   be judged" — while an optional fact the upload never declared stays
-   judgeable: the row reads false, and `compare._missing_outcome` keeps that
-   case distinct (README, "Absent facts").
+   `_validate_declared_values` and `_validate_ruleset_needs` run before any row.
+   A load-level fault refuses the input loudly: a submission set the walk cannot
+   cover, or a cohort naming the `ruleset` namespace the tree was built without
+   (`derived`/`regions` are per-pareto and always present at their nodes). A
+   fault that belongs to one submission is recorded on the nearest
+   `<system, model>` above it instead: an artifact that failed to parse (a
+   corrupt file must never read as an absent fact and switch checks off), or a
+   present value its `valid_refs.yaml` declaration will not carry (one per-node
+   `RefTable.validate_values` pass, whose numeric-string shape notes come back
+   on `Collected.notes`). `submission_verdicts` merges those collect-time
+   refusals with the loader's, so the tuple reads `refused` and exits non-zero
+   while its siblings keep their verdicts. The rule behind all of it: silence
+   must never be the verdict. A `when` row that failed to evaluate is refused
+   loudly for the same reason — `Verdict.broken` separates "judged false" from
+   "could not be judged" — while an optional fact the upload never declared
+   stays judgeable: the row reads false, and `compare._missing_outcome` keeps
+   that case distinct (README, "Absent facts").
 
 2. **Candidate validation.** `_collect_candidates(cohort)` validates `needs` id
    references against the cohort and refuses a `needs` cycle outright (the DFS
