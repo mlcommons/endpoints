@@ -1157,6 +1157,7 @@ class TestDerivedExposure:
             "nodes_used_problems",
             "maximal_engagement_problems",
             "tps_per_kw_mismatches",
+            "tps_per_user_mismatches",
             "unresolved_shared_paths",
             "unapproved_drafter_points",
         }
@@ -1748,3 +1749,49 @@ class TestPointPower:
             [Run(concurrency=16, system_tps=1000.0)],
         )
         assert pareto.tps_per_kw_mismatches() == ()
+
+
+class TestTpsPerUser:
+    """§9.1: `tps_per_user = 1000 / tpot_p90_ms`."""
+
+    @pytest.mark.unit
+    def test_a_matching_p90_implied_rate_holds_its_row(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    summary_extra={
+                        "tpot": {"percentiles": {"90.0": 5_500_000.0}},
+                        "tps_per_user": 1000.0 / 5.5,
+                    },
+                )
+            ],
+        )
+        assert pareto.tps_per_user_mismatches() == ()
+
+    @pytest.mark.unit
+    def test_a_stored_rate_off_the_p90_is_named(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    summary_extra={
+                        "tpot": {"percentiles": {"90": 10_000_000.0}},
+                        "tps_per_user": 250.0,
+                    },
+                )
+            ],
+        )
+        mismatches = pareto.tps_per_user_mismatches()
+        assert len(mismatches) == 1
+        assert "against 100.0" in mismatches[0]
+
+    @pytest.mark.unit
+    def test_a_summary_without_a_p90_has_nothing_to_check(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [Run(concurrency=16, summary_extra={"tps_per_user": 250.0})],
+        )
+        assert pareto.tps_per_user_mismatches() == ()

@@ -1245,6 +1245,45 @@ class Pareto:
         value, error = self.node.parent.read("system_power.json")
         return (value if isinstance(value, Mapping) else None), error
 
+    def tps_per_user_mismatches(self) -> tuple[str, ...]:
+        """§9.1's per-user rate: `tps_per_user = 1000 / tpot_p90_ms`.
+
+        The stored value is checked against the rate the P90 time per output
+        token implies (§4.1's P90, milliseconds), within one percent. A point
+        without a usable P90 or a stored value has nothing to check; a
+        non-finite one is named.
+
+        Returns:
+            tuple[str, ...]: One line per mismatch, empty when each stored value
+                matches its P90-implied rate.
+        """
+        mismatches: list[str] = []
+        for point in self.points:
+            if point.node is None:
+                continue
+            summary, error = point.node.read("result_summary.json")
+            if error is not None or not isinstance(summary, Mapping):
+                continue
+            stored = decode_number(summary.get("tps_per_user"), "float")
+            if not isinstance(stored, int | float) or isinstance(stored, bool):
+                continue
+            p90_ns = _percentile_value(summary.get("tpot"), 90.0)
+            if p90_ns is None or p90_ns <= 0:
+                continue
+            if not math.isfinite(float(stored)):
+                mismatches.append(
+                    f"c{point.concurrency}: tps_per_user reads non-finite ({stored})"
+                )
+                continue
+            p90_ms = p90_ns / 1e6
+            derived = 1000.0 / p90_ms
+            if abs(float(stored) - derived) / max(abs(derived), 1e-9) > 0.01:
+                mismatches.append(
+                    f"c{point.concurrency}: tps_per_user {stored} against "
+                    f"{derived:.4f} (P90 {p90_ms:.4f} ms)"
+                )
+        return tuple(mismatches)
+
     def conflicting_datasets(self) -> tuple[str, ...]:
         """The distinct `dataset` ids when the points disagree (§9.1).
 
@@ -2093,6 +2132,7 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "misplaced_region_points": Pareto.misplaced_region_points,
     "tps_utilization_mismatch_points": Pareto.tps_utilization_mismatch_points,
     "accuracy_gate_misses": Pareto.accuracy_gate_misses,
+    "tps_per_user_mismatches": Pareto.tps_per_user_mismatches,
     "structure_misses": Pareto.structure_misses,
     "unresolved_shared_paths": Pareto.unresolved_shared_paths,
     "unapproved_drafter_points": Pareto.unapproved_drafter_points,
@@ -2137,6 +2177,35 @@ class _Parallelism:
     def accelerators_used(self) -> int:
         """§4.5.3's `accelerators_used = DP x A_replica`."""
         return self.data_parallel * self.replica
+
+
+def _percentile_value(block: Any, percentile: float) -> float | None:
+    """The `percentile` entry of a summary percentile block, `None` when absent.
+
+    Percentile keys are spellings: writers emit `"90"` or `"90.0"` for the same
+    grid point, so the key is matched numerically, the same equivalence
+    `Ref.resolve` applies to percentile refs.
+
+    Args:
+        block (Any): The summary's percentile block (`tpot`, `ttft`, ...).
+        percentile (float): The grid point to read.
+
+    Returns:
+        float | None: The entry's numeric value, or `None` when the block,
+            the `percentiles` map or the grid point is absent.
+    """
+    if not isinstance(block, Mapping):
+        return None
+    percentiles = block.get("percentiles")
+    if not isinstance(percentiles, Mapping):
+        return None
+    for key, value in percentiles.items():
+        decoded_key = decode_number(key, "float")
+        if isinstance(decoded_key, int | float) and float(decoded_key) == percentile:
+            decoded_value = decode_number(value, "float")
+            if isinstance(decoded_value, int | float):
+                return float(decoded_value)
+    return None
 
 
 _PARALLELISM_FIELDS = (

@@ -313,3 +313,16 @@ pareto_tps_per_kw:
         op: eq,
         value: 0,
       }
+
+pareto_tps_per_user:
+  description: Every stored tps_per_user equals 1000 / tpot_p90_ms within one percent (§9.1).
+  rule: "Endpoints Policy §9.1, Automated Checks; §4.1, Metrics; §4.4, Latency."
+  fix: Recompute tps_per_user from the run's tpot P90 and re-export result_summary.json.
+  severity: fail
+  assert:
+    - {
+        over: derived.tps_per_user_mismatches,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }
