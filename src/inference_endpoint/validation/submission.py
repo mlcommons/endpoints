@@ -44,7 +44,6 @@ from typing import Any, Literal
 from inference_endpoint.validation.catalog import Catalog
 from inference_endpoint.validation.refs import decode_number
 from inference_endpoint.validation.regions import RegionKind, Regions
-from inference_endpoint.validation.sentinels import MISSING
 from inference_endpoint.validation.tree import Node, RuleScopes, SubmissionNode
 
 RULES_URL = (
@@ -154,13 +153,33 @@ def _accuracy_entries(root: Any) -> list[Mapping[str, Any]]:
     return []
 
 
+def _accuracy_document_entries(
+    document: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    """One `accuracy_results.json` document's per-dataset entries.
+
+    Two shapes ship: the client's `{"accuracy_scores": [ ... ]}` (or a mapping
+    under that key), and the canonical document keyed by dataset name at its top
+    level. One reader, so `_accuracy_carrying_points`, the gate and the
+    presence row all count the same entries.
+    """
+    if "accuracy_scores" in document:
+        return _accuracy_entries(document.get("accuracy_scores"))
+    return [
+        entry
+        for key, entry in document.items()
+        if key not in _ACCURACY_META_KEYS and isinstance(entry, Mapping)
+    ]
+
+
 def _accuracy_entry_scores(entry: Mapping[str, Any]) -> dict[str, float]:
     """One entry's `{metric: value}`.
 
     The checker reads three shapes: a `score` mapping of named metrics, a
     scalar `score` (kept under its own name), or the metrics as direct entry
     keys, with the bookkeeping keys excluded. A value that decodes to no number
-    is skipped, as the checker logs and skips it.
+    is skipped, as the checker logs and skips it; a non-finite one is kept, for
+    the gate to judge rather than gate to a silent pass.
 
     Args:
         entry (Mapping[str, Any]): One dataset entry.
@@ -187,10 +206,18 @@ def _accuracy_entry_scores(entry: Mapping[str, Any]) -> dict[str, float]:
 
 
 def _accuracy_weight(entry: Mapping[str, Any]) -> float | None:
-    """One entry's aggregation weight: its sample count, `None` when unstated."""
+    """One entry's aggregation weight: its sample count, `None` when unstated.
+
+    A non-finite count is no weight: an infinite one would poison the mean, so
+    the plain-mean fallback takes over.
+    """
     for key in ("num_samples", "unit_samples"):
         weight = decode_number(entry.get(key), "float")
-        if isinstance(weight, int | float) and not isinstance(weight, bool):
+        if (
+            isinstance(weight, int | float)
+            and not isinstance(weight, bool)
+            and math.isfinite(float(weight))
+        ):
             return float(weight)
     return None
 
@@ -1044,7 +1071,13 @@ class Pareto:
             derived = _derived_system_tps(value)
             if not isinstance(stored, int | float) or isinstance(stored, bool):
                 continue
-            if not math.isfinite(float(stored)) or derived is None:
+            if not math.isfinite(float(stored)):
+                continue
+            if derived is None:
+                # A declared throughput the summary's own numbers cannot derive
+                # (a missing, null or non-positive duration) is unverifiable,
+                # and unverifiable must not read as consistent.
+                mismatched.append(point.concurrency)
                 continue
             if abs(float(stored) - derived) / max(abs(derived), 1e-9) > TPS_TOLERANCE:
                 mismatched.append(point.concurrency)
@@ -1086,15 +1119,15 @@ class Pareto:
         derivable: the checker recomputes `system_tps / max(system_tps)` from
         the summaries -- the derived whole-run throughputs, not the stored
         field -- and accepts a declared value within `TPS_UTILIZATION_ABS_TOL`.
-        A point whose summary cannot carry a throughput, or that declares no
-        utilization, is left to the presence refusals.
+        A point whose summary cannot carry a throughput is left to the presence
+        refusals; the peak is taken over every derivable throughput, declared
+        utilization or not.
 
         Returns:
             tuple[int, ...]: The concurrency of each mismatching point, empty
                 when every declared utilization agrees.
         """
-        measured: dict[int, float] = {}
-        declared: dict[int, float] = {}
+        throughputs: list[tuple[Point, float]] = []
         for point in self.points:
             if point.node is None:
                 continue
@@ -1104,23 +1137,25 @@ class Pareto:
                 if error is None and isinstance(value, Mapping)
                 else None
             )
-            util = point.system_desc.get("tps_utilization")
-            if (
-                derived is None
-                or not isinstance(util, int | float)
-                or isinstance(util, bool)
-            ):
-                continue
-            measured[point.concurrency] = derived
-            declared[point.concurrency] = float(util)
-        peak = max(measured.values(), default=0.0)
+            if derived is not None:
+                throughputs.append((point, derived))
+        peak = max((derived for _, derived in throughputs), default=0.0)
         if peak <= 0:
             return ()
-        return tuple(
-            concurrency
-            for concurrency, util in declared.items()
-            if abs(util - measured[concurrency] / peak) > TPS_UTILIZATION_ABS_TOL
-        )
+        misses: list[int] = []
+        for point, derived in throughputs:
+            util = decode_number(point.system_desc.get("tps_utilization"), "float")
+            if (
+                not isinstance(util, int | float)
+                or isinstance(util, bool)
+                or not math.isfinite(float(util))
+            ):
+                continue
+            # The comparison walks the points themselves: two points may share a
+            # concurrency in a hand-built curve, and neither overwrites the other.
+            if abs(float(util) - derived / peak) > TPS_UTILIZATION_ABS_TOL:
+                misses.append(point.concurrency)
+        return tuple(misses)
 
     def accuracy_uncovered_regions(self) -> tuple[str, ...]:
         """The §5.3 mandatory regions no accuracy-carrying point lands in.
@@ -1187,10 +1222,12 @@ class Pareto:
             value, error = point.node.read("accuracy_results.json")
             if error is not None or not isinstance(value, Mapping):
                 continue
-            entries = _accuracy_entries(value.get("accuracy_scores"))
+            entries = _accuracy_document_entries(value)
             if not entries:
                 continue
-            issued = [count for count in map(_accuracy_issued, entries) if count]
+            issued = [
+                count for count in map(_accuracy_issued, entries) if count is not None
+            ]
             if min_samples is not None and issued and sum(issued) < min_samples:
                 misses.append(
                     f"c{point.concurrency}: {sum(issued):.0f} accuracy "
@@ -1216,6 +1253,11 @@ class Pareto:
                     None,
                 )
                 if reported is None:
+                    continue
+                if not math.isfinite(float(reported)):
+                    misses.append(
+                        f"c{point.concurrency}: {metric} reads non-finite ({reported})"
+                    )
                     continue
                 if 0.0 <= reported <= 1.0 and lower > 1.0:
                     reported *= 100.0
@@ -1391,15 +1433,46 @@ class Pareto:
         )
 
     def _accuracy_carrying_points(self) -> tuple[Point, ...]:
-        """The points whose run directory carries a parsable accuracy result."""
+        """The points whose run directory carries a parsable accuracy result.
+
+        The one definition of "carrying": a parsable `accuracy_results.json` whose
+        `accuracy_scores` holds at least one entry. An entryless document is no
+        accuracy result, so the coverage rows, the gate and the presence row all
+        read the same fact.
+        """
         carrying: list[Point] = []
         for point in self.points:
             if point.node is None:
                 continue
             value, error = point.node.read("accuracy_results.json")
-            if value is not MISSING and error is None:
+            if error is not None or not isinstance(value, Mapping):
+                continue
+            if _accuracy_document_entries(value):
                 carrying.append(point)
         return tuple(carrying)
+
+    def entryless_accuracy_points(self) -> tuple[int, ...]:
+        """The points shipping an `accuracy_results.json` with no dataset entry.
+
+        Section 4.3's accuracy result is the entries: a parsable document whose
+        entry set is empty (in either shipped shape) carries no accuracy result
+        at all, so it can count neither towards the coverage rows nor the gate.
+        Reported per point, so the finding names the run to re-export.
+
+        Returns:
+            tuple[int, ...]: The concurrency of each entryless carrier, empty
+                when every shipped document holds at least one entry.
+        """
+        entryless: list[int] = []
+        for point in self.points:
+            if point.node is None:
+                continue
+            value, error = point.node.read("accuracy_results.json")
+            if error is not None or not isinstance(value, Mapping):
+                continue
+            if not _accuracy_document_entries(value):
+                entryless.append(point.concurrency)
+        return tuple(entryless)
 
     def point_count_min(self) -> int:
         """Endpoints Policy §5.3's minimum point count this pareto needs.
@@ -1698,6 +1771,7 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "structure_misses": Pareto.structure_misses,
     "unresolved_shared_paths": Pareto.unresolved_shared_paths,
     "unapproved_drafter_points": Pareto.unapproved_drafter_points,
+    "entryless_accuracy_points": Pareto.entryless_accuracy_points,
     "uncovered_regions": Pareto.uncovered_regions,
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,

@@ -995,7 +995,7 @@ class TestCurveConsistency:
         assert pareto.system_tps_mismatch_points() == (32,)
 
     @pytest.mark.unit
-    def test_unsafe_summary_numbers_are_skipped_not_raised(self, tmp_path):
+    def test_unsafe_summary_numbers_are_named_not_raised(self, tmp_path):
         pareto = _pareto(
             tmp_path,
             [
@@ -1028,7 +1028,9 @@ class TestCurveConsistency:
                 ),
             ],
         )
-        assert pareto.system_tps_mismatch_points() == ()
+        # A NaN or subnormal duration is unverifiable arithmetic evidence: the
+        # row names it (fail-closed) rather than crashing or passing it.
+        assert pareto.system_tps_mismatch_points() == (16, 32)
 
     @pytest.mark.unit
     def test_a_conforming_accuracy_entry_holds_its_gate(self, tmp_path):
@@ -1149,6 +1151,7 @@ class TestDerivedExposure:
             "tps_utilization_mismatch_points",
             "accuracy_gate_misses",
             "structure_misses",
+            "entryless_accuracy_points",
             "unresolved_shared_paths",
             "unapproved_drafter_points",
         }
@@ -1396,3 +1399,80 @@ class TestEmptySystems:
         (root / "results").mkdir(parents=True)
         with pytest.raises(ValueError, match="holds no paretos"):
             Submission.from_directory(root)
+
+
+class TestAccuracyGateEdges:
+    """The accuracy gate's and utilization check's arithmetic edges."""
+
+    @pytest.mark.unit
+    def test_a_zero_sample_count_still_fails_the_gate(self, tmp_path):
+        pareto = _gated_pareto(tmp_path, score=0.95, unit_samples=0)
+        misses = pareto.accuracy_gate_misses()
+        assert any("accuracy samples" in miss for miss in misses)
+
+    @pytest.mark.unit
+    def test_a_non_finite_score_is_named_not_silently_passed(self, tmp_path):
+        pareto = _gated_pareto(tmp_path, score=float("nan"))
+        misses = pareto.accuracy_gate_misses()
+        assert any("non-finite" in miss for miss in misses)
+
+    @pytest.mark.unit
+    def test_the_utilization_peak_covers_undeclared_points(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_tps=100.0,
+                    summary_extra={
+                        "duration_ns": 1_000_000_000,
+                        "output_sequence_lengths": {"total": 100},
+                    },
+                    system_desc_extra={"tps_utilization": 0.5},
+                ),
+                Run(
+                    concurrency=32,
+                    system_tps=200.0,
+                    summary_extra={
+                        "duration_ns": 1_000_000_000,
+                        "output_sequence_lengths": {"total": 200},
+                    },
+                ),
+            ],
+        )
+        assert pareto.tps_utilization_mismatch_points() == ()
+
+    @pytest.mark.unit
+    def test_a_numeric_string_utilization_is_decoded(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_tps=1000.0,
+                    summary_extra={
+                        "duration_ns": 1_000_000_000,
+                        "output_sequence_lengths": {"total": 1000},
+                    },
+                    system_desc_extra={"tps_utilization": "0.5"},
+                ),
+            ],
+        )
+        assert pareto.tps_utilization_mismatch_points() == (16,)
+
+    @pytest.mark.unit
+    def test_an_underivable_throughput_is_named(self, tmp_path):
+        pareto = _pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_tps=1000.0,
+                    summary_extra={
+                        "duration_ns": None,
+                        "output_sequence_lengths": {"total": 2000},
+                    },
+                ),
+            ],
+        )
+        assert pareto.system_tps_mismatch_points() == (16,)

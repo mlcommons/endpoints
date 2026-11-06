@@ -253,3 +253,16 @@ pareto_approved_drafter:
         op: eq,
         value: 0,
       }
+
+pareto_accuracy_entries:
+  description: Every shipped accuracy_results.json carries at least one dataset entry (§5.3/§15).
+  rule: "Endpoints Policy §5.3, Accuracy Runs; §15, Accuracy."
+  fix: Re-export the flagged runs' accuracy_results.json with their dataset entries.
+  severity: fail
+  assert:
+    - {
+        over: derived.entryless_accuracy_points,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }

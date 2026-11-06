@@ -323,19 +323,6 @@ point_sample_count_floor_open_orca:
       op: ge
       right: 24576
 
-point_accuracy_scores_present:
-  description: The run's accuracy_results.json carries at least one dataset entry.
-  rule: "Endpoints Policy §5.3, Accuracy Runs; §15, Accuracy."
-  fix: Run this point's accuracy dataset and ship its accuracy_results.json.
-  severity: fail
-  when:
-    - { left: point.accuracy_results.accuracy_scores, op: exists }
-  assert:
-    - over: point.accuracy_results.accuracy_scores
-      aggregate: count
-      op: gt
-      value: 0
-
 point_accuracy_present:
   description: This point ships an accuracy_results.json.
   rule: "Endpoints Policy §5.3, Accuracy Runs; §1, Submission completeness."
