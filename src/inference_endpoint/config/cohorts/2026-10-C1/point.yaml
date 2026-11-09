@@ -17,7 +17,7 @@ point_disclosure_complete:
   severity: fail
   assert:
     - { left: point.config.division, op: non_blank }
-    - { left: point.config.max_supported_concurrency, op: exists }
+    - { left: point.config.max_supported_concurrency, op: not_null }
     - { left: point.config.model_name, op: non_blank }
     - { left: point.config.model_precision, op: non_blank }
     - { left: point.config.link_to_model, op: non_blank }

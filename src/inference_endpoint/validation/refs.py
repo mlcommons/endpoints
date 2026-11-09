@@ -65,7 +65,7 @@ from typing import Any, ClassVar
 
 import yaml
 
-from inference_endpoint.validation.sentinels import MISSING
+from inference_endpoint.validation.sentinels import MISSING, REDACTED_VALUE
 from inference_endpoint.validation.tree import StrictLoader
 from inference_endpoint.validation.typo_checks import near_match
 
@@ -548,6 +548,10 @@ class RefTable:
         """
         level: Any = self._roots
         for name in ref.parts:
+            if isinstance(level, _Fact):
+                # An open subtree ends the path here, but its descendants inherit
+                # its sensitivity. Validating names already allowed that descent.
+                return replace(ref, sensitive=True) if level.sensitive else ref
             if not isinstance(level, Mapping) or name not in level:
                 return ref
             level = level[name]
@@ -693,9 +697,9 @@ def _quoted(entry: Any, value: Any) -> str:
     the block's declaration marks as a sensitive leaf.
     """
     if isinstance(entry, _Fact) and entry.sensitive:
-        return "(redacted)"
+        return REDACTED_VALUE
     if isinstance(entry, Mapping) and _carries_sensitive(entry):
-        return "(redacted)"
+        return REDACTED_VALUE
     return repr(value)
 
 

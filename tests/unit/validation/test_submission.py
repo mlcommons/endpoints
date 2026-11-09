@@ -1973,3 +1973,65 @@ class TestPowerHardening:
         assert pareto.tps_per_kw_mismatches() == (
             "c16: system_tps_per_kw reads non-finite (nan)",
         )
+
+
+class TestStructureContainment:
+    """Structure evidence below the root cannot be supplied by an external link."""
+
+    @pytest.mark.unit
+    def test_an_external_implementation_link_is_named(self, tmp_path):
+        root = tmp_path / "acme"
+        pareto = _pareto(tmp_path, [Run(concurrency=16)])
+        outside = tmp_path / "outside-implementation"
+        outside.mkdir()
+        (outside / "README.md").write_text("external evidence", encoding="utf-8")
+        (root / "docs").mkdir()
+        (root / "src").mkdir()
+        (root / "src" / "impl").symlink_to(outside, target_is_directory=True)
+        assert pareto.structure_misses() == ("src/impl resolves outside the root",)
+
+
+class TestNodeDeclarationValidation:
+    """Invalid power declarations remain visible to the rows that report them."""
+
+    @pytest.mark.unit
+    def test_a_non_mapping_node_entry_is_preserved_and_named(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [{"system_node_ensemble_id": "ensemble-a", "nodes": 4}],
+        }
+        pareto = TestPointPower._pareto(
+            tmp_path,
+            [Run(concurrency=16, config_extra={"nodes_used": ["not-a-block"]})],
+            power,
+        )
+        assert pareto.nodes_used_problems() == ("c16: nodes_used entry is no block",)
+
+    @pytest.mark.unit
+    def test_a_below_maximum_shortfall_requires_an_explanation(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [
+                {
+                    "system_node_ensemble_id": "ensemble-a",
+                    "nodes": 2,
+                    "accelerators_per_node": 8,
+                }
+            ],
+        }
+        pareto = TestPointPower._pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_desc_extra={"data_parallel": 2},
+                    config_extra={
+                        "dp_shortfall": {"dp_actual": 2, "dp_formula": 16, "reason": ""}
+                    },
+                )
+            ],
+            power,
+        )
+        assert pareto.maximal_engagement_problems() == (
+            "c16: below-maximum DP 2 declares no non-blank dp_shortfall.reason",
+        )

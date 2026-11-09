@@ -432,3 +432,14 @@ class TestShippedCohortGolden:
         path.write_text(yaml.safe_dump(config, sort_keys=True), encoding="utf-8")
         assert main([str(COHORT), str(root)]) == 1
         assert "pareto_benchmark_type_consistency" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_a_null_concurrency_ceiling_fails_the_disclosure(self, tmp_path, capsys):
+        root = tmp_path / "upload"
+        _build_upload(root)
+        path = root / "results" / SYSTEM / MODEL / "r8" / "point.yaml"
+        config = yaml.safe_load(path.read_text(encoding="utf-8"))
+        config["max_supported_concurrency"] = None
+        path.write_text(yaml.safe_dump(config, sort_keys=True), encoding="utf-8")
+        assert main([str(COHORT), str(root)]) == 1
+        assert "point_disclosure_complete" in capsys.readouterr().out

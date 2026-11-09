@@ -1007,3 +1007,29 @@ class TestHostileValues:
         )
         assert verdict.broken
         assert "needs a list" in verdict.why
+
+
+class TestSensitiveOpenSubtrees:
+    """A sensitive open subtree covers every value below it."""
+
+    @pytest.mark.unit
+    def test_deep_values_are_sensitive_and_nonfinite_errors_are_redacted(
+        self, tmp_path
+    ):
+        path = tmp_path / "valid_refs.yaml"
+        path.write_text(
+            "point:\n  config:\n    credentials: { type: dict, sensitive: true }\n",
+            encoding="utf-8",
+        )
+        row = _annotated(
+            _compare(op="eq", left="point.config.credentials.token", right=0),
+            RefTable.from_yaml(path),
+        )
+        assert row.left.sensitive
+        verdict = Verdict.evaluate(
+            row,
+            {"point": {"config": {"credentials": {"token": float("nan")}}}},
+        )
+        assert verdict.broken
+        assert "(redacted)" in verdict.why
+        assert "nan" not in verdict.why

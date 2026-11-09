@@ -31,3 +31,6 @@ class _Missing:
 
 
 MISSING = _Missing()
+
+
+REDACTED_VALUE = "(redacted)"

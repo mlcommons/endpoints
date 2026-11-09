@@ -36,7 +36,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_valida
 from inference_endpoint.validation.operations import Op, Predicate, vet_pattern
 from inference_endpoint.validation.ranges import Interval
 from inference_endpoint.validation.refs import Ref, decode_number
-from inference_endpoint.validation.sentinels import MISSING
+from inference_endpoint.validation.sentinels import MISSING, REDACTED_VALUE
 from inference_endpoint.validation.typo_checks import near_match
 
 
@@ -158,7 +158,6 @@ def _show(value: Any, limit: int = 80) -> str:
 
 
 # What a sensitive fact's resolved value stands as in a row's diagnostic.
-_REDACTED = "(redacted)"
 
 
 def _shown(value: Any, operand: Any, limit: int = 80) -> str:
@@ -173,7 +172,7 @@ def _shown(value: Any, operand: Any, limit: int = 80) -> str:
         str: `_show(value, limit)`, or the redaction marker.
     """
     if isinstance(operand, Ref) and operand.sensitive:
-        return _REDACTED
+        return REDACTED_VALUE
     return _show(value, limit)
 
 
@@ -228,24 +227,27 @@ def _missing_outcome(missing: Sequence[Ref]) -> tuple[bool, str]:
     return False, f"missing {', '.join(str(ref) for ref in missing)}"
 
 
-def _finite(value: Any, where: str) -> Any:
+def _finite(value: Any, where: str, operand: Any = None) -> Any:
     """`value` if a comparison can carry it, else refuse (ValueError -> broken).
 
     `NaN`/`Infinity` decode from `json.loads` (`NaN`/`Infinity`) and YAML
     (`.nan`, `.inf`); a comparison over one answers quietly False and would
     switch a `when` gate off by omission. Refused here, at the one place
-    operands resolve, instead of patching every op.
+    operands resolve, instead of patching every op. The refusal redacts the
+    value when the operand is a sensitive reference.
 
     Args:
         value (Any): One resolved comparison operand (or an aggregate's result).
         where (str): The operand's row syntax, for the message.
+        operand (Any): The `Ref` the value came from, when diagnosing it.
+            (Default: None)
     Returns:
         Any: `value`, unchanged.
     Raises:
         ValueError: When `value` is a non-finite float.
     """
     if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{where} resolved to a non-finite {value!r}")
+        raise ValueError(f"{where} resolved to a non-finite {_shown(value, operand)}")
     return value
 
 
@@ -413,11 +415,11 @@ class Compare(BaseModel):
         if missing:
             return _missing_outcome(missing)
         raw_left, raw_right, *raw_bounds = out
-        left = _finite(raw_left, str(self.left))
-        right = _finite(raw_right, str(self.right))
+        left = _finite(raw_left, str(self.left), self.left)
+        right = _finite(raw_right, str(self.right), self.right)
         if bounds:
             lo, hi = (
-                _finite(value, str(side))
+                _finite(value, str(side), side)
                 for value, side in zip(raw_bounds, bounds, strict=False)
             )
             if lo is None or hi is None:
@@ -624,12 +626,15 @@ class Aggregate(BaseModel):
         # can keep a finite result while a non-finite member hides behind the
         # order, so a bad member refuses in either order.
         measured = self.run(
-            [_finite(member, f"one value of {self.over}") for member in items]
+            [
+                _finite(member, f"one value of {self.over}", self.over)
+                for member in items
+            ]
         )
         held = self._operation().holds(
             Predicate(
-                _finite(measured, f"{self.name} of {self.over}"),
-                _finite(value, str(self.value)),
+                _finite(measured, f"{self.name} of {self.over}", self.over),
+                _finite(value, str(self.value), self.value),
             ),
             self.abs_tol,
             self.rel_tol,

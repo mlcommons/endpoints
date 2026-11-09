@@ -366,6 +366,11 @@ _PER_POINT_SYSTEM_DESC_FIELDS: frozenset[str] = frozenset(
 )
 
 
+def _is_directory_below_root(candidate: Path, root: Path) -> bool:
+    """Whether `candidate` is a directory whose symlinks keep it below `root`."""
+    return candidate.is_dir() and candidate.resolve().is_relative_to(root.resolve())
+
+
 def _resolves_shared_path(root: Path, value: str) -> Path | None:
     """`value` as Section 9.1's shared pointer under `root`, or `None`.
 
@@ -379,13 +384,7 @@ def _resolves_shared_path(root: Path, value: str) -> Path | None:
     if not parts or any(part == ".." for part in parts):
         return None
     candidate = root.joinpath(*parts)
-    if not candidate.is_dir():
-        return None
-    # A symlink anywhere along the path can point outside the root; the pointer
-    # must resolve to a directory still below it.
-    if not candidate.resolve().is_relative_to(root.resolve()):
-        return None
-    return candidate
+    return candidate if _is_directory_below_root(candidate, root) else None
 
 
 # Section 2.9.4's lead time: two cohorts after the entry's approval.
@@ -569,9 +568,10 @@ class Point:
         region (str | None): The declared `region` (§8.3) verbatim: a band name
             or `submitters_choice`. `None` when the artifact omits it or spells
             another type. (Default: None)
-        nodes_used (tuple[Mapping[str, Any], ...] | None): The §9.1 per-point node
-            declaration entries (Appendix E's `system_node_ensemble_id`/`nodes`
-            blocks). `None` when the point declares none. (Default: None)
+        nodes_used (tuple[Any, ...] | None): The §9.1 per-point node declaration
+            entries (Appendix E's `system_node_ensemble_id`/`nodes` blocks).
+            Entries with invalid shapes are preserved so the row can name them.
+            `None` when the point declares none. (Default: None)
         dp_shortfall (Mapping[str, Any] | None): The §9.1 shortfall declaration
             (`dp_actual`/`dp_formula`/`reason`). (Default: None)
     """
@@ -588,7 +588,7 @@ class Point:
     dataset: str | None = None
     seed_set: str | None = None
     region: str | None = None
-    nodes_used: tuple[Mapping[str, Any], ...] | None = None
+    nodes_used: tuple[Any, ...] | None = None
     dp_shortfall: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
@@ -657,11 +657,7 @@ class Point:
                 config.get("region") if isinstance(config.get("region"), str) else None
             ),
             nodes_used=(
-                tuple(
-                    entry
-                    for entry in config.get("nodes_used", ())
-                    if isinstance(entry, Mapping)
-                )
+                tuple(config["nodes_used"])
                 if isinstance(config.get("nodes_used"), list)
                 else None
             ),
@@ -1204,7 +1200,11 @@ class Pareto:
                     f"c{point.concurrency}: DP {dp} below floor({provisioned} / "
                     f"{replica}) = {dp_max} without a dp_shortfall"
                 )
-            elif isinstance(shortfall, Mapping) and (
+            elif dp < dp_max and not isinstance(shortfall, Mapping):
+                problems.append(
+                    f"c{point.concurrency}: dp_shortfall must declare a reason"
+                )
+            elif dp < dp_max and (
                 shortfall.get("dp_actual") != dp
                 or shortfall.get("dp_formula") != dp_max
             ):
@@ -1212,6 +1212,14 @@ class Pareto:
                     f"c{point.concurrency}: dp_shortfall names DP "
                     f"{shortfall.get('dp_actual')}/{shortfall.get('dp_formula')} "
                     f"where the declaration is {dp}/{dp_max}"
+                )
+            elif dp < dp_max and (
+                not isinstance(shortfall.get("reason"), str)
+                or not shortfall["reason"].strip()
+            ):
+                problems.append(
+                    f"c{point.concurrency}: below-maximum DP {dp} declares no "
+                    f"non-blank dp_shortfall.reason"
                 )
         return tuple(problems)
 
@@ -1684,9 +1692,14 @@ class Pareto:
         misses: list[str] = []
         if not (root / "docs").is_dir():
             misses.append("docs/ is missing beside results/")
+        elif not (root / "docs").resolve().is_relative_to(root.resolve()):
+            misses.append("docs/ resolves outside the submission root")
         src_dir = root / "src"
         if not src_dir.is_dir():
             misses.append("src/ is missing")
+            return tuple(misses)
+        if not src_dir.resolve().is_relative_to(root.resolve()):
+            misses.append("src/ resolves outside the submission root")
             return tuple(misses)
         try:
             implementations = [
@@ -1697,11 +1710,16 @@ class Pareto:
         if not implementations:
             misses.append("src/ holds no implementation directory")
         for implementation in implementations:
+            if not implementation.resolve().is_relative_to(root.resolve()):
+                misses.append(f"src/{implementation.name} resolves outside the root")
+                continue
             readme = next(
                 (
                     path
                     for path in implementation.iterdir()
-                    if path.is_file() and path.name.lower() == "readme.md"
+                    if path.is_file()
+                    and path.name.lower() == "readme.md"
+                    and path.resolve().is_relative_to(root.resolve())
                 ),
                 None,
             )
