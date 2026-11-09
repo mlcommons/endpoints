@@ -511,7 +511,15 @@ def setup_benchmark(
     report_dir.mkdir(parents=True, exist_ok=True)
     datasets = config.datasets
     if test_mode == TestMode.PERF:
-        datasets = [ds for ds in datasets if ds.type == DatasetType.PERFORMANCE]
+        # Match _load_datasets: only external accuracy scorers are skipped.
+        datasets = [
+            ds
+            for ds in datasets
+            if ds.type == DatasetType.PERFORMANCE
+            or not _resolve_accuracy_components(ds.name, ds.accuracy_config)[
+                0
+            ].SKIP_ENDPOINT_PHASE
+        ]
     elif test_mode == TestMode.ACC:
         datasets = [ds for ds in datasets if ds.type == DatasetType.ACCURACY]
     config.with_updates(datasets=datasets).to_yaml_file(

@@ -3311,9 +3311,12 @@ class TestReportConfigSecretRedaction:
             (TestMode.BOTH, ["accuracy", "performance"]),
         ],
     )
+    @pytest.mark.parametrize("external", [True, False])
     def test_report_config_matches_mode_and_redacts_secrets(
-        self, tmp_path, test_mode, expected_types
+        self, tmp_path, test_mode, expected_types, external
     ):
+        if test_mode == TestMode.PERF and not external:
+            expected_types = ["accuracy", "performance"]
         endpoint_key = "sentinel-endpoint-key"
         service_token = "sentinel-service-token"
         config = OfflineConfig(
@@ -3328,7 +3331,11 @@ class TestReportConfigSecretRedaction:
                     "type": "accuracy",
                     "path": "unused.jsonl",
                     "accuracy_config": {
-                        "eval_method": "swe_bench_scorer",
+                        "eval_method": (
+                            "swe_bench_scorer" if external else "string_match"
+                        ),
+                        "extractor": None if external else "identity_extractor",
+                        "ground_truth": "answer",
                         "extras": {
                             "swebench_service_url": "http://service:18080",
                             "swebench_service_auth_token": service_token,
@@ -3359,7 +3366,9 @@ class TestReportConfigSecretRedaction:
         persisted = (tmp_path / "config.yaml").read_text()
         assert endpoint_key not in persisted
         assert service_token not in persisted
-        assert persisted.count("<redacted>") >= (1 if test_mode == TestMode.PERF else 2)
+        assert persisted.count("<redacted>") >= (
+            2 if "accuracy" in expected_types else 1
+        )
         saved = BenchmarkConfig.from_yaml_file(tmp_path / "config.yaml")
         assert [ds.type.value for ds in saved.datasets] == expected_types
         assert len(config.datasets) == 2
