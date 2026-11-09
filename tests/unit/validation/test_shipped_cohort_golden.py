@@ -201,11 +201,23 @@ def _accuracy(run_dir: Path) -> None:
         run_dir,
         [
             {
-                "dataset_name": DATASET,
+                "dataset_name": "aime25",
                 "score": 0.99,
-                "unit_samples": FLOOR,
-                "total_samples": FLOOR,
-            }
+                "unit_samples": 30,
+                "total_samples": 240,
+            },
+            {
+                "dataset_name": "gpqa",
+                "score": 0.99,
+                "unit_samples": 198,
+                "total_samples": 990,
+            },
+            {
+                "dataset_name": "livecodebench",
+                "score": 0.99,
+                "unit_samples": 1055,
+                "total_samples": 3165,
+            },
         ],
     )
     written = run_dir / "accuracy" / "accuracy_results.json"
@@ -313,6 +325,39 @@ class TestShippedCohortGolden:
         summary_path.write_text(json.dumps(summary), encoding="utf-8")
         assert main([str(COHORT), str(root)]) == 1
         assert "point_run_complete" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_a_false_marker_without_state_still_fails_the_row(self, tmp_path, capsys):
+        """Dropping `state` cannot hide an explicit `complete: false`."""
+        root = tmp_path / "upload"
+        _build_upload(root)
+        summary_path = (
+            root
+            / "results"
+            / SYSTEM
+            / MODEL
+            / f"r{FIXED_POINTS[0]}"
+            / "result_summary.json"
+        )
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["complete"] = False
+        summary.pop("state", None)
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        assert main([str(COHORT), str(root)]) == 1
+        assert "point_run_complete" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_structure_rows_gate_off_for_a_system_directory_input(
+        self, tmp_path, capsys
+    ):
+        """The structure check judges only a whole-submission input shape."""
+        root = tmp_path / "upload"
+        _build_upload(root)
+        shutil.rmtree(root / "docs")
+        assert main([str(COHORT), str(root)]) == 1
+        assert "pareto_structure" in capsys.readouterr().out
+        assert main([str(COHORT), str(root / "results" / SYSTEM)]) == 0
+        assert "pareto_structure" not in capsys.readouterr().out
 
     @pytest.mark.unit
     def test_dropping_the_offline_run_fails_the_cohort(self, tmp_path, capsys):

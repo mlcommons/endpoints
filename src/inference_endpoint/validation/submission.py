@@ -135,28 +135,43 @@ _ACCURACY_META_KEYS: frozenset[str] = frozenset(
 )
 
 
-def _accuracy_entries(root: Any) -> list[Mapping[str, Any]]:
-    """The per-dataset entries of an `accuracy_scores` value.
+def _accuracy_entries(root: Any) -> list[tuple[str | None, Mapping[str, Any]]]:
+    """The `(dataset name, entry)` pairs of an `accuracy_scores` value.
 
     The round's checker reads a mapping keyed by dataset name; the client's own
-    writer emits a list of entries carrying `dataset_name`. Both read the same.
+    writer emits a list of entries carrying `dataset_name`. Preserve the name in
+    either shape so the gate can honor the catalog's declared-set tie.
 
     Args:
         root (Any): The `accuracy_results.json` document's `accuracy_scores`.
     Returns:
-        list[Mapping[str, Any]]: Each entry, mapping-shaped ones only.
+        list[tuple[str | None, Mapping[str, Any]]]: Each mapping-shaped entry and
+            its dataset identity, `None` when the entry declares none.
     """
     if isinstance(root, Mapping):
-        return [entry for entry in root.values() if isinstance(entry, Mapping)]
+        return [
+            (key if isinstance(key, str) else None, entry)
+            for key, entry in root.items()
+            if isinstance(entry, Mapping)
+        ]
     if isinstance(root, Sequence) and not isinstance(root, str | bytes):
-        return [entry for entry in root if isinstance(entry, Mapping)]
+        return [
+            (
+                entry.get("dataset_name")
+                if isinstance(entry.get("dataset_name"), str)
+                else None,
+                entry,
+            )
+            for entry in root
+            if isinstance(entry, Mapping)
+        ]
     return []
 
 
 def _accuracy_document_entries(
     document: Mapping[str, Any],
-) -> list[Mapping[str, Any]]:
-    """One `accuracy_results.json` document's per-dataset entries.
+) -> list[tuple[str | None, Mapping[str, Any]]]:
+    """One `accuracy_results.json` document's named per-dataset entries.
 
     Two shapes ship: the client's `{"accuracy_scores": [ ... ]}` (or a mapping
     under that key), and the canonical document keyed by dataset name at its top
@@ -166,10 +181,35 @@ def _accuracy_document_entries(
     if "accuracy_scores" in document:
         return _accuracy_entries(document.get("accuracy_scores"))
     return [
-        entry
+        (key if isinstance(key, str) else None, entry)
         for key, entry in document.items()
         if key not in _ACCURACY_META_KEYS and isinstance(entry, Mapping)
     ]
+
+
+def _declared_accuracy_entries(
+    entries: Sequence[tuple[str | None, Mapping[str, Any]]],
+    declared: Mapping[str, Any],
+) -> tuple[list[tuple[str | None, Mapping[str, Any]]], tuple[str, ...]]:
+    """The entries belonging to declared sets, and the declared sets with none.
+
+    `aime25` and `aime25::gptoss` identify the same set. With no declared tie,
+    every entry remains eligible (the aggregate-over-all fallback).
+    """
+    if not declared:
+        return list(entries), ()
+    selected: list[tuple[str | None, Mapping[str, Any]]] = []
+    covered: set[str] = set()
+    for name, entry in entries:
+        if name is None:
+            continue
+        matches = [
+            key for key in declared if name == key or name.startswith(f"{key}::")
+        ]
+        if matches:
+            selected.append((name, entry))
+            covered.update(matches)
+    return selected, tuple(sorted(set(declared) - covered))
 
 
 def _accuracy_entry_scores(entry: Mapping[str, Any]) -> dict[str, float]:
@@ -1089,10 +1129,13 @@ class Pareto:
         if any(value is None for value in per_node):
             return []
         engaged = dict(split)
+        # No declaration engages everything. An explicit partial split engages
+        # only what it declares; omitted ensembles earn no capacity credit.
         capacity = sum(
-            engaged.get(
-                str(node_set.get("system_node_ensemble_id")),
-                node_set.get("nodes") if isinstance(node_set.get("nodes"), int) else 0,
+            (
+                engaged.get(str(node_set.get("system_node_ensemble_id")), 0)
+                if split
+                else node_set.get("nodes")
             )
             * (node_set.get("accelerators_per_node") or 0)
             for node_set in sets
@@ -1214,6 +1257,12 @@ class Pareto:
                 else None
             )
             if not isinstance(stored, int | float) or isinstance(stored, bool):
+                continue
+            if not math.isfinite(float(stored)):
+                mismatches.append(
+                    f"c{point.concurrency}: system_tps_per_kw reads non-finite "
+                    f"({stored})"
+                )
                 continue
             fractions = [
                 (
@@ -1516,19 +1565,16 @@ class Pareto:
 
     def accuracy_gate_misses(self) -> tuple[str, ...]:
         """The Section 15 gate misses the curve's accuracy results report.
-
         The round's checker gates each accuracy-carrying run against the
-        catalog's targets for the declared `model_name`: the run's per-dataset
-        scores aggregate into a sample-weighted mean per metric, compared
-        against `accuracy_targets` scaled by its `factor`, and the issued sample
-        count (`num_samples x max(n_repeats, 1)` per entry; the client's
-        `total_samples` where spelled) must reach the model's `min_queries`. A
-        score reported as a fraction (`0..1`) rescales to the percent scale when
-        the bound sits above 1, and a metric the run does not report is
-        skipped, exactly as the checker skips it. An aggregate holding only the
-        client's unnamed `score` is gated against the model's single metric, as
-        the checker gates it; its warning that the scalar's identity cannot be
-        verified is not a miss here.
+        catalog's targets for the declared `model_name`. Where the catalog
+        declares `accuracy_datasets`, only those sets count; unrelated entries
+        cannot supply either the issued sample count or the weighted mean. The
+        remaining per-dataset scores aggregate into a sample-weighted mean per
+        metric, compared against `accuracy_targets` scaled by its `factor`, and
+        the issued sample count (`num_samples x max(n_repeats, 1)` per entry; the
+        client's `total_samples` where spelled) must reach `min_queries`. A score
+        reported as a fraction rescales to percent when the bound sits above 1,
+        and a metric the run does not report is skipped.
 
         Returns:
             tuple[str, ...]: One line per miss (`c<N>: ...`), empty when every
@@ -1560,8 +1606,19 @@ class Pareto:
             entries = _accuracy_document_entries(value)
             if not entries:
                 continue
+            declared_sets = model.get("accuracy_datasets")
+            entries, missing_sets = _declared_accuracy_entries(
+                entries, declared_sets if isinstance(declared_sets, Mapping) else {}
+            )
+            if missing_sets:
+                misses.append(
+                    f"c{point.concurrency}: no accuracy entry for declared set(s) "
+                    f"{', '.join(missing_sets)}"
+                )
             issued = [
-                count for count in map(_accuracy_issued, entries) if count is not None
+                count
+                for count in map(_accuracy_issued, (entry for _, entry in entries))
+                if count is not None
             ]
             if min_samples is not None and issued and sum(issued) < min_samples:
                 misses.append(
@@ -1569,7 +1626,7 @@ class Pareto:
                     f"samples < {min_samples:.0f}"
                 )
             weighted: dict[str, list[tuple[float, float | None]]] = {}
-            for entry in entries:
+            for _, entry in entries:
                 weight = _accuracy_weight(entry)
                 for metric, score in _accuracy_entry_scores(entry).items():
                     weighted.setdefault(metric, []).append((score, weight))
@@ -2230,7 +2287,7 @@ def _point_parallelism(point: Point) -> _Parallelism | None:
         return None
 
     def _positive(field: str) -> int:
-        value = desc.get(field, 1)
+        value = decode_number(desc.get(field, 1), "int")
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value
         return 1

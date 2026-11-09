@@ -34,15 +34,23 @@ point_run_complete:
   rule: "Endpoints Policy §9.1, Automated Checks; §1, Submission completeness."
   fix: "Re-run this point to completion (`complete: false` marks a drain timeout or an interrupted run)."
   severity: fail
-  # The client's own summary always carries `state` (a canonical `PointSummary`
-  # carries neither field), so the gate keys on `state` and the marker's own
-  # omission on a client-shaped summary fails the row instead of switching it
-  # off.
+  # `complete: false` fails wherever a summary stores it. The second row below
+  # prevents a client-shaped summary (which always carries `state`) from
+  # switching this blocking row off by deleting the marker.
+  when:
+    - { left: point.result_summary.complete, op: exists }
+  assert:
+    - { left: point.result_summary.complete, op: eq, right: true }
+
+point_run_complete_declared:
+  description: A client-shaped run summary declares its completion marker (§1).
+  rule: "Endpoints Policy §9.1, Automated Checks; §1, Submission completeness."
+  fix: Re-export result_summary.json with its `complete` field intact.
+  severity: fail
   when:
     - { left: point.result_summary.state, op: exists }
   assert:
     - { left: point.result_summary.complete, op: exists }
-    - { left: point.result_summary.complete, op: eq, right: true }
 
 point_target_cohort_shape:
   description: The declared target cohort reads YYYY-MM-C0/C1 (§4.2's calendar).

@@ -1795,3 +1795,181 @@ class TestTpsPerUser:
             [Run(concurrency=16, summary_extra={"tps_per_user": 250.0})],
         )
         assert pareto.tps_per_user_mismatches() == ()
+
+
+class TestDeclaredAccuracySets:
+    """The §15 gate scores only sets the catalog ties to the model."""
+
+    @staticmethod
+    def _pareto(tmp_path, document):
+        run = Run(concurrency=16, config_extra={"model_name": "gpt-oss-120b"})
+        run_dir = tmp_path / "upload" / "results" / SYSTEM[0] / SYSTEM[1] / run.name()
+        write_run(run_dir, run)
+        (run_dir / "accuracy_results.json").write_text(
+            json.dumps(document), encoding="utf-8"
+        )
+        catalog = Catalog(
+            models={
+                "gpt-oss-120b": {
+                    "accuracy_targets": {
+                        "exact_match": {"lower": 83.13, "factor": 0.99}
+                    },
+                    "min_queries": 4395,
+                    "accuracy_datasets": {
+                        "aime25": {"unit_samples": 30},
+                        "gpqa": {"unit_samples": 198},
+                        "livecodebench": {"unit_samples": 1055},
+                    },
+                }
+            },
+            datasets={},
+        )
+        return write_upload(
+            tmp_path / "upload", {SYSTEM: [run]}, ruleset=catalog
+        ).paretos[0]
+
+    @pytest.mark.unit
+    def test_unrelated_sets_neither_supply_samples_nor_drag_the_mean_down(
+        self, tmp_path
+    ):
+        pareto = self._pareto(
+            tmp_path,
+            {
+                "aime25::gptoss": {
+                    "exact_match": 0.95,
+                    "num_samples": 30,
+                    "n_repeats": 8,
+                },
+                "gpqa::gptoss": {
+                    "exact_match": 0.95,
+                    "num_samples": 198,
+                    "n_repeats": 5,
+                },
+                "livecodebench::gptoss": {
+                    "exact_match": 0.95,
+                    "num_samples": 1055,
+                    "n_repeats": 3,
+                },
+                "mmlu_pro": {
+                    "exact_match": 0.01,
+                    "num_samples": 100_000,
+                    "n_repeats": 1,
+                },
+            },
+        )
+        assert pareto.accuracy_gate_misses() == ()
+
+    @pytest.mark.unit
+    def test_a_document_with_only_an_unrelated_set_cannot_pass_the_gate(self, tmp_path):
+        pareto = self._pareto(
+            tmp_path,
+            {
+                "accuracy_scores": [
+                    {
+                        "dataset_name": "cnn_dailymail",
+                        "score": 1.0,
+                        "unit_samples": 100_000,
+                        "total_samples": 100_000,
+                    }
+                ]
+            },
+        )
+        misses = pareto.accuracy_gate_misses()
+        assert misses == (
+            "c16: no accuracy entry for declared set(s) aime25, gpqa, livecodebench",
+        )
+
+    @pytest.mark.unit
+    def test_a_missing_declared_set_is_named(self, tmp_path):
+        pareto = self._pareto(
+            tmp_path,
+            {
+                "aime25": {"exact_match": 0.95, "num_samples": 30, "n_repeats": 8},
+                "livecodebench": {
+                    "exact_match": 0.95,
+                    "num_samples": 1055,
+                    "n_repeats": 3,
+                },
+            },
+        )
+        assert any(
+            "declared set(s) gpqa" in miss for miss in pareto.accuracy_gate_misses()
+        )
+
+
+class TestPowerHardening:
+    """Arbitrary numeric forms and explicit splits stay fail-closed."""
+
+    @pytest.mark.unit
+    def test_an_explicit_partial_split_earns_no_capacity_for_omitted_sets(
+        self, tmp_path
+    ):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [
+                {
+                    "system_node_ensemble_id": f"ensemble-{letter}",
+                    "nodes": 4,
+                    "accelerators_per_node": 8,
+                }
+                for letter in ("a", "b")
+            ],
+        }
+        pareto = TestPointPower._pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_desc_extra={"tensor_parallel": 1, "data_parallel": 64},
+                    config_extra={
+                        "nodes_used": [
+                            {"system_node_ensemble_id": "ensemble-a", "nodes": 4}
+                        ]
+                    },
+                )
+            ],
+            power,
+        )
+        assert any("cannot hold" in problem for problem in pareto.nodes_used_problems())
+
+    @pytest.mark.unit
+    def test_numeric_string_parallelism_keeps_its_integer_value(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [
+                {
+                    "system_node_ensemble_id": "ensemble-a",
+                    "nodes": 2,
+                    "accelerators_per_node": 8,
+                }
+            ],
+        }
+        pareto = TestPointPower._pareto(
+            tmp_path,
+            [Run(concurrency=16, system_desc_extra={"data_parallel": "20"})],
+            power,
+        )
+        assert pareto.maximal_engagement_problems() == (
+            "c16: DP 20 engages 20 of 16 provisioned accelerators (max DP 16)",
+        )
+
+    @pytest.mark.unit
+    def test_a_non_finite_tps_per_kw_is_named(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [{"system_node_ensemble_id": "ensemble-a", "nodes": 4}],
+        }
+        pareto = TestPointPower._pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_tps=1000.0,
+                    summary_extra={"system_tps_per_kw": float("nan")},
+                )
+            ],
+            power,
+        )
+        assert pareto.tps_per_kw_mismatches() == (
+            "c16: system_tps_per_kw reads non-finite (nan)",
+        )

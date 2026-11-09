@@ -225,6 +225,8 @@ pareto_structure:
   rule: "Endpoints Policy §8.1, Submission Layout; §2.2.1, Source."
   fix: Add the missing directories beside results/ (docs/, src/<implementation>/README.md).
   severity: fail
+  when:
+    - { left: derived.input_shape, op: eq, right: submission }
   assert:
     - { over: derived.structure_misses, aggregate: count, op: eq, value: 0 }
 
@@ -233,6 +235,8 @@ pareto_shared_path_resolution:
   rule: "Endpoints Policy §9.1, Automated Checks; §8.1, Submission Layout."
   fix: Point the flagged fields at an existing directory under the submission root (relative, without `..`).
   severity: fail
+  when:
+    - { left: derived.input_shape, op: eq, right: submission }
   assert:
     - {
         over: derived.unresolved_shared_paths,
