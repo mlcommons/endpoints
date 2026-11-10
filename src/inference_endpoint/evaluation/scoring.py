@@ -51,7 +51,7 @@ except ImportError:
     _evaluate = None
     _nltk = None
 
-from ..core.record import EventRecord, EventType, SampleEventType
+from ..core.record import EventRecord, EventType, SampleEventType, leading_event_topic
 from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
@@ -65,6 +65,75 @@ from .extractor import (
 from .wer import project_to_labels, wer_counts
 
 logger = logging.getLogger(__name__)
+
+# The compact layout JSONLWriter emits puts event_type first, so a line can be
+# classified from its leading bytes (leading_event_topic) without decoding its
+# payload. Any other layout is decoded whole; see guess_and_decode.
+_ISSUED_TOPIC: bytes = SampleEventType.ISSUED.topic_bytes  # type: ignore[attr-defined]
+_COMPLETE_TOPIC: bytes = SampleEventType.COMPLETE.topic_bytes  # type: ignore[attr-defined]
+# An ISSUED line's key fields come before "data"; the cut is only attempted when
+# "data" starts within this many bytes.
+_ISSUED_KEY_WINDOW_BYTES = 1024
+_DATA_FIELD = b',"data":'
+_KEY_FIELDS = (b'"sample_uuid":', b'"conversation_id":', b'"turn":')
+
+
+class _IssuedKey(msgspec.Struct):
+    """The fields of an ISSUED record that the inline scorer reads."""
+
+    sample_uuid: str = ""
+    conversation_id: str = ""
+    turn: int | None = None
+
+
+_EVENT_DECODER = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+_ISSUED_DECODER = msgspec.json.Decoder(_IssuedKey)
+
+
+def _decode_issued_key(line: bytes) -> _IssuedKey:
+    """The key fields of an ISSUED line, decoding only what is needed.
+
+    The cut at "data" is an optimization: it applies when the key fields precede
+    "data" (the writer's field order) and the cut is valid JSON. In every other
+    case, including a cut that landed inside a nested object, the whole line is
+    decoded, which always works for a valid line.
+    """
+    end = line.find(_DATA_FIELD, 0, _ISSUED_KEY_WINDOW_BYTES)
+    if end != -1 and all(field in line[:end] for field in _KEY_FIELDS):
+        try:
+            return _ISSUED_DECODER.decode(line[:end] + b"}")
+        except msgspec.DecodeError:
+            pass  # "data" was not at the top level here: decode the whole line
+    return _ISSUED_DECODER.decode(line)
+
+
+def guess_and_decode(line: bytes) -> EventRecord | _IssuedKey | None:
+    """Decode the ISSUED and COMPLETE events of one ``events.jsonl`` line.
+
+    A line in the writer's compact layout (``event_type`` first) is classified
+    from those leading bytes alone, so other events return ``None`` undecoded and
+    an ISSUED line, which carries the whole prompt after "data", decodes only its
+    key fields into an ``_IssuedKey``. Any other layout (spaces, reordered fields,
+    ``event_type`` past the lead) is decoded whole and classified by its decoded
+    ``event_type``, so a change in how the log is written cannot silently drop
+    events. A blank line returns ``None``.
+
+    Raises:
+        msgspec.DecodeError: the line is not a valid event.
+    """
+    topic = leading_event_topic(line)
+    if topic is None:
+        if not line.strip():
+            return None
+        record = _EVENT_DECODER.decode(line)
+        if record.event_type == SampleEventType.ISSUED:
+            return _IssuedKey(record.sample_uuid, record.conversation_id, record.turn)
+        return record if record.event_type == SampleEventType.COMPLETE else None
+    if topic == _ISSUED_TOPIC:
+        return _decode_issued_key(line)
+    if topic == _COMPLETE_TOPIC:
+        return _EVENT_DECODER.decode(line)
+    return None
 
 
 class Scorer(ABC):
@@ -178,13 +247,30 @@ class Scorer(ABC):
         if not events_log_path.exists():
             raise FileNotFoundError(f"Events log file not found at {events_log_path}")
 
-        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
-        with events_log_path.open("r") as f:
-            for line in f:
-                stripped = line.strip()
-                if not stripped:
+        with events_log_path.open("rb") as f:
+            for line_no, line in enumerate(f, 1):
+                topic = leading_event_topic(line)
+                if topic is None:
+                    # Not the compact layout: decode the line and classify it by
+                    # its decoded event_type rather than dropping it unseen.
+                    if not line.strip():
+                        continue
+                    try:
+                        record = _EVENT_DECODER.decode(line)
+                    except msgspec.DecodeError as exc:
+                        logger.warning(
+                            "Skipping undecodable event log line %d in %s: %s",
+                            line_no,
+                            events_log_path,
+                            exc,
+                        )
+                        continue
+                elif topic == _COMPLETE_TOPIC:
+                    record = _EVENT_DECODER.decode(line)
+                else:
+                    # Other events (ISSUED lines carry the whole prompt) are
+                    # skipped undecoded.
                     continue
-                record = decoder.decode(stripped)
                 if record.event_type == SampleEventType.COMPLETE:
                     yield record.sample_uuid, record.data
 
@@ -970,18 +1056,14 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
         if not events_path.exists():
             raise FileNotFoundError(f"Events log file not found at {events_path}")
 
-        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
         uuid_to_key: dict[str, tuple[str, int, int]] = {}
         completed_by_uuid: dict[str, dict[str, Any] | None] = {}
         issued_turns: set[tuple[str, int, int]] = set()
         model_turns: dict[tuple[str, int, int], dict[str, Any] | None] = {}
-        with events_path.open() as f:
+        with events_path.open("rb") as f:
             for line_no, line in enumerate(f, 1):
-                stripped = line.strip()
-                if not stripped:
-                    continue
                 try:
-                    record = decoder.decode(stripped)
+                    record = guess_and_decode(line)
                 except msgspec.DecodeError as exc:
                     logger.warning(
                         "Skipping malformed event log line %d in %s: %s",
@@ -990,10 +1072,7 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
                         exc,
                     )
                     continue
-                if record.event_type not in (
-                    SampleEventType.ISSUED,
-                    SampleEventType.COMPLETE,
-                ):
+                if record is None:
                     continue
                 if record.turn is None or not record.conversation_id:
                     continue
@@ -1009,7 +1088,7 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
                     continue
 
                 key = (conversation_id, repeat_id, turn)
-                if record.event_type == SampleEventType.ISSUED:
+                if isinstance(record, _IssuedKey):
                     uuid_to_key[record.sample_uuid] = key
                     issued_turns.add(key)
                     if record.sample_uuid in completed_by_uuid:
