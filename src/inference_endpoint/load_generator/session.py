@@ -402,6 +402,10 @@ class BenchmarkSession:
         self._drain_event = asyncio.Event()
         self._fatal_error: RuntimeError | None = None
         self._last_response_progress_ns: int | None = None
+        # Handling stamp of each streaming response's latest chunk, so that its
+        # COMPLETE is never earlier than its own chunks. Popped at the result;
+        # stamps of synthetically terminated queries are dropped at phase end.
+        self._last_chunk_ns: dict[str, int] = {}
         # Liveness guard: a single re-arming timer, not a task. It exists only
         # while work is in flight, so the disabled and idle paths cost nothing.
         self._endpoint_response_idle_timeout_ns = (
@@ -483,6 +487,7 @@ class BenchmarkSession:
                 except asyncio.CancelledError:
                     pass
             self._disarm_endpoint_response_idle_timeout()
+            self._last_chunk_ns.clear()
             if self._stop_requested:
                 # Aborted run (Ctrl-C, transport closure, run watchdog): mark
                 # it BEFORE the terminal ENDED so the aggregator's ENDED-driven
@@ -582,6 +587,12 @@ class BenchmarkSession:
 
         if phase.drain_after:
             await self._drain_inflight(phase_issuer, phase.drain_timeout)
+        # A query terminated without a QueryResult (e.g. a turn timeout after
+        # some chunks) leaves a stamp that nothing else would pop.
+        for query_id in [
+            q for q in self._last_chunk_ns if q in phase_issuer.completed_uuids
+        ]:
+            del self._last_chunk_ns[query_id]
 
         if phase.phase_type == PhaseType.PERFORMANCE:
             phase_issuer.stop_performance_tracking()
@@ -754,6 +765,7 @@ class BenchmarkSession:
 
         if isinstance(resp, QueryResult):
             query_id = resp.id
+            last_chunk_ns = self._last_chunk_ns.pop(query_id, None)
             # Drop late responses for queries already synthetically terminated
             # (e.g. by AgenticInferenceStrategy._handle_timeout). Without this gate,
             # a real response arriving after timeout double-publishes ERROR/COMPLETE
@@ -797,9 +809,9 @@ class BenchmarkSession:
                 self._publisher.publish(
                     EventRecord(
                         event_type=SampleEventType.COMPLETE,
-                        timestamp_ns=resp.completed_at
-                        if isinstance(resp.completed_at, int)
-                        else now_ns,
+                        timestamp_ns=self._complete_timestamp_ns(
+                            resp, now_ns, last_chunk_ns
+                        ),
                         sample_uuid=query_id,
                         conversation_id=conv_id_str,
                         turn=turn_num,
@@ -837,6 +849,13 @@ class BenchmarkSession:
                 conv_id_str, turn_num = phase_issuer.uuid_to_conv_info.get(
                     resp.id, ("", None)
                 )
+            if phase_issuer is None or (
+                resp.id in phase_issuer.uuid_to_conv_info
+                and resp.id not in phase_issuer.completed_uuids
+            ):
+                self._last_chunk_ns[resp.id] = now_ns
+            else:
+                self._last_chunk_ns.pop(resp.id, None)
             self._publisher.publish(
                 EventRecord(
                     event_type=event_type,
@@ -846,6 +865,26 @@ class BenchmarkSession:
                     turn=turn_num,
                 )
             )
+
+    @staticmethod
+    def _complete_timestamp_ns(
+        resp: QueryResult, now_ns: int, last_chunk_ns: int | None
+    ) -> int:
+        """COMPLETE stamp: the decode time, but never before the response's chunks.
+
+        `resp.completed_at` is set when the transport decodes the result. The
+        transport decodes a whole drain before the session handles any message,
+        so a result decoded in the same drain as its chunks is older than the
+        chunks' handling stamps (RECV_FIRST/RECV_NON_FIRST), which would give a
+        negative TPOT. Only that case moves COMPLETE, to the last chunk's stamp;
+        a response without chunks keeps its decode time.
+        """
+        completed_ns = (
+            resp.completed_at if isinstance(resp.completed_at, int) else now_ns
+        )
+        if last_chunk_ns is None:
+            return completed_ns
+        return max(completed_ns, last_chunk_ns)
 
     def _make_stop_check(
         self, settings: RuntimeSettings, phase_start_ns: int
