@@ -270,3 +270,22 @@ class TextCompletionSSEMessage(
     """SSE message structure for /v1/completions streaming responses."""
 
     choices: tuple[TextCompletionSSEChoice, ...] = ()
+
+
+# ============================================================================
+# OpenAI Audio Transcription Types (POST /v1/audio/transcriptions)
+# Used by OpenAITranscriptionsAdapter for Whisper-class ASR endpoints.
+# ============================================================================
+
+
+class TranscriptionResponse(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
+    """Response body for `response_format=json`.
+
+    The request is multipart/form-data, so there is no matching request struct -
+    the adapter encodes form fields directly. Server-specific extras (duration,
+    language, usage) decode away: msgspec ignores unknown fields.
+    """
+
+    text: str

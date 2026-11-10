@@ -1,0 +1,59 @@
+# Offline run for MLPerf speech2text (whisper-large-v3 / LibriSpeech).
+#
+# Needs a server on /v1/audio/transcriptions:
+#   vllm serve openai/whisper-large-v3 --port 8000
+#
+# The corpus downloads itself on first run. See README.md for the reference
+# accuracy, the storage requirement for the WAVs, how to point at a local
+# manifest, and what api_type validation derives rather than reading here.
+#
+# For a smoke run, set runtime.n_samples_to_issue and both `samples` to 8.
+
+name: "offline-whisper-librispeech"
+version: "1.0"
+type: "offline"
+
+# Streaming, metrics_isl and warmup salt are all settled by api_type
+# validation, so they are deliberately absent below rather than set to the
+# value they would be forced to. README.md ("Notes on the run config") lists
+# what is derived and why.
+model_params:
+  name: "openai/whisper-large-v3"
+  temperature: 0.0
+
+datasets:
+  # setup_benchmark() requires a performance dataset to drive issuance; the
+  # accuracy entry below reuses the same corpus and scores the transcripts.
+  - name: whisper_librispeech
+    type: "performance"
+    samples: 1633
+  - name: whisper_librispeech
+    type: "accuracy"
+    samples: 1633
+    accuracy_config:
+      eval_method: "wer"
+      ground_truth: "transcript"
+      num_repeats: 1
+
+settings:
+  runtime:
+    n_samples_to_issue: 1633
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    num_workers: 8
+
+  warmup:
+    enabled: false
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_type: "openai_transcriptions"
+  api_key: null
+
+report_dir: logs/whisper_librispeech_offline

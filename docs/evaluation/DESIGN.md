@@ -82,6 +82,7 @@ The scorer registry in `evaluation/scoring.py` currently includes:
 | `vbench`                    | VBench video-generation accuracy (WAN 2.2 T2V)                 |
 | `bfcl_v4`                   | BFCL v4 function-calling accuracy                              |
 | `legacy_mlperf_deepseek_r1` | MLPerf DeepSeek-R1 combined multi-subset accuracy              |
+| `wer`                       | MLPerf speech2text Word Error Rate (Whisper / LibriSpeech)     |
 
 The registry (`Scorer.PREDEFINED`) is auto-populated from `Scorer` subclasses
 via `__init_subclass__`.

@@ -56,6 +56,18 @@ MLPerfDeepseekR1 = _Dataset(
     size=4388,
 )
 
+# speech2text. Size is the "dataset-size" entry for whisper in the inference
+# submission checker's constants.py, and matches the repackaged manifest's own
+# sample count (dataset_manager/predefined/whisper_librispeech).
+LibriSpeechDevAll = _Dataset(
+    description=(
+        "LibriSpeech dev-clean + dev-other, converted to 16 kHz WAV and "
+        "repackaged by the MLCommons pipeline into clips approaching 30 s"
+    ),
+    size=1633,
+    metadata={"scorer": "wer"},
+)
+
 # --- Edge-Agentic (BFCL v4) benchmark datasets ---
 
 BFCLv4SingleTurn = _Dataset(

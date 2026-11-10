@@ -146,6 +146,14 @@ Mixtral8x7B = _Model(
     dataset=datasets.TextGenComplex,
 )
 
+Whisper_large_v3 = _Model(
+    "whisper-large-v3",
+    golden_accuracy=("bfloat16", {"accuracy": 97.9329}),
+    accuracy_target_settings=[{"accuracy": (0.99,)}],
+    dataset=datasets.LibriSpeechDevAll,
+    use_equal_issue_mode=False,
+)
+
 # Edge-Agentic (BFCL v4) reference model. The accuracy gate is BFCL v4 single-turn
 # (overall + non_live-normalized). golden_accuracy here is the validated Q4_K_M
 # reference point on a Jetson Thor (llama.cpp, reasoning off); accuracy is

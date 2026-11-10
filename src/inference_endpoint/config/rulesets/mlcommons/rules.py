@@ -272,6 +272,13 @@ _v5_1 = RoundRuleset(
                 max_ttft_latency_ms=2000, max_tpot_latency_ms=200
             ),
         },
+        models.Whisper_large_v3: {
+            OptimizationPriority.THROUGHPUT: PerModelRuleset(
+                min_sample_count_valid=1633,
+                metric=metrics.Throughput,
+                reported_metrics=[metrics.Throughput],
+            ),
+        },
     },
 )
 

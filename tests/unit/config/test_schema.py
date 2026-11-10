@@ -1200,3 +1200,159 @@ class TestRulesetSeedOverride:
         )
         with pytest.raises(ValidationError):
             self._submission(name)
+
+
+class TestTranscriptionsAPIValidation:
+    """``openai_transcriptions`` constrains the run settings by api_type.
+
+    /v1/audio/transcriptions has no SSE mode and no text prompt, so streaming,
+    ISL and warmup salt are not free choices here — a hand-written config gets
+    an error rather than a silently odd run.
+    """
+
+    def _cfg(self, **overrides) -> BenchmarkConfig:
+        kwargs: dict = {
+            "type": TestType.ONLINE,
+            "model_params": {"name": "openai/whisper-large-v3"},
+            "endpoint_config": {
+                "endpoints": ["http://localhost:8000"],
+                "api_type": APIType.OPENAI_TRANSCRIPTIONS,
+            },
+            "datasets": [{"path": "clips.jsonl"}],
+            "settings": {"load_pattern": {"type": "poisson", "target_qps": 1}},
+        }
+        kwargs.update(overrides)
+        return BenchmarkConfig(**kwargs)
+
+    @pytest.mark.unit
+    def test_auto_streaming_resolves_off_even_online(self):
+        # The generic rule would resolve AUTO to ON for an online run.
+        assert self._cfg().model_params.streaming == StreamingMode.OFF
+
+    @pytest.mark.unit
+    def test_explicit_streaming_on_is_rejected(self):
+        with pytest.raises(ValueError, match="no streaming mode"):
+            self._cfg(
+                model_params={"name": "whisper", "streaming": "on"},
+            )
+
+    @pytest.mark.unit
+    def test_explicit_streaming_off_is_accepted(self):
+        cfg = self._cfg(model_params={"name": "whisper", "streaming": "off"})
+        assert cfg.model_params.streaming == StreamingMode.OFF
+
+    @pytest.mark.unit
+    def test_metrics_isl_is_forced_off(self):
+        # Default is True; an audio upload has no prompt to tokenize, so the
+        # series could only ever stay empty.
+        assert self._cfg().settings.metrics_isl is False
+
+    @pytest.mark.unit
+    def test_metrics_isl_stays_off_when_set_explicitly(self):
+        cfg = self._cfg(
+            settings={
+                "load_pattern": {"type": "poisson", "target_qps": 1},
+                "metrics_isl": False,
+            }
+        )
+        assert cfg.settings.metrics_isl is False
+
+    @pytest.mark.unit
+    def test_warmup_salt_is_rejected(self):
+        with pytest.raises(ValueError, match="warmup.salt"):
+            self._cfg(
+                settings={
+                    "load_pattern": {"type": "poisson", "target_qps": 1},
+                    "warmup": {"enabled": True, "salt": True},
+                }
+            )
+
+    @pytest.mark.unit
+    def test_warmup_without_salt_is_accepted(self):
+        cfg = self._cfg(
+            settings={
+                "load_pattern": {"type": "poisson", "target_qps": 1},
+                "warmup": {"enabled": True, "salt": False},
+            }
+        )
+        assert cfg.settings.warmup.enabled is True
+
+    @pytest.mark.unit
+    def test_other_api_types_keep_online_streaming(self):
+        # The constraint is keyed on api_type, not applied to every run.
+        cfg = BenchmarkConfig(
+            type=TestType.ONLINE,
+            model_params={"name": "M"},
+            endpoint_config={
+                "endpoints": ["http://localhost:8000"],
+                "api_type": APIType.OPENAI,
+            },
+            datasets=[{"path": "d.jsonl"}],
+            settings={"load_pattern": {"type": "poisson", "target_qps": 1}},
+        )
+        assert cfg.model_params.streaming == StreamingMode.ON
+        assert cfg.settings.metrics_isl is True
+
+
+class TestNonStreamingAPITypeCapabilities:
+    """The two capabilities are independent, and videogen proves it.
+
+    ``supports_streaming`` and ``has_text_prompt`` gate different constraints.
+    videogen is non-streaming *and* text-to-video, so it takes the streaming
+    rules and none of the prompt ones.
+    """
+
+    def _videogen(self, **overrides) -> BenchmarkConfig:
+        kwargs: dict = {
+            "type": TestType.ONLINE,
+            "model_params": {"name": "wan2.2-t2v-a14b"},
+            "endpoint_config": {
+                "endpoints": ["http://localhost:8000"],
+                "api_type": APIType.VIDEOGEN,
+            },
+            "datasets": [{"path": "prompts.jsonl"}],
+            "settings": {"load_pattern": {"type": "poisson", "target_qps": 1}},
+        }
+        kwargs.update(overrides)
+        return BenchmarkConfig(**kwargs)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("api_type", "streams", "prompts"),
+        [
+            (APIType.OPENAI, True, True),
+            (APIType.OPENAI_COMPLETIONS, True, True),
+            (APIType.SGLANG, True, True),
+            (APIType.VIDEOGEN, False, True),
+            (APIType.OPENAI_TRANSCRIPTIONS, False, False),
+        ],
+    )
+    def test_capability_flags(self, api_type, streams, prompts):
+        assert api_type.supports_streaming is streams
+        assert api_type.has_text_prompt is prompts
+
+    @pytest.mark.unit
+    def test_videogen_auto_streaming_resolves_off_even_online(self):
+        assert self._videogen().model_params.streaming == StreamingMode.OFF
+
+    @pytest.mark.unit
+    def test_videogen_streaming_on_is_rejected(self):
+        with pytest.raises(ValueError, match="no streaming mode"):
+            self._videogen(
+                model_params={"name": "wan", "streaming": "on"},
+            )
+
+    @pytest.mark.unit
+    def test_videogen_keeps_metrics_isl(self):
+        # A text-to-video prompt is a real text prompt: ISL is measurable.
+        assert self._videogen().settings.metrics_isl is True
+
+    @pytest.mark.unit
+    def test_videogen_keeps_warmup_salt(self):
+        cfg = self._videogen(
+            settings={
+                "load_pattern": {"type": "poisson", "target_qps": 1},
+                "warmup": {"enabled": True, "salt": True},
+            }
+        )
+        assert cfg.settings.warmup.salt is True

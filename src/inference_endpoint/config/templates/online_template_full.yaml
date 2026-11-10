@@ -43,7 +43,7 @@ datasets:  # Dataset configs
     system: system_prompt
   generate_params: null  # Dataset-specific parameters passed to the generate() method
   accuracy_config:  # Accuracy evaluation settings
-    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench, bfcl_v4, legacy_mlperf_deepseek_r1, swe_bench_scorer
+    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench, bfcl_v4, legacy_mlperf_deepseek_r1, swe_bench_scorer, wer
     ground_truth: ground_truth  # Ground truth column name
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation
@@ -113,7 +113,7 @@ endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000
   api_key: null  # API key
-  api_type: openai  # API type: openai, sglang, or videogen | options: openai, openai_completions, sglang, videogen
+  api_type: openai  # API type: openai, openai_transcriptions, sglang, or videogen | options: openai, openai_completions, openai_transcriptions, sglang, videogen
 report_dir: null  # Report output directory
 verbose: false  # Enable verbose logging
 enable_cpu_affinity: true  # NUMA-aware CPU pinning
