@@ -183,9 +183,9 @@ def _phase_osl_entry(
 
     Each basis's block is named by ``basis_key("output_sequence_lengths", …)``
     and is present only when that basis counted a sample: the client basis
-    needs ``backend``, the server basis usable usage. A server block that is
-    not primary carries ``"partial": True`` when some scored samples lacked
-    usable usage, as other-basis blocks do. ``n_osl_samples`` counts the
+    needs ``backend``, the server basis usable usage. The server block carries
+    ``"partial": True`` when some scored samples lacked usable usage, on either
+    primary: its mean is then over a subset. ``n_osl_samples`` counts the
     samples behind each block and ``n_missing_usage`` the scored samples
     without usable usage, which are never filled in from the tokenizer. A
     tokenizer failure drops only the client block.
@@ -210,8 +210,7 @@ def _phase_osl_entry(
         # Wall-clock of just this phase's tokenization (seconds); summed across
         # datasets for the accuracy report's total.
         tokenize_s = round(time.perf_counter() - t0, 3)
-    server_is_other = primary is not TokenCountSource.SERVER
-    if server.block is not None and server.n_missing_usage and server_is_other:
+    if server.block is not None and server.n_missing_usage:
         blocks[TokenCountSource.SERVER] = {**server.block, "partial": True}
     n_osl_samples = {
         TokenCountSource.CLIENT: (

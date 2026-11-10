@@ -478,6 +478,26 @@ class TestReportDisplayAndSerialize:
         # Total accuracy-path tokenization time (summed per-entry osl_tokenize_s).
         assert "OSL tokenization: 1.23s" in output
 
+    def test_display_accuracy_partial_osl(self):
+        """An accuracy OSL block over a subset of the scored samples says so."""
+        report = _build_report(_make_registry(n_samples=10))
+        entry = {
+            "dataset_name": "bfcl",
+            "score": 90.0,
+            "output_sequence_lengths": {
+                "avg": 12.0,
+                "min": 4,
+                "max": 20,
+                "partial": True,
+            },
+        }
+        report = msgspec.structs.replace(report, accuracy=[entry])
+
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+
+        assert "output tokens (avg/min/max): 12.0/4/20 (partial)" in "\n".join(lines)
+
     def test_display_full(self):
         registry = _make_registry(n_samples=10)
         report = _build_report(registry)

@@ -612,7 +612,7 @@ class TestScoreAccuracy:
             assert entry[key("n_osl_samples", basis)] == n_samples
         assert entry["n_missing_usage"] == 1
         server_block = entry[key("output_sequence_lengths", SERVER)]
-        assert ("partial" in server_block) is (primary is CLIENT)
+        assert server_block["partial"] is True  # a subset, on either primary
         assert "partial" not in entry[key("output_sequence_lengths", CLIENT)]
         assert isinstance(entry["osl_tokenize_s"], float)
         assert not [k for k in entry if k.endswith(f"_{primary.value}")]

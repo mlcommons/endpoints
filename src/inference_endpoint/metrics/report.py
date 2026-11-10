@@ -818,10 +818,11 @@ class Report(msgspec.Struct, frozen=True, kw_only=True):  # type: ignore[call-ar
                     )
                 osl = entry.get("output_sequence_lengths")
                 if isinstance(osl, dict):
+                    partial = " (partial)" if osl.get("partial") else ""
                     fn(
                         f"    output tokens (avg/min/max): "
                         f"{osl.get('avg', 0):.1f}/{osl.get('min')}/{osl.get('max')}"
-                        f"{newline}"
+                        f"{partial}{newline}"
                     )
                 breakdown = entry.get("breakdown")
                 if isinstance(breakdown, dict):
