@@ -35,7 +35,12 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import TextModelOutput, TokenCountSource, basis_key
+from inference_endpoint.core.types import (
+    ErrorData,
+    TextModelOutput,
+    TokenCountSource,
+    basis_key,
+)
 from inference_endpoint.endpoint_client.cpu_affinity import UnsupportedPlatformError
 from inference_endpoint.metrics.token_count_basis import ServerUsage
 
@@ -1029,3 +1034,93 @@ def test_for_report_server_primary_counts_client_beside_it(
     assert block is not None and block["output_sequence_lengths"]["total"] == 3
     assert (block["output_sequence_lengths_client"] or {}).get("total") == client_total
     assert ("no such tokenizer" in caplog.text) == (client_total is None)
+
+
+@pytest.mark.parametrize("primary", list(TokenCountSource))
+def test_full_run_unexpected_payload_shows_on_each_basis(
+    tmp_path: Path, primary: TokenCountSource
+) -> None:
+    """A COMPLETE without a text payload is a client error and a server turn
+    without usage, so each basis's shortfall shows in a counter it emits."""
+    events = _write_events(
+        tmp_path / "events.jsonl",
+        [
+            _with_usage(1, "one two", 2),
+            EventRecord(
+                event_type=SampleEventType.COMPLETE,
+                sample_uuid="u3",
+                data=ErrorData(error_type="E"),
+            ),
+        ],
+    )
+
+    block = compute_full_run_osl(
+        events,
+        _word_counts,
+        performance_uuids={"u1", "u3"},
+        token_count_source=primary,
+    )
+
+    assert block is not None
+    assert block[basis_key("n_errors", CLIENT, primary=primary)] == 1
+    assert block["n_missing_usage"] == 1
+    assert block["partial"] is True
+    other = basis_key("output_sequence_lengths", primary.other, primary=primary)
+    assert block[other]["partial"] is True
+
+
+@pytest.mark.parametrize("primary", list(TokenCountSource))
+@pytest.mark.parametrize("shortfall", ["missing", "undecodable"])
+def test_full_run_population_shortfall_marks_both_bases(
+    tmp_path: Path, primary: TokenCountSource, shortfall: str
+) -> None:
+    """A turn lost from the log (never logged, or undecodable) is short on every
+    basis: the block is partial and so is the other basis's series."""
+    path = _write_events(tmp_path / "events.jsonl", [_with_usage(1, "one two", 2)])
+    uuids = {"u1"}
+    if shortfall == "missing":
+        uuids.add("u3")
+    else:
+        with path.open("ab") as f:
+            f.write(b'{"event_type":"sample.complete","data":<<<not json>>>}\n')
+
+    block = compute_full_run_osl(
+        path, _word_counts, performance_uuids=uuids, token_count_source=primary
+    )
+
+    assert block is not None
+    assert (block["n_missing"], block["n_undecodable"]) == (
+        (1, 0) if shortfall == "missing" else (0, 1)
+    )
+    assert block["partial"] is True
+    other = basis_key("output_sequence_lengths", primary.other, primary=primary)
+    assert block[other]["partial"] is True
+
+
+def test_full_run_server_primary_marks_the_client_series_on_tokenizer_errors(
+    tmp_path: Path,
+) -> None:
+    """Client tokenizer errors on a server primary leave the block whole and mark
+    only the client series."""
+    events = _write_events(
+        tmp_path / "events.jsonl",
+        [_with_usage(1, "one two", 2), _with_usage(3, "boom", 1)],
+    )
+
+    def flaky(tok_input: MessageInput | TextInput) -> int:
+        if getattr(tok_input, "text", "") == "boom":
+            raise ValueError("tokenizer blew up")
+        return _word_count(tok_input)
+
+    block = compute_full_run_osl(
+        events,
+        _batched(flaky),
+        performance_uuids={"u1", "u3"},
+        token_count_source=SERVER,
+    )
+
+    assert block is not None
+    assert block["partial"] is False
+    assert block["n_errors_client"] == 1
+    assert block["output_sequence_lengths_client"]["partial"] is True
+    assert block["output_sequence_lengths"]["total"] == 3

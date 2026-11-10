@@ -97,9 +97,10 @@ _MAX_COUNT_THREADS = 32
 class _Tally:
     """Turn lengths and exclusion counters for one token basis.
 
-    ``n_errors`` (turns the tokenizer could not count, and unexpected
-    payloads) and ``n_missing_usage`` (turns without usable server usage) are
-    the turns this basis should have counted but could not.
+    ``n_errors`` (client basis: turns the tokenizer could not count, and
+    unexpected payloads) and ``n_missing_usage`` (server basis: turns without
+    usable usage, unexpected payloads included) are the turns this basis should
+    have counted but could not. Each is emitted on its own basis.
     """
 
     lengths: array[int] = field(default_factory=lambda: array("q"))
@@ -297,10 +298,11 @@ def compute_full_run_osl(
                     tally.n_empty += 1
                 continue
             if not isinstance(data, TextModelOutput):
-                # Unexpected payload (ErrorData/PromptData) on a COMPLETE event.
-                reason = f"unexpected {type(data).__name__} payload"
-                for tally in counting:
-                    tally.error(reason)
+                # Unexpected payload (ErrorData/PromptData) on a COMPLETE event:
+                # nothing to tokenize, and no usable usage.
+                if count_batch is not None:
+                    client.error(f"unexpected {type(data).__name__} payload")
+                server.n_missing_usage += 1
                 continue
             server.count_usage(record, data)
             if count_batch is not None:
