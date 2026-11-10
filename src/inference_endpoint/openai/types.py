@@ -18,6 +18,7 @@ msgspec types for OpenAI API serialization/deserialization.
 """
 
 import builtins
+import numbers
 from typing import Any
 
 import msgspec
@@ -128,10 +129,15 @@ def requests_multiple_choices(n: object) -> bool:
     """Whether a request's ``n`` asks for more than one choice.
 
     Server usage then sums the tokens of every choice while only ``choices[0]``
-    is measured. ``n`` is whatever the dataset row holds: a float when its
-    column has gaps (NaN compares False), never a bool.
+    is measured. ``n`` is whatever the dataset row holds: usually absent, a
+    numpy scalar from a parquet or HuggingFace column, a float when the column
+    has gaps (NaN compares False), never a bool.
     """
-    return isinstance(n, int | float) and not isinstance(n, bool) and n > 1
+    # Most requests carry no n: skip the ABC isinstance check for them.
+    if n is None:
+        return False
+    # float(): a numpy scalar's own comparison returns np.bool_, not bool.
+    return isinstance(n, numbers.Real) and not isinstance(n, bool) and float(n) > 1
 
 
 # gc=False: audit 2026-05: request containers set at construction; frozen=True blocks field reassignment.

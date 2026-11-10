@@ -18,6 +18,7 @@
 import json
 
 import msgspec
+import numpy as np
 import pandas as pd
 import pytest
 from inference_endpoint.core.types import Query, TextModelOutput
@@ -469,6 +470,10 @@ def test_n_gt_1_row_omits_stream_options(n, expected):
         (True, False),
         ("2", False),
         (float("nan"), False),
+        (np.int64(2), True),
+        (np.float64(2.0), True),
+        (np.int64(1), False),
+        (np.bool_(True), False),
     ],
 )
 def test_requests_multiple_choices(n, expected):
