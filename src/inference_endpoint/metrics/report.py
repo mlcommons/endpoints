@@ -414,8 +414,9 @@ class Report(msgspec.Struct, frozen=True, kw_only=True):  # type: ignore[call-ar
             return None
         if self.state == "complete" and self.n_samples_dropped == 0:
             if self.token_count_source is TokenCountSource.CLIENT:
-                return "Metrics tokenization did not finish"
-            if self.n_samples_missing_usage > 0:
+                if self.client_token_tasks_pending > 0:
+                    return "Metrics tokenization did not finish"
+            elif self.n_samples_missing_usage > 0:
                 return missing_usage_message(
                     self.n_samples_missing_usage,
                     self.n_samples_missing_usage_empty_output,

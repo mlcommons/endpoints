@@ -1677,9 +1677,14 @@ def test_incomplete_reason_names_state_then_drops_then_primary(primary):
             {"complete": False, "state": "live"},
             "Benchmark report is incomplete (state=live, n_samples_dropped=0)",
         ),
-        # Every server count is whole, so there is no shortfall to name.
+        # Every count on the primary basis is whole, so there is no shortfall
+        # to name.
         (
             {"complete": False, "token_count_source": TokenCountSource.SERVER},
+            "Benchmark report is incomplete (state=complete, n_samples_dropped=0)",
+        ),
+        (
+            {"complete": False, "token_count_source": TokenCountSource.CLIENT},
             "Benchmark report is incomplete (state=complete, n_samples_dropped=0)",
         ),
     ],
