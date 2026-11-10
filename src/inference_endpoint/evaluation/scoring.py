@@ -315,25 +315,20 @@ class Scorer(ABC):
             )
             yield record.sample_uuid, _generated_text(data), completion_tokens
 
-    def get_raw_outputs(self, wanted_uuids: set[str] | None = None) -> pd.DataFrame:
+    def get_raw_outputs(self) -> pd.DataFrame:
         """uuid -> the text the model generated (``str(TextModelOutput)``).
 
         Identical for every scorer: the actual model output before any
-        scoring-specific transform. Used for OSL and response accounting.
-        ``wanted_uuids`` bounds the frame to a target population (one accuracy
-        dataset's issued samples) so finalize need not hold the whole run's
-        response-text corpus.
+        scoring-specific transform, and the base ``get_scoring_outputs``.
+        Accuracy OSL and response accounting read ``iter_complete_outputs``.
         """
         rows = [
             {"sample_uuid": u, "output": _generated_text(d)}
             for u, d in self._iter_complete()
-            if wanted_uuids is None or u in wanted_uuids
         ]
-        # Fixed columns so an all-filtered (empty) frame still exposes
-        # "sample_uuid"/"output". Callers index those columns; a bare
-        # pd.DataFrame([]) is column-less and would KeyError, dropping response
-        # accounting for an all-missing phase — the exact masking the response
-        # counts exist to prevent.
+        # Fixed columns so a log without COMPLETE events still yields a frame
+        # with "sample_uuid"/"output"; a bare pd.DataFrame([]) is column-less
+        # and callers indexing those columns would KeyError.
         return pd.DataFrame(rows, columns=["sample_uuid", "output"])
 
     def get_scoring_outputs(self) -> pd.DataFrame:

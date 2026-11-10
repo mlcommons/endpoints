@@ -1569,7 +1569,7 @@ class TestGetRawOutputs:
         scorer.report_dir = report_dir
         return scorer
 
-    def test_wanted_uuids_bounds_the_frame(self, tmp_path):
+    def test_raw_outputs_hold_every_complete_row(self, tmp_path):
         self._write_events(
             tmp_path,
             [
@@ -1590,29 +1590,27 @@ class TestGetRawOutputs:
                 ),
             ],
         )
-        scorer = self._scorer(tmp_path)
-        # Unbounded read returns every COMPLETE row.
-        assert set(scorer.get_raw_outputs()["sample_uuid"]) == {"u1", "u2", "u3"}
-        # wanted_uuids filters the frame to the requested population only.
-        bounded = scorer.get_raw_outputs({"u1", "u3"})
-        assert set(bounded["sample_uuid"]) == {"u1", "u3"}
-        assert set(bounded["output"]) == {"a b", "d e f"}
+        frame = self._scorer(tmp_path).get_raw_outputs()
+        assert dict(zip(frame["sample_uuid"], frame["output"], strict=True)) == {
+            "u1": "a b",
+            "u2": "c",
+            "u3": "d e f",
+        }
 
-    def test_empty_filter_returns_columned_frame(self, tmp_path):
-        # Filtering out every uuid must still yield a frame WITH the expected
-        # columns (not a column-less pd.DataFrame([])), so callers can index
-        # "sample_uuid"/"output" without a KeyError.
+    def test_log_without_completes_returns_columned_frame(self, tmp_path):
+        # A log with no COMPLETE event must still yield a frame WITH the
+        # expected columns (not a column-less pd.DataFrame([])), so callers can
+        # index "sample_uuid"/"output" without a KeyError.
         self._write_events(
             tmp_path,
             [
                 EventRecord(
-                    event_type=SampleEventType.COMPLETE,
+                    event_type=SampleEventType.ISSUED,
                     sample_uuid="u1",
-                    data=TextModelOutput(output="a b"),
                 ),
             ],
         )
-        frame = self._scorer(tmp_path).get_raw_outputs({"absent"})
+        frame = self._scorer(tmp_path).get_raw_outputs()
         assert frame.empty
         assert list(frame.columns) == ["sample_uuid", "output"]
 
