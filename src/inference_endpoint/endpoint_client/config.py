@@ -189,7 +189,8 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 
     # Streaming OpenAI chat/completions requests ask for the final usage frame
     # (stream_options.include_usage) so server-reported token counts can be
-    # recorded. Turn off for endpoints that reject stream_options.
+    # recorded, on either token-count basis. Turn off for endpoints that reject
+    # stream_options: they fail every streaming request while it is on.
     stream_include_usage: Annotated[
         bool,
         cyclopts.Parameter(

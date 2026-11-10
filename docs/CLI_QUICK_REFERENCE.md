@@ -143,8 +143,11 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--no-stream-include-usage` (YAML `settings.client.stream_include_usage`) -
   stop asking streaming OpenAI requests for usage
   (`stream_options.include_usage`; default: on), for endpoints that reject
-  `stream_options`. Not allowed with `--token-count-source server` on a
-  streaming OpenAI run.
+  `stream_options`. The default changes the request body on either basis: every
+  streaming chat/completions request with `n <= 1` carries `stream_options`, so
+  an endpoint that rejects it fails those requests with a 4xx (each worker logs
+  one hint naming this flag). Not allowed with `--token-count-source server` on
+  a streaming OpenAI run.
 
 **Online-specific:**
 
