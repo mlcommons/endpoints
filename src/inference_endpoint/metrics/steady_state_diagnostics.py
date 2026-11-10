@@ -510,7 +510,8 @@ def _is_complete(line: bytes) -> bool:
     A line in the writer's compact layout is classified from its leading bytes
     (``leading_event_topic``). A line in any other layout is decoded to read its
     ``event_type``, so a change in how the log is written cannot silently drop
-    COMPLETE events.
+    COMPLETE events; the replay then decodes that line again, a cost only a log
+    re-encoded outside the writer's layout pays.
     """
     topic = leading_event_topic(line)
     if topic is not None:
@@ -518,6 +519,8 @@ def _is_complete(line: bytes) -> bool:
     try:
         return _JSON_DECODER.decode(line).get("event_type") == EV_COMPLETE
     except msgspec.DecodeError:
+        # Not a JSON event, so not a COMPLETE: the replay's untyped decode skips
+        # it as it skips a truncated line.
         return False
 
 
