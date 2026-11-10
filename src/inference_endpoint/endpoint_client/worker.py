@@ -208,6 +208,7 @@ class Worker:
         assert self.http_config.accumulator is not None
         self._adapter: type[HttpRequestAdapter] = self.http_config.adapter
         self._accumulator: type[SSEAccumulatorProtocol] = self.http_config.accumulator
+        self._stream_include_usage = self.http_config.stream_include_usage
 
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
@@ -360,7 +361,7 @@ class Worker:
         """Build InFlightRequest with serialized HTTP bytes."""
         # Encode Query into HTTP payload bytes using adapter
         body_bytes = self._adapter.encode_query(
-            query, include_usage=self.http_config.stream_include_usage
+            query, include_usage=self._stream_include_usage
         )
         is_streaming = query.data.get("stream", False)
 
@@ -423,7 +424,7 @@ class Worker:
                 self._pool.release(conn)
                 if (
                     not _stream_options_hint_logged
-                    and self.http_config.stream_include_usage
+                    and self._stream_include_usage
                     and _is_stream_options_rejection(
                         status_code, error_body, req.is_streaming
                     )
