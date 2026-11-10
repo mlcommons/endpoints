@@ -341,6 +341,15 @@ def main(argv=None):
         )
     if args.summary and not Path(args.summary).is_file():
         raise SystemExit(f"FATAL: --summary {args.summary} not found")
+    # Read the summary before the replay, which can take minutes on a large log.
+    summary = None
+    if args.summary:
+        try:
+            summary = json.loads(Path(args.summary).read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"FATAL: --summary {args.summary}: {exc}") from exc
+        if not isinstance(summary, dict):
+            raise SystemExit(f"FATAL: --summary {args.summary} is not a JSON object")
     values = {float(tok) for tok in args.percentiles.split(",")}
     if not all(0.0 < v < 100.0 for v in values):
         raise SystemExit(
@@ -399,10 +408,6 @@ def main(argv=None):
         basis=basis,
         progress=True,
     )
-    summary = None
-    if args.summary:
-        with open(args.summary) as f:
-            summary = json.load(f)
     augmented = json.loads(json.dumps(summary)) if summary is not None else {}
 
     print(f"token basis: {basis.value}")

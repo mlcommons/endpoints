@@ -524,6 +524,30 @@ def test_es_script_unreadable_summary_basis_with_override_never_labels_it(
     assert "token basis: server" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "text", ["{not json", "[1, 2]"], ids=["not_json", "not_object"]
+)
+def test_es_script_bad_summary_fails_before_the_replay(tmp_path, monkeypatch, text):
+    events = _write(tmp_path, [_ev("session.start_performance_tracking", 10)])
+    summary = tmp_path / "summary.json"
+    summary.write_text(text)
+
+    def no_replay(*args, **kwargs):
+        raise AssertionError("the replay ran before the summary was read")
+
+    monkeypatch.setattr(mod, "compute_series", no_replay)
+    with pytest.raises(SystemExit, match=f"--summary {summary}"):
+        mod.main(
+            [
+                str(events),
+                "--summary",
+                str(summary),
+                "--token-count-source",
+                _SERVER.value,
+            ]
+        )
+
+
 def test_es_script_unreadable_summary_exits_with_hint(tmp_path, capsys):
     events = _write(tmp_path, [_ev("session.start_performance_tracking", 10)])
     (tmp_path / "performance").mkdir()
