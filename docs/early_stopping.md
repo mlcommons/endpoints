@@ -204,9 +204,9 @@ A `--summary` path that does not exist fails before the log is replayed.
 
 - `server` runs: TPOT is `(complete - first chunk) / (completion_tokens - 1)`
   from each COMPLETE record, the aggregator's rule. Samples with
-  `completion_tokens <= 1` or a non-positive window are skipped, tool-call
-  samples are included, and no tokenizer is needed. A tracked sample without
-  usage is counted as missing (warned on stderr), never tokenized.
+  `completion_tokens <= 1` or a negative window are skipped, tool-call samples
+  are included, and no tokenizer is needed. A tracked sample without usage is
+  counted as missing (warned on stderr), never tokenized.
 - `client` runs: TPOT needs `--tokenizer` and skips tool-call samples.
 
 The script prints the basis it used (`token basis:`). `--token-count-source`

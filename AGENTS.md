@@ -193,8 +193,9 @@ working in this layer:
   (`classify_server_usage`) and records synchronously with no tokenizer, so it
   adds nothing to `n_pending_tasks`. Server TPOT is
   `(complete − first chunk) / (completion_tokens − 1)`, LoadGen's rule. No
-  server series records a value below 1: server OSL skips 0, and server TPOT
-  skips `completion_tokens <= 1` and non-positive windows.
+  server count series records a value below 1: server OSL skips 0, and server
+  TPOT skips `completion_tokens <= 1` and negative windows (a zero window
+  records 0, as on the client basis).
 
   The tokenizer triggers record into the client-basis series whenever a
   tokenizer is configured (`--no-metrics-isl` drops ISL on both bases; only the

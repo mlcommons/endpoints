@@ -40,6 +40,7 @@ from inference_endpoint.metrics.token_count_basis import (
     ServerUsage,
     classify_server_usage,
     missing_usage_message,
+    server_tpot_ns,
 )
 
 if TYPE_CHECKING:
@@ -536,9 +537,9 @@ class ServerUsageTrigger(EmitTrigger):
     - ``USABLE``: records ``prompt_tokens`` as ISL, ``completion_tokens`` as
       OSL and, when streaming, TPOT by LoadGen's rule
       ``(complete_ns - recv_first_ns) / (completion_tokens - 1)``: the first
-      visible chunk is excluded from both the window and the count. TPOT is
-      skipped without a first chunk, for ``completion_tokens <= 1`` and for a
-      non-positive window.
+      visible chunk is excluded from both the window and the count
+      (``server_tpot_ns``). TPOT is skipped without a first chunk and for
+      ``completion_tokens <= 1``.
     - ``TRUE_ZERO``: records nothing; no server-basis series records an empty
       completion, and client OSL and TPOT also skip empty output.
     - ``MISSING``: counts the sample in ``tracked_samples_missing_usage`` (and
@@ -549,11 +550,10 @@ class ServerUsageTrigger(EmitTrigger):
     Usage exists only on COMPLETE, and no tokenizer is involved, so nothing
     here adds to ``n_pending_tasks``.
 
-    The TPOT window can be non-positive because the two ends are stamped in
-    different places: COMPLETE carries ``QueryResult.completed_at``, set when
-    the transport decodes the response, while RECV_FIRST carries the time the
-    session dequeues the chunk. A short stream decoded in one transport drain
-    can therefore "complete" before its first chunk.
+    The TPOT window can be zero: COMPLETE is stamped no earlier than the
+    response's last chunk, so a response decoded in the transport drain that
+    delivered its first chunk completes at its RECV_FIRST stamp. That window
+    records 0, as the client basis records it.
 
     It fires inside ``set_field(COMPLETE)`` while the row is still in the
     table, so it reads ``row.superpass_index`` directly and feeds ``collector``
@@ -590,15 +590,14 @@ class ServerUsageTrigger(EmitTrigger):
         if self._isl is not None:
             registry.record(self._isl, prompt)
         registry.record(self.metric_name, completion)
-        if self._tpot is None or completion <= 1:
+        if self._tpot is None:
             return
         recv_first_ns = pre_change[SampleField.RECV_FIRST_NS]
         if recv_first_ns is None:
             return
-        delta = ev_rec.timestamp_ns - recv_first_ns
-        if delta <= 0:
+        value = server_tpot_ns(ev_rec.timestamp_ns - recv_first_ns, completion)
+        if value is None:
             return
-        value = delta / (completion - 1)
         registry.record(self._tpot, value)
         if self._collector is not None and row.superpass_index >= 0:
             self._collector.add_tpot(row.superpass_index, value, completion - 1)

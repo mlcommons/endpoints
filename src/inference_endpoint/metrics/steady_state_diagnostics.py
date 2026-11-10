@@ -17,8 +17,9 @@ directory; ``--token-count-source`` replays on either basis:
 
   - server: ``completion_tokens - 1`` from the COMPLETE line's usage, by the
     live aggregator's rule (``classify_server_usage``, then LoadGen's
-    formula). Samples without usable usage, with ``completion_tokens <= 1``
-    or a non-positive window get no TPOT. No tokenizer is needed.
+    formula, ``server_tpot_ns``). Samples without usable usage, with
+    ``completion_tokens <= 1`` or a negative window get no TPOT. No tokenizer
+    is needed.
   - client: plain tokenization of ``text_after_first_chunk``. The live
     metrics aggregator uses the chat-template path for reasoning and
     tool-call outputs, so for reasoning models absolute TPOT can differ from
@@ -102,6 +103,7 @@ from inference_endpoint.metrics.token_count_basis import (
     ServerUsage,
     read_server_usage,
     replay_basis,
+    server_tpot_ns,
 )
 
 # --------------------------------------------------------------------------- #
@@ -905,9 +907,8 @@ def build_super_pass_series(
 
     - SERVER: TPOT is ``(complete - recv_first) / (completion_tokens - 1)``
       from the COMPLETE line's usage, with the live aggregator's rule and
-      guards (usable usage by ``read_server_usage``, streamed,
-      ``completion_tokens > 1``, positive window). ``count_tokens`` may be
-      None.
+      guards (usable usage by ``read_server_usage``, streamed, then
+      ``server_tpot_ns``). ``count_tokens`` may be None.
     - CLIENT: ``count_tokens`` maps a text batch to token counts. It is
       injected so tests can avoid a real tokenizer and callers can swap
       tokenizers.
@@ -967,8 +968,8 @@ def build_super_pass_series(
                     )
                     if usage is ServerUsage.MISSING:
                         n_missing_usage += 1
-                    if n is not None and n > 1 and delta is not None and delta > 0:
-                        collector.add_tpot(row.superpass_index, delta / (n - 1), n - 1)
+                    if n is not None and (tpot := server_tpot_ns(delta, n)) is not None:
+                        collector.add_tpot(row.superpass_index, tpot, n - 1)
                     continue
                 if delta is None:
                     continue

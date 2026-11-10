@@ -44,14 +44,15 @@ none), needs no tokenizer and no `TokenBatchQueue`, so it never enters
 decides ISL, OSL and TPOT together. No server series records a value below 1:
 OSL skips `completion_tokens == 0`, and TPOT
 (`(complete - first chunk) / (completion_tokens - 1)`) skips
-`completion_tokens <= 1` and non-positive windows. A tracked successful sample
-whose COMPLETE has no usable usage, or reports 0 `completion_tokens` beside
-non-empty output (which OSL would otherwise skip silently), increments
-`tracked_samples_missing_usage` (and `..._empty_output` when it has no usage and
-empty output) on either primary basis; the first one logs a warning when the
-server basis is primary, else an info line. The tokenizer-side OSL trigger also
-counts, over samples that have both counts, `osl_paired_samples`,
-`osl_paired_client_tokens` and `osl_paired_server_tokens`.
+`completion_tokens <= 1` and negative windows (a zero window records 0, as on
+the client basis). A tracked successful sample whose COMPLETE has no usable
+usage, or reports 0 `completion_tokens` beside non-empty output (which OSL would
+otherwise skip silently), increments `tracked_samples_missing_usage` (and
+`..._empty_output` when it has no usage and empty output) on either primary
+basis; the first one logs a warning when the server basis is primary, else an
+info line. The tokenizer-side OSL trigger also counts, over samples that have
+both counts, `osl_paired_samples`, `osl_paired_client_tokens` and
+`osl_paired_server_tokens`.
 
 **Tokenizer triggers** may require tokenizer passes: ISL is emitted at `ISSUED`
 from pre-tokenized input IDs or raw prompt text, while OSL and TPOT are emitted

@@ -24,8 +24,9 @@ Replicated aggregator rules:
                         (--token-count-source overrides it):
       server:           ``completion_tokens - 1`` from the COMPLETE record's usage
                         (``classify_server_usage``, then LoadGen's rule, as the
-                        aggregator). Samples without usable usage, with
-                        completion_tokens <= 1 or a non-positive window are skipped.
+                        aggregator, ``server_tpot_ns``). Samples without usable
+                        usage, with completion_tokens <= 1 or a negative window
+                        are skipped.
                         Tool-call samples are included. No tokenizer is needed.
       client:           tokens(text_after_first_chunk) via the raw ``tokenizers``
                         backend with add_special_tokens=False, identical to
@@ -89,6 +90,7 @@ from inference_endpoint.metrics.token_count_basis import (
     ServerUsage,
     read_server_usage,
     replay_basis,
+    server_tpot_ns,
 )
 
 # mirror of the JSONL writer: msgspec.json.Encoder(enc_hook=EventType.encode_hook)
@@ -215,13 +217,10 @@ def compute_series(
                             )
                             if usage is ServerUsage.MISSING:
                                 missing_usage += 1
-                            if (
-                                n is not None
-                                and n > 1
-                                and row[1] is not None
-                                and ts - row[1] > 0
-                            ):
-                                tpot.append((ts - row[1]) / (n - 1))
+                            if row[1] is not None:
+                                value = server_tpot_ns(ts - row[1], n)
+                                if value is not None:
+                                    tpot.append(value)
                         continue
                     if count_tokens is None or row[1] is None:
                         continue

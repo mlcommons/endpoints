@@ -1952,7 +1952,7 @@ class TestTokenCountBases:
             (1, 2000, None),  # <= 1: skipped (LoadGen would log a negative)
             (msgspec.UNSET, 2000, None),
             (4, None, None),  # streaming only
-            (4, 5000, None),  # delta == 0: skipped
+            (4, 5000, 0.0),  # delta == 0: recorded, as the client basis does
             (4, 6000, None),  # RECV_FIRST stamped after COMPLETE: skipped
         ],
     )

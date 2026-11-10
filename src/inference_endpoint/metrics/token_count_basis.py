@@ -17,7 +17,8 @@
 
 - ``classify_server_usage``: the one rule for whether a request's server-reported
   usage is usable, shared by the live aggregator and every post-run tool;
-  ``read_server_usage`` also reads the completion count it allows.
+  ``read_server_usage`` also reads the completion count it allows, and
+  ``server_tpot_ns`` turns that count and the TPOT window into a TPOT.
 - ``effective_token_count_source``: the configured basis after the endpoint's
   API type is taken into account.
 - ``token_count_source_for_run``: the basis a finished run used, for standalone
@@ -96,6 +97,28 @@ def read_server_usage(
     if usage is ServerUsage.USABLE:
         return usage, cast(int, completion_tokens)
     return usage, None
+
+
+def server_tpot_ns(
+    window_ns: float | None, completion_tokens: int | None
+) -> float | None:
+    """Server-basis TPOT: the first-chunk-to-COMPLETE window over the tokens
+    after the first (LoadGen's rule), or ``None`` when there is none.
+
+    ``None`` without a window, for ``completion_tokens`` of ``None`` or at most
+    1, and for a negative window, which only an event log whose COMPLETE was
+    stamped before its chunks arrived holds. A zero window (the response
+    completed in the transport drain that delivered its first chunk) is 0, as
+    the client basis records it, so both bases cover the same samples.
+    """
+    if (
+        window_ns is None
+        or completion_tokens is None
+        or completion_tokens <= 1
+        or window_ns < 0
+    ):
+        return None
+    return window_ns / (completion_tokens - 1)
 
 
 def effective_token_count_source(

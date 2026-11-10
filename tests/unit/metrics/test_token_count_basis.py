@@ -31,6 +31,7 @@ from inference_endpoint.metrics.token_count_basis import (
     missing_usage_message,
     read_server_usage,
     replay_basis,
+    server_tpot_ns,
     token_count_source_for_run,
 )
 
@@ -73,6 +74,21 @@ def test_read_server_usage(prompt, completion, output, expected):
 )
 def test_zero_completion_beside_non_text_output_is_missing(output):
     assert classify_server_usage(10, 0, output) is ServerUsage.MISSING
+
+
+@pytest.mark.parametrize(
+    ("window_ns", "completion_tokens", "expected"),
+    [
+        (3000, 4, 1000.0),  # 3000 / (4 - 1)
+        (0, 4, 0.0),  # a zero window is a TPOT, as on the client basis
+        (-1, 4, None),
+        (3000, 1, None),  # no token after the first
+        (3000, None, None),
+        (None, 4, None),  # no first chunk
+    ],
+)
+def test_server_tpot_ns(window_ns, completion_tokens, expected):
+    assert server_tpot_ns(window_ns, completion_tokens) == expected
 
 
 @pytest.mark.parametrize("configured", list(TokenCountSource))
