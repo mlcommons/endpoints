@@ -641,10 +641,21 @@ class Aggregate(BaseModel):
         )
         if held:
             return True, ""
-        return False, (
+        why = (
             f"expected {self.name} of {self.over} {self.op} {self.value}, "
             f"got {_shown(measured, self.over)} vs {_shown(value, self.value)}"
         )
+        if (
+            self.name == "count"
+            and self.value == 0
+            and measured
+            and not (isinstance(self.over, Ref) and self.over.sensitive)
+        ):
+            offenders = ", ".join(_show(item) for item in items[:4])
+            if len(items) > 4:
+                offenders += f", ... +{len(items) - 4} more"
+            why += f"; offenders: {offenders}"
+        return False, why
 
     def describe(self) -> str:
         """The row as prose: `aggregate of over op value`.

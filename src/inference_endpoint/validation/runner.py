@@ -28,7 +28,7 @@ failing an advisory prerequisite.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -39,6 +39,7 @@ from inference_endpoint.validation.compare import Ref, Verdict
 from inference_endpoint.validation.submission import (
     Pareto,
     Point,
+    RefusedSubmission,
     Submission,
     refused_submissions,
 )
@@ -108,9 +109,10 @@ class Finding:
         the `when` rows or a `needs` chain kept from running is told apart
         from one that ran and failed.
 
-        A load-level check first (`_validate_*`: a submission the walk cannot
-        cover, an unreadable artifact, or a checker namespace the cohort names but
-        the tree lacks is an error -- silence must never be the verdict). Then
+        Preflight records artifact and declared-value faults in
+        `Collected.refusals`, not in the caller's `Node.refusals`. A collectible
+        input tree therefore remains independent of cohort-specific faults.
+        The `_validate_*` predicates and resolver exclude the affected paths;
         `_collect_candidates` validates `needs` names (unknown -> ValueError)
         and `_GateResolver` resolves each `needs` chain per node. Each
         (check, node) is evaluated exactly once -- the chain first (a disavowed
@@ -123,16 +125,20 @@ class Finding:
         must not read as a pass.
         """
         _validate_points(submission)
-        _validate_artifacts(submission)
-        notes = _validate_declared_values(cohort, submission)
+        cohort_refusals = _validate_artifacts(submission)
+        notes, declared_refusals = _validate_declared_values(cohort, submission)
+        cohort_refusals = (*cohort_refusals, *declared_refusals)
         _validate_ruleset_needs(cohort, submission)
         candidates = _collect_candidates(cohort)
-        gate = _GateResolver({check.id: check for check in candidates}, submission)
+        refusal_paths = tuple(refused.path for refused in cohort_refusals)
+        gate = _GateResolver(
+            {check.id: check for check in candidates}, submission, refusal_paths
+        )
         findings: list[Finding] = []
         runs: dict[str, CheckRun] = {}
         for check in candidates:
             ran_at = gated_off = silenced = blocked = 0
-            for node in _scope_nodes(check.scope, submission):
+            for node in _scope_nodes(check.scope, submission, refusal_paths):
                 evaluation = gate.evaluation_at(check, node)
                 if evaluation.state is _CheckState.NOT_APPLICABLE:
                     gated_off += 1
@@ -154,7 +160,7 @@ class Finding:
                 silenced=silenced,
                 blocked=blocked,
             )
-        return Collected(tuple(findings), runs, notes)
+        return Collected(tuple(findings), runs, notes, cohort_refusals)
 
 
 @dataclass(frozen=True)
@@ -192,13 +198,16 @@ class Collected:
             order), keyed by check id.
         notes (tuple[str, ...]): One shape note per decoded value and per
             present undeclared key, each a full line
-            `<coerced|ignored>: <node directory>: <path> ...`, in node then
-            walk order.
+        refusals (tuple[RefusedSubmission, ...]): Cohort-specific faults on the
+            covered submissions, recorded in this evaluation-local record and
+            merged by `submission_verdicts`, never written back into the caller's
+            submission tree. (Default: ())
     """
 
     findings: tuple[Finding, ...]
     runs: Mapping[str, CheckRun]
     notes: tuple[str, ...]
+    refusals: tuple[RefusedSubmission, ...] = ()
 
 
 def _validate_points(submission: Submission) -> None:
@@ -267,43 +276,55 @@ def _refusal_unit(node: Node) -> Node:
     return node if probe is None else probe
 
 
-def _validate_artifacts(submission: Submission) -> None:
-    """Refuse every artifact that failed to parse anywhere in the tree.
+def _refusal_records(node: Node, message: str) -> tuple[RefusedSubmission, ...]:
+    """One cohort-specific fault as records on the submissions it covers."""
+    unit = _refusal_unit(node)
+    # A collect-time fault is absent from `Node.refusals` by design. Obtain
+    # tuple paths structurally; loader-level fan-out instead reads `refusals`.
+    paths = tuple(
+        candidate.dir
+        for candidate in _all_nodes(unit)
+        if candidate.kind is RuleScopes.PARETO
+    )
+    return tuple(RefusedSubmission(path, message) for path in paths or (unit.dir,))
+
+
+def _validate_artifacts(submission: Submission) -> tuple[RefusedSubmission, ...]:
+    """One local refusal record per artifact that failed to parse in this pass.
 
     A corrupt artifact must never read as an absent fact: that would silently
-    switch `when`-gated checks off and pass the submission by omission. The
-    fault is recorded on the `<system, model>` that contains it, so one broken
-    run cannot take its siblings' verdicts down with it.
+    switch `when`-gated checks off and pass the submission by omission. Faults
+    are returned, not written onto `Node.refusals`: this tree belongs to its
+    caller and can safely be collected against another cohort later.
     """
+    refusals: list[RefusedSubmission] = []
     for node in _all_nodes(_tree_root(submission)):
         if _is_refused(node):
             continue
         for name, (_, error) in sorted(node.artifacts.items()):
-            if error is None:
-                continue
-            unit = _refusal_unit(node)
-            unit.refusals = (*unit.refusals, f"{node.dir / name}: {error}")
+            if error is not None:
+                refusals.extend(_refusal_records(node, f"{node.dir / name}: {error}"))
+    return tuple(refusals)
 
 
 def _validate_declared_values(
     cohort: Cohort, submission: Submission
-) -> tuple[str, ...]:
-    """Fail loud on a present fact value its declaration will not carry.
+) -> tuple[tuple[str, ...], tuple[RefusedSubmission, ...]]:
+    """One local refusal pass per present fact value its declaration rejects.
 
     One pass per node through `RefTable.validate_values` (type match, allowlist
     membership, declared-block shape): the cohort's `valid_refs.yaml` owns the
     values' contract, so this is a collect-time refusal, never a finding.
 
     Returns:
-        tuple[str, ...]: The shape notes, each a full line prefixed with the
-            node directory: `coerced: <path>: '<text>' read as <number>` per
-            declared `int`/`float` value decoded from a numeric string, and
-            `ignored: <path>` per present key no declaration names (a
-            multi-pareto upload has many `point.config.…` paths, one per run).
+        tuple[tuple[str, ...], tuple[RefusedSubmission, ...]]: The shape notes
+            (`coerced` and `ignored`, full lines in node then walk order), and
+            evaluation-local refusal records.
     """
     if cohort.refs is None:
-        return ()
+        return (), ()
     notes: list[str] = []
+    refusals: list[RefusedSubmission] = []
     for node in _all_nodes(_tree_root(submission)):
         if _is_refused(node):
             continue
@@ -311,15 +332,10 @@ def _validate_declared_values(
         try:
             shape_notes = cohort.refs.validate_values(node.kind.value, fields)
         except ValueError as exc:
-            # The run directory names the offending node: a multi-pareto upload
-            # has many `point.config.…` paths, one per run. A fault below a
-            # `<system, model>` refuses that tuple and leaves the siblings to
-            # their own verdicts.
-            unit = _refusal_unit(node)
-            unit.refusals = (*unit.refusals, f"{node.dir}: {exc}")
+            refusals.extend(_refusal_records(node, f"{node.dir}: {exc}"))
             continue
         notes.extend(f"{kind}: {node.dir}: {message}" for kind, message in shape_notes)
-    return tuple(notes)
+    return tuple(notes), tuple(refusals)
 
 
 def _validate_ruleset_needs(cohort: Cohort, submission: Submission) -> None:
@@ -360,6 +376,11 @@ def _is_refused(node: Node) -> bool:
             return True
         probe = probe.parent
     return False
+
+
+def _in_collect_refusals(node: Node, paths: Sequence[Path] = ()) -> bool:
+    """Whether `node` sits below a cohort-specific refusal path of this run."""
+    return any(node.dir.is_relative_to(path) for path in paths)
 
 
 def _collect_candidates(cohort: Cohort) -> tuple[Check, ...]:
@@ -457,9 +478,15 @@ class _GateResolver:
     vouch-set names nothing.
     """
 
-    def __init__(self, by_id: Mapping[str, Check], submission: Submission) -> None:
+    def __init__(
+        self,
+        by_id: Mapping[str, Check],
+        submission: Submission,
+        refusal_paths: Sequence[Path] = (),
+    ) -> None:
         self._by_id = by_id
         self._submission = submission
+        self._refusal_paths = tuple(refusal_paths)
         self._memo: dict[tuple[str, str], _Evaluation] = {}
         self._scopes: dict[str, dict[str, Any]] = {}
 
@@ -495,9 +522,11 @@ class _GateResolver:
             upstream = self._by_id[token]
             evaluations = [
                 self._evaluate(upstream, upstream_node, trail)
-                for upstream_node in _chain_nodes(upstream.scope, node)
+                for upstream_node in _chain_nodes(
+                    upstream.scope, node, self._refusal_paths
+                )
             ]
-            if _refused_below(node, upstream.scope):
+            if _refused_below(node, upstream.scope, self._refusal_paths):
                 # A refused instance below the dependent is no claim: the
                 # evidence was never judged, so the chain cannot vouch and the
                 # block is named -- the report says why instead of reading the
@@ -568,15 +597,17 @@ _SCOPE_DEPTH = {
 }
 
 
-def _chain_nodes(scope: RuleScopes, node: Node) -> tuple[Node, ...]:
+def _chain_nodes(
+    scope: RuleScopes, node: Node, refusal_paths: Sequence[Path] = ()
+) -> tuple[Node, ...]:
     """The `scope`-kind nodes a check at `node` depends on: up the chain, or down the subtree.
 
     Same-or-ancestor scope resolves to the one chain node (a point's pareto,
     system and submission ancestors). A finer scope resolves to every such node
     below `node` (a system-scoped check vouches with all of its points), never
-    one inside a refused subtree (`_is_refused`): a refused node's facts cannot
-    be trusted, so it can neither vouch for nor block a judged dependent. A
-    subtree without any claimable node yields none -- the chain claims nothing.
+    one inside a refused loader or cohort-specific subtree. `_refused_below`
+    turns that missing evidence into an unsatisfied claim, not a silently
+    shrunk claim set.
 
     Raises:
         ValueError: When no ancestor of the requested `scope` kind exists above `node`
@@ -590,25 +621,25 @@ def _chain_nodes(scope: RuleScopes, node: Node) -> tuple[Node, ...]:
             return (probe,)
         raise ValueError(f"no {scope.value} node above {node.dir}")
     return tuple(
-        candidate for candidate in _below(node, scope) if not _is_refused(candidate)
+        candidate
+        for candidate in _below(node, scope)
+        if not _is_refused(candidate)
+        and not _in_collect_refusals(candidate, refusal_paths)
     )
 
 
-def _refused_below(node: Node, scope: RuleScopes) -> bool:
-    """Whether any `scope`-kind node in `node`'s subtree belongs to a refused submission.
+def _refused_below(
+    node: Node, scope: RuleScopes, refusal_paths: Sequence[Path] = ()
+) -> bool:
+    """Whether a scope-kind descendant is loader- or cohort-refused.
 
-    `_chain_nodes` drops refused nodes from a scope's claim set; a dependent
-    that ignored the drop could read HOLDS over evidence never judged, so its
-    caller counts the drop as an unsatisfied claim instead.
-
-    Args:
-        node (Node): The dependent node whose subtree is walked.
-        scope (RuleScopes): The finer claim scope to look for below it.
-
-    Returns:
-        bool: Whether at least one `scope`-kind node below `node` is refused.
+    `_chain_nodes` drops refused nodes from the claim set; if the drop is in
+    this run's refusal collection, it is still an unsatisfied claim.
     """
-    return any(_is_refused(candidate) for candidate in _below(node, scope))
+    return any(
+        _is_refused(candidate) or _in_collect_refusals(candidate, refusal_paths)
+        for candidate in _below(node, scope)
+    )
 
 
 def _below(node: Node, scope: RuleScopes) -> Iterator[Node]:
@@ -683,7 +714,9 @@ def _scopes_rows_view(node: Node, submission: Submission) -> dict[str, Any]:
     return scopes
 
 
-def _scope_nodes(scope: RuleScopes, submission: Submission) -> tuple[Node, ...]:
+def _scope_nodes(
+    scope: RuleScopes, submission: Submission, refusal_paths: Sequence[Path] = ()
+) -> tuple[Node, ...]:
     """Unique nodes of `scope` kind reached by walking each point's node chain.
 
     `Point` reaches the points' own `PointNode`s. `pareto`/`system`/`submission`
@@ -707,7 +740,13 @@ def _scope_nodes(scope: RuleScopes, submission: Submission) -> tuple[Node, ...]:
                     f"no {scope.value} node above point {point.concurrency}"
                 )
             nodes.append(probe)
-    return tuple({node.dir: node for node in nodes if not _is_refused(node)}.values())
+    return tuple(
+        {
+            node.dir: node
+            for node in nodes
+            if not _is_refused(node) and not _in_collect_refusals(node, refusal_paths)
+        }.values()
+    )
 
 
 def _when_rows_hold(check: Check, scopes: Mapping[str, Any], where: Path) -> bool:
@@ -786,8 +825,12 @@ def submission_verdicts(
     for node in _all_nodes(submission.tree):
         for refused in refused_submissions(node):
             refusals.setdefault(refused.path, []).append(refused.message)
+    for refused in collected.refusals:
+        refusals.setdefault(refused.path, []).append(refused.message)
     verdicts: list[SubmissionVerdict] = []
     for pareto in submission.paretos:
+        if pareto.node is None:
+            raise ValueError("a verdict requires a pareto bound to its tree node")
         where = pareto.node.dir
         refusal = "; ".join(refusals.get(where, ()))
         failing = blocking = 0
@@ -827,4 +870,6 @@ def _belongs(finding_dir: Path, pareto: Pareto) -> bool:
         if finding_dir == node.dir:
             return True
         node = node.parent
+    if pareto.node is None:
+        raise ValueError("a finding requires a pareto bound to its tree node")
     return pareto.node.dir in finding_dir.parents

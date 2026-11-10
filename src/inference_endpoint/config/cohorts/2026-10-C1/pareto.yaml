@@ -2,12 +2,11 @@
 # Policy section it enforces (pinned at 4ba8224dc746).
 #
 # A pareto row may name `pareto.…` facts, the coarser `system.`/`submission.`
-# namespaces, and the per-pareto `derived.*`/`regions.*` names. Counting over
-# the pareto's points is available as `derived.point_count`,
-# `derived.uncovered_regions`, `derived.offline_points` and the two accuracy
-# coverage derivations; what a row still cannot do -- compare a point
-# to the curve's maximum, or place a point in a computed region band -- is
-# listed in ../2026-10-C1.md under "Not yet expressible", with the reason.
+# namespaces, and the per-pareto `derived.*`/`regions.*` names. This cohort
+# includes cross-point coverage, model/dataset consistency, power/engagement,
+# accuracy cardinality and whole-run-rate derivations. Policy properties that
+# cannot be decided from the available artifacts are listed in
+# ../2026-10-C1.md under "Not yet expressible".
 
 pareto_point_cap:
   description: The pareto traces at most 32 measurement points (§5.6's cap).
@@ -77,6 +76,19 @@ pareto_accuracy_coverage:
         value: 0,
       }
 
+pareto_accuracy_result_limits:
+  description: At most one validation result per mandatory band and one Offline result, none at choice points (§4.3).
+  rule: "Endpoints Policy §4.3, Accuracy Metric; §5.3, Accuracy Runs."
+  fix: Ship only the mandatory-band validation results, plus the Offline result for non-agentic runs; do not put validation dataset entries at choice points.
+  severity: fail
+  assert:
+    - {
+        over: derived.excess_accuracy_results,
+        aggregate: count,
+        op: eq,
+        value: 0,
+      }
+
 pareto_offline_accuracy:
   description: The Offline point carries its §4.3 accuracy validation result.
   rule: "Endpoints Policy §4.3, Accuracy Metric; §5.7, Offline Result."
@@ -95,8 +107,6 @@ pareto_model_name_admitted:
   rule: "Endpoints Policy §3.2, Benchmark Model."
   fix: Declare a model the catalog names (see `ruleset/models.yaml`).
   severity: fail
-  when:
-    - { left: ruleset.models, op: exists }
   assert:
     - { left: derived.model_name_admitted, op: eq, right: true }
 
@@ -202,7 +212,7 @@ pareto_region_placement:
 pareto_tps_utilization:
   description: Every declared system_desc tps_utilization equals the point's share of its curve's peak throughput (§8.2).
   rule: "Endpoints Policy §8.2, System Description; §9.1, Automated Checks."
-  fix: Recompute the flagged points' `tps_utilization` as `system_tps / max(system_tps)` over the curve.
+  fix: Recompute flagged points as their whole-run output tokens divided by whole-run duration, then take each rate's share of the curve's maximum whole-run system_tps.
   severity: fail
   assert:
     - {

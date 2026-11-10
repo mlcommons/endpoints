@@ -1,14 +1,11 @@
 # Per-run checks (`results/<system>/<model>/r<N>/`), every row citing the
 # Endpoints Policy section it enforces (pinned at 4ba8224dc746).
 #
-# Scope of this first version: the checks a row can decide from one run's own
-# artifacts. Rules that need cross-point arithmetic or catalog-conditional
-# rescaling are listed in ../2026-10-C1.md under "Not yet expressible" with the
-# reason; the vocabulary-only rules (an `offline` value
-# outside §8.3's three, a `region` outside §8.3's six, a steady-state verdict
-# outside §4.4's vocabulary, a `load_pattern` outside §6.1's patterns) are
-# enforced by this cohort's `valid_refs.yaml` notes at collect time, not by
-# rows here.
+# Per-run rows can also name the point's own `derived.*`/`regions.*` values.
+# The vocabulary-only rules (an `offline` value outside §8.3's three, a `region`
+# outside §8.3's six, a steady-state verdict outside §4.4's vocabulary, a
+# `load_pattern` outside §6.1's patterns) are enforced by this cohort's
+# `valid_refs.yaml` notes at collect time, not by rows here.
 
 point_disclosure_complete:
   description: Every §8.3 disclosure field is present and non-blank (empty or whitespace-only values fail).

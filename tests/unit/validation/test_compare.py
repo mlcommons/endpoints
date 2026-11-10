@@ -527,13 +527,14 @@ class TestCompareVerdict:
             encoding="utf-8",
         )
         row = _annotated(
-            _aggregate(over="point.config.client", name="count", op="eq", value=0),
+            _aggregate(over="point.config.client", name="min", op="eq", value=0),
             RefTable.from_yaml(path),
         )
         verdict = Verdict.evaluate(
             row, {"point": {"config": {"client": {"api_key": "sk-live-abc123"}}}}
         )
         assert verdict.ok is False
+        assert "(redacted)" in verdict.why
         assert "sk-live-abc123" not in verdict.why
 
     @pytest.mark.unit
@@ -1033,3 +1034,20 @@ class TestSensitiveOpenSubtrees:
         assert verdict.broken
         assert "(redacted)" in verdict.why
         assert "nan" not in verdict.why
+
+
+class TestCountedDiagnostics:
+    """A failed presence row names the offending members, within a bound."""
+
+    @pytest.mark.unit
+    def test_a_nonzero_count_names_a_bounded_subset_of_offenders(self):
+        row = _aggregate(
+            over=["c16", "c32", "c64", "c256", "c4096"],
+            name="count",
+            op="eq",
+            value=0,
+        )
+        verdict = Verdict.evaluate(row, SCOPES)
+        assert not verdict.ok
+        assert "offenders: 'c16', 'c32', 'c64', 'c256'" in verdict.why
+        assert "+1 more" in verdict.why

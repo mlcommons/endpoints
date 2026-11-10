@@ -22,8 +22,8 @@ for.
   `not judged: needs ... did not pass`. Exit codes:
 
   - `0`: everything applicable held, or failed only at `warn`
-  - `1`: a failing `fail` finding
-  - `2`: cohort or submission refused before any check ran
+  - `1`: a failing `fail` finding, or one or more per-submission refusals
+  - `2`: a cohort/input-level fault before any submission can be judged
 
 - **`check.py`** — the cohort side.
 
@@ -70,10 +70,11 @@ for.
     `row failed to evaluate`; every failing verdict names both sides. Anything
     else propagates.
 
-- **`operations.py`** — the `Op` family (12 ops) and `Predicate`.
+- **`operations.py`** — the `Op` family (13 ops) and `Predicate`.
 
   - Ops self-register on `Op(name)` via `__new__`: `Eq`, `Ne`, `Gt`, `Ge`, `Lt`,
-    `Le`, `In`, `Matches`, `SameMultiset`, `Exists`, `Absent`, `NotNull`.
+    `Le`, `In`, `Matches`, `SameMultiset`, `Exists`, `Absent`, `NotNull`,
+    `NonBlank`.
   - `Predicate(subject, target)` is the resolved-operand carrier; `target` is
     the resolved `right`, or the `Interval` a range test resolves to.
   - `Op.tolerant` is True on `Eq`/`Ne` only; `Compare._check_shape` rejects
@@ -437,11 +438,11 @@ Each formula below is anchored to the Endpoints Policy section it implements.
   `C_max = system_desc["max_supported_concurrency"]` (the field name verbatim,
   per the Max-concurrency-declared row). `C_min` is
   `system_desc["c_min_override"]` when the key is declared, else
-  `min(concurrencies)` — Section 5.5's "C_min is derived from the submission
-  points". Section 5.4 validates every declared override — `null` included ("All
-  other values, including `null`, are rejected") — as a bool-free integer in
-  `[1, 32]` equal to a submitted point's concurrency, else a `ValueError` naming
-  Section 9.1's C_min-override row.
+  `min(min(concurrencies), 32)` — Section 5.5's "C_min is derived from the
+  submission points", clamped to `[1, C_MIN_HIGHEST]` where the module sets
+  `C_MIN_HIGHEST = 32`. Section 5.4 rejects every override, including `null`,
+  unless it is a bool-free integer in `[1, 32]` equal to a submitted point's
+  concurrency, else a `ValueError` naming Section 9.1's C_min-override row.
 
 - **`Pareto.offline_ordering()`** —
   `system_tps(Offline) >= 0.98 * system_tps(C_max)` AND
@@ -534,32 +535,51 @@ Each formula below is anchored to the Endpoints Policy section it implements.
 ## 8. Notable engineering calls (for reviewers)
 
 - **Derivations are exposed as fields `Ref` reads, and that exposure is
-  priced.** The `derived.<name>` names are exactly `_DERIVATION_METHODS`' keys,
-  published as `DERIVATION_NAMES`: `offline_ordering`, `point_cap`,
-  `point_count`, `point_count_min`, `accuracy_uncovered_regions`,
-  `offline_points_missing_accuracy`, `uncovered_regions`, `offline_points`,
-  `agentic`, `model_name_admitted`, `conflicting_load_patterns`,
-  `conflicting_model_names`, `conflicting_datasets`, `conflicting_seed_sets`,
-  `inconsistent_system_desc_keys`, `accounting_mismatch_points` (Section 14's
-  counts that do not add up, as the offending points' concurrencies),
-  `system_tps_mismatch_points` (Section 9.1's stored throughputs off
-  `total / duration` beyond `TPS_TOLERANCE`), `misplaced_region_points` (Section
-  8.3's declared regions off their computed band),
-  `tps_utilization_mismatch_points` (Section 8.2's declared utilization off its
-  share of the curve's peak beyond `TPS_UTILIZATION_ABS_TOL`),
-  `out_of_range_points`, `accuracy_gate_misses` (Section 15's per-run gate
-  misses, joined to the catalog's `accuracy_targets` for the declared model),
-  `structure_misses` (Section 8.1's tree: `docs/`, `src/` and one README per
-  implementation), `unresolved_shared_paths` (Section 9.1's shared pointers,
-  resolved against the submission root), `unapproved_drafter_points` (Section
-  2.9.4's approved-drafter and lead-time misses, read from the catalog's
-  `approved_drafters`). `Point.point_power_kw` and `Interval.for_accuracy_gate`
-  stay **method-only**: their inputs (provisioned/engaged node counts; the
-  per-point gate interval) are carried on no fact the rows can reach today, so
-  they price into the rows that need them (the per-point denominator and audit
-  rows) together with the carries those rows bring. `Regions.covers`' row use is
-  `regions.by_kind.<kind>` membership (`op: in`) — the shape the stub cohort in
-  `tests/assets/cohorts/stub/` writes.
+  priced.** The exact key set is `_DERIVATION_METHODS`' keys, published as
+  `DERIVATION_NAMES`; this list is grouped to match.
+
+  - **Coverage and counts:** `offline_ordering`, `point_cap`, `point_count`,
+    `point_count_min`; `accuracy_uncovered_regions`,
+    `offline_points_missing_accuracy`; `excess_accuracy_results` (one
+    non-Offline validation carrier per mandatory region, and no validation
+    carrier at a submitter's-choice point); `entryless_accuracy_points`
+    (provided accuracy documents with no dataset entries).
+  - **Shape, model and structure:** `input_shape`, `model_dir_name_mismatches`,
+    `model_name_admitted`, `agentic`, `structure_misses`,
+    `unresolved_shared_paths`.
+  - **Cross-point consistency:** `conflicting_load_patterns`,
+    `conflicting_model_names`, `conflicting_datasets`, `conflicting_seed_sets`,
+    `inconsistent_system_desc_keys`, all as the tuple with differing values.
+  - **Regions and drafting:** `offline_points`, `uncovered_regions`,
+    `out_of_range_points`, `misplaced_region_points`,
+    `unapproved_drafter_points`.
+  - **Power and engagement:** `nodes_used_problems` carries each malformed,
+    unknown, over-provisioned or over-engaged declaration;
+    `maximal_engagement_problems` names each accelerator/DP failure or missing
+    shortfall reason; `tps_per_kw_mismatches` compares the declared TPS/kW
+    against shared `system_tps` divided by the largest engaged fraction of
+    provisioned power.
+  - **Counts and rates:** `accounting_mismatch_points` gives Section 14's
+    offending point concurrencies; `system_tps_mismatch_points` flags stored
+    whole-run TPS differing by more than `TPS_TOLERANCE` from output tokens
+    divided by duration; `tps_utilization_mismatch_points` compares its share of
+    the curve's peak whole-run TPS; `tps_per_user_mismatches` compares the
+    stored user rate with its TPOT-derived rate; `accuracy_gate_misses` joins
+    declared target datasets to their targets and minimum counts. For agentic
+    points, the shared accuracy reader excludes `agentic_combined` inline
+    performance entries from validation coverage, cardinality and the gate.
+    Inline-only documents still count as nonempty documents; they carry no
+    validation result.
+
+  N is fixed by §4.3: five roles for non-agentic (four mandatory regions plus
+  Offline), four for agentic. Offline results are excluded from the extra-band
+  count, including the elected-Offline combination. `Point.point_power_kw` and
+  `Interval.for_accuracy_gate` stay **method-only**: their inputs
+  (provisioned/engaged node counts; the per-point gate interval) are carried on
+  no fact the rows can reach today, so they price into the rows that need them
+  (the per-point denominator and audit rows) together with the carries those
+  rows bring. `Regions.covers`' row use is `regions.by_kind.<kind>` membership
+  (`op: in`) — the shape the stub cohort in `tests/assets/cohorts/stub/` writes.
 
 - **The strict loader refuses duplicate keys, `<<` merge keys and all YAML
   aliases.** Alias fan-out can re-walk shared subtrees exponentially, and silent

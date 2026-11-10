@@ -1153,6 +1153,7 @@ class TestDerivedExposure:
             "structure_misses",
             "entryless_accuracy_points",
             "input_shape",
+            "excess_accuracy_results",
             "model_dir_name_mismatches",
             "nodes_used_problems",
             "maximal_engagement_problems",
@@ -2035,3 +2036,255 @@ class TestNodeDeclarationValidation:
         assert pareto.maximal_engagement_problems() == (
             "c16: below-maximum DP 2 declares no non-blank dp_shortfall.reason",
         )
+
+
+class TestAccuracyCardinality:
+    """Extra results cannot escape coverage by crowding or choice-point placement."""
+
+    @pytest.mark.unit
+    def test_duplicate_band_and_choice_point_results_are_named(self, tmp_path):
+        pareto = _pareto_with_accuracy(
+            tmp_path,
+            [
+                Run(concurrency=8, max_supported_concurrency=2048),
+                Run(concurrency=16, max_supported_concurrency=2048),
+                Run(concurrency=24, max_supported_concurrency=2048),
+                Run(concurrency=64, max_supported_concurrency=2048),
+                Run(concurrency=2048, max_supported_concurrency=2048),
+                Run(concurrency=4096, max_supported_concurrency=2048),
+            ],
+            carrying={8, 16, 24, 64, 2048, 4096},
+        )
+        misses = pareto.excess_accuracy_results()
+        assert (
+            "med_concurrency: 2 accuracy results (expected 1; carried by c24, c64)"
+            in misses
+        )
+        assert "c4096: accuracy result at a submitter's-choice point" in misses
+
+    @pytest.mark.unit
+    def test_each_mandatory_band_plus_the_offline_result_clears_the_limit(
+        self, tmp_path
+    ):
+        pareto = _pareto_with_accuracy(
+            tmp_path,
+            [
+                Run(concurrency=8, max_supported_concurrency=2048),
+                Run(concurrency=16, max_supported_concurrency=2048),
+                Run(concurrency=64, max_supported_concurrency=2048),
+                Run(concurrency=2048, max_supported_concurrency=2048),
+                Run(
+                    concurrency=13368,
+                    max_supported_concurrency=2048,
+                    offline="dedicated",
+                ),
+            ],
+            carrying={8, 16, 64, 2048, 13368},
+        )
+        assert pareto.excess_accuracy_results() == ()
+
+    @staticmethod
+    def _agentic_pareto(
+        tmp_path: Path, choice_entries: list[dict[str, object]]
+    ) -> Pareto:
+        """An agentic curve with four validation points and one choice point."""
+        root = tmp_path / "upload"
+        runs = [
+            Run(
+                concurrency=concurrency,
+                max_supported_concurrency=2048,
+                config_extra={"model_name": SYSTEM[1]},
+            )
+            for concurrency in (8, 16, 64, 2048, 4096)
+        ]
+        for run in runs:
+            run_dir = root / "results" / SYSTEM[0] / SYSTEM[1] / run.name()
+            write_run(run_dir, run)
+            entries = (
+                choice_entries
+                if run.concurrency == 4096
+                else [
+                    {
+                        "dataset_name": "swe_bench",
+                        "score": 0.9,
+                        "unit_samples": 30,
+                        "total_samples": 30,
+                    }
+                ]
+            )
+            (run_dir / "accuracy_results.json").write_text(
+                json.dumps({"accuracy_scores": entries}), encoding="utf-8"
+            )
+        catalog = Catalog(
+            models={
+                "model": {
+                    "agentic": True,
+                    "accuracy_targets": {"exact_match": {"lower": 80.0, "factor": 1.0}},
+                    "accuracy_datasets": {},
+                }
+            },
+            datasets={},
+        )
+        return write_upload(root, {SYSTEM: runs}, ruleset=catalog).paretos[0]
+
+    @pytest.mark.unit
+    def test_inline_only_results_are_not_accuracy_validation_runs(self, tmp_path):
+        pareto = self._agentic_pareto(
+            tmp_path, [{"dataset_name": "agentic_combined", "score": 0.01}]
+        )
+        assert pareto.excess_accuracy_results() == ()
+        assert pareto.accuracy_gate_misses() == ()
+        assert pareto.entryless_accuracy_points() == ()
+
+    @pytest.mark.unit
+    def test_a_validation_result_beside_an_inline_score_still_counts(self, tmp_path):
+        misses = self._agentic_pareto(
+            tmp_path,
+            [
+                {"dataset_name": "agentic_combined", "score": 0.01},
+                {
+                    "dataset_name": "swe_bench",
+                    "score": 0.9,
+                    "unit_samples": 30,
+                    "total_samples": 30,
+                },
+            ],
+        ).excess_accuracy_results()
+        assert "c4096: accuracy result at a submitter's-choice point" in misses
+
+
+class TestRemainingRejectionBranches:
+    """Negative and edge paths must not regress to silently passing."""
+
+    @staticmethod
+    def _gated_pareto(tmp_path, scores, targets):
+        """A single point carrying raw scores against supplied gate targets."""
+        entries: list[dict[str, str | float]] = []
+        for name, score, weight in scores:
+            entry: dict[str, str | float] = {"dataset_name": name, "score": score}
+            if weight is not None:
+                entry["unit_samples"] = weight
+                entry["total_samples"] = weight
+            entries.append(entry)
+        run = Run(concurrency=16, config_extra={"model_name": "gpt-oss-120b"})
+        run_dir = tmp_path / "upload" / "results" / "sys" / "gpt-oss-120b" / run.name()
+        write_run(run_dir, run)
+        (run_dir / "accuracy_results.json").write_text(
+            json.dumps({"accuracy_scores": entries}), encoding="utf-8"
+        )
+        catalog = Catalog(
+            models={
+                "gpt-oss-120b": {
+                    "accuracy_targets": {"exact_match": targets},
+                    "accuracy_datasets": {},
+                }
+            },
+            datasets={},
+        )
+        return write_upload(
+            tmp_path / "upload", {("sys", "gpt-oss-120b"): [run]}, ruleset=catalog
+        ).paretos[0]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("document", ["{}", '{"accuracy_scores": "malformed"}'])
+    def test_an_entryless_accuracy_result_is_refused(self, tmp_path, document):
+        root = tmp_path / "acme"
+        run_dir = write_run(
+            root / "results" / "sys" / "model" / "r16", Run(concurrency=16)
+        )
+        (run_dir / "accuracy_results.json").write_text(document, encoding="utf-8")
+        pareto = Submission.from_directory(root).paretos[0]
+        assert pareto.entryless_accuracy_points() == (16,)
+
+    @pytest.mark.unit
+    def test_a_missing_weight_uses_the_plain_mean(self, tmp_path):
+        misses = self._gated_pareto(
+            tmp_path,
+            [("a", 0.9, 30), ("b", 0.1, None)],
+            {"lower": 83.13, "factor": 0.99},
+        ).accuracy_gate_misses()
+        assert len(misses) == 1
+        assert "exact_match 50.0000" in misses[0]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("score", "boundary"), [(80.0, "89.1000"), (100.0, "99.9900")]
+    )
+    def test_a_score_outside_its_symmetric_band_is_named(
+        self, tmp_path, score, boundary
+    ):
+        misses = self._gated_pareto(
+            tmp_path,
+            [("a", score, 30)],
+            {"band": [90.0, 99.0], "factor": 0.99},
+        ).accuracy_gate_misses()
+        assert len(misses) == 1
+        assert boundary in misses[0]
+
+    @pytest.mark.unit
+    def test_below_the_dp_floor_without_a_shortfall_is_named(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [
+                {
+                    "system_node_ensemble_id": "ensemble-a",
+                    "nodes": 2,
+                    "accelerators_per_node": 8,
+                }
+            ],
+        }
+        pareto = TestPointPower._pareto(
+            tmp_path,
+            [Run(concurrency=16, system_desc_extra={"data_parallel": 1})],
+            power,
+        )
+        assert pareto.maximal_engagement_problems() == (
+            "c16: DP 1 below floor(16 / 1) = 16 without a dp_shortfall",
+        )
+
+    @pytest.mark.unit
+    def test_heterogeneous_sets_weight_the_largest_engaged_fraction(self, tmp_path):
+        power = {
+            "provisioned_power_kw": 100.0,
+            "node_sets": [
+                {"system_node_ensemble_id": f"ensemble-{letter}", "nodes": nodes}
+                for letter, nodes in (("a", 4), ("b", 2))
+            ],
+        }
+        pareto = TestPointPower._pareto(
+            tmp_path,
+            [
+                Run(
+                    concurrency=16,
+                    system_tps=1000.0,
+                    config_extra={
+                        "nodes_used": [
+                            {"system_node_ensemble_id": "ensemble-a", "nodes": 2}
+                        ]
+                    },
+                    summary_extra={"system_tps_per_kw": 20.0},
+                )
+            ],
+            power,
+        )
+        assert pareto.tps_per_kw_mismatches() == ()
+
+
+class TestSourceOmissions:
+    """Missing source documents are named, never silently discounted."""
+
+    @pytest.mark.unit
+    def test_an_implementation_without_a_readme_is_named(self, tmp_path):
+        root = tmp_path / "acme"
+        pareto = _pareto(tmp_path, [Run(concurrency=16)])
+        (root / "docs").mkdir()
+        (root / "src" / "impl").mkdir(parents=True)
+        assert pareto.structure_misses() == ("src/impl/ carries no README.md",)
+
+    @pytest.mark.unit
+    def test_an_empty_src_directory_is_named(self, tmp_path):
+        root = tmp_path / "acme"
+        pareto = _pareto(tmp_path, [Run(concurrency=16)])
+        (root / "docs").mkdir()
+        (root / "src").mkdir()
+        assert pareto.structure_misses() == ("src/ holds no implementation directory",)

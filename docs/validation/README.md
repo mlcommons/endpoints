@@ -101,14 +101,15 @@ row is refused (`the tree was built without ruleset`).
 
 A submission the loader cannot judge (a run directory missing its summary, a
 curve whose points disagree, a listing refusal below the pool root) is reported
-in the verdict block -- `submission <label>: refused (<message>)` -- and counts
-as a rejection in the roll-up and the exit code; its sibling submissions still
-run and report their findings. A problem of the input itself -- an unwalkable
-tree, a pool root without systems, a listing refusal at the pool root -- refuses
-the whole run before any check starts. Collect-time faults of the cohort's own
-tables (a declared value outside its allowlist, an artifact that does not parse)
-stop the run the same way, so a pool carrying one such artifact is refused whole
-rather than judged in parts.
+in the verdict block as `submission <label>: refused (<message>)`. The roll-up
+counts `rejected` and `refused` separately, and exits 1 rather than 0 for
+either. A point-level fault refuses its own tuple, a system-level fault every
+tuple below it, and healthy siblings still run. Cohort-specific faults (a
+declared value outside its allowlist, an artifact that fails to parse) follow
+the same ownership rule without changing the shared input tree. Only an error in
+the cohort itself or a fault preventing the input walk (including a listing
+refusal at the pool root) rejects the command before any submission is judged
+and exits 2.
 
 The run prints one line per failing finding:
 
@@ -221,7 +222,7 @@ A mapping is a declared leaf only when its `type` value is a type name (`int`,
 `bool`, `float`, `str`, `list`, `dict`) and every key is one of that leaf's
 annotation keys:
 
-    { type, required, default, allowlist, nullable }
+    { type, required, default, allowlist, nullable, sensitive }
 
 ```yaml
 # a declared leaf: `field` is a typed fact
@@ -570,15 +571,17 @@ This check will run per point in the submission: i.e. if an `r1024` point passes
 `concurrency_in_range` and `r999999` does not, `accuracy_sane` will still run
 for `r1024`, but is skipped for `r999999`.
 
-The check above judges the document one point carries - it cannot enforce
-coverage. Section 4.3/5.3 require exactly one accuracy validation run at the
-designated point in each mandatory concurrency region (plus the non-agentic
-Offline run), and none at submitter's-choice points; that is a pareto-level
-count over points, from the cohort doc's "Not yet expressible" list.
-
-Currently the shipped cohort's `point_accuracy_present` warn is a placeholder
-for it: it warns wherever a point carries no `accuracy_results.json`, optional
-points included.
+A point's `needs` rows control applicability at that point only; they cannot
+enforce coverage on the curve. The shipped `pareto_accuracy_coverage` and
+`pareto_offline_accuracy` check mandatory-region and Offline carriers
+(§4.3/5.3); `pareto_accuracy_result_limits` then requires at most one validation
+result in each mandatory region, at most one Offline result, and no validation
+result at submitter's-choice points. An agentic performance score, excluded from
+these counts and the validation gate. An inline-only document is not an empty
+document; it simply carries no validation entry.
+`pareto_accuracy_result_entryless` rejects one with no dataset entries. The
+separate `point_accuracy_present` warn reports points that carry no
+`accuracy_results.json`, not curve coverage.
 
 ### References
 
@@ -725,45 +728,35 @@ unchecked).
     (`point.result_summary.system_tps`, ...)
   - `<scope>.accuracy_results.<key>` - `accuracy_results.json`
   - `<scope>.results.<key>` - `results.json` (the results summary rollup)
-- `derived.<name>` - one pareto's named derivations (see `DESIGN.md` for each
-  source formula). They are per-pareto, so only `pareto.yaml`/`point.yaml` rows
-  may name it:
-  - `derived.offline_ordering` - Section 5.7.2's pair-of-clauses verdict
-  - `derived.point_cap` - Section 5.6's `<=32`
-  - `derived.point_count` - the pareto's measurement-point count
-  - `derived.point_count_min` - Section 5.3's minimum count
-  - `derived.accuracy_uncovered_regions` - Section 4.3's mandatory regions with
-    no accuracy-carrying point
-  - `derived.offline_points_missing_accuracy` - the Offline points lacking an
-    accuracy result
-  - `derived.uncovered_regions` - Section 5.4's mandatory regions with no point
-  - `derived.offline_points` - the points carrying an `offline` declaration
-  - `derived.agentic` - the catalog's agentic flag for the declared model (the
-    declared shape's reading where no catalog entry exists)
-  - `derived.model_name_admitted` - every declared `model_name` is in the
-    catalog's admitted set
-  - `derived.out_of_range_points` - Section 5.4's flagged points tuple
-  - `derived.conflicting_load_patterns` - the distinct patterns when the type
-    vote disagrees
-  - `derived.conflicting_model_names` / `derived.conflicting_datasets` /
-    `derived.conflicting_seed_sets` - Section 9.1's configuration consistency
-  - `derived.inconsistent_system_desc_keys` - Section 8.5's differing system
-    description keys
-  - `derived.accounting_mismatch_points` / `derived.system_tps_mismatch_points`
-    - Section 14's counts and Section 9.1's derived throughput, as the offending
-      points' concurrencies
-  - `derived.misplaced_region_points` - the points whose declared `region` is
-    not their concurrency's computed band
-  - `derived.tps_utilization_mismatch_points` - the points whose declared
-    `system_desc.tps_utilization` misses their share of the curve's peak
-  - `derived.accuracy_gate_misses` - Section 15's per-run gate misses, joined to
-    the catalog's `accuracy_targets` for the declared model
-  - `derived.structure_misses` - Section 8.1's tree misses (`docs/`, `src/` with
-    one README per implementation)
-  - `derived.unresolved_shared_paths` - the `shared_src`/`shared_docs` pointers
-    that do not resolve under the submission root
-  - `derived.unapproved_drafter_points` - Section 2.9.4's approved-drafter and
-    lead-time misses
+- `derived.<name>` - one pareto's lazy, memoized derivation. The authoritative
+  name registry is `DERIVATION_NAMES` in `submission.py`; only
+  `pareto.yaml`/`point.yaml` rows may name it. The groups below explain each
+  key; `DESIGN.md` records the formulas and policy sections.
+
+  Curve coverage and counts: `point_count`, `point_count_min`, `point_cap`,
+  `offline_ordering`.
+
+  Accuracy coverage and carriers: `accuracy_uncovered_regions`,
+  `offline_points_missing_accuracy`, `excess_accuracy_results`,
+  `entryless_accuracy_points`; `accuracy_gate_misses` applies the declared
+  model's target datasets and minimum counts, not unrelated dataset names.
+
+  Submission shape and structure: `input_shape`, `model_dir_name_mismatches`,
+  `structure_misses`, `unresolved_shared_paths`.
+
+  Model and cross-point declarations: `agentic`, `model_name_admitted`,
+  `conflicting_load_patterns`, `conflicting_model_names`,
+  `conflicting_datasets`, `conflicting_seed_sets`,
+  `inconsistent_system_desc_keys`.
+
+  Power, rates and engagement: `nodes_used_problems`,
+  `maximal_engagement_problems`, `tps_per_kw_mismatches`,
+  `accounting_mismatch_points`, `system_tps_mismatch_points`,
+  `tps_utilization_mismatch_points`, `tps_per_user_mismatches`.
+
+  Regions and drafting limits: `offline_points`, `uncovered_regions`,
+  `out_of_range_points`, `misplaced_region_points`, `unapproved_drafter_points`.
+
 - `ruleset` - the packaged ruleset the cohort's `cohort.yaml` names (a
   registered round, e.g. `mlperf-inference-v6.1`):
   - `ruleset.models.<name>.<key>` - model definitions (the round's `models.py`)

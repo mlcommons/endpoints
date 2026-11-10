@@ -447,3 +447,18 @@ class TestReportLines:
         assert "OK hold_check [fail] " in out
         assert "1 eq 1" in out
         assert "[Upload Rules > Holds]" not in out
+
+
+class TestRefusalWithoutASubmission:
+    """A system directory with no models still has its own refusal record."""
+
+    @pytest.mark.unit
+    def test_an_empty_system_directory_is_refused_at_exit_one(self, tmp_path, capsys):
+        root = tmp_path / "upload"
+        (root / "results" / "sys").mkdir(parents=True)
+        cohort = write_cohort(tmp_path / "cohort", point=HOLD_CHECK)
+        assert main([str(cohort), str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "submission sys: refused (" in out
+        assert "submission .: refused" not in out
+        assert "1 submission(s): 0 accepted, 0 rejected, 1 refused" in out

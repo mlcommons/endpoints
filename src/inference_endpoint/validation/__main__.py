@@ -86,17 +86,13 @@ def _verdict_mark(verdict: SubmissionVerdict) -> str:
 def _submission_label(path: Path, root: Path) -> str:
     """The submission's report label: its path below the input, `results/` dropped.
 
-    A pool's submissions sit under `<root>/results/<system>/<model>/`; the
-    label names the unit of review (`<system>/<model>`), not the layout above
-    it. A `<system>`-directory input yields `<model>`.
+    Every verdict path below `root` names the submission it belongs to. A
+    refused system directory equal to the input root keeps its system name,
+    rather than collapsing to `.`.
     """
-    try:
-        rel = path.relative_to(root)
-    except ValueError:
-        # Outside the input (not expected): the absolute path still names it.
-        return str(path)
+    rel = path.relative_to(root)
     parts = rel.parts[1:] if rel.parts[:1] == ("results",) else rel.parts
-    return str(Path(*parts)) if parts else str(rel)
+    return str(Path(*parts)) if parts else root.name
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -108,9 +104,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns:
         int: `0` = every applicable check held, or failed only at `warn` severity (a
             warning is reported and passes through). `1` = at least one failing `fail`
-            finding, or at least one refused submission. `2` = the cohort or the input
-            was refused before any check ran (a bad check file, an unwalkable tree, an
-            unreadable artifact, a number no `float` can carry).
+            finding, or at least one refused submission. `2` = a cohort or
+            input-level fault prevents any submission from being judged (a bad
+            cohort table, an unwalkable input, a pool-root listing refusal).
     """
     parser = argparse.ArgumentParser(
         prog="python -m inference_endpoint.validation",

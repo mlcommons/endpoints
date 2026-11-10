@@ -135,6 +135,9 @@ _ACCURACY_META_KEYS: frozenset[str] = frozenset(
 )
 
 
+_AGENTIC_INLINE_DATASET = "agentic_combined"  # §4.3's inline performance dataset.
+
+
 def _accuracy_entries(root: Any) -> list[tuple[str | None, Mapping[str, Any]]]:
     """The `(dataset name, entry)` pairs of an `accuracy_scores` value.
 
@@ -538,6 +541,18 @@ def _descriptor_facts(system_desc: Mapping[str, Any], where: str) -> Mapping[str
     if isinstance(override, str):
         carried["c_min_override"] = decode_number(override, "int")
     return carried
+
+
+def _node_set_counts(node_set: Mapping[str, Any]) -> tuple[int, int] | None:
+    """Node count and accelerators per node as positive integers."""
+    nodes = decode_number(node_set.get("nodes"), "int")
+    accelerators = decode_number(node_set.get("accelerators_per_node"), "int")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 1
+        for value in (nodes, accelerators)
+    ):
+        return None
+    return nodes, accelerators
 
 
 @dataclass(frozen=True)
@@ -1096,7 +1111,9 @@ class Pareto:
                 continue
             split.append((ensemble, nodes))
         if not problems:
-            problems.extend(self._capacity_problems(point, parallelism, split, sets))
+            problems.extend(
+                self._capacity_problems(point, parallelism, tuple(split), sets)
+            )
         return parallelism, tuple(split), problems
 
     def _system_node_sets(self) -> list[Mapping[str, Any]]:
@@ -1121,20 +1138,19 @@ class Pareto:
         """The declared nodes must hold every accelerator the parallelism engages."""
         if parallelism is None or parallelism.disaggregated:
             return []
-        per_node = [node_set.get("accelerators_per_node") for node_set in sets]
-        if any(value is None for value in per_node):
-            return []
+        counts: list[tuple[str, int, int]] = []
+        for node_set in sets:
+            parsed_counts = _node_set_counts(node_set)
+            if parsed_counts is None:
+                return []
+            ensemble = str(node_set.get("system_node_ensemble_id"))
+            counts.append((ensemble, *parsed_counts))
         engaged = dict(split)
         # No declaration engages everything. An explicit partial split engages
         # only what it declares; omitted ensembles earn no capacity credit.
         capacity = sum(
-            (
-                engaged.get(str(node_set.get("system_node_ensemble_id")), 0)
-                if split
-                else node_set.get("nodes")
-            )
-            * (node_set.get("accelerators_per_node") or 0)
-            for node_set in sets
+            (engaged.get(ensemble, 0) if split else nodes) * accelerators
+            for ensemble, nodes, accelerators in counts
         )
         used = parallelism.accelerators_used
         if capacity < used:
@@ -1186,25 +1202,26 @@ class Pareto:
                 continue
             replica = parallelism.replica
             dp = parallelism.data_parallel
-            if replica < 1 or dp < 1:
-                continue
             dp_max = provisioned // replica
-            shortfall = point.dp_shortfall
             if dp > dp_max:
                 problems.append(
                     f"c{point.concurrency}: DP {dp} engages {dp * replica} of "
                     f"{provisioned} provisioned accelerators (max DP {dp_max})"
                 )
-            elif dp < dp_max and shortfall is None:
+                continue
+            if dp == dp_max:
+                continue
+            shortfall = point.dp_shortfall
+            if shortfall is None:
                 problems.append(
                     f"c{point.concurrency}: DP {dp} below floor({provisioned} / "
                     f"{replica}) = {dp_max} without a dp_shortfall"
                 )
-            elif dp < dp_max and not isinstance(shortfall, Mapping):
+            elif not isinstance(shortfall, Mapping):
                 problems.append(
                     f"c{point.concurrency}: dp_shortfall must declare a reason"
                 )
-            elif dp < dp_max and (
+            elif (
                 shortfall.get("dp_actual") != dp
                 or shortfall.get("dp_formula") != dp_max
             ):
@@ -1213,7 +1230,7 @@ class Pareto:
                     f"{shortfall.get('dp_actual')}/{shortfall.get('dp_formula')} "
                     f"where the declaration is {dp}/{dp_max}"
                 )
-            elif dp < dp_max and (
+            elif (
                 not isinstance(shortfall.get("reason"), str)
                 or not shortfall["reason"].strip()
             ):
@@ -1272,16 +1289,21 @@ class Pareto:
                     f"({stored})"
                 )
                 continue
-            fractions = [
-                (
-                    dict(split).get(str(node_set.get("system_node_ensemble_id")), 0)
-                    if split
-                    else node_set.get("nodes")
+            engaged = dict(split)
+            fractions = []
+            for node_set in sets:
+                parsed_counts = _node_set_counts(node_set)
+                if parsed_counts is None:
+                    continue
+                nodes, _ = parsed_counts
+                fractions.append(
+                    (
+                        engaged.get(str(node_set.get("system_node_ensemble_id")), 0)
+                        if split
+                        else nodes
+                    )
+                    / nodes
                 )
-                / node_set.get("nodes")
-                for node_set in sets
-                if isinstance(node_set.get("nodes"), int) and node_set.get("nodes")
-            ]
             if not fractions:
                 continue
             kw = float(provisioned_kw) * max(fractions)
@@ -1606,12 +1628,7 @@ class Pareto:
         )
         misses: list[str] = []
         for point in self._accuracy_carrying_points():
-            if point.node is None:
-                continue
-            value, error = point.node.read("accuracy_results.json")
-            if error is not None or not isinstance(value, Mapping):
-                continue
-            entries = _accuracy_document_entries(value)
+            entries = self._accuracy_validation_entries(point)
             if not entries:
                 continue
             declared_sets = model.get("accuracy_datasets")
@@ -1860,22 +1877,78 @@ class Pareto:
             if id(point) not in carrying
         )
 
-    def _accuracy_carrying_points(self) -> tuple[Point, ...]:
-        """The points whose run directory carries a parsable accuracy result.
+    def excess_accuracy_results(self) -> tuple[str, ...]:
+        """Accuracy validation results not admitted around §4.3's mandatory points.
 
-        The one definition of "carrying": a parsable `accuracy_results.json` whose
-        `accuracy_scores` holds at least one entry. An entryless document is no
-        accuracy result, so the coverage rows, the gate and the presence row all
-        read the same fact.
+        One non-Offline validation result supplies each mandatory band, beside
+        the separate Offline result. More than one in a band, or any validation
+        result at a submitter's-choice point, is reported. Agentic inline-only
+        entries are excluded. Dedicated and elected Offline roles are not
+        double-counted at a point that also fills a mandatory band.
+
+        Returns:
+            tuple[str, ...]: One line per unauthorized validation result.
+        """
+        regions = self.regions()
+        offline = {id(point) for point in self.offline_points()}
+        by_region: dict[RegionKind, list[Point]] = {
+            kind: [] for kind in _MANDATORY_REGIONS
+        }
+        excessive: list[str] = []
+        for point in self._accuracy_carrying_points():
+            if id(point) in offline:
+                continue
+            kind = regions.covers(point.concurrency)
+            if kind in by_region:
+                by_region[kind].append(point)
+            else:
+                excessive.append(
+                    f"c{point.concurrency}: accuracy result at a submitter's-choice point"
+                )
+        for kind, points in by_region.items():
+            if len(points) > 1:
+                concurrencies = ", ".join(f"c{point.concurrency}" for point in points)
+                excessive.append(
+                    f"{kind.value}: {len(points)} accuracy results (expected 1; "
+                    f"carried by {concurrencies})"
+                )
+        return tuple(excessive)
+
+    def _accuracy_validation_entries(
+        self, point: Point
+    ) -> tuple[tuple[str | None, Mapping[str, Any]], ...]:
+        """Named validation-run entries at one point.
+
+        Agentic inline performance scores use `agentic_combined`, not a
+        validation dataset. Excluding them here keeps §4.3's coverage, fixed
+        `N` and validation gate on the same entry set. Empty-document detection
+        stays separate: an inline-only document is not an empty document.
+        """
+        if point.node is None:
+            return ()
+        value, error = point.node.read("accuracy_results.json")
+        if error is not None or not isinstance(value, Mapping):
+            return ()
+        entries = _accuracy_document_entries(value)
+        if not self.agentic():
+            return tuple(entries)
+        return tuple(
+            (name, entry)
+            for name, entry in entries
+            if name != _AGENTIC_INLINE_DATASET
+            and entry.get("dataset_name") != _AGENTIC_INLINE_DATASET
+        )
+
+    def _accuracy_carrying_points(self) -> tuple[Point, ...]:
+        """The points carrying at least one validation-run dataset entry.
+
+        The one definition of "carrying": a parsable `accuracy_results.json`
+        with a validation entry, excluding agentic inline-only performance
+        scores. Coverage, cardinality and the gate all read this same fact.
         """
         carrying: list[Point] = []
         for point in self.points:
-            if point.node is None:
-                continue
-            value, error = point.node.read("accuracy_results.json")
-            if error is not None or not isinstance(value, Mapping):
-                continue
-            if _accuracy_document_entries(value):
+            if self._accuracy_validation_entries(point):
                 carrying.append(point)
         return tuple(carrying)
 
@@ -2208,6 +2281,7 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "tps_utilization_mismatch_points": Pareto.tps_utilization_mismatch_points,
     "accuracy_gate_misses": Pareto.accuracy_gate_misses,
     "tps_per_user_mismatches": Pareto.tps_per_user_mismatches,
+    "excess_accuracy_results": Pareto.excess_accuracy_results,
     "structure_misses": Pareto.structure_misses,
     "unresolved_shared_paths": Pareto.unresolved_shared_paths,
     "unapproved_drafter_points": Pareto.unapproved_drafter_points,

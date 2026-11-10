@@ -1045,3 +1045,35 @@ class TestRefusedClaims:
         dependent = [f for f in findings if f.check_id == "pool_total"]
         assert dependent
         assert all(not finding.verdict.ok for finding in dependent)
+
+
+class TestEvaluationLocalRefusals:
+    """A cohort's declaration must not contaminate the caller's shared tree."""
+
+    @pytest.mark.unit
+    def test_the_same_tree_can_be_collected_under_different_cohorts(self, tmp_path):
+        submission = _submission(
+            tmp_path, [16], extras={16: {"warmup": {"duration_s": "x"}}}
+        )
+        first = _declared_cohort(
+            tmp_path,
+            refs={"point": {"config": {"warmup": {"duration_s": {"type": "int"}}}}},
+            point=PLAIN_CHECK,
+        )
+        refused = Finding.collect(first, submission)
+        assert refused.refusals
+        assert all(
+            verdict.refusal for verdict in submission_verdicts(submission, refused)
+        )
+
+        second = _declared_cohort(
+            tmp_path,
+            refs={"point": {"config": {"warmup": {"duration_s": {"type": "str"}}}}},
+            point=PLAIN_CHECK,
+        )
+        accepted = Finding.collect(second, submission)
+        assert accepted.refusals == ()
+        assert all(
+            not verdict.refusal and verdict.accepted
+            for verdict in submission_verdicts(submission, accepted)
+        )
