@@ -182,12 +182,13 @@ the tail.
 > `output_sequence_lengths_full_run.output_sequence_lengths.avg` — the per-turn
 > mean over **all** turns (tail and dataset repeats included), counted on the
 > same primary token basis as the window, which is invariant to concurrency.
-> With a server primary the block counts each turn's `completion_tokens`, with
-> no tokenizer needed, and when a tokenizer is configured it also carries the
-> tokenizer count as the sibling `output_sequence_lengths_client`. With a client
-> primary (`--token-count-source client`) the block counts with the tokenizer,
-> so a tokenizer is required, and carries the server count beside it as
-> `output_sequence_lengths_server`. A run is not valid for the OSL accuracy
+> With the default client primary the block counts with the tokenizer, so a
+> tokenizer is required, and carries the server count beside it as
+> `output_sequence_lengths_server`. With a server primary
+> (`--token-count-source server`) the block counts each turn's
+> `completion_tokens`, with no tokenizer needed, and when a tokenizer is
+> configured it also carries the tokenizer count as the sibling
+> `output_sequence_lengths_client`. A run is not valid for the OSL accuracy
 > check when `output_sequence_lengths_full_run` is `null`, **or** its
 > `n_turns_counted` is `0` (turns were scanned but none were countable), **or**
 > its `partial` flag is `true` (some turns were errored, undecodable, missing a

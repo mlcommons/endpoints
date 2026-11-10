@@ -316,10 +316,11 @@ def _accuracy_uuid_bound(
 
 
 def _load_osl_backend(has_accuracy: bool, tokenizer_name: str | None) -> Any | None:
-    """Load the reference tokenizer backend for accuracy OSL, or None to disable.
+    """Load the reference tokenizer backend for client-basis accuracy OSL.
 
     Loaded only when a real accuracy dataset exists; a load failure or a tokenizer
-    with no fast (Rust) backend disables OSL rather than failing scoring.
+    with no fast (Rust) backend returns None, which drops only the client-basis
+    OSL blocks (the server basis needs no tokenizer) rather than failing scoring.
     """
     if not (has_accuracy and tokenizer_name is not None):
         return None
@@ -327,7 +328,7 @@ def _load_osl_backend(has_accuracy: bool, tokenizer_name: str | None) -> Any | N
         osl_backend = load_reference_backend(tokenizer_name)
     except Exception as e:  # noqa: BLE001 - OSL is optional; never fail scoring
         logger.warning(
-            "Accuracy OSL disabled: could not load tokenizer %r: %s",
+            "Accuracy client-basis OSL disabled: could not load tokenizer %r: %s",
             tokenizer_name,
             e,
         )
@@ -339,7 +340,8 @@ def _load_osl_backend(has_accuracy: bool, tokenizer_name: str | None) -> Any | N
     # visible instead of silently dropping the block.
     if osl_backend is None:
         logger.warning(
-            "Accuracy OSL disabled: tokenizer %r has no fast (Rust) backend "
+            "Accuracy client-basis OSL disabled: tokenizer %r has no fast (Rust) "
+            "backend "
             "(token counting requires one, as on the perf side)",
             tokenizer_name,
         )

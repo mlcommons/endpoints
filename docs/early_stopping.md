@@ -149,9 +149,9 @@ the metric's definition site, so a new latency metric opts in where it is
 declared; counters / ISL / OSL simply don't set it.
 
 `tpot_ns` is the headline TPOT, so it is on the run's primary token-count basis:
-with a server primary it is the server TPOT,
-`(complete - first chunk) / (completion_tokens - 1)`, and with a client primary
-(`--token-count-source client`) it is the tokenizer TPOT. The other basis's TPOT
+with the default client primary it is the tokenizer TPOT, and with a server
+primary (`--token-count-source server`) it is the server TPOT,
+`(complete - first chunk) / (completion_tokens - 1)`. The other basis's TPOT
 that the run records beside it, `tpot_ns_<basis>`, is not a tail-latency series:
 it gets no estimate map.
 
