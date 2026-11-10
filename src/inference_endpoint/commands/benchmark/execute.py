@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import shutil
 import tempfile
@@ -108,6 +109,7 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
+from inference_endpoint.utils import trace
 
 if TYPE_CHECKING:
     from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -743,6 +745,9 @@ async def _create_issuer(
             "api_key": config.endpoint_config.api_key,
             "event_logs_dir": ctx.report_dir,
             "cpu_affinity": ctx.affinity_plan,
+            "trace_pipe_path": (
+                trace.fifo_path(os.getpid()) if trace.is_enabled() else None
+            ),
         }
         if ctx.accuracy_only:
             # Single-stream (num_workers=1, max_connections=1) is baked into
@@ -824,6 +829,8 @@ async def _run_benchmark_async(
     """Run async benchmark session."""
     config = ctx.config
     session_id = f"cli_benchmark_{uuid.uuid4().hex[:8]}"
+
+    trace.start_lag_task(loop)  # -vvv: main-proc loop-lag sampler
 
     # Progress bar + response collector
     pbar = tqdm(
@@ -938,6 +945,10 @@ async def _run_benchmark_async(
                         # request is issued, so the server is armed when
                         # traffic begins.
                         profiler.start()
+                        # -vvv: signal the dashboard that warmup is over so its
+                        # LOADGEN vs TRACE accumulators reset to the same
+                        # window the loadgen aggregator's tracked counters use.
+                        trace.emit_trace(trace.Event.PERF_START, 0)
                     # Arms the perf cap on PERFORMANCE and cancels it when any
                     # later phase starts, so a combined perf+accuracy run can
                     # never have its accuracy phase truncated by the perf cap.
@@ -981,6 +992,9 @@ async def _run_benchmark_async(
                     else:
                         raise ExecutionError(f"Benchmark execution failed: {e}") from e
                 finally:
+                    # -vvv: the run is over (issuance + drain complete) — tell
+                    # the dashboard to freeze deterministically.
+                    trace.emit_trace(trace.Event.PERF_END, 0)
                     _perf_cap_done = True
                     perf_timeout.cancel()
                     # Fire /stop_profile for URLs whose /start_profile succeeded.
@@ -1019,6 +1033,9 @@ async def _run_benchmark_async(
                 # setup error can't leak its worker subprocesses; shutdown_async()
                 # is idempotent, so the clean-path call after the drain is a no-op.
                 # pipe teardown runs via the async-with __aexit__.
+                # Cancel trace tasks, flush emitter, unlink FIFO, write final
+                # snapshot. No-op when trace was never enabled.
+                await trace.teardown(final_snapshot=pipe.final_snapshot)
                 try:
                     pbar.close()
                 except Exception as e:  # noqa: BLE001 — progress bar is cosmetic
