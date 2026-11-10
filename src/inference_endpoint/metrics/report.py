@@ -418,9 +418,9 @@ class Report(msgspec.Struct, frozen=True, kw_only=True):  # type: ignore[call-ar
                     return "Metrics tokenization did not finish"
             elif self.n_samples_missing_usage > 0:
                 return missing_usage_message(
-                    self.n_samples_missing_usage,
-                    self.n_samples_missing_usage_empty_output,
-                    self.n_samples_succeeded,
+                    n_missing=self.n_samples_missing_usage,
+                    n_empty_output=self.n_samples_missing_usage_empty_output,
+                    n_succeeded=self.n_samples_succeeded,
                     primary=TokenCountSource.SERVER,
                 )
         return (
@@ -439,9 +439,9 @@ class Report(msgspec.Struct, frozen=True, kw_only=True):  # type: ignore[call-ar
         primary = self.token_count_source
         if primary.other is TokenCountSource.SERVER:
             return missing_usage_message(
-                self.n_samples_missing_usage,
-                self.n_samples_missing_usage_empty_output,
-                self.n_samples_succeeded,
+                n_missing=self.n_samples_missing_usage,
+                n_empty_output=self.n_samples_missing_usage_empty_output,
+                n_succeeded=self.n_samples_succeeded,
                 primary=primary,
             )
         return (

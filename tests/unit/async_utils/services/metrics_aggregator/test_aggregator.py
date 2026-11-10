@@ -1866,7 +1866,9 @@ class TestTokenCountBases:
         assert c["tracked_samples_missing_usage"] == 3
         assert c["tracked_samples_missing_usage_empty_output"] == 1
         # "a" is the first miss and the second successful tracked sample.
-        message = missing_usage_message(1, 0, 2, primary=primary)
+        message = missing_usage_message(
+            n_missing=1, n_empty_output=0, n_succeeded=2, primary=primary
+        )
         level = logging.WARNING if primary is SERVER else logging.INFO
         logged = [
             r.levelno

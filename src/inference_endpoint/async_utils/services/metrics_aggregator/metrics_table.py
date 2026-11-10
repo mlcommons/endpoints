@@ -637,7 +637,10 @@ class ServerUsageTrigger(EmitTrigger):
             "Later misses are only counted (tracked_samples_missing_usage).",
             ev_rec.sample_uuid,
             missing_usage_message(
-                1, int(empty_output), int(n_succeeded), primary=self._primary
+                n_missing=1,
+                n_empty_output=int(empty_output),
+                n_succeeded=int(n_succeeded),
+                primary=self._primary,
             ),
         )
 

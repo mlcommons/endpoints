@@ -131,14 +131,20 @@ def test_missing_usage_message_server_primary_is_the_fatal_text(
     n_missing, n_empty, expected
 ):
     assert (
-        missing_usage_message(n_missing, n_empty, 10, primary=TokenCountSource.SERVER)
+        missing_usage_message(
+            n_missing=n_missing,
+            n_empty_output=n_empty,
+            n_succeeded=10,
+            primary=TokenCountSource.SERVER,
+        )
         == expected
     )
 
 
 def test_missing_usage_message_by_primary():
-    server = missing_usage_message(3, 0, 10, primary=TokenCountSource.SERVER)
-    client = missing_usage_message(3, 0, 10, primary=TokenCountSource.CLIENT)
+    counts = {"n_missing": 3, "n_empty_output": 0, "n_succeeded": 10}
+    server = missing_usage_message(**counts, primary=TokenCountSource.SERVER)
+    client = missing_usage_message(**counts, primary=TokenCountSource.CLIENT)
     assert "settings.token_count_source" in server
     assert "_server" in client
     assert "exit" not in client
@@ -317,9 +323,12 @@ def test_replay_basis_notes_an_archived_run_only_without_override(tmp_path, caps
 
 @pytest.mark.parametrize("override", list(TokenCountSource))
 def test_replay_basis_unreadable_run_basis_is_none_beside_an_override(
-    tmp_path, override
+    tmp_path, capsys, override
 ):
     _write_summary(tmp_path, "{not json")
     assert replay_basis(tmp_path, override=override) == (None, override)
+    err = capsys.readouterr().err
+    assert "cannot read the run's token-count basis" in err
+    assert "result_summary.json" in err  # the reason names the file
     with pytest.raises(RunBasisError, match="--token-count-source"):
         replay_basis(tmp_path, override=None)

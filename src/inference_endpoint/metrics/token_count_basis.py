@@ -268,7 +268,8 @@ def replay_basis(
     ``basis`` the one to replay on: ``override`` when given, else ``primary``.
     Beside an override, a run that records no basis is ``ARCHIVED_RUN_BASIS``
     without the stderr note, and one whose basis cannot be read has a ``None``
-    primary; each caller decides what that means for its output. Without an
+    primary, with the reason on stderr; each caller decides what that means for
+    its output. Without an
     override, ``RunBasisError`` propagates.
     """
     if override is None:
@@ -278,16 +279,23 @@ def replay_basis(
         summary_path = _default_summary_path(run_dir)
     try:
         recorded = _recorded_run_basis(run_dir, summary_path)
-    except RunBasisError:
+    except RunBasisError as exc:
+        # The override replaces an unreadable basis; callers see only None, so
+        # say here what could not be read.
+        print(
+            f"cannot read the run's token-count basis ({exc}); using the "
+            f"{override.value} basis from --token-count-source",
+            file=sys.stderr,
+        )
         return None, override
     return (ARCHIVED_RUN_BASIS if recorded is None else recorded), override
 
 
 def missing_usage_message(
+    *,
     n_missing: int,
     n_empty_output: int,
     n_succeeded: int,
-    *,
     primary: TokenCountSource,
 ) -> str:
     """Why samples lack usable server usage, and what that means for the run.
