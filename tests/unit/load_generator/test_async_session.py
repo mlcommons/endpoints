@@ -34,6 +34,8 @@ from inference_endpoint.core.record import (
     SessionEventType,
 )
 from inference_endpoint.core.types import (
+    COMPLETION_TOKENS_KEY,
+    PROMPT_TOKENS_KEY,
     TOKEN_HDR_HIGH,
     ErrorData,
     PhaseData,
@@ -1949,6 +1951,21 @@ class TestBenchmarkSessionHandleResponse:
         )
         (complete,) = publisher.events_of_type(SampleEventType.COMPLETE)
         assert (complete.prompt_tokens, complete.completion_tokens) == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", [None, "11", 11.0, True], ids=repr)
+    async def test_session_drops_a_non_int_count_under_the_usage_keys(self, value):
+        """A count another writer left under the usage keys must not reach the
+        typed EventRecord: it would fail the aggregator's decode of COMPLETE."""
+        publisher = FakePublisher()
+        session = BenchmarkSession(FakeIssuer(), publisher, asyncio.get_running_loop())
+        metadata = {PROMPT_TOKENS_KEY: value, COMPLETION_TOKENS_KEY: value}
+        session._handle_response(
+            QueryResult(id="q", response_output="ab", metadata=metadata), 1_000
+        )
+        (complete,) = publisher.events_of_type(SampleEventType.COMPLETE)
+        assert complete.prompt_tokens is msgspec.UNSET
+        assert complete.completion_tokens is msgspec.UNSET
 
 
 class NoopStrategy:
