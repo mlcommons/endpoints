@@ -153,12 +153,13 @@ defaults to `"interrupted"`). It derives headline throughput once:
   `legacy_loadgen_window_duration_ns` is left `None` so the serialized report
   honestly records which view it holds.
 - `tps` is additionally `None` when no OSL was recorded (every output empty, or
-  a client primary has no tokenizer configured). OSL is captured on `COMPLETE`
-  regardless of streaming, so non-streaming runs still get a TPS. With a server
-  primary the OSL is the server's `completion_tokens`, so `tps` needs no
-  tokenizer. `other_basis.tps` is the other basis's TPS over the same window; it
-  is `None` whenever that basis is partial (for a client other basis,
-  `client_token_tasks_pending > 0`).
+  a client primary has no tokenizer configured) and when the primary basis fell
+  short (tokenization pending on a client primary, a sample without usable usage
+  on a server primary). OSL is captured on `COMPLETE` regardless of streaming,
+  so non-streaming runs still get a TPS. With a server primary the OSL is the
+  server's `completion_tokens`, so `tps` needs no tokenizer. `other_basis.tps`
+  is the other basis's TPS over the same window; it is `None` whenever that
+  basis is partial (for a client other basis, `client_token_tasks_pending > 0`).
 - For failure-free runs, `e2e_avg_interactivity` is total output tokens (on the
   primary basis) divided by summed end-to-end sample latency in seconds. It is
   `None`/`N/A` when no OSL or positive sample-latency total is available, or

@@ -161,17 +161,19 @@ enabled (`use_legacy_loadgen_qps_metrics`), available, and there are ≥2
 completions (`QPS = (completed - 1) / window`). Otherwise both QPS and TPS fall
 back to the native window so they always share one window, and
 `legacy_loadgen_window_duration_ns` is left `None` so the serialized report
-records which view it holds. `tps` is `None` when no OSL was recorded. With a
-server primary `tps` totals the server's `completion_tokens` and needs no
-tokenizer; `other_basis.tps` totals the other basis's OSL over the same window.
+records which view it holds. `tps` is `None` when no OSL was recorded or the
+primary basis fell short (the cause of `complete: false` then). With a server
+primary `tps` totals the server's `completion_tokens` and needs no tokenizer;
+`other_basis.tps` totals the other basis's OSL over the same window.
 
 **E2E average interactivity.** For failure-free runs, `e2e_avg_interactivity` is
 total output tokens (on the primary basis) divided by summed end-to-end sample
 latency in seconds. It is serialized in `result_summary.json` and displayed in
 the human-readable summary. The value is `None`/`N/A` when no OSL or positive
-sample-latency total is available, or when any tracked request failed. Failed
-responses contribute to `sample_latency_ns` but not OSL, so reporting the ratio
-in that case would combine different sample populations.
+sample-latency total is available, when any tracked request failed, or when the
+primary basis fell short. Failed responses, and successful ones the primary
+basis could not count, contribute to `sample_latency_ns` but not OSL, so
+reporting the ratio in that case would combine different sample populations.
 
 ## Server vs client token counts
 

@@ -582,7 +582,13 @@ class Report(msgspec.Struct, frozen=True, kw_only=True):  # type: ignore[call-ar
             qps = n_completed / window_s
         else:
             window_s = qps = None
-        tps = osl.get("total", 0) / window_s if osl and window_s is not None else None
+        # A throughput over a basis's incomplete token total misleads, so a
+        # basis that fell short gets none.
+        tps = (
+            osl.get("total", 0) / window_s
+            if osl and not fell_short[primary] and window_s is not None
+            else None
+        )
         other_tps = (
             other_osl["total"] / window_s
             if other_osl is not None and not fell_short[other] and window_s is not None
@@ -603,14 +609,17 @@ class Report(msgspec.Struct, frozen=True, kw_only=True):  # type: ignore[call-ar
             )
 
         total_sample_latency_ns = series.get("sample_latency_ns", {}).get("total", 0)
-        # OSL is recorded only for successful responses, while sample latency
-        # includes every terminal request. Without a success-correlated latency
-        # sum, any tracked failure would make the two sides cover different
-        # samples, so omit the derived metric instead of publishing a biased
-        # ratio.
+        # OSL is recorded only for successful responses with counted tokens,
+        # while sample latency includes every terminal request. Without a
+        # success-correlated latency sum, a tracked failure or a primary-basis
+        # shortfall would make the two sides cover different samples, so omit
+        # the derived metric instead of publishing a biased ratio.
         e2e_avg_interactivity = (
             osl.get("total", 0) / (total_sample_latency_ns / 1e9)
-            if osl and total_sample_latency_ns > 0 and n_failed == 0
+            if osl
+            and total_sample_latency_ns > 0
+            and n_failed == 0
+            and not fell_short[primary]
             else None
         )
 

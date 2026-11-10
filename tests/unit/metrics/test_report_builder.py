@@ -1423,6 +1423,17 @@ class TestTokenCountSourceRoles:
         assert data[basis_key("tps", primary.other, primary=primary)] is None
 
     @pytest.mark.parametrize("primary", list(TokenCountSource))
+    def test_primary_shortfall_withholds_token_throughput(self, primary):
+        """A primary basis that fell short gets no TPS or E2E interactivity:
+        both would divide an incomplete token total by every sample's time."""
+        r = _basis_report(primary, **_SHORTFALL[primary])
+        assert r.complete is False
+        assert r.tps is None
+        assert r.e2e_avg_interactivity is None
+        assert r.qps is not None  # counts samples, not tokens
+        assert r.other_basis.tps == pytest.approx(46.0)
+
+    @pytest.mark.parametrize("primary", list(TokenCountSource))
     @pytest.mark.parametrize("other_series", [False, True], ids=["absent", "empty"])
     def test_other_block_none_when_nothing_recorded(self, primary, other_series):
         """No recorded sample means no block, even when the basis fell short."""
