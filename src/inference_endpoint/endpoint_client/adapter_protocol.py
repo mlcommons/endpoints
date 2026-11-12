@@ -127,12 +127,11 @@ class HttpRequestAdapter(ABC):
         """
         json_docs = cls.SSE_DATA_PATTERN.findall(buffer[:end_pos])
         parsed: list[Any] = []
-        # Note: if one frame is malformed, remaining frames are skipped
-        try:
-            for json_doc in json_docs:
+        for json_doc in json_docs:
+            try:
                 content = cls.decode_sse_message(json_doc)
                 if content is not None:
                     parsed.append(content)
-        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-            logger.warning("skipping malformed SSE batch (%s)", type(exc).__name__)
+            except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+                logger.warning("skipping malformed SSE frame (%s)", type(exc).__name__)
         return parsed

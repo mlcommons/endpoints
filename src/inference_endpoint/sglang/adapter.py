@@ -122,7 +122,7 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
         # the output_tokens is the delta from the previous chunk
         token_delta = resp.output_ids
 
-        has_retractions = resp.meta_info.total_retractions > 0
+        has_retractions = resp.meta_info.num_retractions > 0
         return SGLangSSEDelta(
             text=total_text,
             token_delta=token_delta,
