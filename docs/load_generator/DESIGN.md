@@ -309,9 +309,12 @@ async def _receive_responses(self):
             if self._strategy_task and not self._strategy_task.done():
                 self._strategy_task.cancel()
             break
-        self._handle_response(resp)
+        # One clock read per response, shared by the chunk event records
+        # (RECV_FIRST/RECV_NON_FIRST), the COMPLETE floor and the liveness stamp.
+        now_ns = time.monotonic_ns()
+        self._handle_response(resp, now_ns)
         if self._endpoint_response_idle_timeout_ns is not None:
-            self._last_response_progress_ns = time.monotonic_ns()
+            self._last_response_progress_ns = now_ns
 ```
 
 Uses `recv()` exclusively — no `poll()` spin. The ZMQ fd is registered with the
@@ -335,7 +338,7 @@ returns as soon as the fd is readable and `eager_task_factory` executes the
 woken semaphore waiter synchronously, there is no added latency compared to a
 poll-based approach.
 
-**`_handle_response(resp)`**:
+**`_handle_response(resp, now_ns)`**:
 
 - `QueryResult`: publish COMPLETE event, decrement `_inflight`, call
   `on_sample_complete`, call `strategy.on_query_complete(query_id)` if strategy
@@ -352,12 +355,21 @@ poll-based approach.
   until the batch threshold is reached or `flush()` is called. The timestamp
   itself is still accurate (captured before buffering), but the EventRecord
   reaches subscribers with batching latency.
+- RECV_FIRST and RECV_NON_FIRST: one `monotonic_ns()` read per response in
+  `_receive_responses`, when the session handles it.
 - COMPLETE: `QueryResult.completed_at` is set via
   `force_setattr(monotonic_ns())` in `__post_init__`, regenerated on
-  deserialization. Both ISSUED and COMPLETE timestamps share the same ZMQ
-  transit bias. TTFT (`RECV_FIRST - ISSUED`) is still sensitive to this overhead
-  since it spans the full ZMQ round-trip. TPOT avoids cross-process clock skew
-  by computing time deltas between consecutive chunks within the same process.
+  deserialization. The transport decodes a whole drain before the session
+  handles any message, so a result decoded in the same drain as its chunks is
+  older than their RECV stamps (negative TPOT). In that case only, COMPLETE
+  takes the handling stamp of the response's last chunk, so a response's
+  COMPLETE is never earlier than its own chunks. A response without chunks keeps
+  `completed_at`. When COMPLETE keeps `completed_at`, ISSUED and COMPLETE share
+  the same ZMQ transit bias. When it takes the last chunk's stamp, COMPLETE also
+  includes the session's handling backlog for that drain. TTFT
+  (`RECV_FIRST - ISSUED`) is still sensitive to this overhead since it spans the
+  full ZMQ round-trip. TPOT avoids cross-process clock skew by computing time
+  deltas between consecutive chunks within the same process.
 
 ### LoadStrategy (Protocol)
 
@@ -647,7 +659,7 @@ sequenceDiagram
         end
         W-->>I: ZMQ PUSH (QueryResult — final accumulated output)
         I-->>B: recv()
-        B->>E: publish(COMPLETE, uuid, completed_at)
+        B->>E: publish(COMPLETE, uuid, max(completed_at, last chunk stamp))
     end
 
     E->>M: ZMQ PUB (EventRecord)
@@ -945,13 +957,20 @@ shorter strings, no parsing overhead. Update `Query.default_factory` to match.
   `issuer.issue(query)`. ZMQ push is sync/non-blocking — timestamp is honest.
 - **COMPLETE**: `QueryResult.completed_at` set in `__post_init__` on
   deserialization in the main process. Measures main-process receipt time, not
-  worker-side completion.
+  worker-side completion. If a chunk of the same response was handled later
+  (same transport drain), COMPLETE takes that chunk's stamp instead, so it is
+  never earlier than its own chunks.
+- **RECV_FIRST / RECV_NON_FIRST**: one `monotonic_ns()` read per response in
+  `_receive_responses`, when the session handles it. Measures main-process
+  handling time.
 - **TTFT**: `RECV_FIRST - ISSUED` includes full round-trip ZMQ overhead
   (outbound to worker + return to main). This adds 20-100μs of systematic bias.
   Acceptable for most benchmarks; document as a known measurement overhead.
 - **Latency (COMPLETE - ISSUED)**: Both timestamps taken on the main process
-  side. ZMQ transit bias is symmetric and cancels. This is the most accurate
-  measurement.
+  side. When COMPLETE keeps `completed_at`, the ZMQ transit bias is symmetric
+  and cancels; this is the most accurate measurement. When COMPLETE is floored
+  to the response's last chunk, it also includes the session's handling backlog
+  for that drain.
 
 ### Stale Completions After Saturation
 
@@ -959,8 +978,9 @@ After a warmup phase (no drain), in-flight responses arrive during the perf
 phase. The receiver must distinguish stale vs current-phase completions:
 
 ```python
-def _handle_response(self, resp: QueryResult) -> None:
+def _handle_response(self, resp: QueryResult, now_ns: int) -> None:
     query_id = resp.id
+    last_chunk_ns = self._last_chunk_ns.pop(query_id, None)  # set by its chunks
     phase_issuer = self._current_phase_issuer
     # ERROR is published before COMPLETE (the aggregator depends on this order
     # for tracked-failure counting).
@@ -971,7 +991,8 @@ def _handle_response(self, resp: QueryResult) -> None:
     if self._current_phase_type != PhaseType.WARMUP:
         self._publisher.publish(EventRecord(
             event_type=SampleEventType.COMPLETE,
-            timestamp_ns=resp.completed_at,
+            # completed_at, never earlier than this response's chunks
+            timestamp_ns=self._complete_timestamp_ns(resp, now_ns, last_chunk_ns),
             sample_uuid=query_id,
         ))
     # Only route to the current phase's strategy if this is a current-phase query.

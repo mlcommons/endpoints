@@ -27,6 +27,7 @@ from inference_endpoint.core.record import (
     EventType,
     SampleEventType,
     SessionEventType,
+    leading_event_topic,
 )
 from inference_endpoint.core.types import (
     ErrorData,
@@ -314,3 +315,35 @@ class TestEventRecordCodecOnDecodeError:
         # silently swallow decode-path bugs.
         with pytest.raises(ValueError, match="not a decode error"):
             _codec.on_decode_error(b"", ValueError("not a decode error"))
+
+
+@pytest.mark.unit
+class TestLeadingEventTopic:
+    """leading_event_topic reads the event type from a compact line's first bytes."""
+
+    _ENCODER = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+
+    @pytest.mark.parametrize(
+        "event_type",
+        [*SessionEventType, *SampleEventType, *ErrorEventType],
+        ids=lambda member: member.topic,
+    )
+    def test_every_event_type_a_writer_emits_is_found_at_the_lead(self, event_type):
+        line = self._ENCODER.encode(EventRecord(event_type=event_type)) + b"\n"
+
+        assert leading_event_topic(line) == event_type.topic_bytes
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            b'{"event_type": "sample.complete"}',  # a space after the colon
+            b'{"sample_uuid":"u","event_type":"sample.complete"}',  # not first
+            b'{"event_type":"sample.complete',  # no closing quote
+            b'{"event_type":"' + b"x" * 100 + b'"}',  # longer than any topic
+            b"not json",
+            b"\n",
+            b"",
+        ],
+    )
+    def test_any_other_layout_has_no_leading_topic(self, line):
+        assert leading_event_topic(line) is None

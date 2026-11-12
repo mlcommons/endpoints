@@ -1201,6 +1201,57 @@ class TestBenchmarkSession:
         assert len(recv_first) == 2
 
     @pytest.mark.asyncio
+    async def test_streaming_complete_not_before_chunks_of_one_drain(self):
+        """COMPLETE is never stamped before the chunks of its own response.
+
+        One transport drain decodes [chunk, chunk, result] before the session
+        handles any of them, so QueryResult.completed_at is older than the
+        chunks' handling time. Regression test for mlcommons/endpoints#533.
+        """
+        loop = asyncio.get_running_loop()
+        publisher = FakePublisher()
+
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        issuer._auto_respond = False
+
+        session = BenchmarkSession(issuer, publisher, loop)
+        settings = _make_settings(
+            load_pattern=LoadPattern(
+                type=LoadPatternType.CONCURRENCY, target_concurrency=1
+            ),
+            n_samples=1,
+        )
+        phases = [PhaseConfig("perf", settings, FakeDataset(1))]
+
+        async def inject_one_drain():
+            while not issuer._issued:
+                await asyncio.sleep(0.005)
+            query_id = issuer._issued[0].id
+            # Decoded first, as the transport decodes a whole drain at once.
+            result = QueryResult(id=query_id, response_output="out")
+            await asyncio.sleep(0.01)
+            issuer.inject_response(
+                StreamChunk(id=query_id, metadata={"first_chunk": True})
+            )
+            issuer.inject_response(StreamChunk(id=query_id, response_chunk="more"))
+            issuer.inject_response(result)
+
+        injector = asyncio.create_task(inject_one_drain())
+        await asyncio.wait_for(session.run(phases), timeout=5.0)
+        await injector
+
+        recv_first = publisher.events_of_type(SampleEventType.RECV_FIRST)
+        recv_non_first = publisher.events_of_type(SampleEventType.RECV_NON_FIRST)
+        complete = publisher.events_of_type(SampleEventType.COMPLETE)
+        assert len(recv_first) == len(recv_non_first) == len(complete) == 1
+        assert (
+            recv_first[0].timestamp_ns
+            <= recv_non_first[0].timestamp_ns
+            <= complete[0].timestamp_ns
+        )
+
+    @pytest.mark.asyncio
     async def test_concurrency_strategy_transport_close_no_deadlock(self):
         """ConcurrencyStrategy must not deadlock when transport closes mid-phase."""
         loop = asyncio.get_running_loop()
@@ -1319,6 +1370,122 @@ class TestBenchmarkSession:
         )
 
     @pytest.mark.asyncio
+    async def test_complete_stamp_is_decode_time_floored_by_own_chunks(self):
+        """COMPLETE keeps QueryResult.completed_at unless one of the response's
+        own chunks was handled later; then it takes that chunk's stamp."""
+        loop = asyncio.get_running_loop()
+        publisher = FakePublisher()
+        session = BenchmarkSession(FakeIssuer(), publisher, loop)
+
+        late = QueryResult(id="q-late", response_output="out")
+        session._handle_response(
+            StreamChunk(id="q-late", metadata={"first_chunk": True}),
+            late.completed_at + 500,
+        )
+        session._handle_response(late, late.completed_at + 900)
+        early = QueryResult(id="q-early", response_output="out")
+        session._handle_response(
+            StreamChunk(id="q-early", metadata={"first_chunk": True}),
+            early.completed_at - 500,
+        )
+        session._handle_response(early, early.completed_at + 900)
+
+        complete = {
+            e.sample_uuid: e.timestamp_ns
+            for e in publisher.events_of_type(SampleEventType.COMPLETE)
+        }
+        assert complete == {
+            "q-late": late.completed_at + 500,
+            "q-early": early.completed_at,
+        }
+        assert session._last_chunk_ns == {}
+
+    @pytest.mark.asyncio
+    async def test_chunk_stamp_kept_only_for_active_queries(self):
+        """Chunks of stale (previous-phase) or terminated queries may never get
+        a QueryResult, so their stamps are not kept."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+        phase_issuer = PhaseIssuer(FakeDataset(2), issuer, publisher, lambda: False)
+        session._current_phase_issuer = phase_issuer
+        active = phase_issuer.issue(0)
+        terminated = phase_issuer.issue(1)
+        phase_issuer.completed_uuids.add(terminated)
+
+        for query_id in (active, terminated, "q-stale"):
+            session._handle_response(
+                StreamChunk(id=query_id, metadata={"first_chunk": True}), 100
+            )
+
+        assert session._last_chunk_ns == {active: 100}
+        assert len(publisher.events_of_type(SampleEventType.RECV_FIRST)) == 3
+
+    @pytest.mark.asyncio
+    async def test_late_chunk_drops_stamp_of_terminated_query(self):
+        """A chunk that arrives after a synthetic termination removes the stamp
+        recorded before it, since no QueryResult will pop it."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+        phase_issuer = PhaseIssuer(FakeDataset(1), issuer, publisher, lambda: False)
+        session._current_phase_issuer = phase_issuer
+        query_id = phase_issuer.issue(0)
+
+        session._handle_response(
+            StreamChunk(id=query_id, metadata={"first_chunk": True}), 100
+        )
+        phase_issuer.completed_uuids.add(query_id)
+        phase_issuer.uuid_to_conv_info.pop(query_id)
+        session._handle_response(StreamChunk(id=query_id, response_chunk="x"), 200)
+
+        assert session._last_chunk_ns == {}
+
+    @pytest.mark.asyncio
+    async def test_phase_end_drops_chunk_stamps_of_terminated_queries(self):
+        """A turn timeout after some chunks publishes a synthetic failure and no
+        QueryResult follows, so the phase end drops that query's stamp."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        issuer._loop = loop
+        session = BenchmarkSession(issuer, FakePublisher(), loop)
+
+        class TimeoutAfterChunkStrategy:
+            async def execute(self, phase_issuer) -> None:
+                query_id = phase_issuer.issue(0)
+                issuer.inject_response(
+                    StreamChunk(id=query_id, metadata={"first_chunk": True})
+                )
+                while query_id not in session._last_chunk_ns:
+                    await asyncio.sleep(0)
+                # The state changes of AgenticInferenceStrategy._handle_timeout.
+                phase_issuer.mark_inflight_complete()
+                phase_issuer.completed_uuids.add(query_id)
+                phase_issuer.uuid_to_conv_info.pop(query_id)
+
+            def on_query_complete(self, query_id: str) -> None:
+                pass
+
+        phase = PhaseConfig(
+            "perf",
+            _make_settings(n_samples=1),
+            FakeDataset(1),
+            strategy=TimeoutAfterChunkStrategy(),
+        )
+        session._recv_task = asyncio.create_task(session._receive_responses())
+        try:
+            await asyncio.wait_for(session._run_phase(phase), timeout=1.0)
+            assert session._last_chunk_ns == {}
+        finally:
+            issuer.shutdown()
+            await session._recv_task
+
+    @pytest.mark.asyncio
     async def test_handle_response_stamps_conversation_id_and_turn(self):
         """All event types inherit (conv_id, turn) seeded at issue time; streaming
         events use .get() so the entry survives for the terminal QueryResult pop."""
@@ -1371,10 +1538,8 @@ class TestBenchmarkSession:
         assert [(e.conversation_id, e.turn) for e in complete] == [("conv-9", 5)]
         assert complete[0].finish_reason == "stop"
         assert complete[0].worker_id == 3
-        # QueryResult stamps completed_at itself (force_setattr in __post_init__),
-        # and that stamp outranks the caller's arrival timestamp.
+        # Without chunks, COMPLETE keeps the decode-time QueryResult.completed_at.
         assert complete[0].timestamp_ns == ok_resp.completed_at
-        assert complete[0].timestamp_ns != 1_002
         assert "q-ok" not in phase_issuer.uuid_to_conv_info
         assert "q-ok" not in phase_issuer.completed_uuids
 
