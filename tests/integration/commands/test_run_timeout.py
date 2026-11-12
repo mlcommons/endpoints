@@ -18,20 +18,28 @@
 Locking invariant: a fired run watchdog must never produce a COMPLETE
 report. The session still publishes ENDED, then the services get one bounded
 graceful teardown before remaining children are killed; ``run_benchmark``
-exits non-zero via ``ExecutionError``.
+exits non-zero via ``ExecutionError``. A fire after the session's terminal
+ENDED comes too late for the session's INTERRUPTED marker, so a
+``final_snapshot.json`` written within the grace legitimately reads
+``state=complete``; ``result_summary.json`` and the raised error are the
+run-level truth.
 """
 
+import asyncio
 import json
 import time
 from pathlib import Path
 from typing import Any
 
+import inference_endpoint.commands.benchmark.execute as execute_mod
 import pytest
 from inference_endpoint.commands.benchmark.execute import (
     run_benchmark,
     run_benchmark_async,
     setup_benchmark,
 )
+from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
+from inference_endpoint.commands.benchmark.watchdog import RunWatchdog
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
     Dataset,
@@ -50,6 +58,7 @@ from inference_endpoint.config.schema import (
 )
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.exceptions import ExecutionError
+from inference_endpoint.metrics.report import Report
 
 from tests.test_helpers import write_large_prompt_dataset
 
@@ -69,6 +78,68 @@ def _read_final_snapshot(report_dir: Path) -> dict[str, Any]:
 
 def _read_result_summary(report_dir: Path) -> dict[str, Any]:
     return json.loads((report_dir / "performance" / "result_summary.json").read_text())
+
+
+class _DrainDeadlineWatchdog(RunWatchdog):
+    """A RunWatchdog with no wall-clock timer.
+
+    ``expire()`` queues the real fire path, but only while the run has not
+    cancelled the watchdog yet.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        deadline: float | None,
+        abort_event: asyncio.Event,
+    ) -> None:
+        super().__init__(loop, None, abort_event)
+        self.armed = True
+
+    def cancel(self) -> None:
+        self.armed = False
+        super().cancel()
+
+    def expire(self) -> None:
+        if self.armed:
+            asyncio.get_running_loop().call_soon(self._fire)
+
+
+def _expire_run_deadline_at_metrics_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[bool]:
+    """Fire the run watchdog when the parent starts waiting on the metrics drain.
+
+    A wall-clock run_timeout_s cannot target that window: service and worker
+    startup alone can outlast a small budget, so the fire lands before the
+    session exists and takes the launch-abort path instead.
+
+    Returns one entry per drain: whether its abort_event was set when it
+    returned.
+    """
+    watchdogs: list[_DrainDeadlineWatchdog] = []
+    drain_aborted: list[bool] = []
+
+    def make_watchdog(*args: Any) -> _DrainDeadlineWatchdog:
+        watchdogs.append(_DrainDeadlineWatchdog(*args))
+        return watchdogs[-1]
+
+    drain = MetricsPipeline.drain_and_build_report
+
+    async def drain_past_deadline(
+        self: MetricsPipeline, **kwargs: Any
+    ) -> Report | None:
+        (watchdog,) = watchdogs
+        # The fire runs at the drain's first suspension: after the session's
+        # ENDED, while the parent waits on the aggregator.
+        watchdog.expire()
+        report = await drain(self, **kwargs)
+        drain_aborted.append(kwargs["abort_event"].is_set())
+        return report
+
+    monkeypatch.setattr(execute_mod, "RunWatchdog", make_watchdog)
+    monkeypatch.setattr(MetricsPipeline, "drain_and_build_report", drain_past_deadline)
+    return drain_aborted
 
 
 def _make_config(
@@ -173,6 +244,58 @@ def test_run_timeout_with_a_token_backlog_interrupts(mock_http_echo_server, tmp_
 
     snapshot = _read_final_snapshot(report_dir)
     assert snapshot["state"] == "interrupted"
+
+
+@pytest.mark.integration
+def test_run_timeout_during_metrics_drain_interrupts(
+    mock_http_echo_server, tmp_path, monkeypatch
+):
+    """The watchdog stays armed through the post-ENDED metrics drain.
+
+    The session ends normally and leaves the aggregator a deferred
+    tokenization backlog (large prompts echoed back as outputs,
+    metrics_tokenizer_workers=0). The run deadline expires as the parent starts
+    waiting on that drain. The session already published ENDED without an
+    INTERRUPTED marker, so the aggregator finishes draining within the teardown
+    grace and final_snapshot.json records the normally-ended run it observed.
+    result_summary.json and the "Run timeout" error carry the run outcome: the
+    AGENTS.md "Run-outcome precedence" contract that
+    test_sigint_in_drain_window_keeps_summary_authoritative pins for ^C.
+    """
+    drain_aborted = _expire_run_deadline_at_metrics_drain(monkeypatch)
+    dataset_path = write_large_prompt_dataset(tmp_path, 30)
+    report_dir = tmp_path / "report"
+    config = _make_config(
+        mock_http_echo_server.url,
+        dataset_path,
+        report_dir,
+        model_name=str(_CHAR_TOKENIZER_DIR),
+        # Defer every ISL/OSL tokenization to the end-of-run drain.
+        metrics_tokenizer_workers=0,
+        # run_timeout_s only labels the error: _DrainDeadlineWatchdog arms no
+        # timer. The metrics drain stays unlimited, and the grace leaves the
+        # aggregator room to finish it.
+        timeouts=Timeouts(run_timeout_s=600.0, interrupted_teardown_grace_s=120.0),
+    )
+
+    # Any exception escaping the run after the fire (a pre-session cancel, or
+    # a drain/report failure) raises "aborted before a report could be
+    # produced" instead.
+    with pytest.raises(
+        ExecutionError, match=r"Run timeout .*report marked INTERRUPTED"
+    ):
+        run_benchmark(config, TestMode.PERF)
+
+    # The fire reached the drain as an abort, which bounds it by the grace.
+    assert drain_aborted == [True]
+
+    summary = _read_result_summary(report_dir)
+    assert summary["state"] == "interrupted"
+    assert summary["complete"] is False
+
+    snapshot = _read_final_snapshot(report_dir)
+    assert snapshot["state"] == "complete"
+    assert snapshot["n_pending_tasks"] == 0
 
 
 @pytest.mark.integration

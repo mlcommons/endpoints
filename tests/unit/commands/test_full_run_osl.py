@@ -11,6 +11,7 @@ trajectory, so every turn issued afterwards is invisible to the perf-side
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.tokenization imp
     MessageInput,
     TextInput,
 )
+from inference_endpoint.commands.benchmark import full_run_osl as full_run_osl_module
 from inference_endpoint.commands.benchmark.full_run_osl import (
     compute_full_run_osl,
     full_run_osl_for_report,
@@ -31,7 +33,8 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import TextModelOutput
+from inference_endpoint.core.types import PhaseType, TextModelOutput
+from inference_endpoint.endpoint_client.cpu_affinity import UnsupportedPlatformError
 
 pytestmark = pytest.mark.unit
 
@@ -46,6 +49,24 @@ def _word_count(tok_input: MessageInput | TextInput) -> int:
     if tok_input.tool_calls:
         parts.append(" ".join(str(tc) for tc in tok_input.tool_calls))
     return len(" ".join(parts).split())
+
+
+def _batched(count):
+    """A batch counter from a per-turn one: each turn's exception lands in its slot."""
+
+    def count_batch(items: list[MessageInput | TextInput]) -> list[int | Exception]:
+        outcomes: list[int | Exception] = []
+        for item in items:
+            try:
+                outcomes.append(count(item))
+            except Exception as exc:  # noqa: BLE001 - mirror count_batch_sync
+                outcomes.append(exc)
+        return outcomes
+
+    return count_batch
+
+
+_word_counts = _batched(_word_count)
 
 
 def _write_events(path: Path, records: list[EventRecord]) -> Path:
@@ -88,7 +109,7 @@ def test_counts_turns_completed_after_the_performance_window(tmp_path: Path) -> 
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count)
+    result = compute_full_run_osl(events, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 4
@@ -120,8 +141,8 @@ def test_full_run_osl_is_invariant_to_window_position(tmp_path: Path) -> None:
             ],
         )
 
-    early = compute_full_run_osl(build("early.jsonl", 2), _word_count)
-    late = compute_full_run_osl(build("late.jsonl", 5), _word_count)
+    early = compute_full_run_osl(build("early.jsonl", 2), _word_counts)
+    late = compute_full_run_osl(build("late.jsonl", 5), _word_counts)
 
     assert early is not None and late is not None
     assert early["n_turns_counted"] == late["n_turns_counted"] == 6
@@ -148,7 +169,7 @@ def test_excludes_completions_from_other_phases(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+    result = compute_full_run_osl(events, _word_counts, performance_uuids={"u1", "u3"})
 
     assert result is not None
     assert result["n_turns_counted"] == 2
@@ -171,7 +192,7 @@ def test_counts_empty_completions_separately(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count)
+    result = compute_full_run_osl(events, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 1
@@ -233,10 +254,10 @@ def test_full_run_mean_invariant_while_windowed_mean_moves(tmp_path: Path) -> No
         return sum(counted) / len(counted)
 
     early = compute_full_run_osl(
-        build("e.jsonl", 2), _word_count, performance_uuids=uuids
+        build("e.jsonl", 2), _word_counts, performance_uuids=uuids
     )
     late = compute_full_run_osl(
-        build("l.jsonl", 5), _word_count, performance_uuids=uuids
+        build("l.jsonl", 5), _word_counts, performance_uuids=uuids
     )
 
     assert windowed_mean(2) != windowed_mean(5)  # the windowed mean moves
@@ -261,7 +282,7 @@ def test_data_none_completion_counts_as_empty(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count)
+    result = compute_full_run_osl(events, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 1
@@ -286,12 +307,95 @@ def test_count_failure_is_isolated_to_n_errors(tmp_path: Path) -> None:
             raise ValueError("tokenizer blew up")
         return _word_count(tok_input)
 
-    result = compute_full_run_osl(events, flaky)
+    result = compute_full_run_osl(events, _batched(flaky))
 
     assert result is not None
     assert result["n_turns_counted"] == 1
     assert result["n_errors"] == 1
     assert result["output_sequence_lengths"]["total"] == 1  # only "one" counted
+
+
+def _five_turns(tmp_path: Path) -> Path:
+    texts = ["a", "b b", "c c c", "d d d d", "e e e e e"]
+    return _write_events(
+        tmp_path / "events.jsonl",
+        [
+            _session(SessionEventType.STARTED),
+            *(_complete(turn, text) for turn, text in enumerate(texts, start=1)),
+            _session(SessionEventType.ENDED),
+        ],
+    )
+
+
+def test_batches_count_every_turn(tmp_path: Path) -> None:
+    """Full batches plus a final partial one count the same as a single batch."""
+    events = _five_turns(tmp_path)
+    batch_sizes: list[int] = []
+
+    def recording(items):
+        batch_sizes.append(len(items))
+        return _word_counts(items)
+
+    batched = compute_full_run_osl(events, recording, batch_size=2)
+    single = compute_full_run_osl(events, _word_counts, batch_size=1024)
+
+    assert batch_sizes == [2, 2, 1]
+    assert batched is not None and single is not None
+    assert batched["n_turns_counted"] == 5
+    assert batched["output_sequence_lengths"] == single["output_sequence_lengths"]
+
+
+def test_failed_batch_charges_each_of_its_turns(tmp_path: Path) -> None:
+    """A batch call that raises charges each of its turns to n_errors; later
+    batches still count."""
+    events = _five_turns(tmp_path)
+    batch_sizes: list[int] = []
+
+    def first_batch_fails(items):
+        batch_sizes.append(len(items))
+        if len(batch_sizes) == 1:
+            raise RuntimeError("encoder crashed")
+        return _word_counts(items)
+
+    result = compute_full_run_osl(events, first_batch_fails, batch_size=2)
+
+    assert batch_sizes == [2, 2, 1]  # the failed batch is not retried
+    assert result is not None
+    assert result["n_errors"] == 2
+    assert result["n_turns_counted"] == 3
+    assert result["output_sequence_lengths"]["total"] == 3 + 4 + 5
+    assert result["partial"] is True
+
+
+@pytest.mark.parametrize("n_outcomes", [0, 1, 4], ids=["none", "short", "long"])
+def test_counter_returning_the_wrong_number_of_outcomes_charges_its_batch(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, n_outcomes: int
+) -> None:
+    """One outcome per turn is the counter's contract. Any other number cannot be
+    matched back to its turns, so the batch is charged to n_errors and the block
+    is partial, not published as complete over an unknown subset."""
+    events = _five_turns(tmp_path)
+    batch_sizes: list[int] = []
+
+    def wrong_count_on_first_batch(items):
+        batch_sizes.append(len(items))
+        if len(batch_sizes) == 1:
+            return [1] * n_outcomes
+        return _word_counts(items)
+
+    with caplog.at_level(logging.WARNING):
+        result = compute_full_run_osl(events, wrong_count_on_first_batch, batch_size=2)
+
+    assert batch_sizes == [2, 2, 1]
+    assert result is not None
+    assert result["n_errors"] == 2  # the first batch's two turns
+    assert result["n_turns_counted"] == 3
+    assert result["output_sequence_lengths"]["total"] == 3 + 4 + 5
+    assert result["partial"] is True
+    assert any(
+        f"returned {n_outcomes} outcomes for 2 turns" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_all_empty_population_returns_a_visible_block(tmp_path: Path) -> None:
@@ -309,7 +413,7 @@ def test_all_empty_population_returns_a_visible_block(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count)
+    result = compute_full_run_osl(events, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 0
@@ -329,7 +433,7 @@ def test_undecodable_complete_line_is_skipped(
     path.write_bytes(good + b"\n" + corrupt + b"\n")
 
     with caplog.at_level(logging.WARNING):
-        result = compute_full_run_osl(path, _word_count)
+        result = compute_full_run_osl(path, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 1
@@ -340,6 +444,60 @@ def test_undecodable_complete_line_is_skipped(
     assert sum("undecodable COMPLETE line" in m for m in messages) == 1
 
 
+def _spaced_line(record: EventRecord) -> bytes:
+    """The record as valid JSON with json.dumps' default spacing."""
+    return json.dumps(json.loads(_ENCODER.encode(record))).encode()
+
+
+def _event_type_last_line(record: EventRecord) -> bytes:
+    """The record with its fields reversed, so event_type comes last."""
+    fields = json.loads(_ENCODER.encode(record))
+    return json.dumps(dict(reversed(fields.items())), separators=(",", ":")).encode()
+
+
+def test_complete_lines_in_other_valid_layouts_are_counted(tmp_path: Path) -> None:
+    """The reader must not depend on the writer's compact layout: spaced and
+    reordered COMPLETE lines count like compact ones, and blank lines and other
+    events in any layout are skipped, not charged."""
+    path = tmp_path / "events.jsonl"
+    lines = [
+        _ENCODER.encode(_complete(1, "a b")),
+        _spaced_line(_complete(3, "c d e")),
+        _event_type_last_line(_complete(5, "f")),
+        _spaced_line(_session(SessionEventType.ENDED)),
+        b"",
+    ]
+    path.write_bytes(b"\n".join(lines) + b"\n")
+
+    result = compute_full_run_osl(
+        path, _word_counts, performance_uuids={"u1", "u3", "u5"}
+    )
+
+    assert result is not None
+    assert result["n_turns_counted"] == 3
+    assert result["output_sequence_lengths"]["total"] == 6  # 2 + 3 + 1 words
+    assert result["n_missing"] == 0
+    assert result["n_undecodable"] == 0
+    assert result["partial"] is False
+
+
+def test_unreadable_line_that_does_not_decode_is_charged_as_undecodable(
+    tmp_path: Path,
+) -> None:
+    """A line whose event type cannot be read from its lead and that is not a
+    valid event may have been a COMPLETE turn, so it is charged (and the block
+    marked partial) rather than skipped unseen."""
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(_ENCODER.encode(_complete(1, "one")) + b"\nnot json\n")
+
+    result = compute_full_run_osl(path, _word_counts)
+
+    assert result is not None
+    assert result["n_turns_counted"] == 1
+    assert result["n_undecodable"] == 1
+    assert result["partial"] is True
+
+
 def test_all_undecodable_returns_visible_block(tmp_path: Path) -> None:
     """A stream of only corrupt COMPLETE lines returns a block (not None) so the
     accuracy field is not mistaken for uncomputed."""
@@ -347,7 +505,7 @@ def test_all_undecodable_returns_visible_block(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     path.write_bytes(corrupt + b"\n" + corrupt + b"\n")
 
-    result = compute_full_run_osl(path, _word_count)
+    result = compute_full_run_osl(path, _word_counts)
 
     assert result is not None
     assert result["n_turns_counted"] == 0
@@ -362,6 +520,138 @@ def test_for_report_fails_closed_without_performance_map(tmp_path: Path) -> None
     # No sample_idx_map.json → load_performance_uuids None → fail closed, before
     # any tokenizer is constructed.
     assert full_run_osl_for_report(tmp_path, "any-tokenizer") is None
+
+
+class _SpyTokenizer:
+    """Stands in for BatchTokenizer: records how it was built, counts by words."""
+
+    built: list[dict] = []
+
+    def __init__(self, tokenizer_name: str, *, live_workers: int, n_workers: int):
+        type(self).built.append(
+            {
+                "tokenizer_name": tokenizer_name,
+                "live_workers": live_workers,
+                "n_workers": n_workers,
+            }
+        )
+
+    def __enter__(self) -> _SpyTokenizer:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def count_batch_sync(self, items):
+        return _word_counts(items)
+
+
+def _perf_report(report_dir: Path) -> None:
+    """A two-turn performance report that full_run_osl_for_report will accept."""
+    _write_events(
+        report_dir / "events.jsonl",
+        [_complete(1, "a"), _complete(3, "b c")],
+    )
+    (report_dir / "sample_idx_map.json").write_bytes(
+        msgspec.json.encode({PhaseType.PERFORMANCE.value: {"u1": 0, "u3": 1}})
+    )
+
+
+@pytest.mark.parametrize("n_cpus", [4, 32, 352])
+def test_for_report_caps_counting_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, n_cpus: int
+) -> None:
+    """Finalize counts on at most one thread per usable CPU, capped where adding
+    threads stops helping, and without tokenizer shards (n_workers=0)."""
+    _perf_report(tmp_path)
+    _SpyTokenizer.built = []
+    monkeypatch.setattr(full_run_osl_module, "BatchTokenizer", _SpyTokenizer)
+    monkeypatch.setattr(
+        full_run_osl_module, "get_all_online_cpus", lambda: list(range(n_cpus))
+    )
+
+    result = full_run_osl_for_report(tmp_path, "tok")
+
+    assert result is not None and result["n_turns_counted"] == 2
+    assert _SpyTokenizer.built == [
+        {
+            "tokenizer_name": "tok",
+            "live_workers": min(n_cpus, full_run_osl_module._MAX_COUNT_THREADS),
+            "n_workers": 0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("cpu_count", "expected"),
+    [(64, full_run_osl_module._MAX_COUNT_THREADS), (8, 8), (None, 1)],
+)
+def test_for_report_threads_without_cpu_affinity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cpu_count: int | None,
+    expected: int,
+) -> None:
+    """Where the affinity API is unsupported, fall back to os.cpu_count()."""
+    _perf_report(tmp_path)
+    _SpyTokenizer.built = []
+    monkeypatch.setattr(full_run_osl_module, "BatchTokenizer", _SpyTokenizer)
+
+    def _unsupported() -> list[int]:
+        raise UnsupportedPlatformError("no affinity here")
+
+    monkeypatch.setattr(full_run_osl_module, "get_all_online_cpus", _unsupported)
+    monkeypatch.setattr(full_run_osl_module.os, "cpu_count", lambda: cpu_count)
+
+    assert full_run_osl_for_report(tmp_path, "tok") is not None
+    assert _SpyTokenizer.built[0]["live_workers"] == expected
+
+
+def test_for_report_empty_cpu_list_counts_on_one_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that finds no CPUs must not ask for zero counting threads."""
+    _perf_report(tmp_path)
+    _SpyTokenizer.built = []
+    monkeypatch.setattr(full_run_osl_module, "BatchTokenizer", _SpyTokenizer)
+    monkeypatch.setattr(full_run_osl_module, "get_all_online_cpus", lambda: [])
+
+    assert full_run_osl_for_report(tmp_path, "tok") is not None
+    assert _SpyTokenizer.built[0]["live_workers"] == 1
+
+
+class _FailingTokenizer(_SpyTokenizer):
+    """A tokenizer that cannot be constructed."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("tokenizer could not be loaded")
+
+
+@pytest.mark.parametrize("failure", ["cpu_probe", "tokenizer"])
+def test_for_report_failure_drops_the_block_with_a_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    """The block is best-effort: whatever fails while counting (the CPU probe,
+    the tokenizer), finalize gets None and a warning, not an exception."""
+    _perf_report(tmp_path)
+    if failure == "cpu_probe":
+
+        def _broken_probe() -> list[int]:
+            raise RuntimeError("probe broke")
+
+        monkeypatch.setattr(full_run_osl_module, "BatchTokenizer", _SpyTokenizer)
+        monkeypatch.setattr(full_run_osl_module, "get_all_online_cpus", _broken_probe)
+    else:
+        monkeypatch.setattr(full_run_osl_module, "BatchTokenizer", _FailingTokenizer)
+        monkeypatch.setattr(full_run_osl_module, "get_all_online_cpus", lambda: [0, 1])
+
+    with caplog.at_level(logging.WARNING):
+        assert full_run_osl_for_report(tmp_path, "tok") is None
+
+    assert any("Full-run OSL skipped" in r.getMessage() for r in caplog.records)
 
 
 def test_for_report_skips_without_tokenizer_or_events(tmp_path: Path) -> None:
@@ -382,7 +672,7 @@ def test_missing_turn_is_detected_via_uuid_reconciliation(tmp_path: Path) -> Non
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+    result = compute_full_run_osl(events, _word_counts, performance_uuids={"u1", "u3"})
 
     assert result is not None
     assert result["n_turns_counted"] == 1
@@ -408,7 +698,9 @@ def test_failed_turn_marks_block_partial(tmp_path: Path) -> None:
             raise ValueError("tokenizer blew up")
         return _word_count(tok_input)
 
-    result = compute_full_run_osl(events, flaky, performance_uuids={"u1", "u3"})
+    result = compute_full_run_osl(
+        events, _batched(flaky), performance_uuids={"u1", "u3"}
+    )
 
     assert result is not None
     assert result["n_turns_counted"] == 1
@@ -428,7 +720,7 @@ def test_clean_run_is_not_partial(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+    result = compute_full_run_osl(events, _word_counts, performance_uuids={"u1", "u3"})
 
     assert result is not None
     assert result["n_turns_counted"] == 2
@@ -449,7 +741,7 @@ def test_empty_turns_do_not_make_block_partial(tmp_path: Path) -> None:
         ],
     )
 
-    result = compute_full_run_osl(events, _word_count, performance_uuids={"u1", "u3"})
+    result = compute_full_run_osl(events, _word_counts, performance_uuids={"u1", "u3"})
 
     assert result is not None
     assert result["n_empty"] == 1
