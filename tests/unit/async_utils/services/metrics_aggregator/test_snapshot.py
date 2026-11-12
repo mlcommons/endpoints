@@ -80,13 +80,15 @@ class TestSeriesStat:
 
 @pytest.mark.unit
 class TestMetricsSnapshot:
-    def test_empty_metrics_roundtrip(self):
+    @pytest.mark.parametrize("started_ns", [None, 0, 42])
+    def test_empty_metrics_roundtrip(self, started_ns):
         snap = MetricsSnapshot(
             counter=1,
             timestamp_ns=1234,
             state=SessionState.LIVE,
             n_pending_tasks=0,
             metrics=[],
+            session_started_ns=started_ns,
         )
         codec = MetricsSnapshotCodec()
         topic, payload = codec.encode(snap)
@@ -94,6 +96,10 @@ class TestMetricsSnapshot:
         assert len(topic) == TOPIC_FRAME_SIZE
         decoded = codec.decode(payload)
         assert decoded == snap
+
+    def test_decode_without_session_start(self):
+        payload = msgspec.msgpack.encode([1, 1234, "live", 0, [], None])
+        assert MetricsSnapshotCodec().decode(payload).session_started_ns is None
 
     def test_tagged_union_dispatch(self):
         """Decoder must produce the right concrete type per tag."""

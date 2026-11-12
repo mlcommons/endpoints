@@ -87,6 +87,7 @@ class MetricsPublisher:
         self._loop = loop
         self._final_snapshot_path = final_snapshot_path
         self._tick_task: asyncio.Task | None = None
+        self._session_started_ns: int | None = None
         self._closed = False
         # publish_final is idempotent AND serialized: the SIGTERM handler in
         # __main__.py and the aggregator's ENDED-driven path can both call
@@ -107,6 +108,8 @@ class MetricsPublisher:
         registry: MetricsRegistry,
         publish_interval_s: float,
         get_runtime_state: Callable[[], tuple[SessionState, int]],
+        *,
+        session_started_ns: int | None = None,
     ) -> None:
         """Begin publishing live ticks every ``publish_interval_s`` seconds.
 
@@ -133,6 +136,7 @@ class MetricsPublisher:
             raise ValueError(
                 f"publish_interval_s must be positive, got {publish_interval_s}"
             )
+        self._session_started_ns = session_started_ns
 
         async def _tick() -> None:
             while True:
@@ -140,7 +144,9 @@ class MetricsPublisher:
                     await asyncio.sleep(publish_interval_s)
                     state, n_pending = get_runtime_state()
                     snap = registry.build_snapshot(
-                        state=state, n_pending_tasks=n_pending
+                        state=state,
+                        n_pending_tasks=n_pending,
+                        session_started_ns=self._session_started_ns,
                     )
                     self._publisher.publish(snap)
                 except asyncio.CancelledError:
@@ -237,6 +243,7 @@ class MetricsPublisher:
             state=terminal_state,
             n_pending_tasks=n_pending_tasks,
             steady_state=steady_state,
+            session_started_ns=self._session_started_ns,
         )
 
         # Primary: atomic JSON file write. Run on a worker thread because
