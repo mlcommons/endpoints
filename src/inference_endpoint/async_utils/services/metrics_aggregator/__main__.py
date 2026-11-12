@@ -18,6 +18,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import signal
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
@@ -109,6 +110,19 @@ def _make_sigterm_handler(
         task.add_done_callback(pending_tasks.discard)
 
     return _on_sigterm, pending_tasks
+
+
+def _cap_live_lane_rayon_pool(tokenizer_workers: int) -> None:
+    """Cap the Hugging Face rayon pool the live (mid-run) lane encodes on.
+
+    The live lane runs in this process, and rayon sizes its pool once, at the
+    first encode, so the cap must be in the environment before the tokenizer is
+    used. ``setdefault`` lets an operator-exported ``RAYON_NUM_THREADS`` win; the
+    ``max(1, ...)`` keeps ``--tokenizer-workers 0`` from reading as rayon's "use
+    every CPU". The end-of-run drain is not capped by this: its shard processes
+    size their own pools in ``_init_worker``.
+    """
+    os.environ.setdefault("RAYON_NUM_THREADS", str(max(1, tokenizer_workers)))
 
 
 async def main() -> None:
@@ -257,6 +271,7 @@ async def main() -> None:
     # (coalesces to 'object' not 'AbstractContextManager[BatchTokenizer | None]')
     tokenizer_cm: AbstractContextManager[BatchTokenizer | None]
     if args.tokenizer:
+        _cap_live_lane_rayon_pool(args.tokenizer_workers)
         try:
             tokenizer_cm = BatchTokenizer(
                 args.tokenizer, live_workers=args.tokenizer_workers
