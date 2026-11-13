@@ -3163,6 +3163,28 @@ class TestSetupBenchmark:
         assert ctx.config.settings.load_pattern.target_concurrency == 10
 
     @pytest.mark.unit
+    def test_setup_resolves_source_provenance_before_the_run(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings, caplog
+    ):
+        """The report's SHA is sampled at setup, not after a long run."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, report_dir=str(tmp_path))
+        resolve = MagicMock(
+            return_value={
+                "version": "0.1.0",
+                "git_sha": "abc1234-dirty",
+                "git_sha_source": "git",
+            }
+        )
+        with (
+            patch.object(execute_mod, "get_version_info", resolve),
+            caplog.at_level(logging.INFO, logger=execute_mod.__name__),
+        ):
+            self._setup(config, TestMode.PERF, (_simple_dataset, []), _rt_settings)
+
+        resolve.assert_called_once_with()
+        assert "abc1234-dirty (source: git)" in caplog.text
+
+    @pytest.mark.unit
     def test_accuracy_dataset_named_performance_is_counted_by_type(
         self, tmp_path, _base_patches, _simple_dataset, _rt_settings
     ):
