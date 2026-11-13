@@ -1,13 +1,16 @@
 # Endpoint Client Implementation Deep Dive
 
-> Primary component spec: [docs/endpoint_client/DESIGN.md](endpoint_client/DESIGN.md)
+> Primary component spec:
+> [docs/endpoint_client/DESIGN.md](endpoint_client/DESIGN.md)
 >
-> This document is the detailed companion reference for the endpoint client implementation. Use
-> it for deeper material on connection pool architecture, worker internals, SSE handling, and
-> performance analysis. Treat `docs/endpoint_client/DESIGN.md` as the canonical high-level design
-> spec.
+> This document is the detailed companion reference for the endpoint client
+> implementation. Use it for deeper material on connection pool architecture,
+> worker internals, SSE handling, and performance analysis. Treat
+> `docs/endpoint_client/DESIGN.md` as the canonical high-level design spec.
 
-Detailed design for the `HTTPEndpointClient`: functional requirements, performance constraints, connection pool architecture, and worker process integration.
+Detailed design for the `HTTPEndpointClient`: functional requirements,
+performance constraints, connection pool architecture, and worker process
+integration.
 
 ## Table of Contents
 
@@ -94,7 +97,8 @@ Detailed design for the `HTTPEndpointClient`: functional requirements, performan
 
 ## 1. Introduction & Constraints
 
-This document defines the architecture of the HTTP client used for benchmarking LLM Servers by the MLPerf Inference-Endpoints LoadGen.
+This document defines the architecture of the HTTP client used for benchmarking
+LLM Servers by the MLPerf Inference-Endpoints LoadGen.
 
 #### 1.1 Functional Requirements
 
@@ -115,11 +119,15 @@ This document defines the architecture of the HTTP client used for benchmarking 
 | 3   | Per-request overhead        | O(µs)   | O(µs)                                      | O(µs)                                     | 300k QPS / 14 workers ≈ 21.4k req/s/worker; ~47µs pure client overhead |
 | 4   | Run-to-run jitter           | Minimal |                                            |                                           |                                                                        |
 
-**Test environments:** x86 = Intel Xeon Platinum 8570 × 2 (112 cores / 224 threads, HT); ARM = NVIDIA Grace × 2 (144 cores). Measured using `benchmark_httpclient.py` (`src/inference_endpoint/utils/`). See [§11](#11-performance-analysis) for full results.
+**Test environments:** x86 = Intel Xeon Platinum 8570 × 2 (112 cores / 224
+threads, HT); ARM = NVIDIA Grace × 2 (144 cores). Measured using
+`benchmark_httpclient.py` (`src/inference_endpoint/utils/`). See
+[§11](#11-performance-analysis) for full results.
 
 #### 1.3 Constraints
 
-The design operates within these constraints, which shape all subsequent architectural decisions.
+The design operates within these constraints, which shape all subsequent
+architectural decisions.
 
 | #   | Constraint                | Detail                                                                                                                                                                                                                                                                                      | Implication                                                                                                                                                               |
 | --- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -141,11 +149,26 @@ The design operates within these constraints, which shape all subsequent archite
 
 ![High Level System Architecture](res/endpoint_client/01_high_level_architecture.png)
 
-The HTTP client (`HTTPEndpointClient`) is a multi-process, async HTTP engine that the LoadGen uses to send requests to and receive responses from the target LLM endpoint (e.g. vLLM, SGLang, TRT-LLM). It exposes a `SampleIssuer` interface (`HttpClientSampleIssuer`) so the LoadGen can call `issue(sample)` without knowledge of the underlying transport or HTTP details.
+The HTTP client (`HTTPEndpointClient`) is a multi-process, async HTTP engine
+that the LoadGen uses to send requests to and receive responses from the target
+LLM endpoint (e.g. vLLM, SGLang, TRT-LLM). It exposes a `SampleIssuer` interface
+(`HttpClientSampleIssuer`) so the LoadGen can call `issue(sample)` without
+knowledge of the underlying transport or HTTP details.
 
-On initialization, the client spawns N worker processes and sets up IPC channels between the main process event loop and each worker. The **main process** runs two threads: the LoadGen thread (orchestrating the test and scheduling requests) and the event loop thread (`uvloop`-based async dispatcher). The event loop accepts queries from the LoadGen thread via `issue()`, dispatches them to workers in round-robin order, and collects responses back from all workers on the return path. Incoming responses (`StreamChunk` and `QueryResult` messages) are routed to `SampleEventHandler` callbacks.
+On initialization, the client spawns N worker processes and sets up IPC channels
+between the main process event loop and each worker. The **main process** runs
+two threads: the LoadGen thread (orchestrating the test and scheduling requests)
+and the event loop thread (`uvloop`-based async dispatcher). The event loop
+accepts queries from the LoadGen thread via `issue()`, dispatches them to
+workers in round-robin order, and collects responses back from all workers on
+the return path. Incoming responses (`StreamChunk` and `QueryResult` messages)
+are routed to `SampleEventHandler` callbacks.
 
-Each **worker process** runs its own async event loop in a separate OS process (avoiding GIL contention). A worker receives queries from its IPC channel, builds HTTP requests using the configured API adapter, sends them over its connection pool, and returns responses back via IPC. Each worker handles multiple in-flight requests concurrently.
+Each **worker process** runs its own async event loop in a separate OS process
+(avoiding GIL contention). A worker receives queries from its IPC channel,
+builds HTTP requests using the configured API adapter, sends them over its
+connection pool, and returns responses back via IPC. Each worker handles
+multiple in-flight requests concurrently.
 
 ### 2.1 Usage
 
@@ -181,7 +204,10 @@ client.shutdown()
 
 ### 2.2 Inference-Endpoints Integration
 
-In benchmarking mode, the `HttpClientSampleIssuer` bridges the LoadGen thread and the async client. `HttpClientSampleIssuer` implements the `SampleIssuer` interface from the `inference-endpoints` LoadGen framework, converting `Sample` objects to `Query` and routing responses back to `SampleEventHandler` callbacks.
+In benchmarking mode, the `HttpClientSampleIssuer` bridges the LoadGen thread
+and the async client. `HttpClientSampleIssuer` implements the `SampleIssuer`
+interface from the `inference-endpoints` LoadGen framework, converting `Sample`
+objects to `Query` and routing responses back to `SampleEventHandler` callbacks.
 
 ```python
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
@@ -195,7 +221,12 @@ issuer = HttpClientSampleIssuer(client)
 
 ## 3. Types
 
-The endpoint client uses three core message types defined in the parent project (`core/types.py`) for IPC communication. All types are `msgspec.Struct` [5] with performance-oriented options (`frozen`, `array_like`, `gc=False`, `omit_defaults` — see [A.5](#a5-msgspec-serialization) for the full convention table). The `tag` field on `QueryResult` and `StreamChunk` enables union type discrimination during MessagePack deserialization on the fan-in path.
+The endpoint client uses three core message types defined in the parent project
+(`core/types.py`) for IPC communication. All types are `msgspec.Struct` [5] with
+performance-oriented options (`frozen`, `array_like`, `gc=False`,
+`omit_defaults` — see [A.5](#a5-msgspec-serialization) for the full convention
+table). The `tag` field on `QueryResult` and `StreamChunk` enables union type
+discrimination during MessagePack deserialization on the fan-in path.
 
 | Type          | Direction     | Purpose                                                                 |
 | ------------- | ------------- | ----------------------------------------------------------------------- |
@@ -235,7 +266,10 @@ class QueryStatus(Enum):
 
 ## 4. HTTPClientConfig
 
-`HTTPClientConfig` (`config.py`) is a Pydantic `BaseModel` that configures the client, worker pool, and connection management. Several fields support auto-detection via sentinel defaults (`-1`), resolved in the `_resolve_defaults` model validator.
+`HTTPClientConfig` (`config.py`) is a Pydantic `BaseModel` that configures the
+client, worker pool, and connection management. Several fields support
+auto-detection via sentinel defaults (`-1`), resolved in the `_resolve_defaults`
+model validator.
 
 **Classes:**
 
@@ -308,17 +342,45 @@ class HTTPClientConfig(BaseModel):
 
 Three fields resolve `-1` sentinels by probing the host at construction time:
 
-**`num_workers=-1`:** Detects the NUMA node of the current process, counts physical CPUs in that NUMA domain, and clamps to `min(max(8, numa_cpu_count), 24)`. Falls back to 8 if NUMA info is unavailable. The intent is to keep all workers local to the same NUMA node for memory locality; users can override to use more cores (workers will be pinned to additional cores outside the NUMA domain if an `AffinityPlan` is provided).
+**`num_workers=-1`:** Detects the NUMA node of the current process, counts
+physical CPUs in that NUMA domain, and clamps to
+`min(max(8, numa_cpu_count), 24)`. Falls back to 8 if NUMA info is unavailable.
+The intent is to keep all workers local to the same NUMA node for memory
+locality; users can override to use more cores (workers will be pinned to
+additional cores outside the NUMA domain if an `AffinityPlan` is provided).
 
-**`max_connections=-1`:** Reads the system ephemeral port range from `/proc/sys/net/ipv4/ip_local_port_range` and sets `max_connections` to the full port budget: `range_size x distinct_endpoints` (the ephemeral limit is per `(src_ip, dst)` pair, so each distinct endpoint has its own range). Live socket occupancy is deliberately not subtracted — it is racy and counts unrelated destinations; actual port contention surfaces at `connect()` time as an `OSError` (no automatic retry today), so establishment is paced (the `max_concurrent_warmup_connects` config field, default 128 in-flight per worker pool) to keep bursts from reaching that point. When `warmup_connections` is also `-1`, it resolves to the `auto_warmup_budget_fraction` config field (default 25%) of that budget, so the auto config pre-establishes a bounded warm set and grows the rest on demand. `min_required_connections=-1` resolves to 12.5% of the system port range. If an explicit `max_connections` value exceeds the port budget, raises `RuntimeError`.
+**`max_connections=-1`:** Reads the system ephemeral port range from
+`/proc/sys/net/ipv4/ip_local_port_range` and sets `max_connections` to the full
+port budget: `range_size x distinct_endpoints` (the ephemeral limit is per
+`(src_ip, dst)` pair, so each distinct endpoint has its own range). Live socket
+occupancy is deliberately not subtracted — it is racy and counts unrelated
+destinations; actual port contention surfaces at `connect()` time as an
+`OSError` (no automatic retry today), so establishment is paced (the
+`max_concurrent_warmup_connects` config field, default 128 in-flight per worker
+pool) to keep bursts from reaching that point. When `warmup_connections` is also
+`-1`, it resolves to the `auto_warmup_budget_fraction` config field (default
+25%) of that budget, so the auto config pre-establishes a bounded warm set and
+grows the rest on demand. `min_required_connections=-1` resolves to 12.5% of the
+system port range. If an explicit `max_connections` value exceeds the port
+budget, raises `RuntimeError`.
 
-**`cpu_affinity`:** When an `AffinityPlan` is provided (or computed via `compute_affinity_plan()`), cores are auto-detected from sysfs topology and ranked by performance. Ranking sources, checked in order: ACPI CPPC `highest_perf` (Intel P-core vs E-core), ARM `cpu_capacity` (big.LITTLE), `cpuinfo_max_freq` (fallback). The fastest cores are reserved for the main process (LoadGen thread + event loop daemon + transport I/O threads); remaining physical cores are assigned 1:1 to workers.
+**`cpu_affinity`:** When an `AffinityPlan` is provided (or computed via
+`compute_affinity_plan()`), cores are auto-detected from sysfs topology and
+ranked by performance. Ranking sources, checked in order: ACPI CPPC
+`highest_perf` (Intel P-core vs E-core), ARM `cpu_capacity` (big.LITTLE),
+`cpuinfo_max_freq` (fallback). The fastest cores are reserved for the main
+process (LoadGen thread + event loop daemon + transport I/O threads); remaining
+physical cores are assigned 1:1 to workers.
 
 ---
 
 ## 5. HTTPEndpointClient
 
-Unified multi-process HTTP client for LLM inference. Manages a pool of worker processes behind a simple issue/poll/drain interface — actual HTTP request dispatch and response processing run in background worker processes. Exposes both synchronous methods (for callers on non-async threads) and an async `recv()` (for callers already on an event loop).
+Unified multi-process HTTP client for LLM inference. Manages a pool of worker
+processes behind a simple issue/poll/drain interface — actual HTTP request
+dispatch and response processing run in background worker processes. Exposes
+both synchronous methods (for callers on non-async threads) and an async
+`recv()` (for callers already on an event loop).
 
 **Classes:**
 
@@ -338,7 +400,14 @@ Unified multi-process HTTP client for LLM inference. Manages a pool of worker pr
 
 ### 5.1 Architecture
 
-On construction, the client creates a `uvloop` event loop via `LoopManager` (or accepts an external one) and initializes a `WorkerManager` ([§10](#10-initialization--shutdown)) that spawns N worker processes connected via IPC ([§7](#7-transport)). The **main process** dispatches queries round-robin to workers and collects responses from all workers into a single fan-in queue. Each **worker** (×N) is a separate OS process with its own event loop, executing HTTP requests against the target endpoint and returning results via IPC ([§6](#6-worker)).
+On construction, the client creates a `uvloop` event loop via `LoopManager` (or
+accepts an external one) and initializes a `WorkerManager`
+([§10](#10-initialization--shutdown)) that spawns N worker processes connected
+via IPC ([§7](#7-transport)). The **main process** dispatches queries
+round-robin to workers and collects responses from all workers into a single
+fan-in queue. Each **worker** (×N) is a separate OS process with its own event
+loop, executing HTTP requests against the target endpoint and returning results
+via IPC ([§6](#6-worker)).
 
 **Main process:**
 
@@ -371,11 +440,26 @@ On construction, the client creates a `uvloop` event loop via `LoopManager` (or 
 
 ## 6. Worker
 
-Each worker is a separate OS process running its own uvloop event loop ([A.2](#a2-event-loops-and-eager-task-factory)). It receives queries via IPC, executes HTTP requests against its assigned endpoint, and returns responses via IPC. The worker's operation decomposes into two concurrent components on that single event loop:
+Each worker is a separate OS process running its own uvloop event loop
+([A.2](#a2-event-loops-and-eager-task-factory)). It receives queries via IPC,
+executes HTTP requests against its assigned endpoint, and returns responses via
+IPC. The worker's operation decomposes into two concurrent components on that
+single event loop:
 
-- **Main loop (`_run_main_loop`)** — a tight recv → prepare → acquire → write → create_task cycle. Each iteration receives one query from IPC, encodes it to HTTP bytes, acquires a pooled connection, writes the request to the socket, and creates a response task. The loop never blocks on a response — it immediately loops back to receive the next query. All of its await points (`recv`, `pool.acquire`) are designed to return synchronously in the common case.
+- **Main loop (`_run_main_loop`)** — a tight recv → prepare → acquire → write →
+  create_task cycle. Each iteration receives one query from IPC, encodes it to
+  HTTP bytes, acquires a pooled connection, writes the request to the socket,
+  and creates a response task. The loop never blocks on a response — it
+  immediately loops back to receive the next query. All of its await points
+  (`recv`, `pool.acquire`) are designed to return synchronously in the common
+  case.
 
-- **Concurrent response tasks (`_process_response`)** — each spawned via `create_task()`. A single worker may have hundreds of response tasks alive simultaneously, each waiting independently on network I/O. The event loop multiplexes between them using `HttpResponseProtocol` callbacks ([§8.1](#81-httpresponseprotocol)) that resume suspended tasks when data arrives.
+- **Concurrent response tasks (`_process_response`)** — each spawned via
+  `create_task()`. A single worker may have hundreds of response tasks alive
+  simultaneously, each waiting independently on network I/O. The event loop
+  multiplexes between them using `HttpResponseProtocol` callbacks
+  ([§8.1](#81-httpresponseprotocol)) that resume suspended tasks when data
+  arrives.
 
 **Classes:**
 
@@ -393,9 +477,13 @@ Each worker is a separate OS process running its own uvloop event loop ([A.2](#a
 
 ### 6.1 Request Lifecycle
 
-Each request flows through the main loop and a spawned response task — the two concurrent components from [§6](#6-worker). The main loop handles request dispatch; the response task handles response processing independently. The hot-path diagram below traces this lifecycle visually.
+Each request flows through the main loop and a spawned response task — the two
+concurrent components from [§6](#6-worker). The main loop handles request
+dispatch; the response task handles response processing independently. The
+hot-path diagram below traces this lifecycle visually.
 
-Every async step _can_ resolve synchronously in the common case — suspending only when data is not yet available.
+Every async step _can_ resolve synchronously in the common case — suspending
+only when data is not yet available.
 
 **Main loop — request dispatch:**
 
@@ -407,7 +495,8 @@ Every async step _can_ resolve synchronously in the common case — suspending o
 | `protocol.write()`   | No      | Write HTTP request bytes to kernel socket buffer                                              |
 | `create_task()`      | No      | Spawn response task                                                                           |
 
-The loop returns to `recv()` immediately after `create_task()` — it never waits for a response.
+The loop returns to `recv()` immediately after `create_task()` — it never waits
+for a response.
 
 **Response task** (`_process_response`, ×N concurrent):
 
@@ -418,7 +507,10 @@ The loop returns to `recv()` immediately after `create_task()` — it never wait
 | parse + send     | No      | Regex extract + msgspec decode ([§9.3](#93-sse-stream-parsing)); IPC send `StreamChunk` / `QueryResult` |
 | `pool.release()` | No      | Return connection to idle stack; always synchronous                                                     |
 
-For streaming requests, `iter_body()` → parse + send repeats in a loop until the stream completes, then a final `QueryResult` is sent before `pool.release()`. Non-streaming requests read the full body in a single `read_body()` call, decode, and send one `QueryResult` directly.
+For streaming requests, `iter_body()` → parse + send repeats in a loop until the
+stream completes, then a final `QueryResult` is sent before `pool.release()`.
+Non-streaming requests read the full body in a single `read_body()` call,
+decode, and send one `QueryResult` directly.
 
 Response processing is spawned as an asyncio Task rather than awaited directly:
 
@@ -427,17 +519,27 @@ Response processing is spawned as an asyncio Task rather than awaited directly:
 | `await process_response()`        | Main loop blocks until response complete | 1 request at a time         |
 | `create_task(process_response())` | Main loop continues immediately          | 100s of concurrent requests |
 
-The main loop must keep dispatching new requests while previous responses are still streaming. Without tasks, each request would wait for its full response (potentially seconds for LLM generation) before the next could start.
+The main loop must keep dispatching new requests while previous responses are
+still streaming. Without tasks, each request would wait for its full response
+(potentially seconds for LLM generation) before the next could start.
 
 **Hot path:**
 
-The diagram below traces the full lifecycle. The left column shows the main loop's dispatch cycle; the right column shows the concurrent response task with its streaming/non-streaming branch. Red nodes are AWAIT points (potential suspend); green nodes execute synchronously.
+The diagram below traces the full lifecycle. The left column shows the main
+loop's dispatch cycle; the right column shows the concurrent response task with
+its streaming/non-streaming branch. Red nodes are AWAIT points (potential
+suspend); green nodes execute synchronously.
 
 <img src="res/endpoint_client/12_worker_lifecycle.png" alt="Worker Request Lifecycle" width="624">
 
 ### 6.2 Call Chain
 
-The lifecycle above identifies _what_ each step does; the call chain below shows _when_ each step actually suspends. Every `await` in the request path is a potential context switch: the coroutine yields control to the event loop, the event loop selects the next ready task, and that task resumes. The system is designed so that every `await` _can_ resolve synchronously — meaning the entire dispatch-to-send sequence can complete without ever yielding to the event loop:
+The lifecycle above identifies _what_ each step does; the call chain below shows
+_when_ each step actually suspends. Every `await` in the request path is a
+potential context switch: the coroutine yields control to the event loop, the
+event loop selects the next ready task, and that task resumes. The system is
+designed so that every `await` _can_ resolve synchronously — meaning the entire
+dispatch-to-send sequence can complete without ever yielding to the event loop:
 
 | Await Point        | Completes Synchronously When                                                                            | Suspends When                                             |
 | ------------------ | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
@@ -448,13 +550,17 @@ The lifecycle above identifies _what_ each step does; the call chain below shows
 | `protocol.write()` | **Always** — kernel socket buffer accepts bytes immediately                                             | Never                                                     |
 | `pool.release()`   | **Always** — returns connection to idle stack                                                           | Never                                                     |
 
-In the common case, the request path executes with zero event loop round-trips between `recv()` returning and `read_headers()` suspending on network I/O.
+In the common case, the request path executes with zero event loop round-trips
+between `recv()` returning and `read_headers()` suspending on network I/O.
 
 <img src="res/endpoint_client/03_request_response_flow.png" alt="Request → Response Flow" width="990">
 
 ### 6.3 Design Choices
 
-A standard implementation would use `aiohttp` for HTTP and `zmq.asyncio` for IPC. The worker instead uses a custom HTTP stack ([§8](#8-http-engine)) and a custom loopless transport ([§7](#7-transport)); per-component optimizations are documented in those sections. Worker-specific design choices:
+A standard implementation would use `aiohttp` for HTTP and `zmq.asyncio` for
+IPC. The worker instead uses a custom HTTP stack ([§8](#8-http-engine)) and a
+custom loopless transport ([§7](#7-transport)); per-component optimizations are
+documented in those sections. Worker-specific design choices:
 
 | Choice             | Implementation                                                                                    | Alternative          | Rationale                                                                                                                        |
 | ------------------ | ------------------------------------------------------------------------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -468,7 +574,17 @@ A standard implementation would use `aiohttp` for HTTP and `zmq.asyncio` for IPC
 
 ## 7. Transport
 
-The transport layer handles all IPC between the main process and worker processes. It defines abstract protocols (`async_utils/transport/protocol.py`) with a concrete ZMQ implementation (`async_utils/transport/zmq/`), keeping the worker and client code decoupled from the underlying messaging library. The protocols are serialization-agnostic — implementations bring their own serialization/deserialization. By convention, all serialization throughout the client uses `msgspec` [5] (MessagePack for IPC, JSON for HTTP); see [A.5](#a5-msgspec-serialization) for the shared usage patterns. `WorkerPoolTransport` owns the full topology; workers only see their own `ReceiverTransport` + `SenderTransport` pair, with no knowledge of other workers or the pool structure.
+The transport layer handles all IPC between the main process and worker
+processes. It defines abstract protocols (`async_utils/transport/protocol.py`)
+with a concrete ZMQ implementation (`async_utils/transport/zmq/`), keeping the
+worker and client code decoupled from the underlying messaging library. The
+protocols are serialization-agnostic — implementations bring their own
+serialization/deserialization. By convention, all serialization throughout the
+client uses `msgspec` [5] (MessagePack for IPC, JSON for HTTP); see
+[A.5](#a5-msgspec-serialization) for the shared usage patterns.
+`WorkerPoolTransport` owns the full topology; workers only see their own
+`ReceiverTransport` + `SenderTransport` pair, with no knowledge of other workers
+or the pool structure.
 
 **Classes:**
 
@@ -549,7 +665,10 @@ async with connector.connect(worker_id=0) as (receiver, sender):
 
 ### 7.1 ZMQ Implementation
 
-The ZMQ implementation (`ZmqWorkerPoolTransport`) uses direct event loop integration via `add_reader`/`add_writer` on ZMQ file descriptors, rather than pyzmq's async APIs or aiozmq. This eliminates extra abstraction layers and keeps all I/O on the uvloop event loop.
+The ZMQ implementation (`ZmqWorkerPoolTransport`) uses direct event loop
+integration via `add_reader`/`add_writer` on ZMQ file descriptors, rather than
+pyzmq's async APIs or aiozmq. This eliminates extra abstraction layers and keeps
+all I/O on the uvloop event loop.
 
 **Classes:**
 
@@ -564,21 +683,42 @@ The ZMQ implementation (`ZmqWorkerPoolTransport`) uses direct event loop integra
 
 #### 7.1.1 Serialization
 
-The transport uses `msgspec.msgpack` [5] for all IPC serialization. Each transport instance holds a pre-constructed `Encoder` or `Decoder` reused across every message, amortizing the construction cost over the transport lifetime rather than paying it per-message. The decoder is instantiated with a target type (e.g. `msgspec.msgpack.Decoder(type=QueryResult | StreamChunk)`), enabling schema-aware deserialization that allocates the result Struct directly without an intermediate `dict`.
+The transport uses `msgspec.msgpack` [5] for all IPC serialization. Each
+transport instance holds a pre-constructed `Encoder` or `Decoder` reused across
+every message, amortizing the construction cost over the transport lifetime
+rather than paying it per-message. The decoder is instantiated with a target
+type (e.g. `msgspec.msgpack.Decoder(type=QueryResult | StreamChunk)`), enabling
+schema-aware deserialization that allocates the result Struct directly without
+an intermediate `dict`.
 
-On the request path, each worker's `ReceiverTransport` holds a `Decoder(type=Query)`. On the response fan-in path, the main process holds a single `Decoder(type=QueryResult | StreamChunk)` — the `tag` field on each Struct (see [§3](#3-types)) tells msgpack which union variant to instantiate without a type-discriminator wrapper or try/except decode fallback.
+On the request path, each worker's `ReceiverTransport` holds a
+`Decoder(type=Query)`. On the response fan-in path, the main process holds a
+single `Decoder(type=QueryResult | StreamChunk)` — the `tag` field on each
+Struct (see [§3](#3-types)) tells msgpack which union variant to instantiate
+without a type-discriminator wrapper or try/except decode fallback.
 
-The same `msgspec.Struct` type definitions also drive JSON serialization on the HTTP path via `msgspec.json` in the adapter layer (see [§9.1](#91-httprequestadapter)), so there is one schema per message type shared across both IPC and HTTP — no separate serialization models to maintain. See [A.5](#a5-msgspec-serialization) for the full set of Struct conventions, encoder/decoder patterns, and a cross-reference of where msgspec is used across layers.
+The same `msgspec.Struct` type definitions also drive JSON serialization on the
+HTTP path via `msgspec.json` in the adapter layer (see
+[§9.1](#91-httprequestadapter)), so there is one schema per message type shared
+across both IPC and HTTP — no separate serialization models to maintain. See
+[A.5](#a5-msgspec-serialization) for the full set of Struct conventions,
+encoder/decoder patterns, and a cross-reference of where msgspec is used across
+layers.
 
 #### 7.1.2 Topology
 
-The main process maintains one dedicated PUSH socket per worker for request fan-out (explicit targeting, no load-balancer overhead) and a single shared PULL socket for response fan-in from all workers. Each worker connects a PULL socket for incoming queries and a PUSH socket for outgoing responses. All sockets use `ipc://` (Unix domain sockets) for zero-copy kernel transport.
+The main process maintains one dedicated PUSH socket per worker for request
+fan-out (explicit targeting, no load-balancer overhead) and a single shared PULL
+socket for response fan-in from all workers. Each worker connects a PULL socket
+for incoming queries and a PUSH socket for outgoing responses. All sockets use
+`ipc://` (Unix domain sockets) for zero-copy kernel transport.
 
 <img src="res/endpoint_client/07_socket_topology.png" alt="Socket Topology" width="685">
 
 #### 7.1.3 Message Flow
 
-Each IPC message traverses the following path through pyzmq and the kernel (see [A.3](#a3-zeromq-zmq) for pyzmq source-level detail):
+Each IPC message traverses the following path through pyzmq and the kernel (see
+[A.3](#a3-zeromq-zmq) for pyzmq source-level detail):
 
 | Step | Thread     | Operation                                                                                                                            |
 | ---- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -589,11 +729,23 @@ Each IPC message traverses the following path through pyzmq and the kernel (see 
 | 5    | ZMQbg/IO/0 | ZMQ I/O thread reads from the Unix domain socket via `recv()` syscall and enqueues the message to the receiver's mailbox             |
 | 6    | Receiver   | pyzmq receives the ZMQ frame (`zmq_msg_recv`, `NOBLOCK`) and deserializes the msgpack bytes using `msgspec.decode()`                 |
 
-Per message: 4 context switches (sender↔IO thread↔kernel↔IO thread↔receiver), 2 kernel syscalls (UDS write + recv). A WIP shared-memory transport eliminates steps 3–5 entirely, achieving ~400k QPS vs ZMQ's ~300k (1.33×) — see [Appendix B.1](#b1-shared-memory-transport-wip).
+Per message: 4 context switches (sender↔IO thread↔kernel↔IO
+thread↔receiver), 2 kernel syscalls (UDS write + recv). A WIP shared-memory
+transport eliminates steps 3–5 entirely, achieving ~400k QPS vs ZMQ's ~300k
+(1.33×) — see [Appendix B.1](#b1-shared-memory-transport-wip).
 
 #### 7.1.4 Edge-Triggered FD Handling
 
-ZMQ exposes a single file descriptor per socket for event loop integration (`zmq.FD`). Unlike regular sockets, this FD is **edge-triggered** — it signals state _change_, not data presence. A single edge fires when the socket transitions from "no messages" to "has messages", but does _not_ fire again for subsequent messages that arrive while existing ones are still buffered. If the handler reads only one message per callback (level-triggered style), remaining messages sit unprocessed until an unrelated state change re-triggers the FD. Both `_ZmqReceiverTransport` and `_ZmqSenderTransport` handle this with a drain-and-reschedule pattern (adapted from aiozmq's `_ZmqLooplessTransportImpl` [2]):
+ZMQ exposes a single file descriptor per socket for event loop integration
+(`zmq.FD`). Unlike regular sockets, this FD is **edge-triggered** — it signals
+state _change_, not data presence. A single edge fires when the socket
+transitions from "no messages" to "has messages", but does _not_ fire again for
+subsequent messages that arrive while existing ones are still buffered. If the
+handler reads only one message per callback (level-triggered style), remaining
+messages sit unprocessed until an unrelated state change re-triggers the FD.
+Both `_ZmqReceiverTransport` and `_ZmqSenderTransport` handle this with a
+drain-and-reschedule pattern (adapted from aiozmq's `_ZmqLooplessTransportImpl`
+[2]):
 
 **Key Pattern:**
 
@@ -621,11 +773,14 @@ def _on_readable(self) -> None:
 | Single wake            | Wake the waiting coroutine once after the entire drain completes, rather than once per message                        |
 | `call_soon` reschedule | Schedule another drain to catch messages that arrived during the current drain, since no new edge fires for those     |
 
-Step 3 addresses a race condition: if a message arrives while draining, there is no new edge notification. The `call_soon` reschedule catches these racing messages.
+Step 3 addresses a race condition: if a message arrives while draining, there is
+no new edge notification. The `call_soon` reschedule catches these racing
+messages.
 
 **Sender Fast/Slow Path:**
 
-`_ZmqSenderTransport.send()` uses a two-tier strategy to avoid buffer allocation on the common case:
+`_ZmqSenderTransport.send()` uses a two-tier strategy to avoid buffer allocation
+on the common case:
 
 ```python
 def send(self, data: Any) -> None:
@@ -683,9 +838,15 @@ def _on_writable(self) -> None:
 
 ### 7.2 Benchmarks
 
-The custom transport's primary advantage is eliminating pyzmq's async abstraction layer — all I/O runs directly on uvloop via `add_reader`/`add_writer` callbacks, avoiding the overhead of pyzmq's `ZMQEventLoop` and its per-message future allocation. The benchmarks below measure single-process round-trip (send + recv) throughput across message sizes representative of LLM inference traffic.
+The custom transport's primary advantage is eliminating pyzmq's async
+abstraction layer — all I/O runs directly on uvloop via
+`add_reader`/`add_writer` callbacks, avoiding the overhead of pyzmq's
+`ZMQEventLoop` and its per-message future allocation. The benchmarks below
+measure single-process round-trip (send + recv) throughput across message sizes
+representative of LLM inference traffic.
 
-**Test Configuration:** Single-process round-trip (send + recv), varying message sizes.
+**Test Configuration:** Single-process round-trip (send + recv), varying message
+sizes.
 
 | Message Type | Size                  | Custom (msg/s) | Custom (MB/s) | pyzmq async (msg/s) | pyzmq async (MB/s) | Speedup |
 | ------------ | --------------------- | -------------- | ------------- | ------------------- | ------------------ | ------- |
@@ -702,13 +863,16 @@ The custom transport's primary advantage is eliminating pyzmq's async abstractio
 
 **Observations:**
 
-- 6-9x msg/s over pyzmq async for typical LLM response sizes (52B - 4KB); narrows with larger messages as memory bandwidth dominates
+- 6-9x msg/s over pyzmq async for typical LLM response sizes (52B - 4KB);
+  narrows with larger messages as memory bandwidth dominates
 
 ---
 
 ## 8. HTTP Engine
 
-The HTTP engine provides the low-level TCP connection management and HTTP/1.1 request/response handling that each worker uses to communicate with its assigned endpoint.
+The HTTP engine provides the low-level TCP connection management and HTTP/1.1
+request/response handling that each worker uses to communicate with its assigned
+endpoint.
 
 **Classes:**
 
@@ -721,15 +885,38 @@ The HTTP engine provides the low-level TCP connection management and HTTP/1.1 re
 
 ### 8.1 HttpResponseProtocol
 
-`HttpResponseProtocol` bridges two programming models: asyncio's callback-based **Protocol** interface (see [§8.1](#81-httpresponseprotocol)) and the async/await world that the worker's response tasks live in. It subclasses `asyncio.Protocol` and wraps `httptools.HttpResponseParser` — a Python binding to Node.js's llhttp, the same C HTTP parser used in production by Node.js and other high-performance servers.
+`HttpResponseProtocol` bridges two programming models: asyncio's callback-based
+**Protocol** interface (see [§8.1](#81-httpresponseprotocol)) and the
+async/await world that the worker's response tasks live in. It subclasses
+`asyncio.Protocol` and wraps `httptools.HttpResponseParser` — a Python binding
+to Node.js's llhttp, the same C HTTP parser used in production by Node.js and
+other high-performance servers.
 
-**Why this architecture:** asyncio's transport/protocol layer operates at the callback level — the event loop calls `data_received(data)` whenever TCP bytes arrive, with no coroutine suspension involved. This is the fastest path for I/O in Python's async ecosystem, but it means the protocol cannot `await` anything. Meanwhile, the worker's response tasks need to `await read_headers()` and `async for chunks in iter_body()`. The protocol bridges this gap using Futures and Events as synchronization primitives: callbacks _set_ them, async methods _await_ them.
+**Why this architecture:** asyncio's transport/protocol layer operates at the
+callback level — the event loop calls `data_received(data)` whenever TCP bytes
+arrive, with no coroutine suspension involved. This is the fastest path for I/O
+in Python's async ecosystem, but it means the protocol cannot `await` anything.
+Meanwhile, the worker's response tasks need to `await read_headers()` and
+`async for chunks in iter_body()`. The protocol bridges this gap using Futures
+and Events as synchronization primitives: callbacks _set_ them, async methods
+_await_ them.
 
-**How callbacks become awaitable results:** When TCP bytes arrive, the C parser fires synchronous callbacks (`on_headers_complete`, `on_body`, `on_message_complete`). Each callback sets a Future or Event — a zero-cost bridge primitive. On the other side, async worker code awaits those same primitives. The diagram below shows the three parallel lanes: each callback (green, left) sets a bridge primitive (amber diamond, center), which an async method (blue, right) awaits.
+**How callbacks become awaitable results:** When TCP bytes arrive, the C parser
+fires synchronous callbacks (`on_headers_complete`, `on_body`,
+`on_message_complete`). Each callback sets a Future or Event — a zero-cost
+bridge primitive. On the other side, async worker code awaits those same
+primitives. The diagram below shows the three parallel lanes: each callback
+(green, left) sets a bridge primitive (amber diamond, center), which an async
+method (blue, right) awaits.
 
 <img src="res/endpoint_client/17c_http_response_protocol.png" alt="HttpResponseProtocol Data Flow" width="775">
 
-**FD-based event loop handling:** The diagram below shows the full lifecycle — callbacks on the left write to shared state (Futures, Events, chunk lists) in the center, which the async API on the right awaits. The `iter_body()` sync-drain loop is the key optimization: it drains all buffered chunks synchronously before yielding to the event loop, reducing context switches when data arrives faster than processing.
+**FD-based event loop handling:** The diagram below shows the full lifecycle —
+callbacks on the left write to shared state (Futures, Events, chunk lists) in
+the center, which the async API on the right awaits. The `iter_body()`
+sync-drain loop is the key optimization: it drains all buffered chunks
+synchronously before yielding to the event loop, reducing context switches when
+data arrives faster than processing.
 
 <img src="res/endpoint_client/18_fd_event_loop_protocol.png" alt="HttpResponseProtocol FD Event Loop" width="850">
 
@@ -743,13 +930,31 @@ The HTTP engine provides the low-level TCP connection management and HTTP/1.1 re
 | `write(data)`    | No    | Delegates to `transport.write()` (kernel-buffered, non-blocking).                                                                                 |
 | `reset()`        | No    | Clear all state for connection reuse. Lazy parser creation — `_parser = None` until first `data_received()`, amortizing reset cost.               |
 
-**Connection reuse:** Each `PooledConnection` holds one `HttpResponseProtocol` instance for the lifetime of the TCP connection. Between requests, `reset()` clears response state without closing the socket. The parser is set to `None` and lazily re-created on next `data_received()` — this avoids allocating the C parser object during reset when the connection may sit idle.
+**Connection reuse:** Each `PooledConnection` holds one `HttpResponseProtocol`
+instance for the lifetime of the TCP connection. Between requests, `reset()`
+clears response state without closing the socket. The parser is set to `None`
+and lazily re-created on next `data_received()` — this avoids allocating the C
+parser object during reset when the connection may sit idle.
 
-**TCP half-close handling:** `eof_received()` marks `_connection_lost = True` to prevent reuse of a connection where the server sent FIN. Without this, a reused connection would accept writes (TCP half-close allows it) but reads would hang forever — a known asyncio footgun [9]. The `should_close` property combines three conditions: `_should_close` (server sent `Connection: close`), `_connection_lost` (EOF/error), and `_exc is not None` (parse error). The pool checks this after each response to decide whether to release or discard the connection.
+**TCP half-close handling:** `eof_received()` marks `_connection_lost = True` to
+prevent reuse of a connection where the server sent FIN. Without this, a reused
+connection would accept writes (TCP half-close allows it) but reads would hang
+forever — a known asyncio footgun [9]. The `should_close` property combines
+three conditions: `_should_close` (server sent `Connection: close`),
+`_connection_lost` (EOF/error), and `_exc is not None` (parse error). The pool
+checks this after each response to decide whether to release or discard the
+connection.
 
 ### 8.2 HttpRequestTemplate
 
-HTTP libraries like `aiohttp` and `httpx` build request bytes from scratch on every call — assembling the request line, encoding headers into a dict, serializing the body, and concatenating everything. For a benchmarking client that sends thousands of structurally identical requests per second (same endpoint, same path, same auth headers), this per-request work is pure waste. `HttpRequestTemplate` eliminates it by splitting the HTTP request into **static** parts (built once) and **dynamic** parts (built per-request), then concatenating them with a single `b"".join()`.
+HTTP libraries like `aiohttp` and `httpx` build request bytes from scratch on
+every call — assembling the request line, encoding headers into a dict,
+serializing the body, and concatenating everything. For a benchmarking client
+that sends thousands of structurally identical requests per second (same
+endpoint, same path, same auth headers), this per-request work is pure waste.
+`HttpRequestTemplate` eliminates it by splitting the HTTP request into
+**static** parts (built once) and **dynamic** parts (built per-request), then
+concatenating them with a single `b"".join()`.
 
 **Public API:**
 
@@ -771,12 +976,20 @@ HTTP libraries like `aiohttp` and `httpx` build request bytes from scratch on ev
 
 ![build_request() fast/slow path](res/endpoint_client/11_build_request_flow.png)
 
-The fast path (no extra headers) joins the 5 segments above in a single `b"".join()` — no allocation beyond the final buffer. The slow path (extra headers present) adds a `frozenset` cache key lookup; the first call per unique header set encodes the headers (~1us), subsequent calls hit the cache (~50ns) and join 6 segments.
+The fast path (no extra headers) joins the 5 segments above in a single
+`b"".join()` — no allocation beyond the final buffer. The slow path (extra
+headers present) adds a `frozenset` cache key lookup; the first call per unique
+header set encodes the headers (~1us), subsequent calls hit the cache (~50ns)
+and join 6 segments.
 
 ### 8.3 Connection Pool
 
-Each worker maintains its own `ConnectionPool` to its assigned endpoint. The pool manages the full TCP connection lifecycle — creation, reuse, limiting, staleness detection, warmup, and shutdown. It uses a **LIFO stack** for idle connections (recently-used connections are reused first, keeping them "hot" in kernel buffers and reducing staleness) and a **FIFO waiter queue** (`OrderedDict`) for fairness when all connections are in use.
-**Public API:**
+Each worker maintains its own `ConnectionPool` to its assigned endpoint. The
+pool manages the full TCP connection lifecycle — creation, reuse, limiting,
+staleness detection, warmup, and shutdown. It uses a **LIFO stack** for idle
+connections (recently-used connections are reused first, keeping them "hot" in
+kernel buffers and reducing staleness) and a **FIFO waiter queue**
+(`OrderedDict`) for fairness when all connections are in use. **Public API:**
 
 | Method          | Async   | Description                                                       |
 | --------------- | ------- | ----------------------------------------------------------------- |
@@ -789,7 +1002,11 @@ Each worker maintains its own `ConnectionPool` to its assigned endpoint. The poo
 
 **Idle Connection Validation (`is_stale`):**
 
-When `acquire()` pops a connection from the idle stack, it must verify the server hasn't closed it. `PooledConnection.is_stale()` combines a fast-path skip with a zero-cost kernel probe. It uses `poll()` rather than `select()` to avoid the `FD_SETSIZE` limit on high fds, and reuses a persistent per-connection poller (registered lazily on first call, since the fd is stable per connection):
+When `acquire()` pops a connection from the idle stack, it must verify the
+server hasn't closed it. `PooledConnection.is_stale()` combines a fast-path skip
+with a zero-cost kernel probe. It uses `poll()` rather than `select()` to avoid
+the `FD_SETSIZE` limit on high fds, and reuses a persistent per-connection
+poller (registered lazily on first call, since the fd is stable per connection):
 
 ```python
 def is_stale(self) -> bool:
@@ -811,7 +1028,9 @@ def is_stale(self) -> bool:
 | Event raised    | Server sent FIN (readable EOF) or socket error/reset | Discard connection, try next idle |
 | No event        | No pending data or errors on the socket              | Connection is healthy, use it     |
 
-The fast-path skip (`< 1.0s`) avoids the `poll()` syscall entirely for connections in active rotation — reducing validation from ~1.2µs to ~161ns (see latencies below).
+The fast-path skip (`< 1.0s`) avoids the `poll()` syscall entirely for
+connections in active rotation — reducing validation from ~1.2µs to ~161ns (see
+latencies below).
 
 **Operation Latencies:**
 
@@ -836,7 +1055,10 @@ Per-operation latency measurements for `ConnectionPool` (localhost TCP, uvloop):
 
 ### 8.4 Socket Config
 
-The `_SocketConfig` class (`http.py`) defines socket options applied to all TCP connections created by the connection pool. These options are tuned for low-latency streaming workloads where individual request latency directly impacts benchmark measurements.
+The `_SocketConfig` class (`http.py`) defines socket options applied to all TCP
+connections created by the connection pool. These options are tuned for
+low-latency streaming workloads where individual request latency directly
+impacts benchmark measurements.
 
 | Option             | Value  | Effect                                                                                                            | Interaction                                                                                                                                                                                                                                                                                                                                         |
 | ------------------ | ------ | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -850,7 +1072,10 @@ The `_SocketConfig` class (`http.py`) defines socket options applied to all TCP 
 | `SO_SNDBUF`        | 128 KB | Send buffer size                                                                                                  | Sliding-window send buffer; large request bodies stream through without blocking `write()`                                                                                                                                                                                                                                                          |
 | `TCP_USER_TIMEOUT` | 0      | Disabled — no timeout on unacknowledged sent data (Linux-specific)                                                | Dead-connection detection is handled in the pool via `connection_lost`/`eof_received` (kernel keepalive is disabled); setting this to 0 avoids interfering with long-running SSE streams where the server may take seconds between chunks                                                                                                           |
 
-**Cross-platform compatibility:** Applied via `_SocketConfig.apply(sock)` with `hasattr()` checks for Linux-specific options (`TCP_KEEPIDLE`, `TCP_QUICKACK`, `TCP_USER_TIMEOUT`). On non-Linux platforms, these options are silently skipped — the system runs with reduced tuning but remains functional.
+**Cross-platform compatibility:** Applied via `_SocketConfig.apply(sock)` with
+`hasattr()` checks for Linux-specific options (`TCP_KEEPIDLE`, `TCP_QUICKACK`,
+`TCP_USER_TIMEOUT`). On non-Linux platforms, these options are silently skipped
+— the system runs with reduced tuning but remains functional.
 
 ### 8.5 Design Choices
 
@@ -883,7 +1108,8 @@ Comparison against aiohttp's connection handling.
 | Full Request Cycle   | 7.81x              | 7.43x           |
 | Streaming Response   | 3.19x              | 4.94x           |
 
-**End-to-End Benchmark:** Offline mode, 60k queries, vLLM backend (Qwen/Qwen2.5-0.5B-Instruct):
+**End-to-End Benchmark:** Offline mode, 60k queries, vLLM backend
+(Qwen/Qwen2.5-0.5B-Instruct):
 
 | Implementation                | QPS    | TPS     | Errors |
 | ----------------------------- | ------ | ------- | ------ |
@@ -891,7 +1117,8 @@ Comparison against aiohttp's connection handling.
 | Custom (max_connections=1024) | 721.62 | 1443.23 | 0      |
 | Custom (max_connections=22k)  | 595.75 | 1170.80 | 1,042  |
 
-**End-to-End Benchmark:** Offline mode, 20k queries (within ephemeral port limit):
+**End-to-End Benchmark:** Offline mode, 20k queries (within ephemeral port
+limit):
 
 | Implementation                | QPS    | TPS     | Errors |
 | ----------------------------- | ------ | ------- | ------ |
@@ -902,14 +1129,20 @@ Comparison against aiohttp's connection handling.
 **Observations:**
 
 - Bounded connection pool eliminates ephemeral port exhaustion errors
-- Lower max_connections (1024) achieves higher throughput than unlimited (22k) due to reduced connection churn
-- Custom implementation eliminates "Cannot Assign Given Address" and connection timeout errors common with aiohttp under high load
+- Lower max_connections (1024) achieves higher throughput than unlimited (22k)
+  due to reduced connection churn
+- Custom implementation eliminates "Cannot Assign Given Address" and connection
+  timeout errors common with aiohttp under high load
 
 ---
 
 ## 9. Adapters
 
-The adapter and accumulator layers convert between the endpoint client's internal types (`Query`, `QueryResult`, `StreamChunk`) and endpoint-specific wire formats. Each API backend (OpenAI, SGLang) provides an adapter and accumulator pair. Adding a new backend requires implementing these two interfaces — no changes to the HTTP engine, transport, or worker code.
+The adapter and accumulator layers convert between the endpoint client's
+internal types (`Query`, `QueryResult`, `StreamChunk`) and endpoint-specific
+wire formats. Each API backend (OpenAI, SGLang) provides an adapter and
+accumulator pair. Adding a new backend requires implementing these two
+interfaces — no changes to the HTTP engine, transport, or worker code.
 
 **Classes:**
 
@@ -920,7 +1153,9 @@ The adapter and accumulator layers convert between the endpoint client's interna
 
 ### 9.1 HttpRequestAdapter
 
-Abstract base class (`endpoint_client/adapter_protocol.py`) for HTTP request/response encoding. All methods are `@classmethod` — adapters carry no per-instance state.
+Abstract base class (`endpoint_client/adapter_protocol.py`) for HTTP
+request/response encoding. All methods are `@classmethod` — adapters carry no
+per-instance state.
 
 **Public API:**
 
@@ -932,13 +1167,22 @@ Abstract base class (`endpoint_client/adapter_protocol.py`) for HTTP request/res
 | `decode_sse_message(json_bytes)`            | No    | Extract content string from a single SSE JSON message                                                                                                   |
 | `parse_sse_chunk(buffer, end_pos)`          | No    | Extract all content strings from a buffer region. Default: regex `findall` → loop of `decode_sse_message` calls                                         |
 
-The base class defines `SSE_DATA_PATTERN: re.Pattern[bytes] = re.compile(rb"data:\s*(\{[^\n]+\})")` — a pre-compiled regex shared by all adapters for extracting JSON documents from SSE `data:` lines.
+The base class defines
+`SSE_DATA_PATTERN: re.Pattern[bytes] = re.compile(rb"data:\s*(\{[^\n]+\})")` — a
+pre-compiled regex shared by all adapters for extracting JSON documents from SSE
+`data:` lines.
 
-All adapters use `msgspec` [5] for serialization — class-level `Encoder`/`Decoder` instances are reused across all requests, and typed decoders write directly into Struct fields with no intermediate `dict` allocation. See [A.5](#a5-msgspec-serialization) for the full set of msgspec usage patterns shared across adapters and transports.
+All adapters use `msgspec` [5] for serialization — class-level
+`Encoder`/`Decoder` instances are reused across all requests, and typed decoders
+write directly into Struct fields with no intermediate `dict` allocation. See
+[A.5](#a5-msgspec-serialization) for the full set of msgspec usage patterns
+shared across adapters and transports.
 
 ### 9.2 SSEAccumulatorProtocol
 
-Protocol class (`endpoint_client/accumulator_protocol.py`) for collecting streaming SSE deltas into final results. Unlike adapters, accumulators are per-request instances (they track state across chunks).
+Protocol class (`endpoint_client/accumulator_protocol.py`) for collecting
+streaming SSE deltas into final results. Unlike adapters, accumulators are
+per-request instances (they track state across chunks).
 
 **Public API:**
 
@@ -955,11 +1199,15 @@ Protocol class (`endpoint_client/accumulator_protocol.py`) for collecting stream
 | `False` (default)   | `add_chunk` returns `StreamChunk` only for the first content delta; subsequent deltas return `None` | Time-to-first-token (TTFT) measurement only; minimizes IPC traffic by sending a single chunk |
 | `True`              | `add_chunk` returns `StreamChunk` for every content delta                                           | Full token-by-token streaming to main process for per-token latency measurement              |
 
-The first emitted chunk carries `metadata={"first_chunk": True}` for TTFT measurement. The final `QueryResult` from `get_final_output()` carries `metadata={"final_chunk": True}`.
+The first emitted chunk carries `metadata={"first_chunk": True}` for TTFT
+measurement. The final `QueryResult` from `get_final_output()` carries
+`metadata={"final_chunk": True}`.
 
 ### 9.3 SSE Stream Parsing
 
-SSE streams deliver multiple JSON messages per network read. The parsing strategy combines regex extraction with batched exception handling to minimize per-message overhead.
+SSE streams deliver multiple JSON messages per network read. The parsing
+strategy combines regex extraction with batched exception handling to minimize
+per-message overhead.
 
 `TODO: Populate with ablation study results (regex vs line-by-line, try-per-iteration vs try-outside-loop, msgspec vs stdlib json)`
 
@@ -1002,13 +1250,20 @@ return parsed_contents
 | `SGLangGenerateAdapter` | `sglang/adapter.py`                | SGLang generate endpoint adapter                 |
 | `SGLangSSEAccumulator`  | `sglang/accumulator.py`            | SGLang streaming delta accumulator               |
 
-All OpenAI and SGLang request/response types follow the Struct conventions from [A.5](#a5-msgspec-serialization) (`frozen`, `kw_only`, `omit_defaults`, `gc=False`). Notable exceptions: `ChatCompletionResponse` uses `omit_defaults=False` (must encode all fields for downstream consumers). OpenAI `SSEDelta` includes a `reasoning: str` field for reasoning model outputs. `SSEMessage.choices` is typed as `tuple[SSEChoice, ...]` (not `list`) for immutability.
+All OpenAI and SGLang request/response types follow the Struct conventions from
+[A.5](#a5-msgspec-serialization) (`frozen`, `kw_only`, `omit_defaults`,
+`gc=False`). Notable exceptions: `ChatCompletionResponse` uses
+`omit_defaults=False` (must encode all fields for downstream consumers). OpenAI
+`SSEDelta` includes a `reasoning: str` field for reasoning model outputs.
+`SSEMessage.choices` is typed as `tuple[SSEChoice, ...]` (not `list`) for
+immutability.
 
 ---
 
 ## 10. Initialization & Shutdown
 
-The initialization and shutdown subsystem manages worker process lifecycle: spawning, CPU pinning, readiness barrier, and graceful termination.
+The initialization and shutdown subsystem manages worker process lifecycle:
+spawning, CPU pinning, readiness barrier, and graceful termination.
 
 **Classes:**
 
@@ -1018,7 +1273,10 @@ The initialization and shutdown subsystem manages worker process lifecycle: spaw
 
 ### 10.1 WorkerManager
 
-The `WorkerManager` (main process) orchestrates the worker lifecycle: spawn, CPU pinning, liveness-check, and shutdown. Each worker process goes through a deterministic startup sequence before entering the request-processing main loop (see [§6](#6-worker)).
+The `WorkerManager` (main process) orchestrates the worker lifecycle: spawn, CPU
+pinning, liveness-check, and shutdown. Each worker process goes through a
+deterministic startup sequence before entering the request-processing main loop
+(see [§6](#6-worker)).
 
 **Public API:**
 
@@ -1039,7 +1297,11 @@ The `WorkerManager` (main process) orchestrates the worker lifecycle: spawn, CPU
 
 ## 11. Performance Analysis
 
-Empirical measurements of the endpoint client under sustained load. Benchmarks use `benchmark_httpclient.py` (`src/inference_endpoint/utils/`). The profiling approach starts with macro-level benchmarks (§11.1–§11.2) to establish throughput ceilings, then drills into per-worker behavior (§11.3–§11.8) using progressively finer-grained tools to identify where CPU time is actually spent.
+Empirical measurements of the endpoint client under sustained load. Benchmarks
+use `benchmark_httpclient.py` (`src/inference_endpoint/utils/`). The profiling
+approach starts with macro-level benchmarks (§11.1–§11.2) to establish
+throughput ceilings, then drills into per-worker behavior (§11.3–§11.8) using
+progressively finer-grained tools to identify where CPU time is actually spent.
 
 **Key findings:**
 
@@ -1054,7 +1316,10 @@ Empirical measurements of the endpoint client under sustained load. Benchmarks u
 | 11.7    | `runqlat`             | Kernel scheduling delay histogram          | Most thread wake-ups are scheduled within single-digit microseconds; the worker rarely waits for a CPU core                                                                                                              |
 | 11.8    | `tiptop`              | Hardware performance counters (IPC, cache) | Instructions per cycle is approximately 1.0, consistent with CPython interpreter workloads                                                                                                                               |
 
-**IPC overhead:** ~25% of worker CPU (reverse Amdahl's Law: WIP [shared-memory transport](#b1-shared-memory-transport-wip) at ~400k QPS vs ZMQ's ~300k QPS → `1 - 1/1.33 ≈ 0.25`). Down from ~56% before `recv_into` and `array_like` optimizations. Pre-optimization profiling detail in §11.3–§11.8.
+**IPC overhead:** ~25% of worker CPU (reverse Amdahl's Law: WIP
+[shared-memory transport](#b1-shared-memory-transport-wip) at ~400k QPS vs ZMQ's
+~300k QPS → `1 - 1/1.33 ≈ 0.25`). Down from ~56% before `recv_into` and
+`array_like` optimizations. Pre-optimization profiling detail in §11.3–§11.8.
 
 **Test Environments:**
 
@@ -1074,11 +1339,18 @@ Empirical measurements of the endpoint client under sustained load. Benchmarks u
 
 ![Offline Benchmark Sweep — ARM](res/endpoint_client/19b_bench_offline_scaling_arm.png)
 
-Offline (non-streaming) scaling sweep — 1 query = 1000 characters/tokens, `max_concurrency=100000`. The benchmark server (`MaxThroughputServer`) returns pre-built responses with no compute, so all measured overhead is purely client-side. This measures raw request dispatch and response collection throughput without per-token streaming overhead:
+Offline (non-streaming) scaling sweep — 1 query = 1000 characters/tokens,
+`max_concurrency=100000`. The benchmark server (`MaxThroughputServer`) returns
+pre-built responses with no compute, so all measured overhead is purely
+client-side. This measures raw request dispatch and response collection
+throughput without per-token streaming overhead:
 
-- **Send Rate** reaches ~300k QPS at ~14 workers on both x86 and ARM Grace. Beyond the plateau, send throughput is flat.
-- **Recv Rate** tracks send rate closely in offline mode since each response is returned as a single body read — no per-chunk event loop pressure.
-- **Stall%** measures the fraction of send time the benchmark spent blocked on back-pressure (in-flight requests hit `max_concurrency`).
+- **Send Rate** reaches ~300k QPS at ~14 workers on both x86 and ARM Grace.
+  Beyond the plateau, send throughput is flat.
+- **Recv Rate** tracks send rate closely in offline mode since each response is
+  returned as a single body read — no per-chunk event loop pressure.
+- **Stall%** measures the fraction of send time the benchmark spent blocked on
+  back-pressure (in-flight requests hit `max_concurrency`).
 
 ### 11.2 Streaming Worst-Case
 
@@ -1090,14 +1362,24 @@ Offline (non-streaming) scaling sweep — 1 query = 1000 characters/tokens, `max
 
 ![Streaming Benchmark Sweep — ARM](res/endpoint_client/20b_bench_streaming_scaling_arm.png)
 
-Streaming scaling sweep (`stream_interval=1` — server emits 1 character per SSE chunk, so a 1000-char response produces ~1000 SSE events; worst-case for event loop and parsing pressure), 4–128 workers, `duration=10.0`, `max_concurrency=100000`, with per-second variation bands:
+Streaming scaling sweep (`stream_interval=1` — server emits 1 character per SSE
+chunk, so a 1000-char response produces ~1000 SSE events; worst-case for event
+loop and parsing pressure), 4–128 workers, `duration=10.0`,
+`max_concurrency=100000`, with per-second variation bands:
 
-- **Send Rate** peaks at ~90.6k QPS at ~96 workers on x86; ~133k QPS at ~132 workers on ARM Grace.
+- **Send Rate** peaks at ~90.6k QPS at ~96 workers on x86; ~133k QPS at ~132
+  workers on ARM Grace.
 - **Recv Rate** peaks at ~79.4k resp/s on x86; ~121.3k resp/s on ARM Grace.
-- **SSE Rate** scales near-linearly to ~79.7M SSE-pkts/s on x86; ~121M SSE-pkts/s on ARM Grace. Per-worker streaming throughput is independent — each worker's `iter_body()` drain loop ([§6.2](#62-call-chain)) processes chunks without contention.
-- **Stall%** remains nonzero even at high worker counts — streaming is recv-limited (main process fan-in bottleneck).
+- **SSE Rate** scales near-linearly to ~79.7M SSE-pkts/s on x86; ~121M
+  SSE-pkts/s on ARM Grace. Per-worker streaming throughput is independent — each
+  worker's `iter_body()` drain loop ([§6.2](#62-call-chain)) processes chunks
+  without contention.
+- **Stall%** remains nonzero even at high worker counts — streaming is
+  recv-limited (main process fan-in bottleneck).
 
-The remaining profiles (§11.3–§11.8) were captured on the profiling machine — AMD Ryzen Threadripper PRO 7965WX (24 cores / 48 threads) — to isolate per-worker behavior under streaming load:
+The remaining profiles (§11.3–§11.8) were captured on the profiling machine —
+AMD Ryzen Threadripper PRO 7965WX (24 cores / 48 threads) — to isolate
+per-worker behavior under streaming load:
 
 | Tool            | Command                       | What It Measures                                                  |
 | --------------- | ----------------------------- | ----------------------------------------------------------------- |
@@ -1112,7 +1394,10 @@ The remaining profiles (§11.3–§11.8) were captured on the profiling machine 
 
 ![pidstat -t — per-thread CPU breakdown](res/endpoint_client/21_pidstat_threads.png)
 
-`pidstat -p <pid> -t 5` output for a single worker process during a streaming run. Two 5-second sample intervals are shown, followed by averages. In `pidstat -t` output, the first `python3` row (TID = PID) is the **process total** — the aggregate of all threads. Subsequent rows are individual threads:
+`pidstat -p <pid> -t 5` output for a single worker process during a streaming
+run. Two 5-second sample intervals are shown, followed by averages. In
+`pidstat -t` output, the first `python3` row (TID = PID) is the **process
+total** — the aggregate of all threads. Subsequent rows are individual threads:
 
 | Row                     | %usr | %sys | %wait | %CPU | Role                                                                                       |
 | ----------------------- | ---- | ---- | ----- | ---- | ------------------------------------------------------------------------------------------ |
@@ -1124,11 +1409,25 @@ The remaining profiles (§11.3–§11.8) were captured on the profiling machine 
 | `iou-sqp-*`             | 0    | 0    | 0.0   | 0    | io_uring submission queue polling thread — present but idle (not used by this workload)    |
 | `ZMQbg/Reaper`          | 0    | 0    | 0.0   | 0    | ZMQ socket cleanup thread — negligible                                                     |
 
-The worker thread consumes ~78% CPU (55% usr + 23% sys), with sys time reflecting kernel socket operations (`sendmsg`/`recvmsg`, `epoll_wait`). The ZMQ I/O thread adds ~29% CPU independently but with an inverted profile: it spends more than 2× as much time in kernel (20% sys) as in userspace (8% usr), confirming that ZMQ's C++ layer is a thin dispatch wrapper with the real work happening in kernel I/O (Unix domain socket reads/writes, polling). Combined, the process total reaches ~107% (more than one core) because the two threads run on separate cores concurrently.
+The worker thread consumes ~78% CPU (55% usr + 23% sys), with sys time
+reflecting kernel socket operations (`sendmsg`/`recvmsg`, `epoll_wait`). The ZMQ
+I/O thread adds ~29% CPU independently but with an inverted profile: it spends
+more than 2× as much time in kernel (20% sys) as in userspace (8% usr),
+confirming that ZMQ's C++ layer is a thin dispatch wrapper with the real work
+happening in kernel I/O (Unix domain socket reads/writes, polling). Combined,
+the process total reaches ~107% (more than one core) because the two threads run
+on separate cores concurrently.
 
-**`%wait` — scheduling delay:** This column measures the percentage of time a runnable thread spent waiting in the kernel run queue for a CPU core. It is not I/O wait — all I/O is non-blocking via epoll. The ZMQ I/O thread has the highest wait at 9.3%, meaning it frequently wakes to drain IPC messages but must wait for a core. The worker thread's 2.8% is consistent with ~1,295 involuntary context switches/s ([§11.4](#114-context-switches-pidstat--w)).
+**`%wait` — scheduling delay:** This column measures the percentage of time a
+runnable thread spent waiting in the kernel run queue for a CPU core. It is not
+I/O wait — all I/O is non-blocking via epoll. The ZMQ I/O thread has the highest
+wait at 9.3%, meaning it frequently wakes to drain IPC messages but must wait
+for a core. The worker thread's 2.8% is consistent with ~1,295 involuntary
+context switches/s ([§11.4](#114-context-switches-pidstat--w)).
 
-**Core pinning does not eliminate this contention.** Experimentally, increasing the number of physical cores pinned to workers does not reduce `%wait` — the bottleneck is internal to the ZMQ transport layer, not core availability.
+**Core pinning does not eliminate this contention.** Experimentally, increasing
+the number of physical cores pinned to workers does not reduce `%wait` — the
+bottleneck is internal to the ZMQ transport layer, not core availability.
 
 ### 11.4 Context Switches (`pidstat -w`)
 
@@ -1141,17 +1440,26 @@ The worker thread consumes ~78% CPU (55% usr + 23% sys), with sys time reflectin
 | cswch/s   | 3,034   | Voluntary context switches — corresponds to `epoll_pwait` calls when no events are ready                              |
 | nvcswch/s | 1,295   | Involuntary preemptions — OS scheduler displacing the worker; CPU pinning ([§4](#4-httpclientconfig)) minimizes these |
 
-These numbers were captured under sustained streaming load. The ~3:1 voluntary-to-involuntary ratio shows that even under full pressure, the worker still yields voluntarily (via `epoll_pwait`) more often than it is preempted — meaning the event loop occasionally drains all ready events and briefly blocks for new ones.
+These numbers were captured under sustained streaming load. The ~3:1
+voluntary-to-involuntary ratio shows that even under full pressure, the worker
+still yields voluntarily (via `epoll_pwait`) more often than it is preempted —
+meaning the event loop occasionally drains all ready events and briefly blocks
+for new ones.
 
 ### 11.5 CPU Symbol Profile (`perf top`)
 
 ![perf top — worker process hottest symbols](res/endpoint_client/22_perf_top_worker.png)
 
-`sudo perf top -p <worker_pid>` during a streaming run. Two threads: `python3` (worker event loop) and `ZMQbg/IO/0` (ZMQ I/O thread). Collapsed from 65+ symbols into functional domains:
+`sudo perf top -p <worker_pid>` during a streaming run. Two threads: `python3`
+(worker event loop) and `ZMQbg/IO/0` (ZMQ I/O thread). Collapsed from 65+
+symbols into functional domains:
 
-- **Self%** = exclusive CPU time in that function only (no callees). Can be summed across rows without double-counting.
-- **Children%** = time in that function + everything it calls. Cannot be summed (overlaps across rows).
-- **~45% of total CPU** is spent inside kernel syscalls (22.73% python3 + 22.67% ZMQbg).
+- **Self%** = exclusive CPU time in that function only (no callees). Can be
+  summed across rows without double-counting.
+- **Children%** = time in that function + everything it calls. Cannot be summed
+  (overlaps across rows).
+- **~45% of total CPU** is spent inside kernel syscalls (22.73% python3 + 22.67%
+  ZMQbg).
 
 **python3 thread** (worker event loop):
 
@@ -1172,7 +1480,10 @@ These numbers were captured under sustained streaming load. The ~3:1 voluntary-t
 | ↳ epoll             | —     | —         | `epoll_wait` → `do_epoll_wait` → `ep_poll`                                        | Event loop polling for readiness on ZMQ IPC file descriptors                                                                                      |
 | **ZMQ internals**   | 0.01% | 29.42%    | `clone3` → `start_thread` → ZMQ internals + `__libc_recv` + `unix_stream_recvmsg` | ZMQ userspace code is a thin dispatch layer; the 29.42% Children is dominated by kernel I/O underneath (Unix domain socket reads/writes, polling) |
 
-**Shared (softirq context)** — softirqs are deferred interrupt handlers that run in kernel context after a hardware interrupt (e.g., NIC signals packet arrival). They execute outside any thread, borrowing whatever CPU was interrupted, so their cost is not attributed to either thread above:
+**Shared (softirq context)** — softirqs are deferred interrupt handlers that run
+in kernel context after a hardware interrupt (e.g., NIC signals packet arrival).
+They execute outside any thread, borrowing whatever CPU was interrupted, so
+their cost is not attributed to either thread above:
 
 | Functional Domain | Self% | Children% | Call Chain                                                                                         | Analysis                                                                                           |
 | ----------------- | ----- | --------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
@@ -1182,7 +1493,8 @@ These numbers were captured under sustained streaming load. The ~3:1 voluntary-t
 
 ![strace -c — syscall summary](res/endpoint_client/23_strace_syscall_summary.png)
 
-`sudo strace -c -p <worker_pid>` — syscall summary for a single worker during a streaming run:
+`sudo strace -c -p <worker_pid>` — syscall summary for a single worker during a
+streaming run:
 
 | Syscall          | % Time | Calls   | Errors | Path      | Analysis                                                                                                                                                                                                                                                                                                                                                                             |
 | ---------------- | ------ | ------- | ------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -1202,13 +1514,18 @@ These numbers were captured under sustained streaming load. The ~3:1 voluntary-t
 
 ![strace with getpid cache shim](res/endpoint_client/29_strace_with_getpid_shim.png)
 
-`getpid` drops to **0 calls**. The syscall profile is now dominated by `write` (69.23%) and `read` (22.46%) — the actual I/O work, no longer diluted by getpid overhead.
+`getpid` drops to **0 calls**. The syscall profile is now dominated by `write`
+(69.23%) and `read` (22.46%) — the actual I/O work, no longer diluted by getpid
+overhead.
 
 ### 11.7 Run Queue Latency (`runqlat-bpfcc`)
 
 ![runqlat-bpfcc — scheduler latency histogram](res/endpoint_client/24_runqlat_histogram.png)
 
-`sudo runqlat-bpfcc -p <worker_pid>` — BPF-traced histogram of kernel run queue latency (time between a thread becoming runnable and actually getting scheduled onto a CPU). The vast majority of wake-ups complete in single-digit microseconds, but a small percentage experience longer scheduling delays.
+`sudo runqlat-bpfcc -p <worker_pid>` — BPF-traced histogram of kernel run queue
+latency (time between a thread becoming runnable and actually getting scheduled
+onto a CPU). The vast majority of wake-ups complete in single-digit
+microseconds, but a small percentage experience longer scheduling delays.
 
 ### 11.8 Hardware Performance Counters (`tiptop`)
 
@@ -1216,7 +1533,8 @@ These numbers were captured under sustained streaming load. The ~3:1 voluntary-t
 
 ![tiptop — branch prediction metrics](res/endpoint_client/26_tiptop_branch_miss.png)
 
-`tiptop` captures two views of hardware performance counters for the worker process:
+`tiptop` captures two views of hardware performance counters for the worker
+process:
 
 **View 1 — IPC and Cache:**
 
@@ -1243,13 +1561,15 @@ These numbers were captured under sustained streaming load. The ~3:1 voluntary-t
 
 ## Appendix A: Concepts
 
-This appendix provides background on key concepts referenced throughout the design document.
+This appendix provides background on key concepts referenced throughout the
+design document.
 
 ---
 
 ### A.2 Event Loops and Eager Task Factory
 
-The event loop is the core scheduler for async code. It monitors I/O readiness and dispatches callbacks.
+The event loop is the core scheduler for async code. It monitors I/O readiness
+and dispatches callbacks.
 
 **Event Loop Execution Model:**
 
@@ -1264,7 +1584,10 @@ The event loop is the core scheduler for async code. It monitors I/O readiness a
 | Callback overhead   | Each callback has dispatch cost                  | Batch operations; drain patterns                             |
 | I/O polling         | `select`/`poll` don't scale; `epoll` is O(ready) | uvloop uses epoll/kqueue automatically                       |
 
-**Eager Task Factory (Python 3.12):** `asyncio.eager_task_factory` changes `create_task()` to execute the coroutine synchronously until its first true `await`, rather than scheduling it for the next loop iteration. This saves one full event loop round-trip per task and prevents task starvation under load.
+**Eager Task Factory (Python 3.12):** `asyncio.eager_task_factory` changes
+`create_task()` to execute the coroutine synchronously until its first true
+`await`, rather than scheduling it for the next loop iteration. This saves one
+full event loop round-trip per task and prevents task starvation under load.
 
 ```python
 loop.set_task_factory(asyncio.eager_task_factory)
@@ -1283,7 +1606,8 @@ task = loop.create_task(self._worker_cycle_send(query))
 
 ### A.3 ZeroMQ (ZMQ)
 
-ZeroMQ is a high-performance asynchronous messaging library that provides socket-like abstractions for IPC, TCP, and multicast communication [1].
+ZeroMQ is a high-performance asynchronous messaging library that provides
+socket-like abstractions for IPC, TCP, and multicast communication [1].
 
 **Socket Types Used:**
 
@@ -1291,7 +1615,8 @@ ZeroMQ is a high-performance asynchronous messaging library that provides socket
 | -------- | ----------- | ----------------------------------------------- |
 | Pipeline | PUSH / PULL | Unidirectional; PUSH distributes, PULL collects |
 
-ZMQ contexts can spawn background I/O threads to handle socket operations asynchronously:
+ZMQ contexts can spawn background I/O threads to handle socket operations
+asynchronously:
 
 ```python
 # Default in this client: 4 background I/O threads
@@ -1303,37 +1628,53 @@ context = zmq.Context(io_threads=4)
 | `io_threads=0` | All I/O on calling thread (blocks)     |
 | `io_threads=N` | N background threads handle socket I/O |
 
-These threads are created in the main process only (workers use `io_threads=1`). The LoadGen requires physical cores for these threads to achieve consistent throughput (see A.4).
+These threads are created in the main process only (workers use `io_threads=1`).
+The LoadGen requires physical cores for these threads to achieve consistent
+throughput (see A.4).
 
 **Edge-Triggered FD Semantics:**
 
-ZMQ exposes a file descriptor via `getsockopt(ZMQ_FD)` for integration with event loops [2]:
+ZMQ exposes a file descriptor via `getsockopt(ZMQ_FD)` for integration with
+event loops [2]:
 
 - Signals when internal state _changes_, not when data is present
 - Requires draining all messages on each callback
 - Requires reschedule via `call_soon` to catch racing messages
 
-pyzmq's `zmq.asyncio.Socket` uses the same pattern as our transport — `add_reader(zmq_fd)` → drain loop → `_schedule_remaining_events` via `call_later(0, ...)`. Our `_on_readable` + `call_soon` reschedule is equivalent.
+pyzmq's `zmq.asyncio.Socket` uses the same pattern as our transport —
+`add_reader(zmq_fd)` → drain loop → `_schedule_remaining_events` via
+`call_later(0, ...)`. Our `_on_readable` + `call_soon` reschedule is equivalent.
 
 **pyzmq Send/Recv Internals:**
 
-pyzmq has a `copy_threshold` (default 65536). Messages smaller than 64KB **silently ignore `copy=False`** on send and take the `_send_copy` path (malloc + memcpy). On recv, `copy=False` gives true zero-copy (Frame wraps zmq_msg_t buffer), but pyzmq always calls `zmq_getsockopt(ZMQ_RCVMORE)` — unnecessary for PUSH/PULL sockets.
+pyzmq has a `copy_threshold` (default 65536). Messages smaller than 64KB
+**silently ignore `copy=False`** on send and take the `_send_copy` path
+(malloc + memcpy). On recv, `copy=False` gives true zero-copy (Frame wraps
+zmq_msg_t buffer), but pyzmq always calls `zmq_getsockopt(ZMQ_RCVMORE)` —
+unnecessary for PUSH/PULL sockets.
 
-Per-message round-trip: **4 context switches** (sender↔IO thread↔kernel↔IO thread↔receiver), **2 kernel syscalls** (UDS write + recv), ~5 `_check_rc` calls (each invokes `zmq_errno()` + `PyErr_CheckSignals()`). See [§7.1.3](#713-message-flow) for the full per-message flow table.
+Per-message round-trip: **4 context switches** (sender↔IO thread↔kernel↔IO
+thread↔receiver), **2 kernel syscalls** (UDS write + recv), ~5 `_check_rc`
+calls (each invokes `zmq_errno()` + `PyErr_CheckSignals()`). See
+[§7.1.3](#713-message-flow) for the full per-message flow table.
 
 ---
 
 ### A.4 CPU Affinity and NUMA
 
-**CPU Affinity** restricts a process to run only on specified CPU cores, preventing the OS scheduler from migrating it.
+**CPU Affinity** restricts a process to run only on specified CPU cores,
+preventing the OS scheduler from migrating it.
 
-**NUMA (Non-Uniform Memory Access)** is a memory architecture where each CPU socket has "local" memory (fast) and can access other sockets' memory (slow, ~100ns penalty).
+**NUMA (Non-Uniform Memory Access)** is a memory architecture where each CPU
+socket has "local" memory (fast) and can access other sockets' memory (slow,
+~100ns penalty).
 
 **Physical Cores vs Logical CPUs (SMT/Hyperthreading):**
 
 - Physical core: Actual execution unit
 - Logical CPU: OS-visible CPU (2 per physical core with SMT)
-- Hyperthreads share execution resources; pinning to both ensures full core utilization
+- Hyperthreads share execution resources; pinning to both ensures full core
+  utilization
 
 **Affinity Strategy in this client (from `cpu_affinity.py`):**
 
@@ -1350,7 +1691,9 @@ Per-message round-trip: **4 context switches** (sender↔IO thread↔kernel↔IO
 | Event loop daemon      | 1                        | uvloop in `HTTPEndpointClient` |
 | Transport I/O          | `io_threads` (default 4) | Background threads for IPC     |
 
-Default `loadgen_cores=5` (`DEFAULT_LOADGEN_CORES` in `cpu_affinity.py`) reserves headroom for the loadgen-side threads (Session + event loop) plus the transport I/O threads that share those cores.
+Default `loadgen_cores=5` (`DEFAULT_LOADGEN_CORES` in `cpu_affinity.py`)
+reserves headroom for the loadgen-side threads (Session + event loop) plus the
+transport I/O threads that share those cores.
 
 **Performance ranking sources (checked in order):**
 
@@ -1362,7 +1705,10 @@ Default `loadgen_cores=5` (`DEFAULT_LOADGEN_CORES` in `cpu_affinity.py`) reserve
 
 ### A.5 msgspec Serialization
 
-`msgspec` [5] is used throughout the client for both JSON (HTTP bodies) and MessagePack (IPC transport) serialization. The same `msgspec.Struct` type definitions serve both paths — one schema per message type, no separate serialization models to maintain.
+`msgspec` [5] is used throughout the client for both JSON (HTTP bodies) and
+MessagePack (IPC transport) serialization. The same `msgspec.Struct` type
+definitions serve both paths — one schema per message type, no separate
+serialization models to maintain.
 
 **Struct conventions:**
 
@@ -1377,13 +1723,26 @@ Default `loadgen_cores=5` (`DEFAULT_LOADGEN_CORES` in `cpu_affinity.py`) reserve
 
 **Encoder / Decoder patterns:**
 
-Each component holds class-level or instance-level `Encoder` and `Decoder` objects that are reused across all messages:
+Each component holds class-level or instance-level `Encoder` and `Decoder`
+objects that are reused across all messages:
 
-- **Class-level on adapters:** `_request_encoder = msgspec.json.Encoder()` and `_response_decoder = msgspec.json.Decoder(ChatCompletionResponse)` as class attributes. Construction cost amortized; decoder builds an internal parse plan on first use and reuses it.
-- **Instance-level on transports:** `msgspec.msgpack.Encoder()` and `msgspec.msgpack.Decoder(type=QueryResult | StreamChunk)` per transport instance. Tagged union discrimination without try/except.
-- **Typed decoders:** `Decoder(ResponseType)` writes directly into Struct fields during parsing — no intermediate `dict` allocation. Unknown JSON keys silently skipped, so adapters tolerate server-side schema additions.
-- **Zero-copy encoding:** `Encoder.encode(Struct)` serializes directly from Struct field slots to bytes in a single C-level pass. Avoids the `Struct → dict → json.dumps → bytes` pipeline.
-- **Buffer-reuse on receive:** `_ZmqReceiverTransport` uses `sock.recv_into(bytearray)` with a pre-allocated buffer, then decodes from a `memoryview` slice (`decoder.decode(view[:nbytes])`). Avoids per-message `bytes` allocation on the receive path.
+- **Class-level on adapters:** `_request_encoder = msgspec.json.Encoder()` and
+  `_response_decoder = msgspec.json.Decoder(ChatCompletionResponse)` as class
+  attributes. Construction cost amortized; decoder builds an internal parse plan
+  on first use and reuses it.
+- **Instance-level on transports:** `msgspec.msgpack.Encoder()` and
+  `msgspec.msgpack.Decoder(type=QueryResult | StreamChunk)` per transport
+  instance. Tagged union discrimination without try/except.
+- **Typed decoders:** `Decoder(ResponseType)` writes directly into Struct fields
+  during parsing — no intermediate `dict` allocation. Unknown JSON keys silently
+  skipped, so adapters tolerate server-side schema additions.
+- **Zero-copy encoding:** `Encoder.encode(Struct)` serializes directly from
+  Struct field slots to bytes in a single C-level pass. Avoids the
+  `Struct → dict → json.dumps → bytes` pipeline.
+- **Buffer-reuse on receive:** `_ZmqReceiverTransport` uses
+  `sock.recv_into(bytearray)` with a pre-allocated buffer, then decodes from a
+  `memoryview` slice (`decoder.decode(view[:nbytes])`). Avoids per-message
+  `bytes` allocation on the receive path.
 
 **Where used:**
 
@@ -1396,7 +1755,8 @@ Each component holds class-level or instance-level `Encoder` and `Decoder` objec
 
 **Struct option benchmarks (core IPC types):**
 
-Combined effect of the Struct options above on core IPC types (`core/types.py`), measured via `msgspec.msgpack` encode/decode:
+Combined effect of the Struct options above on core IPC types (`core/types.py`),
+measured via `msgspec.msgpack` encode/decode:
 
 | Type        | Payload | Encode (old → new)  | Decode (old → new)  | Wire Size (old → new) |
 | ----------- | ------- | ------------------- | ------------------- | --------------------- |
@@ -1408,7 +1768,8 @@ Combined effect of the Struct options above on core IPC types (`core/types.py`),
 | Query       | 4096 ch | 337 → 289 ns (-14%) | 920 → 888 ns (-4%)  | 4193 → 4166 B (-1%)   |
 | StreamChunk | 4096 ch | 309 → 231 ns (-25%) | 783 → 753 ns (-4%)  | 4161 → 4117 B (-1%)   |
 
-Size reduction is largest for small messages where key names dominate the payload. E2E transport impact in [§7.2](#72-benchmarks).
+Size reduction is largest for small messages where key names dominate the
+payload. E2E transport impact in [§7.2](#72-benchmarks).
 
 **Adapter type benchmarks (OpenAI):**
 
@@ -1428,9 +1789,13 @@ Size reduction is largest for small messages where key names dominate the payloa
 
 ### B.1 Shared-Memory Transport (WIP)
 
-A WIP shared-memory transport replaces ZMQ IPC with direct inter-process memory access, eliminating the ZMQ I/O thread, Unix domain socket syscalls, and kernel buffer copies.
+A WIP shared-memory transport replaces ZMQ IPC with direct inter-process memory
+access, eliminating the ZMQ I/O thread, Unix domain socket syscalls, and kernel
+buffer copies.
 
-**Measured improvement:** ~400k QPS vs ZMQ's ~300k QPS (1.33×). With `recv_into` and `array_like` optimizations, IPC overhead has dropped from ~56% to ~25% of worker CPU, narrowing the gap.
+**Measured improvement:** ~400k QPS vs ZMQ's ~300k QPS (1.33×). With `recv_into`
+and `array_like` optimizations, IPC overhead has dropped from ~56% to ~25% of
+worker CPU, narrowing the gap.
 
 **What it eliminates** (per message):
 
@@ -1444,7 +1809,9 @@ A WIP shared-memory transport replaces ZMQ IPC with direct inter-process memory 
 | `zmq_msg_recv` + RCVMORE getsockopt   | Direct read from shared ring buffer       |
 | `getpid()` × N per round-trip         | Eliminated — no libzmq fork-safety checks |
 
-The remaining cost after shared-memory is HTTP networking (~44% of original CPU): TCP send/recv, IP stack, and the Python interpreter for request encoding/response decoding.
+The remaining cost after shared-memory is HTTP networking (~44% of original
+CPU): TCP send/recv, IP stack, and the Python interpreter for request
+encoding/response decoding.
 
 ---
 
@@ -1452,13 +1819,22 @@ The remaining cost after shared-memory is HTTP networking (~44% of original CPU)
 
 ### C.1 Nginx Reverse Proxy for Multi-Endpoint Load Balancing
 
-When the SUT exposes multiple backend endpoints (e.g., multiple vLLM instances behind separate ports), the HTTP client currently handles multi-endpoint distribution at the worker level via round-robin URL assignment at construction time. An alternative approach is to front all backends with an nginx reverse proxy, presenting a single endpoint URL to the client.
+When the SUT exposes multiple backend endpoints (e.g., multiple vLLM instances
+behind separate ports), the HTTP client currently handles multi-endpoint
+distribution at the worker level via round-robin URL assignment at construction
+time. An alternative approach is to front all backends with an nginx reverse
+proxy, presenting a single endpoint URL to the client.
 
-**Architecture:** All workers connect to a single nginx endpoint, which load-balances across the backend fleet. This simplifies the client's URL assignment (one URL for all workers) and delegates backend health-checking and failover to nginx.
+**Architecture:** All workers connect to a single nginx endpoint, which
+load-balances across the backend fleet. This simplifies the client's URL
+assignment (one URL for all workers) and delegates backend health-checking and
+failover to nginx.
 
 ### C.2 TCP Fast Open (TFO)
 
-TCP Fast Open allows the client to send data (the HTTP request) inside the initial SYN packet, eliminating the TCP handshake latency penalty for new connections.
+TCP Fast Open allows the client to send data (the HTTP request) inside the
+initial SYN packet, eliminating the TCP handshake latency penalty for new
+connections.
 
 **Standard TCP vs TFO:**
 
@@ -1487,7 +1863,8 @@ Latency: 1.5 RTT before request           Latency: 0.5 RTT before request
 | Warm connection latency | ~1µs         | ~1µs (unchanged)               |
 | Cold/Warm ratio         | 150x         | ~50x                           |
 
-With TFO enabled, the cold-start penalty shrinks significantly, potentially making reactive connection creation viable without background refresh overhead.
+With TFO enabled, the cold-start penalty shrinks significantly, potentially
+making reactive connection creation viable without background refresh overhead.
 
 **System Configuration (Linux):**
 
@@ -1552,13 +1929,19 @@ def create_tfo_socket():
 # On subsequent connects: kernel sends data in SYN if cookie cached
 ```
 
-**Implementation Status:** Not yet implemented. Requires kernel support verification and benchmark validation before adoption.
+**Implementation Status:** Not yet implemented. Requires kernel support
+verification and benchmark validation before adoption.
 
 ### C.3 Work-Stealing Dispatch
 
-The current dispatch model assigns queries to workers round-robin ([§5.1](#51-architecture)). Under skewed response times, some workers sit idle while others accumulate a backlog.
+The current dispatch model assigns queries to workers round-robin
+([§5.1](#51-architecture)). Under skewed response times, some workers sit idle
+while others accumulate a backlog.
 
-**Goal:** Balance SSE chunks/s evenly across workers. Possible load signals include active chunk rate per worker (observable via fan-in PULL socket), event loop stall rate (a periodic sleep task measures scheduling delay), or in-flight request count. The right metric is TBD.
+**Goal:** Balance SSE chunks/s evenly across workers. Possible load signals
+include active chunk rate per worker (observable via fan-in PULL socket), event
+loop stall rate (a periodic sleep task measures scheduling delay), or in-flight
+request count. The right metric is TBD.
 
 **Two levels:**
 
@@ -1567,13 +1950,22 @@ The current dispatch model assigns queries to workers round-robin ([§5.1](#51-a
 | **Intra-endpoint** | Workers sharing the same endpoint  | SSE chunks/s per worker         | Uneven response times — slow generation, GC pauses, scheduling         |
 | **Inter-endpoint** | Workers across different endpoints | Aggregate chunks/s per endpoint | Uneven endpoint speeds — different GPUs, model sizes, partial failures |
 
-Intra-endpoint is simpler: the main process routes new queries to the least-loaded worker for that endpoint. Inter-endpoint requires workers to hold connection pools to multiple endpoints and the main process to track per-endpoint load.
+Intra-endpoint is simpler: the main process routes new queries to the
+least-loaded worker for that endpoint. Inter-endpoint requires workers to hold
+connection pools to multiple endpoints and the main process to track
+per-endpoint load.
 
 **Implementation Status:** Not yet implemented.
 
 ### C.4 `getpid` Cache Shim
 
-libzmq calls `getpid()` on every `zmq_msg_send`/`zmq_msg_recv` for fork-safety (`ctx_t::check_tag`). Since glibc 2.25 [10], the C library no longer caches PID — each `getpid()` is a real syscall. The glibc PID cache was removed because it was not 100% reliable in certain scenarios (e.g., applications bypassing glibc's `fork()` wrapper via raw `syscall(SYS_clone)`). At high message rates this adds ~6–12% overhead to the syscall profile ([§11.6](#116-syscall-profile-strace--c): 53k `getpid` calls out of 256k total).
+libzmq calls `getpid()` on every `zmq_msg_send`/`zmq_msg_recv` for fork-safety
+(`ctx_t::check_tag`). Since glibc 2.25 [10], the C library no longer caches PID
+— each `getpid()` is a real syscall. The glibc PID cache was removed because it
+was not 100% reliable in certain scenarios (e.g., applications bypassing glibc's
+`fork()` wrapper via raw `syscall(SYS_clone)`). At high message rates this adds
+~6–12% overhead to the syscall profile ([§11.6](#116-syscall-profile-strace--c):
+53k `getpid` calls out of 256k total).
 
 ```c
 // getpid_cache.c

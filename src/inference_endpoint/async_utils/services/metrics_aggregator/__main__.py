@@ -18,6 +18,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import signal
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
@@ -27,6 +28,7 @@ from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
 from inference_endpoint.metrics.early_stopping import EarlyStoppingSpec
+from inference_endpoint.metrics.steady_state_diagnostics import PROFILES
 from inference_endpoint.utils.logging import setup_logging
 
 from .aggregator import MetricCounterKey, MetricsAggregatorService
@@ -110,6 +112,19 @@ def _make_sigterm_handler(
     return _on_sigterm, pending_tasks
 
 
+def _cap_live_lane_rayon_pool(tokenizer_workers: int) -> None:
+    """Cap the Hugging Face rayon pool the live (mid-run) lane encodes on.
+
+    The live lane runs in this process, and rayon sizes its pool once, at the
+    first encode, so the cap must be in the environment before the tokenizer is
+    used. ``setdefault`` lets an operator-exported ``RAYON_NUM_THREADS`` win; the
+    ``max(1, ...)`` keeps ``--tokenizer-workers 0`` from reading as rayon's "use
+    every CPU". The end-of-run drain is not capped by this: its shard processes
+    size their own pools in ``_init_worker``.
+    """
+    os.environ.setdefault("RAYON_NUM_THREADS", str(max(1, tokenizer_workers)))
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(
         description="Metrics aggregator service - subscribes to EventRecords and computes real-time metrics"
@@ -189,6 +204,12 @@ async def main() -> None:
         ),
     )
     parser.add_argument(
+        "--metrics-isl",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Collect input sequence length (ISL) metrics (default: enabled).",
+    )
+    parser.add_argument(
         "--streaming",
         action="store_true",
         default=False,
@@ -211,6 +232,17 @@ async def main() -> None:
         action="store_true",
         default=False,
         help="Compute MLPerf early-stopping percentile estimates for TTFT/TPOT/latency.",
+    )
+    parser.add_argument(
+        "--steady-state-profile",
+        default=None,
+        choices=sorted(PROFILES),
+        help=(
+            "Collect the steady-state super-pass series. Evaluate it with this "
+            "workload profile's CoV bounds and warmup driver. Omit this flag to "
+            "disable collection. The parent resolves it from the load pattern so "
+            "standalone detector re-runs use the same profile."
+        ),
     )
     args = parser.parse_args()
     setup_logging(level="INFO")
@@ -239,6 +271,7 @@ async def main() -> None:
     # (coalesces to 'object' not 'AbstractContextManager[BatchTokenizer | None]')
     tokenizer_cm: AbstractContextManager[BatchTokenizer | None]
     if args.tokenizer:
+        _cap_live_lane_rayon_pool(args.tokenizer_workers)
         try:
             tokenizer_cm = BatchTokenizer(
                 args.tokenizer, live_workers=args.tokenizer_workers
@@ -280,8 +313,10 @@ async def main() -> None:
                     args.publish_interval if args.tokenizer_workers > 0 else None
                 ),
                 streaming=args.streaming,
+                enable_isl=args.metrics_isl,
                 shutdown_event=shutdown_event,
                 drain_timeout_s=args.drain_timeout,
+                steady_state_profile=args.steady_state_profile,
             )
             aggregator.start()
 

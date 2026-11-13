@@ -1,12 +1,17 @@
 ---
 name: msgspec-patterns
-description: Reference guide for msgspec.Struct usage patterns, performance tips, and gc=False safety analysis. Use when writing or reviewing msgspec Struct definitions, encoding/decoding code, or deciding whether gc=False is safe.
+description:
+  Reference guide for msgspec.Struct usage patterns, performance tips, and
+  gc=False safety analysis. Use when writing or reviewing msgspec Struct
+  definitions, encoding/decoding code, or deciding whether gc=False is safe.
 allowed-tools: Read, Grep, Glob
 ---
 
 ## Use Structs for Structured Data
 
-Always prefer `msgspec.Struct` over `dict`, `dataclasses`, or `attrs` for structured data with a known schema. Structs are 5-60x faster for common operations and are optimized for encoding/decoding.
+Always prefer `msgspec.Struct` over `dict`, `dataclasses`, or `attrs` for
+structured data with a known schema. Structs are 5-60x faster for common
+operations and are optimized for encoding/decoding.
 
 ```python
 # BAD
@@ -52,7 +57,8 @@ decoded = msgspec.json.decode(data, type=User)
 
 ## Omit Default Values
 
-Set `omit_defaults=True` when default values are known on both encoding and decoding ends. Reduces encoded message size and improves performance.
+Set `omit_defaults=True` when default values are known on both encoding and
+decoding ends. Reduces encoded message size and improves performance.
 
 ```python
 class Config(msgspec.Struct, omit_defaults=True):
@@ -67,7 +73,9 @@ msgspec.json.encode(config)
 
 ## Avoid Decoding Unused Fields
 
-Define smaller "view" Struct types that only contain the fields you actually need. msgspec skips decoding fields not defined in your Struct, reducing allocations and CPU time.
+Define smaller "view" Struct types that only contain the fields you actually
+need. msgspec skips decoding fields not defined in your Struct, reducing
+allocations and CPU time.
 
 ```python
 # BAD: decodes entire object
@@ -92,7 +100,9 @@ class TweetView(msgspec.Struct):
 
 ## array_like=True
 
-Set `array_like=True` when both ends know the field schema. Encodes structs as arrays instead of objects, removing field names from the message — smaller and faster.
+Set `array_like=True` when both ends know the field schema. Encodes structs as
+arrays instead of objects, removing field names from the message — smaller and
+faster.
 
 ```python
 class Point(msgspec.Struct, array_like=True):
@@ -107,7 +117,8 @@ msgspec.json.encode(point)
 
 ## Tagged Unions
 
-Use `tag=True` on Struct types when handling multiple message types in a single union for efficient type discrimination during decoding.
+Use `tag=True` on Struct types when handling multiple message types in a single
+union for efficient type discrimination during decoding.
 
 ```python
 class GetRequest(msgspec.Struct, tag=True):
@@ -134,7 +145,9 @@ match request:
 
 ## Use encode_into for Buffer Reuse
 
-In hot loops, use `Encoder.encode_into()` with a pre-allocated `bytearray` instead of `encode()` to avoid allocating a new `bytes` object per call. Always measure before adopting.
+In hot loops, use `Encoder.encode_into()` with a pre-allocated `bytearray`
+instead of `encode()` to avoid allocating a new `bytes` object per call. Always
+measure before adopting.
 
 ```python
 # BAD: new bytes object allocated each iteration
@@ -153,7 +166,8 @@ for msg in msgs:
 
 ## NDJSON with encode_into
 
-For line-delimited JSON, use `encode_into()` to avoid the copy from string concatenation:
+For line-delimited JSON, use `encode_into()` to avoid the copy from string
+concatenation:
 
 ```python
 encoder = msgspec.json.Encoder()
@@ -166,7 +180,8 @@ for msg in messages:
 
 ## Length-Prefix Framing
 
-Use `encode_into()` with an offset to efficiently prepend a message length without extra copies:
+Use `encode_into()` with an offset to efficiently prepend a message length
+without extra copies:
 
 ```python
 def send_length_prefixed(socket, msg):
@@ -189,7 +204,8 @@ async def prefixed_recv(stream) -> bytes:
 
 ## Use MessagePack for Internal APIs
 
-`msgspec.msgpack` is more compact and can be more performant than `msgspec.json` for internal service communication.
+`msgspec.msgpack` is more compact and can be more performant than `msgspec.json`
+for internal service communication.
 
 ```python
 class Event(msgspec.Struct):
@@ -204,7 +220,8 @@ packed = encoder.encode(Event(type="login", data={"user_id": 123}, timestamp=170
 
 ## TOML Configuration Files
 
-Use msgspec for parsing pyproject.toml and other TOML config files with validation:
+Use msgspec for parsing pyproject.toml and other TOML config files with
+validation:
 
 ```python
 class BuildSystem(msgspec.Struct, omit_defaults=True, rename="kebab"):
@@ -230,9 +247,13 @@ def load_pyproject(path: str) -> PyProject:
 
 ## gc=False — Safety Analysis
 
-Setting `gc=False` on a Struct means instances are **never tracked** by Python's garbage collector. This reduces GC pressure (up to 75x less GC pause time, 16 bytes saved per instance). The **only** risk: if a **reference cycle** involves only `gc=False` structs, that cycle will **never be collected** — memory leak.
+Setting `gc=False` on a Struct means instances are **never tracked** by Python's
+garbage collector. This reduces GC pressure (up to 75x less GC pause time, 16
+bytes saved per instance). The **only** risk: if a **reference cycle** involves
+only `gc=False` structs, that cycle will **never be collected** — memory leak.
 
-Reference: [msgspec Structs – Disabling Garbage Collection](https://jcristharif.com/msgspec/structs.html#struct-gc)
+Reference:
+[msgspec Structs – Disabling Garbage Collection](https://jcristharif.com/msgspec/structs.html#struct-gc)
 
 ### When to use this analysis
 
@@ -246,30 +267,41 @@ All of the following must hold to use `gc=False` safely.
 
 **1. No reference cycles**
 
-- The struct (and any container it references) must never be part of a reference cycle.
-- Multiple variables pointing to the same struct (`x = s; y = x`) are safe — that is not a cycle. A cycle is A → B → … → A.
-- Returning a struct from a function is safe. What matters is whether any reference path leads back to the struct.
+- The struct (and any container it references) must never be part of a reference
+  cycle.
+- Multiple variables pointing to the same struct (`x = s; y = x`) are safe —
+  that is not a cycle. A cycle is A → B → … → A.
+- Returning a struct from a function is safe. What matters is whether any
+  reference path leads back to the struct.
 
 **2. No mutation that could create cycles**
 
-- Do not mutate struct fields after construction in a way that could introduce a cycle (e.g. set a field to an object that references the struct, or append the struct to its own list/dict).
-- Frozen structs (`frozen=True`) prevent field reassignment; `force_setattr` in `__post_init__` is one-time init only — acceptable.
+- Do not mutate struct fields after construction in a way that could introduce a
+  cycle (e.g. set a field to an object that references the struct, or append the
+  struct to its own list/dict).
+- Frozen structs (`frozen=True`) prevent field reassignment; `force_setattr` in
+  `__post_init__` is one-time init only — acceptable.
 - Assigning scalars (int, str, bool, float, None) to fields is always safe.
 
 **3. Mutable containers (list, dict, set) on the struct**
 
 - If the struct has list/dict/set fields, either:
-  - Never mutate those containers after creation and never store in them any object that references the struct, or
+  - Never mutate those containers after creation and never store in them any
+    object that references the struct, or
   - Do not use `gc=False` (conservative).
 - Reading from containers does not create cycles and is always allowed.
 
 **4. Nested structs**
 
-- If a struct holds another Struct (or containers that hold Structs), the same rules apply to the whole reference graph. No cycles, no mutation that could create cycles.
+- If a struct holds another Struct (or containers that hold Structs), the same
+  rules apply to the whole reference graph. No cycles, no mutation that could
+  create cycles.
 
 **5. Generic / mixins**
 
-- With `gc=False`, the type must be compatible with `__slots__` (e.g. if using `Generic`, the mixin must define `__slots__ = ()`). See msgspec issue #631 / PR #635.
+- With `gc=False`, the type must be compatible with `__slots__` (e.g. if using
+  `Generic`, the mixin must define `__slots__ = ()`). See msgspec issue #631 /
+  PR #635.
 
 ### Decision tree
 
@@ -346,41 +378,56 @@ def load_repo_data(path: str) -> RepoData:
 
 ### Checklist: can use gc=False
 
-- [ ] Struct and everything it references can never participate in a reference cycle.
-- [ ] No mutation of struct fields after construction that could introduce a cycle (frozen or init-only mutation is ok; scalar assignment is ok).
+- [ ] Struct and everything it references can never participate in a reference
+      cycle.
+- [ ] No mutation of struct fields after construction that could introduce a
+      cycle (frozen or init-only mutation is ok; scalar assignment is ok).
 - [ ] Any list/dict/set fields are never mutated after creation.
-- [ ] No storing the struct (or anything that references it) inside its own container fields.
+- [ ] No storing the struct (or anything that references it) inside its own
+      container fields.
 - [ ] If Generic/mixins are used, `__slots__` compatibility is satisfied.
 
 ### Checklist: must NOT use gc=False
 
 - [ ] Struct is mutated after creation in a way that could create a cycle.
-- [ ] Container fields are mutated after creation and could hold the struct or back-references.
-- [ ] Struct is used in a pattern where it's stored in a container that the struct also references.
+- [ ] Container fields are mutated after creation and could hold the struct or
+      back-references.
+- [ ] Struct is used in a pattern where it's stored in a container that the
+      struct also references.
 
 ### Per-struct analysis steps
 
 1. List all fields and their types (scalars vs containers vs nested Structs).
-2. Search the codebase for: assignments to this struct's fields, mutations of its container fields (`.append`, `.update`, etc.), and any place the struct instance is stored in a list/dict that might be referenced by the struct.
-3. If only scalars or immutable types, or frozen with no container mutation → likely safe.
-4. If mutable containers and they're never mutated → likely safe; otherwise → do not use `gc=False`.
+2. Search the codebase for: assignments to this struct's fields, mutations of
+   its container fields (`.append`, `.update`, etc.), and any place the struct
+   instance is stored in a list/dict that might be referenced by the struct.
+3. If only scalars or immutable types, or frozen with no container mutation →
+   likely safe.
+4. If mutable containers and they're never mutated → likely safe; otherwise → do
+   not use `gc=False`.
 
 ### Risky structs: AT-RISK audit pattern
 
-A struct is **risky** for `gc=False` if it has a condition that would normally disallow it (e.g. a mutable dict field) but that condition never arises in practice (e.g. the field is only ever read).
+A struct is **risky** for `gc=False` if it has a condition that would normally
+disallow it (e.g. a mutable dict field) but that condition never arises in
+practice (e.g. the field is only ever read).
 
 **Auditing a risky struct:**
 
-1. Identify the at-risk condition (e.g. "has `metadata: dict` that could be mutated").
+1. Identify the at-risk condition (e.g. "has `metadata: dict` that could be
+   mutated").
 2. Search the codebase for all uses of that struct and of the at-risk field:
-   - Field assignment: `obj.field = ...`, `obj.field[key] = ...`, `obj.field.append(...)`, `obj.field.update(...)`
-   - Any code path that stores the struct (or something holding it) inside that container.
-3. If the audit finds no such mutation or cycle-creating storage, `gc=False` is acceptable — **but add the AT-RISK marker** so future changes are re-audited.
+   - Field assignment: `obj.field = ...`, `obj.field[key] = ...`,
+     `obj.field.append(...)`, `obj.field.update(...)`
+   - Any code path that stores the struct (or something holding it) inside that
+     container.
+3. If the audit finds no such mutation or cycle-creating storage, `gc=False` is
+   acceptable — **but add the AT-RISK marker** so future changes are re-audited.
 
 **When audit passes** — set `gc=False` and add:
 
-- A comment above the class stating why gc=False is used and when the audit was done:
-  `# gc=False: audit YYYY-MM: <condition> is only read, never mutated.`
+- A comment above the class stating why gc=False is used and when the audit was
+  done: `# gc=False: audit YYYY-MM: <condition> is only read, never mutated.`
 - A docstring line signalling that changes must trigger re-audit:
   `AT-RISK (gc=False): Has <brief condition>. Any change that <what would violate safety> must be audited; if so, remove gc=False.`
 
@@ -399,8 +446,10 @@ class QueryResult(msgspec.Struct, frozen=True, array_like=True, gc=False):
 **When touching an AT-RISK struct:**
 
 1. Re-run the audit searches above.
-2. If your change mutates the at-risk field(s) or creates a cycle → remove `gc=False` and the AT-RISK comment.
-3. If your change does not touch the at-risk field → existing `gc=False` and AT-RISK comment remain; optionally update the audit date.
+2. If your change mutates the at-risk field(s) or creates a cycle → remove
+   `gc=False` and the AT-RISK comment.
+3. If your change does not touch the at-risk field → existing `gc=False` and
+   AT-RISK comment remain; optionally update the audit date.
 
 ---
 

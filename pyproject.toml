@@ -22,8 +22,15 @@ conflicts = [
 # CVE floors for transitive deps we don't declare directly. click is pulled in
 # via transformers -> typer; 8.3.2 carries PYSEC-2026-2132 (fixed in 8.3.3).
 # setuptools is pulled in via pbr/torch; 82.0.1 carries PYSEC-2026-3447 (fixed
-# in 83.0.0).
-constraint-dependencies = ["click>=8.3.3", "setuptools>=83.0.0"]
+# in 83.0.0) and 83.0.0 carries GHSA-xmj3-9gf7-h52w (fixed in 84.1.0).
+# fsspec (datasets) and multidict (aiohttp) require fixes for CVE-2026-104851
+# and CVE-2026-104874, respectively.
+constraint-dependencies = [
+    "click>=8.3.3",
+    "setuptools>=84.1.0",
+    "fsspec>=2026.6.0",
+    "multidict>=6.9.1",
+]
 
 [tool.uv.build-backend]
 module-root = "src"
@@ -79,13 +86,13 @@ dependencies = [
     "cyclopts==4.10.0",
     "rich==14.3.3",
     # Needed for tokenization and OSL reporting
-    "transformers==5.5.0",
+    "transformers==5.16.1",
     "tiktoken==0.13.0",
     # Required by transformers' apply_chat_template
     "jinja2==3.1.6",
     "numpy>=1.26.4",
     "datasets==5.0.1",
-    "Pillow==12.3.0",
+    "Pillow==13.0.0",
     "sentencepiece==0.2.1",
     "protobuf==7.34.1",
     "openai_harmony==0.0.8",
@@ -96,8 +103,15 @@ dependencies = [
     "colorama==0.4.6",
     # Fix pytz-2024 import warning
     "pytz==2026.1.post1",
-    "urllib3==2.7.0",
+    "urllib3==2.8.0",
     "pyyaml==6.0.3",
+    # anyio is pulled in transitively (openai -> httpx -> anyio); pinned here to
+    # force past CVE-2026-63374 / CVE-2026-64847 (both fixed in 4.14.2), which
+    # otherwise fail `uv run pip-audit`.
+    "anyio==4.14.2",
+    # certifi is pulled in transitively (httpx, requests); pinned here so pip
+    # installs also get the PYSEC-2026-4320 fix (2026.10.19).
+    "certifi==2026.10.19",
 ]
 
 [project.optional-dependencies]
@@ -124,16 +138,22 @@ dev = [
     # every resolution fork. Because bfcl conflicts with this extra (see
     # [tool.uv].conflicts), these floors force uv to fork filelock/virtualenv:
     # patched here, pinned only inside the bfcl fork. Closes CVE-2025-68146 /
-    # CVE-2026-22701 (filelock) and CVE-2026-22702 (virtualenv).
-    "filelock>=3.20.3",
-    "virtualenv>=20.36.1",
+    # CVE-2026-22701 / CVE-2026-112907 / CVE-2026-112913 / CVE-2026-112940
+    # (filelock) and CVE-2026-22702 / CVE-2026-113713 / CVE-2026-115586
+    # (virtualenv).
+    "filelock>=4.2.1",
+    "virtualenv==21.14.13",
     # pip is pulled in transitively (pip-audit -> pip-api -> pip); force past
     # PYSEC-2026-3721 (fixed in 26.2), which otherwise fails `uv run pip-audit`.
     "pip==26.2",
+    # msgpack is pulled in transitively (pip-audit -> cachecontrol -> msgpack);
+    # force past CVE-2026-114613 (fixed in 1.2.3).
+    "msgpack==1.2.3",
 ]
 test = [
     # Includes optional dependencies for full test coverage
     "inference-endpoint[sql]",
+    "inference-endpoint[rouge]",
     # Testing framework
     "pytest==9.0.3",
     "pytest-asyncio==1.3.0",
@@ -147,7 +167,7 @@ test = [
     "Pympler==1.1",
     "scipy==1.17.1",
     # HTTP server and client for mock server fixture
-    "aiohttp==3.14.3",
+    "aiohttp==3.14.5",
     # Plotting for benchmark sweep mode
     "matplotlib==3.10.8",
     # Property-based testing (CLI fuzz)
@@ -156,6 +176,18 @@ test = [
 performance = [
     "pytest-benchmark==5.2.3",
     "memory-profiler==0.61.0",
+]
+rouge = [
+    # ROUGE text-generation scoring (eval_method: "rouge"), used by the Llama
+    # CNN-DailyMail / OpenOrca accuracy paths. Imported lazily in
+    # evaluation/scoring.py, so the base install stays lean. Resolves cleanly
+    # against the pinned datasets==5.0.1 - no conflicts fork needed, unlike bfcl.
+    # NOTE: not self-contained at runtime - nltk needs the punkt/punkt_tab
+    # corpora and evaluate.load("rouge") fetches its metric script from the HF
+    # Hub, so an offline image must prefetch both.
+    "nltk==3.10.4",
+    "evaluate==0.4.6",
+    "rouge-score==0.1.2",
 ]
 bfcl = [
     # BFCL v4 function-calling evaluation. Pins numpy==1.26.4, which is why

@@ -1,6 +1,9 @@
 # Dataset Manager
 
-The `dataset_manager` module provides a flexible, composable system for loading, transforming, and preparing benchmark datasets for inference endpoint evaluation. It separates the concepts of **datasets** and **transforms** to enable reusable, modular data processing pipelines.
+The `dataset_manager` module provides a flexible, composable system for loading,
+transforming, and preparing benchmark datasets for inference endpoint
+evaluation. It separates the concepts of **datasets** and **transforms** to
+enable reusable, modular data processing pipelines.
 
 ## Table of Contents
 
@@ -25,47 +28,63 @@ The `dataset_manager` module provides a flexible, composable system for loading,
 
 A **dataset** in the context of Inference Endpoint is defined as:
 
-> A set of keyed data with a set of **critical keys**. Critical keys define the core components of the data that are ingested by the model. Combinations of critical keys should be unique within the dataset.
+> A set of keyed data with a set of **critical keys**. Critical keys define the
+> core components of the data that are ingested by the model. Combinations of
+> critical keys should be unique within the dataset.
 
-**Critical keys** are the essential columns that define the dataset's identity. Non-critical keys (metadata, auxiliary information) can be retrieved by searching for rows in the original dataset and matching the critical keys.
+**Critical keys** are the essential columns that define the dataset's identity.
+Non-critical keys (metadata, auxiliary information) can be retrieved by
+searching for rows in the original dataset and matching the critical keys.
 
 **Example:** In the GPQA dataset, the critical keys are:
 
 - `question`: The question text
 - `choices`: The 4 multiple-choice options
 
-Non-critical keys like `domain` and `subdomain` provide metadata but don't uniquely identify the sample.
+Non-critical keys like `domain` and `subdomain` provide metadata but don't
+uniquely identify the sample.
 
 ### What is a Transform?
 
-A **transform** is an operation that is uniformly applied to all rows of a dataset. A key property of transforms is:
+A **transform** is an operation that is uniformly applied to all rows of a
+dataset. A key property of transforms is:
 
-> **Transforms must be reversible** if a copy of the original dataset is provided.
+> **Transforms must be reversible** if a copy of the original dataset is
+> provided.
 
 This reversibility principle means:
 
-- **User prompt formatting** is reversible with an equivalent Regex extraction pattern
-- **Dropping non-critical columns** is reversible if the original dataset is provided
+- **User prompt formatting** is reversible with an equivalent Regex extraction
+  pattern
+- **Dropping non-critical columns** is reversible if the original dataset is
+  provided
 - **Inserting static columns** is reversible by dropping those columns
-- **Harmonizing data** (e.g., converting to model-specific formats) is reversible with a Regex pattern
+- **Harmonizing data** (e.g., converting to model-specific formats) is
+  reversible with a Regex pattern
 
-This ensures that transforms don't fundamentally change the dataset's identity—they only reformat it for specific use cases.
+This ensures that transforms don't fundamentally change the dataset's
+identity—they only reformat it for specific use cases.
 
 ### When to Create a New Dataset
 
 A new `Dataset` subclass should be created when:
 
-> A dataset variant **cannot be transformed** from an existing dataset with a set of transforms.
+> A dataset variant **cannot be transformed** from an existing dataset with a
+> set of transforms.
 
-If different formatting or preprocessing can be achieved through transforms, it should remain the same base dataset with different transform presets.
+If different formatting or preprocessing can be achieved through transforms, it
+should remain the same base dataset with different transform presets.
 
-**Example:** `AIME25` with different prompt formats for different models (GPT-OSS, Llama2, etc.) should be the same dataset with different transform presets, not separate dataset classes.
+**Example:** `AIME25` with different prompt formats for different models
+(GPT-OSS, Llama2, etc.) should be the same dataset with different transform
+presets, not separate dataset classes.
 
 ## Architecture
 
 ### Transform Pipeline
 
-The transform system uses a pipeline architecture where transforms are applied sequentially to a pandas DataFrame. The pipeline consists of two main stages:
+The transform system uses a pipeline architecture where transforms are applied
+sequentially to a pandas DataFrame. The pipeline consists of two main stages:
 
 1. **Model-Specific Transforms** (Dataset + Model)
 
@@ -83,7 +102,8 @@ The transform system uses a pipeline architecture where transforms are applied s
 
 ### Model-Specific vs Adapter-Specific Transforms
 
-The architecture prevents a "cross-product explosion" of transforms by separating concerns:
+The architecture prevents a "cross-product explosion" of transforms by
+separating concerns:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -106,17 +126,21 @@ The architecture prevents a "cross-product explosion" of transforms by separatin
 
 **Key Benefits:**
 
-- **Reusability:** Adapter transforms work with any dataset that provides the expected columns
+- **Reusability:** Adapter transforms work with any dataset that provides the
+  expected columns
 - **Maintainability:** Adding a new model requires only one preset per dataset
 - **Clarity:** Clear separation between dataset formatting and API formatting
 
-**Constraint:** Adapter-specific transforms **require certain columns** (e.g., `prompt`) to be present in the input DataFrame. These columns must be created by the end of the model-specific transform pipeline.
+**Constraint:** Adapter-specific transforms **require certain columns** (e.g.,
+`prompt`) to be present in the input DataFrame. These columns must be created by
+the end of the model-specific transform pipeline.
 
 ## Usage
 
 ### Using Predefined Datasets
 
-Predefined datasets use a naming convention that separates the dataset from its model-specific transforms:
+Predefined datasets use a naming convention that separates the dataset from its
+model-specific transforms:
 
 ```
 <dataset_name>::<model_preset>
@@ -135,11 +159,13 @@ This specifies:
 - Base dataset: `aime25`
 - Model preset: `gptoss` (found in `aime25/presets.py`)
 
-The adapter-specific transforms are automatically applied based on the `api_type` or `adapter` specified in the configuration.
+The adapter-specific transforms are automatically applied based on the
+`api_type` or `adapter` specified in the configuration.
 
 ### Loading Custom Datasets
 
-For custom datasets not in the predefined registry, use `Dataset.load_from_file()`:
+For custom datasets not in the predefined registry, use
+`Dataset.load_from_file()`:
 
 ```python
 from inference_endpoint.dataset_manager import Dataset
@@ -232,7 +258,8 @@ class MyDataset(Dataset, dataset_id="my_dataset"):
 
 ### Creating Model Presets
 
-Model presets define dataset + model specific transforms. Each preset function should:
+Model presets define dataset + model specific transforms. Each preset function
+should:
 
 1. Return a list of transforms
 2. Generate standardized columns expected by adapters (typically `prompt`)
@@ -253,8 +280,10 @@ def my_model() -> list[Transform]:
 
 ### Base Classes
 
-- **`Transform`**: Abstract base class for all transforms. Operates on entire DataFrames.
-- **`RowProcessor`**: Special transform that processes each row individually. Automatically handles iteration.
+- **`Transform`**: Abstract base class for all transforms. Operates on entire
+  DataFrames.
+- **`RowProcessor`**: Special transform that processes each row individually.
+  Automatically handles iteration.
 
 ### Built-in Transforms
 
@@ -316,7 +345,8 @@ ColumnRemap(
 
 #### `MakeAdapterCompatible`
 
-Special transform that searches for common prompt column names and standardizes them.
+Special transform that searches for common prompt column names and standardizes
+them.
 
 ```python
 MakeAdapterCompatible()  # Automatically remaps to "prompt" and "system"
@@ -324,7 +354,9 @@ MakeAdapterCompatible()  # Automatically remaps to "prompt" and "system"
 
 ### Performance Optimization
 
-The `apply_transforms()` function automatically **fuses consecutive `RowProcessor` transforms** into a single pass over the DataFrame to minimize iteration overhead.
+The `apply_transforms()` function automatically **fuses consecutive
+`RowProcessor` transforms** into a single pass over the DataFrame to minimize
+iteration overhead.
 
 ```python
 transforms = [
@@ -354,7 +386,8 @@ datasets:
 This applies:
 
 1. **Model preset** (`gptoss`): Formats question with reasoning instruction
-2. **Adapter transforms** (from SGLang adapter): Harmonizes prompt, adds metadata, filters columns
+2. **Adapter transforms** (from SGLang adapter): Harmonizes prompt, adds
+   metadata, filters columns
 
 ### Example 2: Custom Dataset with Transforms
 
@@ -407,15 +440,23 @@ class ExtractYear(RowProcessor):
 
 The separation of datasets and transforms provides several benefits:
 
-1. **No Dataset Explosion:** Instead of creating `AIME25_GPT_OSS`, `AIME25_Llama2`, `AIME25_Claude`, etc., we have one `AIME25` dataset with multiple presets.
+1. **No Dataset Explosion:** Instead of creating `AIME25_GPT_OSS`,
+   `AIME25_Llama2`, `AIME25_Claude`, etc., we have one `AIME25` dataset with
+   multiple presets.
 
-2. **Composability:** Transforms can be mixed and matched. Adapter transforms work with any dataset that provides the required columns.
+2. **Composability:** Transforms can be mixed and matched. Adapter transforms
+   work with any dataset that provides the required columns.
 
-3. **Maintainability:** Adding a new model requires updating only the preset transforms, not creating new dataset classes.
+3. **Maintainability:** Adding a new model requires updating only the preset
+   transforms, not creating new dataset classes.
 
-4. **Clarity:** Users see both the base dataset (`aime25`) and the transformations (`gptoss`) in the config, making it clear what data is being used and how it's being prepared.
+4. **Clarity:** Users see both the base dataset (`aime25`) and the
+   transformations (`gptoss`) in the config, making it clear what data is being
+   used and how it's being prepared.
 
-5. **Reversibility:** Since transforms are reversible, the original dataset data is preserved conceptually. Transforms only change the format, not the fundamental content.
+5. **Reversibility:** Since transforms are reversible, the original dataset data
+   is preserved conceptually. Transforms only change the format, not the
+   fundamental content.
 
 ## Directory Structure
 

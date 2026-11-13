@@ -19,7 +19,7 @@ from typing import Any, ClassVar, Final
 
 import msgspec
 
-from .types import OUTPUT_TYPE, ErrorData, PromptData
+from .types import OUTPUT_TYPE, ErrorData, PhaseData, PromptData
 
 TOPIC_FRAME_SIZE: Final[int] = 40
 """int: Fixed bytesize for the encoded topic string. PUB messages will be prefixed by a
@@ -131,6 +131,10 @@ class SessionEventType(EventType):
     # state=interrupted instead of a lying COMPLETE snapshot.
     INTERRUPTED = "interrupted"
     STOP_LOADGEN = "stop_loadgen"
+    # Announces the shape of the phase about to run, carrying PhaseData.
+    # Published for every phase. For performance phases, it immediately precedes
+    # START_PERFORMANCE_TRACKING.
+    PHASE_START = "phase_start"
     START_PERFORMANCE_TRACKING = "start_performance_tracking"
     STOP_PERFORMANCE_TRACKING = "stop_performance_tracking"
 
@@ -161,9 +165,37 @@ class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type:
     sample_uuid: str = ""
     conversation_id: str = ""
     turn: int | None = None
-    data: OUTPUT_TYPE | PromptData | ErrorData | None = None
+    data: OUTPUT_TYPE | PromptData | ErrorData | PhaseData | None = None
     finish_reason: str | msgspec.UnsetType = msgspec.UNSET
     worker_id: int | msgspec.UnsetType = msgspec.UNSET
+
+
+EVENT_LINE_LEAD: Final[bytes] = b'{"event_type":"'
+"""bytes: How an events.jsonl line begins when it is written compactly.
+
+``JSONLWriter`` encodes an ``EventRecord`` with ``event_type`` first and without
+spaces, so every line it writes starts with these bytes.
+"""
+
+
+def leading_event_topic(line: bytes) -> bytes | None:
+    """The event_type topic that leads a compact events.jsonl line, if it does.
+
+    Lets a reader pick out some event types from a line's first bytes and skip
+    the rest undecoded; a run's log is hundreds of GB, mostly ISSUED prompts.
+    Compare the result with a member's ``topic_bytes``, e.g.
+    ``SampleEventType.COMPLETE.topic_bytes``.
+
+    ``None`` means the line is not in that layout (a space after the colon,
+    reordered fields, ``event_type`` not first, a blank line). The caller must
+    then decode the whole line and classify it by its decoded ``event_type``, so
+    a change in how the log is written cannot silently drop events.
+    """
+    if not line.startswith(EVENT_LINE_LEAD):
+        return None
+    start = len(EVENT_LINE_LEAD)
+    end = line.find(b'"', start, start + TOPIC_FRAME_SIZE)
+    return None if end == -1 else line[start:end]
 
 
 class EventRecordCodec:

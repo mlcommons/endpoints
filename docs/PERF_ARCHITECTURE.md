@@ -1,6 +1,7 @@
 # Benchmark Hot-Path
 
-This document describes the performance-critical data flow during benchmark execution.
+This document describes the performance-critical data flow during benchmark
+execution.
 
 ---
 
@@ -75,11 +76,13 @@ Each `await` is a potential context switch:
 2. Event loop selects next ready task
 3. Next task resumes, potentially evicting cache lines
 
-**Key insight:** When data is already buffered, `await` returns immediately with no actual suspend.
-The implementations below exploit this by draining buffers synchronously before awaiting.
+**Key insight:** When data is already buffered, `await` returns immediately with
+no actual suspend. The implementations below exploit this by draining buffers
+synchronously before awaiting.
 
-Combined with `eager_task_factory` (worker.py), new tasks run synchronously until their first
-_real_ suspend point - avoiding scheduler overhead for fast-path requests.
+Combined with `eager_task_factory` (worker.py), new tasks run synchronously
+until their first _real_ suspend point - avoiding scheduler overhead for
+fast-path requests.
 
 ### Flow Diagram
 
@@ -125,13 +128,16 @@ flowchart TD
     style P5b fill:#ffcc80,stroke:#ef6c00
 ```
 
-Legend: Orange nodes are suspend points. Suspends only occur when data not already buffered.
+Legend: Orange nodes are suspend points. Suspends only occur when data not
+already buffered.
 
 ### Design Pattern: Buffer-Drain
 
-Both HTTP streaming and ZMQ transports use a common pattern to minimize async overhead:
+Both HTTP streaming and ZMQ transports use a common pattern to minimize async
+overhead:
 
-**Pattern:** Accumulate data in buffer, drain ALL available synchronously, only await when empty.
+**Pattern:** Accumulate data in buffer, drain ALL available synchronously, only
+await when empty.
 
 | Implementation                    | Buffer             | Drain Loop                         | Await Point                       |
 | --------------------------------- | ------------------ | ---------------------------------- | --------------------------------- |
@@ -181,7 +187,8 @@ sequenceDiagram
 
 The Buffer-Drain pattern optimizes for throughput. For latency-sensitive TTFT:
 
-- `eager_task_factory` ensures response tasks start immediately (no scheduler delay)
+- `eager_task_factory` ensures response tasks start immediately (no scheduler
+  delay)
 - First chunk triggers immediate event, task resumes on next loop iteration
 - Subsequent chunks batch naturally as task processes
 
@@ -285,7 +292,8 @@ Legend:  [AWAIT] = async suspend point     [SYNC] = synchronous (no suspend)
 ## 4. CPU Pinning Strategy
 
 The pinning strategy maximizes throughput while minimizing jitter between runs.
-NUMA-aware placement reduces cross-socket memory access and cache coherency traffic.
+NUMA-aware placement reduces cross-socket memory access and cache coherency
+traffic.
 
 ### Key Insight
 
@@ -372,7 +380,9 @@ Workers are mostly I/O-bound (waiting on HTTP responses).
 | **LoadGen** | `DEFAULT_LOADGEN_CORES` = 5 physical cores | Session thread + event loop thread + up to 4 ZMQ I/O threads. Bottleneck - gets fastest cores. |
 | **Workers** | 1 physical core each (2 logical)           | I/O-bound. Full core isolation prevents context switches, reduces jitter.                      |
 
-> The core-ordering diagram above is schematic — it shows two `LG` cells for illustration; the actual default reserves 5 physical cores for loadgen (`DEFAULT_LOADGEN_CORES` in `cpu_affinity.py`).
+> The core-ordering diagram above is schematic — it shows two `LG` cells for
+> illustration; the actual default reserves 5 physical cores for loadgen
+> (`DEFAULT_LOADGEN_CORES` in `cpu_affinity.py`).
 
 ### Why Both Hyperthreads Per Core
 
@@ -384,9 +394,11 @@ Each process owns its **entire physical core** (both hyperthreads):
 
 ### Why NUMA-Aware Placement
 
-- **Memory locality**: Workers on same NUMA node as LoadGen can access shared memory without cross-socket hops
+- **Memory locality**: Workers on same NUMA node as LoadGen can access shared
+  memory without cross-socket hops
 - **Cache coherency**: Reduced inter-NUMA cache invalidation traffic
-- **Graceful spillover**: When Primary NUMA is exhausted, workers spill to next-best NUMA nodes
+- **Graceful spillover**: When Primary NUMA is exhausted, workers spill to
+  next-best NUMA nodes
 
 ### Configuration
 
@@ -396,4 +408,5 @@ enable_cpu_affinity: true   # Auto-compute NUMA-aware plan (default)
 enable_cpu_affinity: false  # Disabled (no CPU pinning)
 ```
 
-See `src/inference_endpoint/endpoint_client/cpu_affinity.py` for full implementation.
+See `src/inference_endpoint/endpoint_client/cpu_affinity.py` for full
+implementation.

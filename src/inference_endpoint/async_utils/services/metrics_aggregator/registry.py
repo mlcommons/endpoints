@@ -507,7 +507,11 @@ class MetricsRegistry:
     # -- snapshot ---------------------------------------------------------
 
     def build_snapshot(
-        self, *, state: SessionState, n_pending_tasks: int
+        self,
+        *,
+        state: SessionState,
+        n_pending_tasks: int,
+        steady_state: dict | None = None,
     ) -> MetricsSnapshot:
         # Exact (raw-values) computation is reserved for the COMPLETE snapshot;
         # live and draining snapshots use the cheap HDR path.
@@ -524,6 +528,7 @@ class MetricsRegistry:
             state=state,
             n_pending_tasks=n_pending_tasks,
             metrics=metrics,
+            steady_state=steady_state,
         )
 
     # -- introspection (mostly for tests) --------------------------------

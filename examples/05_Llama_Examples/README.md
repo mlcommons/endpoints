@@ -2,8 +2,10 @@
 
 This example covers benchmarking two Llama models:
 
-- **[Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)** — CNN/DailyMail summarization, offline and online modes
-- **[Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf)** — Open Orca, online (Poisson) mode
+- **[Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)**
+  — CNN/DailyMail summarization, offline and online modes
+- **[Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf)**
+  — Open Orca, online (Poisson) mode
 
 ---
 
@@ -11,9 +13,15 @@ This example covers benchmarking two Llama models:
 
 ### Dataset
 
-The Llama3.1-8B benchmark uses the [cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset. When using the provided config files, the validation split is downloaded automatically by specifying the dataset name as `- name: cnn_dailymail::llama3_8b`.
+The Llama3.1-8B benchmark uses the
+[cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset.
+When using the provided config files, the validation split is downloaded
+automatically by specifying the dataset name as
+`- name: cnn_dailymail::llama3_8b`.
 
-For post-training quantization calibration, use the repository-provided [`calibration-list.txt`](./calibration-list.txt), which corresponds to the [cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/v4.0/calibration/CNNDailyMail/calibration-list.txt):
+For post-training quantization calibration, use the repository-provided
+[`calibration-list.txt`](./calibration-list.txt), which corresponds to the
+[cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/v4.0/calibration/CNNDailyMail/calibration-list.txt):
 
 ```bash
 uv run python download_cnndm.py --save-dir data --calibration-ids-file calibration-list.txt --split train
@@ -30,7 +38,12 @@ hf download $MODEL_NAME
 
 ### Launch the server
 
-**Note:** To generate outputs matching MLPerf submissions from legacy loadgen, apply a custom chat template (handled automatically by the `cnn_dailymail::llama3_8b` preset). The `--trust-request-chat-template` flag is required. **Security warning:** this flag allows execution of request-provided chat templates and should only be used in trusted environments. Do not enable it on publicly exposed endpoints.
+**Note:** To generate outputs matching MLPerf submissions from legacy loadgen,
+apply a custom chat template (handled automatically by the
+`cnn_dailymail::llama3_8b` preset). The `--trust-request-chat-template` flag is
+required. **Security warning:** this flag allows execution of request-provided
+chat templates and should only be used in trusted environments. Do not enable it
+on publicly exposed endpoints.
 
 ```bash
 docker run --runtime nvidia --gpus all \
@@ -53,7 +66,10 @@ uv run inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --
 uv run inference-endpoint benchmark from-config -c online_llama3_8b_cnn.yaml --timeout 600
 ```
 
-These configs run in performance-only mode by default. To also evaluate summarization quality, add `--mode both` and install the accuracy dependencies listed in the [Llama-2-70b accuracy setup](#accuracy-evaluation-setup-optional) section below.
+These configs run in performance-only mode by default. To also evaluate
+summarization quality, add `--mode both` and install the accuracy dependencies
+listed in the [Llama-2-70b accuracy setup](#accuracy-evaluation-setup-optional)
+section below.
 
 ---
 
@@ -61,18 +77,25 @@ These configs run in performance-only mode by default. To also evaluate summariz
 
 ### Dataset
 
-Download the preprocessed Open Orca dataset from the MLCommons R2 bucket. Navigate to your desired download directory and run:
+Download the preprocessed Open Orca dataset from the MLCommons R2 bucket.
+Navigate to your desired download directory and run:
 
 ```bash
 bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) \
     https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri
 ```
 
-Running the script above will download the dataset to the `./open_orca` directory. Additional instructions for downloading the model and dataset are in the [Reference Implementation for llama2-70b](https://github.com/mlcommons/inference/tree/master/language/llama2-70b).
+Running the script above will download the dataset to the `./open_orca`
+directory. Additional instructions for downloading the model and dataset are in
+the
+[Reference Implementation for llama2-70b](https://github.com/mlcommons/inference/tree/master/language/llama2-70b).
 
 ### Environment
 
-Go to [meta-llama/Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf) and request access, then create a HuggingFace access token with read permissions.
+Go to
+[meta-llama/Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf)
+and request access, then create a HuggingFace access token with read
+permissions.
 
 ```bash
 export MODEL_NAME=meta-llama/Llama-2-70b-chat-hf
@@ -83,7 +106,8 @@ hf download $MODEL_NAME
 
 ### Accuracy evaluation setup (optional)
 
-Accuracy evaluation requires additional packages. Skip this for performance-only runs.
+Accuracy evaluation requires additional packages. Skip this for performance-only
+runs.
 
 ```bash
 uv pip install nltk evaluate rouge_score

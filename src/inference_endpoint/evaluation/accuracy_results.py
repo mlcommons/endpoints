@@ -26,8 +26,9 @@ back from the entry's ``score``.
 
 This module owns that contract: the breakdown constructor
 (:func:`build_breakdown`), the readers (:func:`find_accuracy_entry` /
-:func:`find_accuracy_breakdown`), the cross-component mean
-(:func:`average_accuracy`), and the numeric coercion (:func:`to_float`). It lives
+:func:`find_accuracy_breakdown`), the sample-count-weighted cross-component mean
+(:func:`samples_weighted_average_accuracy`), and the numeric coercion
+(:func:`to_float`). It lives
 under ``evaluation`` — the layer that *produces* breakdowns — so ``metrics`` and
 ``compliance`` can both import it without a cycle.
 """
@@ -86,35 +87,69 @@ def find_accuracy_breakdown(results: dict[str, Any]) -> dict[str, Any] | None:
     return entry.get("breakdown") if entry is not None else None
 
 
-def average_accuracy(accuracy_scores: list[dict[str, Any]]) -> float | None:
-    """Plain mean of the per-dataset scalar scores across accuracy components.
+def samples_weighted_average_accuracy(
+    accuracy_scores: list[dict[str, Any]],
+) -> float | None:
+    """Sample-count-weighted mean of the per-dataset scalar scores.
 
-    One component per accuracy dataset (3 for gpt-oss, 1 for DeepSeek-R1), so the
-    result equals the single dataset's score when there is only one. The inline
-    perf-scored entry (``dataset_type == "performance"``) — a scored perf dataset,
-    not an accuracy component — and any non-numeric score are excluded. Excluding
-    by the ``dataset_type`` discriminator (not by ``dataset_name == "performance"``)
-    means a dataset legitimately named ``performance`` is still counted. Returns
-    ``None`` when no component has a numeric score.
+    Each accuracy component is weighted by its dataset sample count — the
+    ``unit_samples`` field, which is ``dataset.num_samples()`` (the number of rows
+    in the loaded dataset, e.g. 30 AIME / 198 GPQA / 1055 LiveCodeBench problems),
+    NOT ``total_samples`` (``unit_samples × repeats``, the issued attempts). This
+    reproduces the MLCommons gpt-oss reference aggregation that feeds the
+    submission ``exact_match``::
 
-    Assumes the components share a scale — real runs score one model's same-family
-    datasets (gpt-oss: three fraction ``[0, 1]`` scorers; DeepSeek-R1: one
-    percentage ``[0, 100]`` scorer). A hypothetical run mixing scales would yield a
-    meaningless mean, but magnitude alone can't tell a fraction from a low
-    percentage, so this does not guess; homogenizing the scorer ``score()``
-    contract to one unit is tracked separately.
+        overall = Σ(score_d · unit_samples_d) / Σ unit_samples_d
+
+    Because ``score_d = correct_d / (unit_samples_d · repeats_d)``, the numerator
+    term equals ``correct_d / repeats_d`` — i.e. each dataset is normalized
+    per-repeat before combining, so it contributes in proportion to its unique
+    problems regardless of how many repeats it ran. A plain unweighted mean
+    over-weights small datasets (AIME's 30 problems counting equally with
+    LiveCodeBench's 1055) and does not match the reference; weighting by
+    ``total_samples`` (issued attempts) instead yields the reference's *raw*
+    accuracy, which is not the submitted score.
+
+    With one component the weight cancels and the result is that dataset's score
+    (DeepSeek-R1). The inline perf-scored entry (``dataset_type == "performance"``)
+    and any non-numeric score are excluded; exclusion is by the ``dataset_type``
+    discriminator, so a dataset legitimately named ``performance`` still counts.
+    A component with ``unit_samples`` absent/``None`` falls back to weight ``1.0``
+    (legacy artifacts predating the field; runs produced by this tool always record
+    it — ``accuracy.py``), while a *present but* non-positive/non-numeric weight is
+    treated as corrupt and the component is skipped rather than counted as one
+    sample. Returns ``None`` when no component contributes a numeric score.
+
+    Assumes the components share a scale (gpt-oss: fractions ``[0, 1]``;
+    DeepSeek-R1: one percentage ``[0, 100]``); it does not homogenize units.
     """
-    values = [
-        float(entry["score"])
-        for entry in accuracy_scores
-        if isinstance(entry, dict)
-        and entry.get("dataset_type") != DatasetType.PERFORMANCE.value
-        and isinstance(entry.get("score"), int | float)
-        and not isinstance(entry.get("score"), bool)
-    ]
-    if not values:
+    numerator = 0.0
+    denominator = 0.0
+    for entry in accuracy_scores:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("dataset_type") == DatasetType.PERFORMANCE.value:
+            continue
+        score = entry.get("score")
+        if not isinstance(score, int | float) or isinstance(score, bool):
+            continue
+        weight = entry.get("unit_samples")
+        if weight is None:
+            # Legacy artifacts predating unit_samples: contribute unweighted.
+            weight = 1.0
+        elif (
+            isinstance(weight, bool)
+            or not isinstance(weight, int | float)
+            or weight <= 0
+        ):
+            # Present but non-positive / non-numeric — a corrupt weight; skip the
+            # entry rather than invent a sample count that would skew the mean.
+            continue
+        numerator += float(score) * float(weight)
+        denominator += float(weight)
+    if denominator == 0:
         return None
-    return sum(values) / len(values)
+    return numerator / denominator
 
 
 def build_breakdown(

@@ -4,9 +4,9 @@
 
 Subprocess startup is asynchronous. The main process spawns workers or service
 subprocesses, but cannot use them until they have completed initialization
-(bound sockets, subscribed to topics, loaded resources). Without synchronization,
-the main process may send messages that are dropped because the subprocess isn't
-listening yet.
+(bound sockets, subscribed to topics, loaded resources). Without
+synchronization, the main process may send messages that are dropped because the
+subprocess isn't listening yet.
 
 ## Solution
 
@@ -26,12 +26,12 @@ Main Process                         Subprocess (worker or service)
 
 ## Why PUSH/PULL
 
-PUB/SUB has a "slow joiner" problem — the subscriber may miss messages
-published before it connects. PUSH/PULL guarantees delivery: if the PULL
-socket is bound before the PUSH connects, no messages are lost.
+PUB/SUB has a "slow joiner" problem — the subscriber may miss messages published
+before it connects. PUSH/PULL guarantees delivery: if the PULL socket is bound
+before the PUSH connects, no messages are lost.
 
-Multiple PUSH sockets can connect to a single PULL socket (ZMQ fan-in).
-This means one receiver socket handles readiness from all subprocesses.
+Multiple PUSH sockets can connect to a single PULL socket (ZMQ fan-in). This
+means one receiver socket handles readiness from all subprocesses.
 
 ## Components
 
@@ -40,7 +40,8 @@ This means one receiver socket handles readiness from all subprocesses.
 - Binds a ZMQ PULL socket on an IPC path
 - `wait(timeout)` blocks until `count` signals arrive
 - Returns list of identities in arrival order
-- Closes the socket after all signals are received, but deliberately **not** on timeout (the caller may retry)
+- Closes the socket after all signals are received, but deliberately **not** on
+  timeout (the caller may retry)
 - Timeout is a total deadline, not per-message
 
 ### `send_ready_signal()` (subprocess side)
@@ -54,8 +55,8 @@ This means one receiver socket handles readiness from all subprocesses.
 
 ### Workers (PUSH/PULL primary transport)
 
-The `_ZmqWorkerConnector` calls `send_ready_signal()` with the worker's
-existing ZMQ context after connecting its request/response transports:
+The `_ZmqWorkerConnector` calls `send_ready_signal()` with the worker's existing
+ZMQ context after connecting its request/response transports:
 
 ```python
 requests = _create_receiver(loop, request_path, zmq_context, ...)
@@ -101,7 +102,8 @@ ServiceLauncher.wait_for_exit(procs, timeout=60.0)
 The launcher:
 
 1. Creates a `ReadyCheckReceiver` bound to a unique IPC path
-2. Spawns each service as `python -m <module> ... --readiness-path <path> --readiness-id <i>`
+2. Spawns each service as
+   `python -m <module> ... --readiness-path <path> --readiness-id <i>`
 3. Awaits all readiness signals (total deadline timeout)
 4. Returns subprocess handles for later `wait_for_exit()`
 5. On failure, checks for subprocess crashes and kills remaining processes
@@ -109,6 +111,6 @@ The launcher:
 ## Ordering Guarantee
 
 The ready signal is sent **after** the subprocess has completed its
-initialization (transport connect, topic subscribe, reader registration).
-This guarantees that when the main process's `wait()` returns, all
-subprocesses are ready to process messages.
+initialization (transport connect, topic subscribe, reader registration). This
+guarantees that when the main process's `wait()` returns, all subprocesses are
+ready to process messages.

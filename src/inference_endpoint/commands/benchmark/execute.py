@@ -56,6 +56,7 @@ from inference_endpoint.commands.benchmark.accuracy import (
     score_accuracy,
     write_accuracy_results,
 )
+from inference_endpoint.commands.benchmark.full_run_osl import full_run_osl_for_report
 from inference_endpoint.commands.benchmark.pipeline import MetricsPipeline
 from inference_endpoint.commands.benchmark.profiling import (
     ProfileController,
@@ -79,7 +80,7 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import PhaseType, QueryResult
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -97,12 +98,13 @@ from inference_endpoint.exceptions import (
 )
 from inference_endpoint.load_generator.agentic_inference_strategy import (
     AgenticInferenceStrategy,
+    expected_agentic_sample_count,
 )
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
+    EndpointResponseIdleTimeoutError,
     PhaseConfig,
-    PhaseType,
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
@@ -171,6 +173,9 @@ class BenchmarkResult:
     profiling: dict[str, Any] | None = None
     run_timed_out: bool = False
     user_interrupted: bool = False
+    # Endpoint response idle timeout message when the endpoint stalled; the run still drains
+    # and finalizes its artifacts, then run_benchmark fails with this message.
+    stall_error: str | None = None
 
 
 @dataclass
@@ -542,6 +547,26 @@ def setup_benchmark(
                 sample_order=audit_run_spec.sample_order,
             )
         total_samples = rt_settings.total_samples_to_issue()
+        # WAR (TODO: clean up the logic of agentic issue mode and single issue mode)
+        # calculate the correct number of samples to issue for agentic inference dataset
+        if isinstance(dataloader, AgenticInferenceDataset):
+            perf_ds_cfg = next(
+                (d for d in config.datasets if d.type == DatasetType.PERFORMANCE),
+                None,
+            )
+            agentic_cfg = (
+                perf_ds_cfg.agentic_inference if perf_ds_cfg is not None else None
+            )
+            assert dataloader.conversation_metadata is not None
+            total_samples = expected_agentic_sample_count(
+                dataloader.conversation_metadata,
+                (
+                    agentic_cfg.num_trajectories_to_issue
+                    if agentic_cfg is not None
+                    else None
+                ),
+                rt_settings.rng_sample_index,
+            )
 
     total_samples += sum(
         ec.dataset.num_samples() * ec.dataset.repeats
@@ -751,11 +776,15 @@ def _build_agentic_strategy(
         if perf_ds_cfg is not None:
             agentic_cfg = perf_ds_cfg.agentic_inference
     assert ctx.dataloader.conversation_metadata is not None
+    rng_sample_index = (
+        ctx.rt_settings.rng_sample_index if ctx.rt_settings is not None else None
+    )
     return AgenticInferenceStrategy(
         conversation_manager=ConversationManager(),
         dataset_metadata=ctx.dataloader.conversation_metadata,
         agentic_inference_config=agentic_cfg,
         target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
+        rng_sample_index=rng_sample_index,
     )
 
 
@@ -821,6 +850,7 @@ async def _run_benchmark_async(
         config,
         tokenizer_name=ctx.tokenizer_name,
         enable_streaming=ctx.enable_streaming,
+        accuracy_only=ctx.accuracy_only,
         event_log_dir=event_log_dir,
         metrics_output_dir=metrics_output_dir,
         loop=loop,
@@ -872,6 +902,7 @@ async def _run_benchmark_async(
                     loop=loop,
                     on_sample_complete=on_sample_complete,
                     session_id=session_id,
+                    endpoint_response_idle_timeout_s=ctx.config.settings.timeouts.endpoint_response_idle_timeout_s,
                 )
                 watchdog.bind_session(session)
                 sigint.bind_session(session, abort_event)
@@ -884,6 +915,7 @@ async def _run_benchmark_async(
                 )
                 _perf_cap_done = False
                 session_completed_normally = False
+                stall_error: str | None = None
 
                 def _on_perf_phase_timeout() -> None:
                     if not _perf_cap_done:
@@ -924,6 +956,23 @@ async def _run_benchmark_async(
                             "Session error after run timeout fired "
                             "(continuing to finalize)"
                         )
+                        result = SessionResult(
+                            session_id=session_id,
+                            phase_results=[],
+                            start_time_ns=0,
+                            end_time_ns=0,
+                        )
+                    elif isinstance(e, EndpointResponseIdleTimeoutError):
+                        # Endpoint stall is fatal but the drained data is still
+                        # worth keeping: fall through to the drain below so the
+                        # interrupted report and standard artifacts are written,
+                        # then run_benchmark fails with this message.
+                        logger.error(
+                            "Endpoint stalled — finalizing partial results "
+                            "before failing the run: %s",
+                            e,
+                        )
+                        stall_error = str(e)
                         result = SessionResult(
                             session_id=session_id,
                             phase_results=[],
@@ -1011,6 +1060,7 @@ async def _run_benchmark_async(
         profiling=profiler.payload(),
         run_timed_out=watchdog.fired,
         user_interrupted=sigint.interrupted,
+        stall_error=stall_error,
     )
 
 
@@ -1162,6 +1212,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     aborted = (
         bench.run_timed_out
         or bench.user_interrupted
+        or bench.stall_error is not None
         or (report is not None and report.state == "interrupted")
     )
     if report is not None and aborted and report.state != "interrupted":
@@ -1172,13 +1223,18 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # sample_idx_map.json + events.jsonl from here).
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
-    # Accuracy scoring runs before report writing so its headline can attach.
-    # The finally block still writes the performance report if scoring fails.
+    # Full-run OSL over every turn, including those issued after the performance
+    # window closed, plus accuracy scoring. Both run inside the try/finally so a
+    # Ctrl-C during the (large) event-log scan still writes an interrupted report
+    # instead of losing it. Skipped on abort: a partial tail would report as
+    # complete.
+    full_run_osl: dict[str, Any] | None = None
     accuracy_scores: list[dict[str, Any]] = []
     try:
         if aborted:
             logger.warning("Run aborted — skipping accuracy scoring on partial data")
         else:
+            full_run_osl = full_run_osl_for_report(ctx.report_dir, ctx.tokenizer_name)
             accuracy_scores = score_accuracy(ctx, result)
     except KeyboardInterrupt:
         if report is not None:
@@ -1191,7 +1247,11 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         # Attach the per-dataset accuracy list so result_summary.json, the
         # console summary, and report.txt all carry it.
         if report is not None:
-            final_report = msgspec.structs.replace(report, accuracy=accuracy_scores)
+            final_report = msgspec.structs.replace(
+                report,
+                accuracy=accuracy_scores,
+                output_sequence_lengths_full_run=full_run_osl,
+            )
             _write_report_artifacts(ctx, final_report, bench.profiling)
             report = final_report
     bench.report = report
@@ -1257,6 +1317,10 @@ def run_benchmark(
                 raise ExecutionError(
                     f"Run timeout ({run_timeout_s}s) reached; run aborted and "
                     "report marked INTERRUPTED"
+                )
+            if bench.stall_error is not None:
+                raise ExecutionError(
+                    f"{bench.stall_error}; run aborted and report marked INTERRUPTED"
                 )
             if bench.report is None:
                 raise ExecutionError("Benchmark produced no usable metrics report")

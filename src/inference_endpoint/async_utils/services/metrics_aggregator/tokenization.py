@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
+from inference_endpoint.core.types import TextModelOutput
+
 
 @dataclass(frozen=True, slots=True)
 class TokenIdsInput:
@@ -51,3 +53,26 @@ class PromptInput:
 TokenizationInput: TypeAlias = (  # noqa: UP040 - mypy version lacks PEP 695.
     TokenIdsInput | TextInput | MessageInput | PromptInput
 )
+
+
+def extract_tokenization_input(
+    output: TextModelOutput,
+) -> MessageInput | TextInput | None:
+    """The OSL rule: how one model output is rendered for token counting.
+
+    Single source of truth for both OSL populations — the performance-window
+    series (``OslTrigger``) and the full-run statistic. Keeping one rule is
+    what makes the two numbers comparable; a second, text-only implementation
+    silently under-counts reasoning and tool calls (mlcommons/endpoints#500).
+
+    Returns ``None`` for an output that must not be counted at all: an empty
+    completion is excluded rather than counted as a zero-token sample, because
+    a failed request still logs a COMPLETE event with ``output == ""`` and
+    would otherwise drag ``min``/``avg`` down.
+    """
+    if output.reasoning or output.tool_calls:
+        return MessageInput(*output.as_message_parts())
+    text = str(output)
+    if text:
+        return TextInput(text)
+    return None

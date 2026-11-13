@@ -43,6 +43,12 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     snapshot_to_dict,
 )
 from inference_endpoint.metrics.report import Report, series_metric_dict
+from inference_endpoint.metrics.steady_state_diagnostics import (
+    Anomaly,
+    SteadyState,
+    SteadyWindow,
+    TpsBlock,
+)
 
 # 1 hour in ns — same as the aggregator's default bound for time-series.
 _NS_HIGH = 3_600_000_000_000
@@ -93,7 +99,7 @@ class TestSeriesMetricDict:
         assert d["std_dev"] == 0.0
 
 
-def _make_registry(n_samples: int = 50) -> MetricsRegistry:
+def _make_registry(n_samples: int = 50, *, isl: bool = True) -> MetricsRegistry:
     """A registry populated with the metrics ``Report.from_snapshot`` reads.
 
     Only the metrics consumed by ``Report.from_snapshot`` are registered:
@@ -121,14 +127,15 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
         n_histogram_buckets=10,
         percentiles=(50.0, 90.0, 99.0),
     )
-    registry.register_series(
-        MetricSeriesKey.ISL.value,
-        hdr_low=1,
-        hdr_high=10_000_000,
-        sig_figs=3,
-        n_histogram_buckets=10,
-        percentiles=(50.0, 90.0, 99.0),
-    )
+    if isl:
+        registry.register_series(
+            MetricSeriesKey.ISL.value,
+            hdr_low=1,
+            hdr_high=10_000_000,
+            sig_figs=3,
+            n_histogram_buckets=10,
+            percentiles=(50.0, 90.0, 99.0),
+        )
     registry.register_series(
         MetricSeriesKey.OSL.value,
         hdr_low=1,
@@ -156,7 +163,8 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
             registry.record(
                 MetricSeriesKey.SAMPLE_LATENCY_NS.value, 5_000_000 + i * 50_000
             )
-            registry.record(MetricSeriesKey.ISL.value, 50 + i)
+            if isl:
+                registry.record(MetricSeriesKey.ISL.value, 50 + i)
             registry.record(MetricSeriesKey.OSL.value, 100 + i)
 
     return registry
@@ -209,12 +217,21 @@ class TestFromSnapshot:
         # No duration -> from_snapshot leaves throughput unset.
         assert report.qps is None
         assert report.tps is None
+        assert report.e2e_avg_interactivity is None
         # Series with count==0 should produce empty dicts.
         assert report.ttft == {}
         assert report.latency == {}
         assert report.input_sequence_lengths == {}
         assert report.output_sequence_lengths == {}
         assert report.tpot == {}
+
+    def test_isl_series_absent(self):
+        # settings.metrics_isl=false: the aggregator never registers the
+        # series, so the snapshot lacks it entirely (not merely count==0).
+        report = _build_report(_make_registry(n_samples=50, isl=False))
+
+        assert report.input_sequence_lengths == {}
+        assert report.output_sequence_lengths["total"] > 0
 
     def test_with_metrics(self):
         registry = _make_registry(n_samples=50)
@@ -226,6 +243,7 @@ class TestFromSnapshot:
         assert report.n_samples_completed == 50
         assert report.duration_ns == 10_000_000_000
         assert report.qps == pytest.approx(5.0)
+        assert report.e2e_avg_interactivity == pytest.approx(20_000.0)
 
         assert "min" in report.ttft
         assert "percentiles" in report.ttft
@@ -260,6 +278,25 @@ class TestFromSnapshot:
         assert report.tpot == {}
         # OSL data was written → tps is computable.
         assert report.tps is not None
+
+    def test_e2e_avg_interactivity_is_unavailable_with_failed_requests(self):
+        """Do not divide successful-output tokens by mixed-success latency."""
+        registry = _make_registry(n_samples=0)
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value, 2)
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_COMPLETED.value, 2)
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_FAILED.value)
+        registry.set_counter(MetricCounterKey.TRACKED_DURATION_NS.value, 10_000_000_000)
+        # Both terminal requests contribute latency, but only the successful
+        # response contributes output tokens.
+        registry.record(MetricSeriesKey.SAMPLE_LATENCY_NS.value, 1_000_000_000)
+        registry.record(MetricSeriesKey.SAMPLE_LATENCY_NS.value, 9_000_000_000)
+        registry.record(MetricSeriesKey.OSL.value, 100)
+
+        report = _build_report(registry, use_legacy_loadgen_qps_metrics=False)
+
+        assert report.latency["total"] == 10_000_000_000
+        assert report.output_sequence_lengths["total"] == 100
+        assert report.e2e_avg_interactivity is None
 
     def test_run_config_keyword_only_passthrough(self):
         """run_config is config, not a snapshot metric: None unless the caller
@@ -357,6 +394,7 @@ class TestReportDisplayAndSerialize:
         assert "Summary" in output
         assert "QPS:" in output
         assert "TPS:" in output
+        assert "E2E average interactivity: 20000.00 tokens/s" in output
         assert "End of Summary" in output
 
     def test_from_snapshot_leaves_accuracy_empty(self):
@@ -369,7 +407,9 @@ class TestReportDisplayAndSerialize:
         report = _build_report(_make_registry(n_samples=0))
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
-        assert "TPS: N/A" in "\n".join(lines)
+        output = "\n".join(lines)
+        assert "TPS: N/A" in output
+        assert "E2E average interactivity: N/A" in output
 
     def test_display_accuracy_section(self):
         """Each accuracy entry renders score + sample counts, plus per-subset
@@ -462,12 +502,14 @@ class TestReportDisplayAndSerialize:
         assert data["qps"] == pytest.approx(5.0)  # 50 completed / 10s
         assert data["tps"] == pytest.approx(report.tps)
         assert data["tps"] > 0  # OSL was recorded, so TPS is computable
+        assert data["e2e_avg_interactivity"] == pytest.approx(20_000.0)
 
     def test_to_json_qps_tps_null_without_duration(self):
         """No duration -> qps/tps serialize as null, not omitted or crashing."""
         data = json.loads(_build_report(_make_registry(n_samples=0)).to_json())
         assert data["qps"] is None
         assert data["tps"] is None
+        assert data["e2e_avg_interactivity"] is None
 
     def test_to_json_and_display_carry_run_config(self):
         """result_summary.json + report.txt carry the run's config so a run is
@@ -557,6 +599,101 @@ class TestReportDisplayAndSerialize:
         report.display(fn=lines.append, summary_only=True)
         output = "\n".join(lines)
         assert "WARNING" in output or "incomplete" in output.lower()
+
+    def _report_with_full_run_osl(self, fr, *, osl_windowed=None, complete=True):
+        return Report(
+            version="test",
+            git_sha=None,
+            test_started_at=0,
+            n_samples_issued=10,
+            n_samples_completed=10,
+            n_samples_failed=0,
+            duration_ns=1_000_000_000,
+            state="complete" if complete else "interrupted",
+            complete=complete,
+            ttft={},
+            tpot={},
+            latency={},
+            input_sequence_lengths={},
+            output_sequence_lengths=osl_windowed or {},
+            output_sequence_lengths_full_run=fr,
+        )
+
+    def test_display_full_run_osl_mean(self):
+        """A block with counted turns prints the accuracy per-turn mean."""
+        report = self._report_with_full_run_osl(
+            {
+                "output_sequence_lengths": {"avg": 412.5},
+                "n_turns_counted": 1055,
+                "n_empty": 3,
+                "n_errors": 0,
+            }
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert (
+            "OSL per-turn mean (accuracy, all turns): 412.5 tokens over 1055 turns"
+            in output
+        )
+
+    def test_display_full_run_osl_no_countable_turns(self):
+        """An all-empty/all-error block prints counts, not a fabricated 0.0 mean."""
+        report = self._report_with_full_run_osl(
+            {
+                "output_sequence_lengths": {},
+                "n_turns_counted": 0,
+                "n_empty": 5,
+                "n_errors": 2,
+            }
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert "no countable turns" in output
+        assert "0.0 tokens" not in output
+
+    def test_display_full_run_osl_partial_is_flagged(self):
+        """A partial block (errored/missing turns) is labeled NOT valid for the gate."""
+        report = self._report_with_full_run_osl(
+            {
+                "output_sequence_lengths": {"avg": 400.0},
+                "n_turns_counted": 1,
+                "n_empty": 0,
+                "n_errors": 1,
+                "n_undecodable": 0,
+                "n_missing": 1,
+                "partial": True,
+            }
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert "1 missing" in output
+        assert "PARTIAL" in output
+        assert "NOT valid for the OSL accuracy gate" in output
+
+    def test_display_full_run_osl_missing_on_complete_performance_run(self):
+        """A COMPLETE perf run (windowed OSL present) with no full-run block
+        blames the tokenizer/sample-map, not incompleteness."""
+        report = self._report_with_full_run_osl(None, osl_windowed={"avg": 100.0})
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert "no tokenizer or unreadable sample map" in output
+        assert "run incomplete" not in output
+
+    def test_display_full_run_osl_incomplete_run_with_windowed_osl(self):
+        """An INTERRUPTED perf run (windowed OSL present, no block) must report
+        incompleteness — not a false tokenizer/sample-map diagnosis."""
+        report = self._report_with_full_run_osl(
+            None, osl_windowed={"avg": 100.0}, complete=False
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "".join(lines)
+        assert "run incomplete" in output
+        assert "no tokenizer or unreadable sample map" not in output
 
     def test_display_warns_when_interrupted(self):
         """Reports with ``state == "interrupted"`` surface a distinct WARNING."""
@@ -810,3 +947,114 @@ def test_scrub_nonfinite_round_trip_yields_none():
     json.dumps(d, allow_nan=False)
     # Sanity: original NaN was indeed non-finite.
     assert not math.isfinite(float("nan"))
+
+
+@pytest.mark.unit
+class TestSteadyStateOnTheReport:
+    """The verdict rides the snapshot into result_summary.json and report.txt."""
+
+    @staticmethod
+    def _verdict(**over) -> SteadyState:
+        """A complete verdict; ``over`` replaces individual fields."""
+        base = SteadyState(
+            found=True,
+            reason=None,
+            superpass_size=500,
+            n_super_passes=12,
+            warmup=1,
+            window=SteadyWindow(
+                sp_lo=1,
+                sp_hi=9,
+                n_super_passes=8,
+                n_samples=4000,
+                start_ns=0,
+                end_ns=700_000_000_000,
+                plateau_index=0,
+                n_plateaus=1,
+                skipped_short=0,
+            ),
+            ttft=None,
+            tpot=None,
+            osl=None,
+            latency=None,
+            tps=TpsBlock(
+                per_user=42.0,
+                per_user_ci=[41.0, 43.0],
+                system=1234.5,
+                system_ci=[1200.0, 1270.0],
+            ),
+            cov={},
+            cov_basis=None,
+            anomaly=Anomaly(
+                detected=True,
+                change_point_sp=7,
+                delta_pct=12.5,
+                pettitt=None,
+                plateaus=[[1, 9]],
+            ),
+            short_window=None,
+            global_trend={},
+            drifting_up=["ttft_p50"],
+        )
+        return msgspec.structs.replace(base, **over) if over else base
+
+    def _report(self, verdict):
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(
+                state=SessionState.COMPLETE, n_pending_tasks=0, steady_state=verdict
+            )
+        )
+        return Report.from_snapshot(snap)
+
+    def test_absent_by_default(self):
+        assert self._report(None).steady_state is None
+
+    def test_read_from_the_snapshot_and_kept_in_to_json(self):
+        verdict = self._verdict()
+        report = self._report(verdict)
+        assert report.steady_state == verdict
+        assert json.loads(report.to_json())["steady_state"] == msgspec.to_builtins(
+            verdict
+        )
+
+    def test_a_scrubbed_verdict_is_dropped_rather_than_rendered_wrong(self):
+        """``snapshot_to_dict`` scrubs non-finite floats to ``None``.
+
+        A ``None`` where the schema promises a number means the verdict no
+        longer describes anything, so it is dropped and the run keeps its
+        report. Coercing instead would print a plausible wrong number --
+        ``cov()`` divides by a mean that can be zero, so this is reachable.
+        """
+        raw = msgspec.to_builtins(self._verdict())
+        raw["tps"]["system"] = None  # what _scrub_deep leaves behind
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        snap["steady_state"] = raw
+        report = Report.from_snapshot(snap)
+        assert report.steady_state is None
+        lines: list[str] = []
+        report.display(lines.append)  # must not raise
+        assert "Steady state" not in "".join(lines)
+
+    def test_display_renders_the_headline(self):
+        lines: list[str] = []
+        self._report(self._verdict()).display(lines.append)
+        text = "".join(lines)
+        assert "Steady state: super-passes 1...8 (post-warmup), 4000 samples" in text
+        assert "over 700s" in text
+        assert "Steady TPS: 1234.50 system, 42.00 per user" in text
+        assert "ttft_p50 drifting up" in text
+        assert "ANOMALY: level shift at super-pass 7, TPOT +12.5%" in text
+
+    def test_display_reports_a_missing_window(self):
+        lines: list[str] = []
+        verdict = self._verdict(
+            found=False, reason="no admissible steady plateau", window=None, tps=None
+        )
+        self._report(verdict).display(lines.append)
+        assert "Steady state: not found (no admissible steady plateau)" in "".join(
+            lines
+        )

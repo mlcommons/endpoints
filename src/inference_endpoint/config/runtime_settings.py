@@ -110,7 +110,7 @@ class RuntimeSettings:
     """Random number generator for scheduler"""
 
     rng_sample_index: random.Random
-    """Random number generator for sample indexing"""
+    """Random number generator for sample indexing / agentic conversation shuffle"""
 
     load_pattern: LoadPattern | None
     """Load pattern configuration"""

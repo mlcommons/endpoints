@@ -7,6 +7,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -16,6 +17,12 @@ from typing import Any
 
 from pydantic import AliasChoices, BaseModel, Field
 
+from .pyxis_persistent import PersistentExecChannel
+from .pyxis_slurm import SRUN_MAX_ATTEMPTS as _SRUN_MAX_ATTEMPTS
+from .pyxis_slurm import (
+    is_retryable_prelaunch_failure as _is_retryable_prelaunch_failure,
+)
+from .pyxis_slurm import wait_for_prelaunch_retry
 from .runner import RunnerError
 
 logger = logging.getLogger(__name__)
@@ -43,6 +50,8 @@ _SAFE_SRUN_ENV = (
     "SLURM_CONF",
 )
 _STEP_STATUS = "/tmp/.mlperf_srun_status"
+_PERSISTENT_ROOT = "/.mlperf_persistent_exec"
+_COMMAND_WORKER = Path(__file__).with_name("pyxis_command_worker.sh")
 _STEP_SCRIPT = r"""set +e
 status_path=$1
 timeout_s=$2
@@ -120,8 +129,6 @@ def run_srun_step(
     workdir: str | None = None,
     stderr: int = subprocess.STDOUT,
 ) -> subprocess.CompletedProcess[str]:
-    status_path.write_text("pending\n")
-    status_path.chmod(0o666)
     command = build_srun_command(
         image=image,
         name=name,
@@ -137,28 +144,52 @@ def run_srun_step(
             *argv,
         ],
     )
-    try:
-        result = subprocess.run(
-            command,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=stderr,
-            timeout=timeout_s + 30,
-            env=safe_srun_env(),
+    for attempt in range(1, _SRUN_MAX_ATTEMPTS + 1):
+        status_path.write_text("pending\n")
+        status_path.chmod(0o666)
+        try:
+            result = subprocess.run(
+                command,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                timeout=timeout_s + 30,
+                env=safe_srun_env(),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            if failure_path is not None:
+                failure_path.touch()
+            raise RunnerError(
+                "Pyxis infrastructure failure before the command completed"
+            ) from exc
+
+        status = status_path.read_text().strip()
+        if status == f"finished:{result.returncode}":
+            return result
+
+        output = "\n".join(
+            stream for stream in (result.stdout, result.stderr) if stream
+        ).strip()
+        retryable = _is_retryable_prelaunch_failure(status, output)
+        if retryable and attempt < _SRUN_MAX_ATTEMPTS:
+            wait_for_prelaunch_retry(attempt)
+            continue
+
+        if failure_path is not None:
+            failure_path.touch()
+        if len(output) > 8000:
+            output = "...<truncated>...\n" + output[-8000:]
+        detail = (
+            "Pyxis infrastructure failure before the command completed "
+            f"(srun return code {result.returncode}, attempts {attempt})"
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        if failure_path is not None:
-            failure_path.touch()
-        raise RunnerError(
-            "Pyxis infrastructure failure before the command completed"
-        ) from exc
-    if status_path.read_text().strip() != f"finished:{result.returncode}":
-        if failure_path is not None:
-            failure_path.touch()
-        raise RunnerError("Pyxis infrastructure failure before the command completed")
-    return result
+        if output:
+            detail += f"\nCaptured srun output:\n{output}"
+        raise RunnerError(detail)
+
+    raise AssertionError("unreachable")
 
 
 def resolve_image(image_registry: str, instance_id: str) -> str:
@@ -180,6 +211,7 @@ class PyxisEnvironmentConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     timeout_s: int = Field(
         default=30,
+        gt=0,
         validation_alias=AliasChoices("timeout_s", "timeout"),
         serialization_alias="timeout",
     )
@@ -194,60 +226,85 @@ class PyxisEnvironment:
         self.name = f"mswe_{safe_run_id}_{uuid.uuid4().hex[:8]}"
         self._tmp = tempfile.TemporaryDirectory(prefix=f"pyxis_{self.name}_")
         self._tmp_dir = Path(self._tmp.name)
-        self._tmp_dir.chmod(0o1777)
         self._lock = threading.Lock()
         self._cleaned = False
         try:
+            (self._tmp_dir / "tmp").mkdir(mode=0o700)
+            shutil.copyfile(_COMMAND_WORKER, self._tmp_dir / _COMMAND_WORKER.name)
             # A no-op initializes and validates the named persistent container.
             run_srun_step(
                 image=self.config.image,
                 name=self.name,
-                mounts=[(self._tmp_dir, "/tmp")],
+                mounts=[(self._tmp_dir / "tmp", "/tmp")],
                 workdir=self.config.cwd,
                 argv=["true"],
-                status_path=self._tmp_dir / Path(_STEP_STATUS).name,
+                status_path=self._tmp_dir / "tmp" / Path(_STEP_STATUS).name,
                 timeout_s=self.config.timeout_s,
                 failure_path=self.config.infrastructure_failure_path,
             )
-        except RunnerError as exc:
+            self._persistent_channel = PersistentExecChannel(
+                self._tmp_dir / "channel",
+                self._persistent_server_command(),
+                safe_srun_env(),
+                failure_path=self.config.infrastructure_failure_path,
+                launch_timeout_s=self.config.timeout_s + 30,
+            )
+            self._persistent_channel.start()
+        except (RunnerError, OSError) as exc:
             self.cleanup()
             raise RunnerError(
                 f"failed to start Pyxis container for {self.config.image}"
             ) from exc
+
+    def _persistent_server_command(self) -> list[str]:
+        return build_srun_command(
+            name=self.name,
+            # Tool cleanup of /tmp must not remove the worker or its protocol files.
+            mounts=[
+                (self._tmp_dir / "tmp", "/tmp"),
+                (self._tmp_dir, _PERSISTENT_ROOT),
+            ],
+            workdir=self.config.cwd,
+            argv=[
+                "env",
+                *(f"{key}={value}" for key, value in self.config.env.items()),
+                "unshare",
+                "--pid",
+                "--fork",
+                "--mount-proc",
+                "--kill-child",
+                "bash",
+                f"{_PERSISTENT_ROOT}/{_COMMAND_WORKER.name}",
+                f"{_PERSISTENT_ROOT}/channel",
+                *self.config.interpreter,
+            ],
+        )
 
     def execute(
         self, action: dict[str, Any], cwd: str = "", *, timeout: int | None = None
     ) -> dict[str, Any]:
         command = action.get("command", "")
         logger.debug("Executing Pyxis command: %s", command)
-        argv = ["env"]
-        argv.extend(f"{key}={value}" for key, value in self.config.env.items())
-        argv.extend([*self.config.interpreter, command])
-        result = run_srun_step(
-            argv=argv,
-            status_path=self._tmp_dir / Path(_STEP_STATUS).name,
-            timeout_s=timeout or self.config.timeout_s,
-            failure_path=self.config.infrastructure_failure_path,
-            name=self.name,
-            mounts=[(self._tmp_dir, "/tmp")],
-            workdir=cwd or self.config.cwd,
+        timeout_s = self.config.timeout_s if timeout is None else timeout
+        result = self._persistent_channel.execute(
+            command=command,
+            cwd=cwd or self.config.cwd,
+            timeout_s=timeout_s,
         )
         output: dict[str, Any]
-        if result.returncode == 124:
+        if result.timed_out:
             output = {
-                "output": result.stdout,
+                "output": result.output,
                 "returncode": -1,
                 "exception_info": "The command timed out",
                 "extra": {
                     "exception_type": "TimeoutExpired",
-                    "exception": (
-                        f"command timed out after {timeout or self.config.timeout_s}s"
-                    ),
+                    "exception": f"command timed out after {timeout_s}s",
                 },
             }
         else:
             output = {
-                "output": result.stdout,
+                "output": result.output,
                 "returncode": result.returncode,
                 "exception_info": "",
             }
@@ -295,6 +352,14 @@ class PyxisEnvironment:
                 return
             self._cleaned = True
         try:
+            channel = getattr(self, "_persistent_channel", None)
+            if channel is not None:
+                try:
+                    channel.close()
+                except (OSError, subprocess.SubprocessError):
+                    logger.warning(
+                        "Could not stop Pyxis worker %s", self.name, exc_info=True
+                    )
             if os.environ.get("SLURM_JOB_ID", "").strip():
                 try:
                     subprocess.run(

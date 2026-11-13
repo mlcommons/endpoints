@@ -26,7 +26,6 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Protocol
 
 import msgspec
@@ -39,24 +38,28 @@ from ..core.record import (
     SampleEventType,
     SessionEventType,
 )
-from ..core.types import PromptData, Query, QueryResult, StreamChunk
+from ..core.types import (
+    PhaseData,
+    PhaseType,
+    PromptData,
+    Query,
+    QueryResult,
+    StreamChunk,
+)
 from ..dataset_manager.dataset import Dataset
 from .sample_order import create_sample_order
 from .strategy import LoadStrategy, create_load_strategy
 
 logger = logging.getLogger(__name__)
 
+
+class EndpointResponseIdleTimeoutError(RuntimeError):
+    """An endpoint stopped returning response progress while work was in flight."""
+
+
 # ---------------------------------------------------------------------------
 # Phase configuration
 # ---------------------------------------------------------------------------
-
-
-class PhaseType(str, Enum):
-    """Phase types control tracking and reporting behavior."""
-
-    PERFORMANCE = "performance"
-    ACCURACY = "accuracy"
-    WARMUP = "warmup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +157,7 @@ class PhaseIssuer:
         "_dataset",
         "_issuer",
         "_on_inflight_drained",
+        "_on_inflight_started",
         "_performance_tracking_stopped",
         "_prompt_warning_reasons",
         "_publisher",
@@ -163,6 +167,7 @@ class PhaseIssuer:
         "uuid_to_conv_info",
         "completed_uuids",
         "inflight",
+        "inflight_started_ns",
         "issued_count",
     )
 
@@ -172,6 +177,7 @@ class PhaseIssuer:
         issuer: SampleIssuer,
         publisher: EventPublisher,
         stop_check: Callable[[], bool],
+        on_inflight_started: Callable[[], None] | None = None,
         on_inflight_drained: Callable[[], None] | None = None,
         routing_headers: tuple[str, ...] = (),
     ):
@@ -179,12 +185,15 @@ class PhaseIssuer:
         self._issuer = issuer
         self._publisher = publisher
         self._stop_check = stop_check
+        self._on_inflight_started = on_inflight_started
         self._on_inflight_drained = on_inflight_drained or (lambda: None)
         self._routing_headers = routing_headers
         self.uuid_to_index: dict[str, int] = {}
         self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.completed_uuids: set[str] = set()
         self.inflight: int = 0
+        # Set on the 0 -> 1 transition and cleared when the phase drains.
+        self.inflight_started_ns: int | None = None
         self.issued_count: int = 0
         self._performance_tracking_stopped = False
         self._prompt_warning_reasons: set[str] = set()
@@ -197,8 +206,12 @@ class PhaseIssuer:
         logger.warning(message)
 
     def mark_inflight_complete(self) -> None:
-        self.inflight -= 1
         if self.inflight <= 0:
+            logger.warning("Ignoring completion with no in-flight request")
+            return
+        self.inflight -= 1
+        if self.inflight == 0:
+            self.inflight_started_ns = None
             self._on_inflight_drained()
 
     def stop_performance_tracking(self) -> None:
@@ -312,7 +325,14 @@ class PhaseIssuer:
             )
         )
         self._issuer.issue(query)
+        starting_inflight = self.inflight == 0
+        if starting_inflight and self._on_inflight_started is not None:
+            self.inflight_started_ns = time.monotonic_ns()
         self.inflight += 1
+        # The callback arms the liveness guard, which reads this counter, so it
+        # must observe the incremented value rather than the prior idle state.
+        if starting_inflight and self._on_inflight_started is not None:
+            self._on_inflight_started()
         self.issued_count += 1
         return query_id
 
@@ -362,6 +382,7 @@ class BenchmarkSession:
         loop: asyncio.AbstractEventLoop,
         on_sample_complete: Callable[[QueryResult], None] | None = None,
         session_id: str | None = None,
+        endpoint_response_idle_timeout_s: float | None = None,
     ):
         self._issuer = issuer
         self._publisher = event_publisher
@@ -379,6 +400,20 @@ class BenchmarkSession:
         self._recv_task: asyncio.Task | None = None
         self._strategy_task: asyncio.Task | None = None
         self._drain_event = asyncio.Event()
+        self._fatal_error: RuntimeError | None = None
+        self._last_response_progress_ns: int | None = None
+        # Handling stamp of each streaming response's latest chunk, so that its
+        # COMPLETE is never earlier than its own chunks. Popped at the result;
+        # stamps of synthetically terminated queries are dropped at phase end.
+        self._last_chunk_ns: dict[str, int] = {}
+        # Liveness guard: a single re-arming timer, not a task. It exists only
+        # while work is in flight, so the disabled and idle paths cost nothing.
+        self._endpoint_response_idle_timeout_ns = (
+            int(endpoint_response_idle_timeout_s * 1_000_000_000)
+            if endpoint_response_idle_timeout_s is not None
+            else None
+        )
+        self._progress_timer: asyncio.TimerHandle | None = None
 
     def stop(self) -> None:
         """Signal early termination. Safe to call from signal handler.
@@ -389,6 +424,7 @@ class BenchmarkSession:
         """
         self._stop_requested = True
         self._drain_event.set()
+        self._disarm_endpoint_response_idle_timeout()
         if self._strategy_task and not self._strategy_task.done():
             self._strategy_task.cancel()
 
@@ -431,6 +467,8 @@ class BenchmarkSession:
 
         try:
             for phase in phases:
+                if self._fatal_error is not None:
+                    raise self._fatal_error
                 if self._stop_requested:
                     break
                 if on_phase_start is not None:
@@ -438,6 +476,8 @@ class BenchmarkSession:
                 result = await self._run_phase(phase)
                 if result is not None:
                     phase_results.append(result)
+                if self._fatal_error is not None:
+                    raise self._fatal_error
         finally:
             self._done = True
             if self._recv_task and not self._recv_task.done():
@@ -446,6 +486,8 @@ class BenchmarkSession:
                     await self._recv_task
                 except asyncio.CancelledError:
                     pass
+            self._disarm_endpoint_response_idle_timeout()
+            self._last_chunk_ns.clear()
             if self._stop_requested:
                 # Aborted run (Ctrl-C, transport closure, run watchdog): mark
                 # it BEFORE the terminal ENDED so the aggregator's ENDED-driven
@@ -463,11 +505,20 @@ class BenchmarkSession:
 
     async def _run_phase(self, phase: PhaseConfig) -> PhaseResult | None:
         """Run a single phase. Returns PhaseResult or None for warmup."""
+        # Tests key on this log line: tests/integration/commands/test_sigint.py
+        # waits for it as the "workers up, STARTED published" signal, and
+        # tests/integration/commands/test_benchmark_command.py asserts on it.
+        # Update them if the wording changes.
         logger.info("Starting phase: %s (%s)", phase.name, phase.phase_type.value)
         phase_start = time.monotonic_ns()
         # Per-phase stop flag is scoped to this phase; clear any cap left set by
         # a previous phase so it can't short-circuit this one.
         self._current_phase_stopped = False
+        # A new phase must not inherit a response timestamp from the previous
+        # phase: its first in-flight request gets a full liveness interval.
+        if self._endpoint_response_idle_timeout_ns is not None:
+            self._last_response_progress_ns = None
+            self._disarm_endpoint_response_idle_timeout()
 
         # Create per-phase state
         if phase.strategy is not None:
@@ -485,13 +536,41 @@ class BenchmarkSession:
             issuer=self._issuer,
             publisher=self._publisher,
             stop_check=self._make_stop_check(phase.runtime_settings, phase_start),
-            on_inflight_drained=self._drain_event.set,
+            on_inflight_started=(
+                self._on_inflight_started
+                if self._endpoint_response_idle_timeout_ns is not None
+                else None
+            ),
+            on_inflight_drained=self._on_inflight_drained,
             routing_headers=phase.routing_headers,
         )
 
         self._current_phase_issuer = phase_issuer
         self._current_phase_type = phase.phase_type
         self._current_strategy = strategy
+
+        # Use getattr instead of isinstance to keep AgenticInferenceDataset out
+        # of the load generator import graph; it imports pandas. None covers
+        # datasets without conversation metadata and the pre-load single-turn
+        # case.
+        conv = getattr(phase.dataset, "conversation_metadata", None)
+        self._publish_session_event(
+            SessionEventType.PHASE_START,
+            PhaseData(
+                phase_type=phase.phase_type,
+                drain_after=phase.drain_after,
+                # One pass is over ``n_samples_from_dataset``, not the dataset's
+                # raw size. The ruleset path sets it from ``ds_subset_size``
+                # without truncating the dataloader, so the dataset count would
+                # create super-passes that do not match issued samples.
+                num_turns=(
+                    len(conv.samples)
+                    if conv is not None
+                    else phase.runtime_settings.n_samples_from_dataset
+                ),
+                num_trajectories=(conv.num_conversations if conv is not None else 0),
+            ),
+        )
 
         # Performance phases get tracking events
         if phase.phase_type == PhaseType.PERFORMANCE:
@@ -508,6 +587,12 @@ class BenchmarkSession:
 
         if phase.drain_after:
             await self._drain_inflight(phase_issuer, phase.drain_timeout)
+        # A query terminated without a QueryResult (e.g. a turn timeout after
+        # some chunks) leaves a stamp that nothing else would pop.
+        for query_id in [
+            q for q in self._last_chunk_ns if q in phase_issuer.completed_uuids
+        ]:
+            del self._last_chunk_ns[query_id]
 
         if phase.phase_type == PhaseType.PERFORMANCE:
             phase_issuer.stop_performance_tracking()
@@ -566,32 +651,121 @@ class BenchmarkSession:
 
     async def _receive_responses(self) -> None:
         """Receive responses from the issuer. Runs as a concurrent task."""
-        while not self._done:
-            resp = await self._issuer.recv()
-            if resp is None:
-                # Transport closed unexpectedly — trigger stop so strategy
-                # and drain don't hang waiting for responses that will never arrive.
-                logger.warning("Issuer recv() returned None — transport closed")
-                self._stop_requested = True
-                self._drain_event.set()  # Unblock _drain_inflight
-                # Cancel the strategy task if it's blocked (e.g., ConcurrencyStrategy
-                # awaiting sem.acquire() that will never be released).
-                if self._strategy_task and not self._strategy_task.done():
-                    self._strategy_task.cancel()
-                break
-            self._handle_response(resp)
+        try:
+            while not self._done:
+                resp = await self._issuer.recv()
+                if resp is None:
+                    # Transport closed unexpectedly — trigger stop so strategy
+                    # and drain don't hang waiting for responses that will never arrive.
+                    logger.warning("Issuer recv() returned None — transport closed")
+                    self._stop_requested = True
+                    self._drain_event.set()  # Unblock _drain_inflight
+                    # Cancel a strategy blocked awaiting a semaphore that will
+                    # never be released.
+                    if self._strategy_task and not self._strategy_task.done():
+                        self._strategy_task.cancel()
+                    break
+                # One clock read per response, shared by the event records and
+                # the liveness stamp.
+                now_ns = time.monotonic_ns()
+                self._handle_response(resp, now_ns)
+                if self._endpoint_response_idle_timeout_ns is not None:
+                    self._last_response_progress_ns = now_ns
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = RuntimeError(f"Endpoint response receiver failed: {exc}")
+            error.__cause__ = exc
+            # First error wins: a stalled endpoint often drops its connection
+            # too, and the transport error that follows is a symptom of the
+            # diagnosis already recorded, not a better one.
+            if self._fatal_error is None:
+                self._fatal_error = error
+            logger.exception("%s", error)
+            self.stop()
 
-    def _handle_response(self, resp: QueryResult | StreamChunk) -> None:
+    def _on_inflight_started(self) -> None:
+        """Arm the liveness guard for a 0-to-1 in-flight transition."""
+        if (
+            self._endpoint_response_idle_timeout_ns is None
+            or self._progress_timer is not None
+        ):
+            return
+        self._progress_timer = self._loop.call_later(
+            self._endpoint_response_idle_timeout_ns / 1e9,
+            self._fire_endpoint_response_idle_timeout,
+        )
+
+    def _on_inflight_drained(self) -> None:
+        """Unblock drain waits and retire the liveness guard."""
+        self._drain_event.set()
+        self._disarm_endpoint_response_idle_timeout()
+
+    def _disarm_endpoint_response_idle_timeout(self) -> None:
+        if self._progress_timer is not None:
+            self._progress_timer.cancel()
+            self._progress_timer = None
+
+    def _fire_endpoint_response_idle_timeout(self) -> None:
+        """Fail the run when outstanding work makes no response progress.
+
+        This is transport- and engine-agnostic: a response chunk or final result
+        is progress. It deliberately does not try to classify TensorRT-LLM or
+        vLLM errors, so it also catches the silent worker hang where no HTTP
+        response is ever produced.
+        """
+        self._progress_timer = None
+        timeout_ns = self._endpoint_response_idle_timeout_ns
+        assert timeout_ns is not None
+        if self._done or self._stop_requested:
+            return
+        phase_issuer = self._current_phase_issuer
+        if (
+            phase_issuer is None
+            or phase_issuer.inflight <= 0
+            or phase_issuer.inflight_started_ns is None
+        ):
+            return
+        last_progress_ns = max(
+            timestamp
+            for timestamp in (
+                self._last_response_progress_ns,
+                phase_issuer.inflight_started_ns,
+            )
+            if timestamp is not None
+        )
+        idle_ns = time.monotonic_ns() - last_progress_ns
+        if idle_ns < timeout_ns:
+            # Progress raced the deadline: re-arm for the remainder rather than
+            # reporting a stall that did not happen.
+            self._progress_timer = self._loop.call_later(
+                (timeout_ns - idle_ns) / 1e9, self._fire_endpoint_response_idle_timeout
+            )
+            return
+        error = EndpointResponseIdleTimeoutError(
+            "Endpoint response idle timeout after "
+            f"{timeout_ns / 1e9:.1f}s with {phase_issuer.inflight} request(s) in flight"
+        )
+        logger.error("%s", error)
+        if self._fatal_error is None:
+            self._fatal_error = error
+        self.stop()
+
+    def _handle_response(self, resp: QueryResult | StreamChunk, now_ns: int) -> None:
         """Route a response to the appropriate handler.
 
         Transport contract for streaming: the worker sends intermediate
         StreamChunk messages for timing events, then a final QueryResult
         with accumulated output for completion.
+
+        `now_ns` is the caller's arrival timestamp, used for every event record
+        that would otherwise read the clock again.
         """
         phase_issuer = self._current_phase_issuer
 
         if isinstance(resp, QueryResult):
             query_id = resp.id
+            last_chunk_ns = self._last_chunk_ns.pop(query_id, None)
             # Drop late responses for queries already synthetically terminated
             # (e.g. by AgenticInferenceStrategy._handle_timeout). Without this gate,
             # a real response arriving after timeout double-publishes ERROR/COMPLETE
@@ -622,7 +796,7 @@ class BenchmarkSession:
                 self._publisher.publish(
                     EventRecord(
                         event_type=ErrorEventType.GENERIC,
-                        timestamp_ns=time.monotonic_ns(),
+                        timestamp_ns=now_ns,
                         sample_uuid=query_id,
                         conversation_id=conv_id_str,
                         turn=turn_num,
@@ -635,9 +809,9 @@ class BenchmarkSession:
                 self._publisher.publish(
                     EventRecord(
                         event_type=SampleEventType.COMPLETE,
-                        timestamp_ns=resp.completed_at
-                        if isinstance(resp.completed_at, int)
-                        else time.monotonic_ns(),
+                        timestamp_ns=self._complete_timestamp_ns(
+                            resp, now_ns, last_chunk_ns
+                        ),
                         sample_uuid=query_id,
                         conversation_id=conv_id_str,
                         turn=turn_num,
@@ -675,15 +849,42 @@ class BenchmarkSession:
                 conv_id_str, turn_num = phase_issuer.uuid_to_conv_info.get(
                     resp.id, ("", None)
                 )
+            if phase_issuer is None or (
+                resp.id in phase_issuer.uuid_to_conv_info
+                and resp.id not in phase_issuer.completed_uuids
+            ):
+                self._last_chunk_ns[resp.id] = now_ns
+            else:
+                self._last_chunk_ns.pop(resp.id, None)
             self._publisher.publish(
                 EventRecord(
                     event_type=event_type,
-                    timestamp_ns=time.monotonic_ns(),
+                    timestamp_ns=now_ns,
                     sample_uuid=resp.id,
                     conversation_id=conv_id_str,
                     turn=turn_num,
                 )
             )
+
+    @staticmethod
+    def _complete_timestamp_ns(
+        resp: QueryResult, now_ns: int, last_chunk_ns: int | None
+    ) -> int:
+        """COMPLETE stamp: the decode time, but never before the response's chunks.
+
+        `resp.completed_at` is set when the transport decodes the result. The
+        transport decodes a whole drain before the session handles any message,
+        so a result decoded in the same drain as its chunks is older than the
+        chunks' handling stamps (RECV_FIRST/RECV_NON_FIRST), which would give a
+        negative TPOT. Only that case moves COMPLETE, to the last chunk's stamp;
+        a response without chunks keeps its decode time.
+        """
+        completed_ns = (
+            resp.completed_at if isinstance(resp.completed_at, int) else now_ns
+        )
+        if last_chunk_ns is None:
+            return completed_ns
+        return max(completed_ns, last_chunk_ns)
 
     def _make_stop_check(
         self, settings: RuntimeSettings, phase_start_ns: int
@@ -723,16 +924,23 @@ class BenchmarkSession:
 
         return check
 
-    def _publish_session_event(self, event_type: SessionEventType) -> None:
-        """Publish a session event and flush the publisher immediately.
+    def _publish_session_event(
+        self, event_type: SessionEventType, data: PhaseData | None = None
+    ) -> None:
+        """Publish a session event, then flush the publisher.
 
-        Session events are control signals (STARTED, ENDED, START/STOP
-        PERFORMANCE_TRACKING) that subscribers must receive promptly for
-        correct state transitions. Flushing ensures any buffered sample
-        events are sent first, followed by the session event, so ordering
-        is preserved and the signal is not delayed by batching.
+        Session events are control signals (STARTED, ENDED, PHASE_START,
+        START/STOP PERFORMANCE_TRACKING) that subscribers must receive promptly.
+        Flushing sends buffered sample events first, then the session event, so
+        ordering is preserved without waiting for another batch.
+
+        ``data`` carries payloads for events that have them, such as
+        PHASE_START. Routing it through this method preserves the same
+        publish-then-flush ordering.
         """
         self._publisher.publish(
-            EventRecord(event_type=event_type, timestamp_ns=time.monotonic_ns())
+            EventRecord(
+                event_type=event_type, timestamp_ns=time.monotonic_ns(), data=data
+            )
         )
         self._publisher.flush()

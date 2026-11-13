@@ -40,7 +40,7 @@ from inference_endpoint.config.schema import (
     LoadPatternType,
 )
 from inference_endpoint.core.record import EventRecord, SampleEventType
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import PhaseType, QueryResult
 from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     AgenticInferenceDataset,
 )
@@ -55,7 +55,6 @@ from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     EventPublisher,
     PhaseConfig,
-    PhaseType,
 )
 from inference_endpoint.testing.echo_server import EchoServer
 

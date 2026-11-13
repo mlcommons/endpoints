@@ -30,6 +30,7 @@ from inference_endpoint.commands.benchmark.accuracy import (
     _phase_osl_stats,
     _phase_response_counts,
     score_accuracy,
+    write_accuracy_results,
 )
 from inference_endpoint.config import schema as config_schema
 from inference_endpoint.config.schema import (
@@ -684,3 +685,23 @@ class TestPhaseDuration:
         # must accept the coerced entry.
         json.dumps(entry)
         msgspec.json.encode(entry)
+
+
+@pytest.mark.unit
+def test_write_accuracy_results_keeps_stable_average_accuracy_key(tmp_path):
+    # The Python aggregator was renamed to samples_weighted_average_accuracy, but
+    # the JSON artifact key is intentionally frozen as "average_accuracy" so
+    # existing accuracy_results.json consumers keep working. Lock the key name and
+    # that its value is the unit_samples-weighted mean (627/1030, not the flat 0.75).
+    scores = [
+        {"dataset_name": "aime", "score": 0.9, "unit_samples": 30},
+        {"dataset_name": "lcb", "score": 0.6, "unit_samples": 1000},
+    ]
+    write_accuracy_results(tmp_path, scores)
+    data = msgspec.json.decode(
+        (tmp_path / "accuracy" / "accuracy_results.json").read_bytes()
+    )
+    assert "average_accuracy" in data
+    assert "samples_weighted_average_accuracy" not in data
+    expected = (0.9 * 30 + 0.6 * 1000) / (30 + 1000)
+    assert data["average_accuracy"] == pytest.approx(expected)

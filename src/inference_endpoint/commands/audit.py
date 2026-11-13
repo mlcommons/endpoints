@@ -37,7 +37,12 @@ from pathlib import Path
 
 from ..compliance import AuditRunArtifacts, AuditRunSpec, AuditTest, get_audit_test
 from ..compliance.result import AuditResult, write_result
-from ..config.schema import AuditConfig, BenchmarkConfig, DatasetType
+from ..config.schema import (
+    AuditConfig,
+    BenchmarkConfig,
+    DatasetType,
+    SteadyStateConfig,
+)
 from ..exceptions import CLIError, ExecutionError, SetupError
 from .benchmark.execute import (
     BenchmarkResult,
@@ -140,8 +145,13 @@ def _run_phases(
             if spec.test_mode == TestMode.PERF
             else perf_datasets + accuracy_datasets
         )
+        # Disable steady state for audit phases. TEST04 issues one repeated
+        # sample, so the collected series would not describe a steady window.
         phase_config = config.with_updates(
-            report_dir=phase_dir, audit=None, datasets=phase_datasets
+            report_dir=phase_dir,
+            audit=None,
+            datasets=phase_datasets,
+            settings=config.settings.with_updates(steady_state=SteadyStateConfig()),
         )
 
         bench: BenchmarkResult | None = None

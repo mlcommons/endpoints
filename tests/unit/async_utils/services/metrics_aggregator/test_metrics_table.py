@@ -402,7 +402,7 @@ class TestOslTriggerToolCalls:
 class TestTpotTriggerToolCalls:
     """TpotTrigger routes to message path when tool_calls are present."""
 
-    async def test_tpot_tool_calls_only_response(self):
+    async def test_tpot_tools_after_first_content_delta(self):
         """TpotTrigger includes tool_calls in TPOT denominator for agentic responses."""
         from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
             SampleField,
@@ -428,7 +428,7 @@ class TestTpotTriggerToolCalls:
                 "function": {"name": "f", "arguments": "{}"},
             },
         )
-        tmo = TextModelOutput(output=[], tool_calls=tool_calls)
+        tmo = TextModelOutput(output=("checking",), tool_calls=((), tool_calls))
         ev = EventRecord(
             event_type=SampleEventType.COMPLETE,
             timestamp_ns=2000,

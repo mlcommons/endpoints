@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -30,14 +31,21 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import ErrorData, Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    ErrorData,
+    PhaseData,
+    PhaseType,
+    Query,
+    QueryResult,
+    StreamChunk,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
+    EndpointResponseIdleTimeoutError,
     PhaseConfig,
     PhaseIssuer,
     PhaseResult,
-    PhaseType,
     SessionResult,
 )
 from inference_endpoint.metrics.metric import Throughput
@@ -162,6 +170,42 @@ class TestPhaseIssuer:
         assert issued_events[0].sample_uuid == result
         assert issued_events[0].conversation_id == ""
         assert issued_events[0].turn is None
+
+    def test_inflight_started_timestamp_tracks_outstanding_work(self):
+        phase_issuer = PhaseIssuer(
+            FakeDataset(2),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: False,
+            on_inflight_started=lambda: None,
+        )
+
+        phase_issuer.issue(0)
+        started_ns = phase_issuer.inflight_started_ns
+        assert started_ns is not None
+
+        phase_issuer.issue(1)
+        assert phase_issuer.inflight_started_ns == started_ns
+
+        phase_issuer.mark_inflight_complete()
+        assert phase_issuer.inflight_started_ns == started_ns
+        phase_issuer.mark_inflight_complete()
+        assert phase_issuer.inflight_started_ns is None
+
+    def test_duplicate_completion_does_not_make_inflight_negative(self):
+        phase_issuer = PhaseIssuer(
+            FakeDataset(1),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: False,
+            on_inflight_started=lambda: None,
+        )
+        phase_issuer.issue(0)
+        phase_issuer.mark_inflight_complete()
+        phase_issuer.mark_inflight_complete()
+
+        assert phase_issuer.inflight == 0
+        assert phase_issuer.inflight_started_ns is None
 
     def test_issue_preserves_structured_chat_input_for_isl(self):
         class ChatDataset(FakeDataset):
@@ -405,6 +449,411 @@ class TestPhaseIssuer:
 
 @pytest.mark.unit
 class TestBenchmarkSession:
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_waits_between_inflight_periods(self):
+        """The guard arms with in-flight work and disarms when the phase drains."""
+        loop = asyncio.get_running_loop()
+        session = BenchmarkSession(
+            FakeIssuer(), FakePublisher(), loop, endpoint_response_idle_timeout_s=60
+        )
+        phase_issuer = PhaseIssuer(
+            FakeDataset(1),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: False,
+            on_inflight_started=session._on_inflight_started,
+            on_inflight_drained=session._on_inflight_drained,
+        )
+        session._current_phase_issuer = phase_issuer
+
+        phase_issuer.issue(0)
+        assert session._progress_timer is not None
+
+        phase_issuer.mark_inflight_complete()
+        assert session._progress_timer is None
+        assert session._fatal_error is None
+
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_waits_for_an_active_phase(self):
+        """No in-flight work means no armed timer, so an idle session never fires."""
+        session = BenchmarkSession(
+            FakeIssuer(),
+            FakePublisher(),
+            asyncio.get_running_loop(),
+            endpoint_response_idle_timeout_s=0.01,
+        )
+
+        assert session._progress_timer is None
+        await asyncio.sleep(0.05)
+        assert session._fatal_error is None
+
+    @pytest.mark.asyncio
+    async def test_perf_cap_keeps_the_guard_watching_the_drain(self):
+        """The perf issue cap stops issuing, but in-flight work is still guarded.
+
+        `stop_current_phase` deliberately leaves the drain running, so the
+        liveness guard must stay armed until the phase actually drains —
+        otherwise a stall during drain would go undetected.
+        """
+        loop = asyncio.get_running_loop()
+        session = BenchmarkSession(
+            FakeIssuer(), FakePublisher(), loop, endpoint_response_idle_timeout_s=60
+        )
+        phase_issuer = PhaseIssuer(
+            FakeDataset(1),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: False,
+            on_inflight_started=session._on_inflight_started,
+            on_inflight_drained=session._on_inflight_drained,
+        )
+        phase_issuer.issue(0)
+        session._current_phase_issuer = phase_issuer
+        armed = session._progress_timer
+        assert armed is not None
+
+        # A strategy must be in flight for stop_current_phase to do anything.
+        async def never() -> None:
+            await asyncio.sleep(3600)
+
+        session._strategy_task = asyncio.create_task(never())
+        session.stop_current_phase()
+
+        assert session._current_phase_stopped is True
+        assert session._progress_timer is armed  # still watching the drain
+        assert session._fatal_error is None
+
+        phase_issuer.mark_inflight_complete()  # drain finishes
+        assert session._progress_timer is None  # now retired
+
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_stops_when_session_stops(self):
+        """A normal stop must not be reported as an endpoint stall."""
+        loop = asyncio.get_running_loop()
+        session = BenchmarkSession(
+            FakeIssuer(), FakePublisher(), loop, endpoint_response_idle_timeout_s=0.01
+        )
+        phase_issuer = PhaseIssuer(
+            FakeDataset(1),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: False,
+            on_inflight_started=session._on_inflight_started,
+        )
+        phase_issuer.issue(0)
+        session._current_phase_issuer = phase_issuer
+        assert session._progress_timer is not None
+
+        session.stop()
+
+        assert session._progress_timer is None
+        await asyncio.sleep(0.05)
+        assert session._fatal_error is None
+
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_stops_when_phase_changes(self):
+        """A phase change leaves the session-lifetime guard idle, not failed."""
+        loop = asyncio.get_running_loop()
+        session = BenchmarkSession(
+            FakeIssuer(), FakePublisher(), loop, endpoint_response_idle_timeout_s=0.01
+        )
+        phase_issuer = PhaseIssuer(
+            FakeDataset(1),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: False,
+            on_inflight_started=session._on_inflight_started,
+        )
+        phase_issuer.issue(0)
+        session._current_phase_issuer = phase_issuer
+        assert session._progress_timer is not None
+
+        # Swap in a phase with nothing in flight, then let the armed timer fire.
+        session._current_phase_issuer = PhaseIssuer(
+            FakeDataset(1), FakeIssuer(), FakePublisher(), lambda: False
+        )
+        session._fire_endpoint_response_idle_timeout()
+
+        assert session._fatal_error is None
+        assert session._progress_timer is None
+
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_uses_one_timer(self):
+        """Re-entering the armed state must not stack a second timer."""
+        session = BenchmarkSession(
+            FakeIssuer(),
+            FakePublisher(),
+            asyncio.get_running_loop(),
+            endpoint_response_idle_timeout_s=60,
+        )
+
+        session._on_inflight_started()
+        armed = session._progress_timer
+        assert armed is not None
+
+        session._on_inflight_started()
+
+        assert session._progress_timer is armed
+        session._disarm_endpoint_response_idle_timeout()
+
+    @pytest.mark.asyncio
+    async def test_response_activity_does_not_rearm_the_timer(self):
+        """The receiver stamps a timestamp per chunk; it must not re-arm the timer.
+
+        Streaming frame rate is QPS x output length, so anything the receiver
+        does per chunk is paid per token.
+        """
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        session = BenchmarkSession(
+            issuer, FakePublisher(), loop, endpoint_response_idle_timeout_s=60
+        )
+        phase_issuer = PhaseIssuer(
+            FakeDataset(1),
+            issuer,
+            FakePublisher(),
+            lambda: False,
+            on_inflight_started=session._on_inflight_started,
+        )
+        query_id = phase_issuer.issue(0)
+        session._current_phase_issuer = phase_issuer
+        armed = session._progress_timer
+        assert armed is not None
+        before = session._last_response_progress_ns
+
+        issuer.inject_response(StreamChunk(id=query_id, response_chunk="tok"))
+        issuer.shutdown()  # None ends the receive loop
+        await session._receive_responses()
+
+        assert session._last_response_progress_ns != before  # stamp advanced
+        assert session._progress_timer is armed  # same timer, not re-armed
+        session._disarm_endpoint_response_idle_timeout()
+
+    @pytest.mark.asyncio
+    async def test_run_retires_an_active_endpoint_response_idle_timeout(self):
+        """Session teardown leaves no guard task running, even on a long deadline."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        session = BenchmarkSession(
+            issuer, FakePublisher(), loop, endpoint_response_idle_timeout_s=60
+        )
+        # The 60s deadline never elapses here, so the guard is retired by
+        # teardown rather than by its own timeout.
+        phases = [PhaseConfig("perf", _make_settings(n_samples=1), FakeDataset(1))]
+
+        await asyncio.wait_for(session.run(phases), timeout=5.0)
+
+        assert session._progress_timer is None
+        assert session._fatal_error is None
+
+    @pytest.mark.asyncio
+    async def test_run_does_not_start_a_phase_after_a_fatal_watchdog_error(self):
+        """A pending fatal error prevents a later phase from issuing work."""
+        session = BenchmarkSession(
+            FakeIssuer(), FakePublisher(), asyncio.get_running_loop()
+        )
+        session._fatal_error = EndpointResponseIdleTimeoutError("endpoint stalled")
+        started_phases = []
+        phase = PhaseConfig("perf", _make_settings(n_samples=1), FakeDataset(1))
+
+        with pytest.raises(EndpointResponseIdleTimeoutError, match="endpoint stalled"):
+            await session.run([phase], on_phase_start=started_phases.append)
+
+        assert started_phases == []
+
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_fails_instead_of_hanging(self):
+        """A silent server hang must not wait for an unbounded drain."""
+        loop = asyncio.get_running_loop()
+        previous_task_factory = loop.get_task_factory()
+        loop.set_task_factory(asyncio.eager_task_factory)
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        issuer._auto_respond = False
+        session = BenchmarkSession(
+            issuer, FakePublisher(), loop, endpoint_response_idle_timeout_s=0.02
+        )
+        phases = [PhaseConfig("perf", _make_settings(n_samples=1), FakeDataset(1))]
+
+        try:
+            with pytest.raises(
+                EndpointResponseIdleTimeoutError, match="response idle timeout"
+            ):
+                await asyncio.wait_for(session.run(phases), timeout=1.0)
+        finally:
+            loop.set_task_factory(previous_task_factory)
+
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_accepts_streaming_progress(self):
+        """Chunks refresh the guard; only a silent in-flight request is fatal."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        issuer._auto_respond = False
+        session = BenchmarkSession(
+            issuer, FakePublisher(), loop, endpoint_response_idle_timeout_s=0.03
+        )
+        phases = [PhaseConfig("perf", _make_settings(n_samples=1), FakeDataset(1))]
+
+        async def stream_response() -> None:
+            while not issuer._issued:
+                await asyncio.sleep(0.002)
+            query = issuer._issued[0]
+            for _ in range(3):
+                await asyncio.sleep(0.015)
+                issuer.inject_response(StreamChunk(id=query.id, response_chunk="x"))
+            issuer.inject_response(QueryResult(id=query.id, response_output="done"))
+
+        injector = asyncio.create_task(stream_response())
+        result = await asyncio.wait_for(session.run(phases), timeout=1.0)
+        await injector
+        assert result.perf_results[0].issued_count == 1
+
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_waits_for_other_responses_then_fails_lone_stall(
+        self,
+    ):
+        """Session liveness tolerates one stuck request while other work responds.
+
+        Once the healthy request completes, the stuck request is the only
+        in-flight work. Its lack of any subsequent session-wide response
+        progress must then fail the session after the configured interval.
+        """
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        session = BenchmarkSession(
+            issuer, FakePublisher(), loop, endpoint_response_idle_timeout_s=0.03
+        )
+        phase_issuer = PhaseIssuer(
+            FakeDataset(2),
+            issuer,
+            FakePublisher(),
+            lambda: False,
+            on_inflight_started=session._on_inflight_started,
+            on_inflight_drained=session._on_inflight_drained,
+        )
+        session._current_phase_issuer = phase_issuer
+
+        stuck_id = phase_issuer.issue(0)
+        healthy_id = phase_issuer.issue(1)
+        assert stuck_id is not None
+        assert healthy_id is not None
+        receiver = asyncio.create_task(session._receive_responses())
+
+        try:
+            # Responses for another in-flight request keep the session alive.
+            for _ in range(3):
+                await asyncio.sleep(0.012)
+                issuer.inject_response(
+                    StreamChunk(id=healthy_id, response_chunk="progress")
+                )
+                await asyncio.sleep(0)
+                assert session._fatal_error is None
+
+            issuer.inject_response(QueryResult(id=healthy_id, response_output="done"))
+            await asyncio.sleep(0)
+            assert phase_issuer.inflight == 1
+            assert session._fatal_error is None
+
+            # The remaining request is silent, so the next liveness deadline
+            # fails the whole session.
+            await asyncio.sleep(0.04)
+            assert isinstance(session._fatal_error, EndpointResponseIdleTimeoutError)
+            assert str(session._fatal_error).endswith("1 request(s) in flight")
+        finally:
+            issuer.shutdown()
+            await receiver
+            session._disarm_endpoint_response_idle_timeout()
+
+    @pytest.mark.asyncio
+    async def test_endpoint_response_idle_timeout_rearms_after_an_idle_gap(self):
+        """A prior completion must not make the next request immediately stale."""
+
+        class GapStrategy:
+            async def execute(self, phase_issuer) -> None:
+                phase_issuer.issue(0)
+                await asyncio.sleep(0.04)
+                phase_issuer.issue(1)
+
+            def on_query_complete(self, query_id: str) -> None:
+                pass
+
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer(response_delay=0.001)
+        issuer._loop = loop
+        session = BenchmarkSession(
+            issuer, FakePublisher(), loop, endpoint_response_idle_timeout_s=0.02
+        )
+        phases = [
+            PhaseConfig(
+                "perf",
+                _make_settings(n_samples=2),
+                FakeDataset(2),
+                strategy=GapStrategy(),
+            )
+        ]
+
+        result = await asyncio.wait_for(session.run(phases), timeout=1.0)
+        assert result.perf_results[0].issued_count == 2
+
+    @pytest.mark.asyncio
+    async def test_receiver_exception_fails_session_instead_of_hanging(self):
+        class FailingIssuer(FakeIssuer):
+            async def recv(self) -> QueryResult | StreamChunk | None:
+                raise OSError("connection reset")
+
+        loop = asyncio.get_running_loop()
+        session = BenchmarkSession(FailingIssuer(), FakePublisher(), loop)
+        phases = [PhaseConfig("perf", _make_settings(n_samples=1), FakeDataset(1))]
+
+        with pytest.raises(RuntimeError, match="Endpoint response receiver failed"):
+            await asyncio.wait_for(session.run(phases), timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_receiver_failure_does_not_mask_an_earlier_stall(self):
+        """A stalled endpoint that then drops its connection still reports the stall.
+
+        Without first-error-wins, the transport error that follows a watchdog
+        firing overwrites the diagnosis the watchdog produced.
+        """
+        loop = asyncio.get_running_loop()
+        session = BenchmarkSession(
+            FakeIssuer(), FakePublisher(), loop, endpoint_response_idle_timeout_s=60
+        )
+        phase_issuer = PhaseIssuer(
+            FakeDataset(1),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: False,
+            on_inflight_started=session._on_inflight_started,
+        )
+        phase_issuer.issue(0)
+        session._current_phase_issuer = phase_issuer
+        # The endpoint went silent long enough for the guard to fire. Both
+        # stamps must age: the deadline is measured from the later of them.
+        stalled_ns = time.monotonic_ns() - 120 * 1_000_000_000
+        session._last_response_progress_ns = stalled_ns
+        phase_issuer.inflight_started_ns = stalled_ns
+        session._fire_endpoint_response_idle_timeout()
+        assert isinstance(session._fatal_error, EndpointResponseIdleTimeoutError)
+
+        # The dead connection now surfaces as a transport error in the receiver.
+        session._stop_requested = False
+        failing = FakeIssuer()
+
+        async def boom() -> QueryResult | StreamChunk | None:
+            raise OSError("connection reset")
+
+        failing.recv = boom  # type: ignore[method-assign]
+        session._issuer = failing
+        await session._receive_responses()
+
+        assert isinstance(session._fatal_error, EndpointResponseIdleTimeoutError)
+        assert "response idle timeout" in str(session._fatal_error)
+
     @pytest.mark.asyncio
     async def test_single_perf_phase(self):
         loop = asyncio.get_running_loop()
@@ -752,6 +1201,57 @@ class TestBenchmarkSession:
         assert len(recv_first) == 2
 
     @pytest.mark.asyncio
+    async def test_streaming_complete_not_before_chunks_of_one_drain(self):
+        """COMPLETE is never stamped before the chunks of its own response.
+
+        One transport drain decodes [chunk, chunk, result] before the session
+        handles any of them, so QueryResult.completed_at is older than the
+        chunks' handling time. Regression test for mlcommons/endpoints#533.
+        """
+        loop = asyncio.get_running_loop()
+        publisher = FakePublisher()
+
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        issuer._auto_respond = False
+
+        session = BenchmarkSession(issuer, publisher, loop)
+        settings = _make_settings(
+            load_pattern=LoadPattern(
+                type=LoadPatternType.CONCURRENCY, target_concurrency=1
+            ),
+            n_samples=1,
+        )
+        phases = [PhaseConfig("perf", settings, FakeDataset(1))]
+
+        async def inject_one_drain():
+            while not issuer._issued:
+                await asyncio.sleep(0.005)
+            query_id = issuer._issued[0].id
+            # Decoded first, as the transport decodes a whole drain at once.
+            result = QueryResult(id=query_id, response_output="out")
+            await asyncio.sleep(0.01)
+            issuer.inject_response(
+                StreamChunk(id=query_id, metadata={"first_chunk": True})
+            )
+            issuer.inject_response(StreamChunk(id=query_id, response_chunk="more"))
+            issuer.inject_response(result)
+
+        injector = asyncio.create_task(inject_one_drain())
+        await asyncio.wait_for(session.run(phases), timeout=5.0)
+        await injector
+
+        recv_first = publisher.events_of_type(SampleEventType.RECV_FIRST)
+        recv_non_first = publisher.events_of_type(SampleEventType.RECV_NON_FIRST)
+        complete = publisher.events_of_type(SampleEventType.COMPLETE)
+        assert len(recv_first) == len(recv_non_first) == len(complete) == 1
+        assert (
+            recv_first[0].timestamp_ns
+            <= recv_non_first[0].timestamp_ns
+            <= complete[0].timestamp_ns
+        )
+
+    @pytest.mark.asyncio
     async def test_concurrency_strategy_transport_close_no_deadlock(self):
         """ConcurrencyStrategy must not deadlock when transport closes mid-phase."""
         loop = asyncio.get_running_loop()
@@ -870,6 +1370,122 @@ class TestBenchmarkSession:
         )
 
     @pytest.mark.asyncio
+    async def test_complete_stamp_is_decode_time_floored_by_own_chunks(self):
+        """COMPLETE keeps QueryResult.completed_at unless one of the response's
+        own chunks was handled later; then it takes that chunk's stamp."""
+        loop = asyncio.get_running_loop()
+        publisher = FakePublisher()
+        session = BenchmarkSession(FakeIssuer(), publisher, loop)
+
+        late = QueryResult(id="q-late", response_output="out")
+        session._handle_response(
+            StreamChunk(id="q-late", metadata={"first_chunk": True}),
+            late.completed_at + 500,
+        )
+        session._handle_response(late, late.completed_at + 900)
+        early = QueryResult(id="q-early", response_output="out")
+        session._handle_response(
+            StreamChunk(id="q-early", metadata={"first_chunk": True}),
+            early.completed_at - 500,
+        )
+        session._handle_response(early, early.completed_at + 900)
+
+        complete = {
+            e.sample_uuid: e.timestamp_ns
+            for e in publisher.events_of_type(SampleEventType.COMPLETE)
+        }
+        assert complete == {
+            "q-late": late.completed_at + 500,
+            "q-early": early.completed_at,
+        }
+        assert session._last_chunk_ns == {}
+
+    @pytest.mark.asyncio
+    async def test_chunk_stamp_kept_only_for_active_queries(self):
+        """Chunks of stale (previous-phase) or terminated queries may never get
+        a QueryResult, so their stamps are not kept."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+        phase_issuer = PhaseIssuer(FakeDataset(2), issuer, publisher, lambda: False)
+        session._current_phase_issuer = phase_issuer
+        active = phase_issuer.issue(0)
+        terminated = phase_issuer.issue(1)
+        phase_issuer.completed_uuids.add(terminated)
+
+        for query_id in (active, terminated, "q-stale"):
+            session._handle_response(
+                StreamChunk(id=query_id, metadata={"first_chunk": True}), 100
+            )
+
+        assert session._last_chunk_ns == {active: 100}
+        assert len(publisher.events_of_type(SampleEventType.RECV_FIRST)) == 3
+
+    @pytest.mark.asyncio
+    async def test_late_chunk_drops_stamp_of_terminated_query(self):
+        """A chunk that arrives after a synthetic termination removes the stamp
+        recorded before it, since no QueryResult will pop it."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+        phase_issuer = PhaseIssuer(FakeDataset(1), issuer, publisher, lambda: False)
+        session._current_phase_issuer = phase_issuer
+        query_id = phase_issuer.issue(0)
+
+        session._handle_response(
+            StreamChunk(id=query_id, metadata={"first_chunk": True}), 100
+        )
+        phase_issuer.completed_uuids.add(query_id)
+        phase_issuer.uuid_to_conv_info.pop(query_id)
+        session._handle_response(StreamChunk(id=query_id, response_chunk="x"), 200)
+
+        assert session._last_chunk_ns == {}
+
+    @pytest.mark.asyncio
+    async def test_phase_end_drops_chunk_stamps_of_terminated_queries(self):
+        """A turn timeout after some chunks publishes a synthetic failure and no
+        QueryResult follows, so the phase end drops that query's stamp."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        issuer._loop = loop
+        session = BenchmarkSession(issuer, FakePublisher(), loop)
+
+        class TimeoutAfterChunkStrategy:
+            async def execute(self, phase_issuer) -> None:
+                query_id = phase_issuer.issue(0)
+                issuer.inject_response(
+                    StreamChunk(id=query_id, metadata={"first_chunk": True})
+                )
+                while query_id not in session._last_chunk_ns:
+                    await asyncio.sleep(0)
+                # The state changes of AgenticInferenceStrategy._handle_timeout.
+                phase_issuer.mark_inflight_complete()
+                phase_issuer.completed_uuids.add(query_id)
+                phase_issuer.uuid_to_conv_info.pop(query_id)
+
+            def on_query_complete(self, query_id: str) -> None:
+                pass
+
+        phase = PhaseConfig(
+            "perf",
+            _make_settings(n_samples=1),
+            FakeDataset(1),
+            strategy=TimeoutAfterChunkStrategy(),
+        )
+        session._recv_task = asyncio.create_task(session._receive_responses())
+        try:
+            await asyncio.wait_for(session._run_phase(phase), timeout=1.0)
+            assert session._last_chunk_ns == {}
+        finally:
+            issuer.shutdown()
+            await session._recv_task
+
+    @pytest.mark.asyncio
     async def test_handle_response_stamps_conversation_id_and_turn(self):
         """All event types inherit (conv_id, turn) seeded at issue time; streaming
         events use .get() so the entry survives for the terminal QueryResult pop."""
@@ -884,9 +1500,11 @@ class TestBenchmarkSession:
         # Streaming path: entry stays available for the terminal COMPLETE pop.
         phase_issuer.uuid_to_conv_info["q-stream"] = ("conv-s", 7)
         session._handle_response(
-            StreamChunk(id="q-stream", metadata={"first_chunk": True})
+            StreamChunk(id="q-stream", metadata={"first_chunk": True}), 1_000
         )
-        session._handle_response(StreamChunk(id="q-stream", response_chunk="delta"))
+        session._handle_response(
+            StreamChunk(id="q-stream", response_chunk="delta"), 1_001
+        )
         assert (
             publisher.events_of_type(SampleEventType.RECV_FIRST)[0].conversation_id,
             publisher.events_of_type(SampleEventType.RECV_FIRST)[0].turn,
@@ -895,24 +1513,33 @@ class TestBenchmarkSession:
             publisher.events_of_type(SampleEventType.RECV_NON_FIRST)[0].conversation_id,
             publisher.events_of_type(SampleEventType.RECV_NON_FIRST)[0].turn,
         ) == ("conv-s", 7)
+        # Chunk events carry the caller's arrival stamp, not a fresh clock read.
+        assert (
+            publisher.events_of_type(SampleEventType.RECV_FIRST)[0].timestamp_ns
+            == 1_000
+        )
+        assert (
+            publisher.events_of_type(SampleEventType.RECV_NON_FIRST)[0].timestamp_ns
+            == 1_001
+        )
         assert "q-stream" in phase_issuer.uuid_to_conv_info
 
         # Success path: COMPLETE inherits conv info, entry is popped.
         phase_issuer.uuid_to_index["q-ok"] = 0
         phase_issuer.uuid_to_conv_info["q-ok"] = ("conv-9", 5)
         phase_issuer.inflight = 1
-        session._handle_response(
-            QueryResult(
-                id="q-ok",
-                response_output="ok",
-                metadata={"finish_reason": "stop", "worker_id": 3},
-                completed_at=12345,
-            )
+        ok_resp = QueryResult(
+            id="q-ok",
+            response_output="ok",
+            metadata={"finish_reason": "stop", "worker_id": 3},
         )
+        session._handle_response(ok_resp, 1_002)
         complete = publisher.events_of_type(SampleEventType.COMPLETE)
         assert [(e.conversation_id, e.turn) for e in complete] == [("conv-9", 5)]
         assert complete[0].finish_reason == "stop"
         assert complete[0].worker_id == 3
+        # Without chunks, COMPLETE keeps the decode-time QueryResult.completed_at.
+        assert complete[0].timestamp_ns == ok_resp.completed_at
         assert "q-ok" not in phase_issuer.uuid_to_conv_info
         assert "q-ok" not in phase_issuer.completed_uuids
 
@@ -924,7 +1551,8 @@ class TestBenchmarkSession:
             QueryResult(
                 id="q-err",
                 error=ErrorData(error_type="boom", error_message="x"),
-            )
+            ),
+            1_003,
         )
         error_events = [
             e for e in publisher.events if isinstance(e.event_type, ErrorEventType)
@@ -1287,7 +1915,90 @@ class TestBenchmarkSessionHandleResponse:
             id="q-late",
             error=ErrorData(error_type="late", error_message="late arrival"),
         )
-        session._handle_response(late_resp)
+        session._handle_response(late_resp, 1_004)
 
         assert publisher.events == []
         assert phase_issuer.inflight == 1
+
+
+class NoopStrategy:
+    """Issues nothing, so ``_run_phase`` returns without any in-flight work."""
+
+    async def execute(self, phase_issuer) -> None:
+        return None
+
+
+@pytest.mark.unit
+class TestPhaseStartEvent:
+    """PHASE_START announces each phase's shape on the wire."""
+
+    @staticmethod
+    async def _run(dataset, phase_type=PhaseType.PERFORMANCE, drain=True):
+        publisher = FakePublisher()
+        session = BenchmarkSession(FakeIssuer(), publisher, asyncio.get_running_loop())
+        await session._run_phase(
+            PhaseConfig(
+                name="p",
+                runtime_settings=_make_settings(n_samples=dataset.num_samples()),
+                dataset=dataset,
+                phase_type=phase_type,
+                drain_after=drain,
+                strategy=NoopStrategy(),
+            )
+        )
+        return publisher
+
+    async def _phase_data(self, *args, **kwargs):
+        starts = (await self._run(*args, **kwargs)).events_of_type(
+            SessionEventType.PHASE_START
+        )
+        assert len(starts) == 1
+        return starts[0].data
+
+    @pytest.mark.asyncio
+    async def test_single_turn_dataset_reports_sample_count(self):
+        assert await self._phase_data(FakeDataset(7)) == PhaseData(
+            phase_type=PhaseType.PERFORMANCE,
+            drain_after=True,
+            num_turns=7,
+            num_trajectories=0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_agentic_dataset_reports_turns_and_trajectories(self):
+        dataset = FakeDataset(7)
+        # num_turns is turns issued in one pass -- every turn across every
+        # conversation, not the per-conversation ceiling.
+        dataset.conversation_metadata = SimpleNamespace(
+            samples=[object()] * 11, max_turns_per_conv=4, num_conversations=3
+        )
+        assert await self._phase_data(dataset) == PhaseData(
+            phase_type=PhaseType.PERFORMANCE,
+            drain_after=True,
+            num_turns=11,
+            num_trajectories=3,
+        )
+
+    @pytest.mark.asyncio
+    async def test_published_for_non_performance_phases_too(self):
+        data = await self._phase_data(
+            FakeDataset(2), phase_type=PhaseType.WARMUP, drain=False
+        )
+        assert (data.phase_type, data.drain_after) == ("warmup", False)
+
+    @pytest.mark.asyncio
+    async def test_precedes_start_performance_tracking(self):
+        publisher = await self._run(FakeDataset(1))
+        order = [
+            e.event_type
+            for e in publisher.events
+            if e.event_type
+            in (
+                SessionEventType.PHASE_START,
+                SessionEventType.START_PERFORMANCE_TRACKING,
+            )
+        ]
+        assert order == [
+            SessionEventType.PHASE_START,
+            SessionEventType.START_PERFORMANCE_TRACKING,
+        ]

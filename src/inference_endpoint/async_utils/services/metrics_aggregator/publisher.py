@@ -161,6 +161,7 @@ class MetricsPublisher:
         *,
         n_pending_tasks: int,
         interrupted: bool = False,
+        steady_state: dict | None = None,
     ) -> None:
         """Write the final snapshot to disk and signal pub/sub consumers.
 
@@ -205,7 +206,10 @@ class MetricsPublisher:
                 return
             self._finalized = True
             await self._publish_final_locked(
-                registry, n_pending_tasks=n_pending_tasks, interrupted=interrupted
+                registry,
+                n_pending_tasks=n_pending_tasks,
+                interrupted=interrupted,
+                steady_state=steady_state,
             )
 
     async def _publish_final_locked(
@@ -214,6 +218,7 @@ class MetricsPublisher:
         *,
         n_pending_tasks: int,
         interrupted: bool,
+        steady_state: dict | None,
     ) -> None:
         """Finalize body; runs exactly once, under ``_final_lock``."""
         if self._tick_task is not None:
@@ -229,7 +234,9 @@ class MetricsPublisher:
             SessionState.INTERRUPTED if interrupted else SessionState.COMPLETE
         )
         snap = registry.build_snapshot(
-            state=terminal_state, n_pending_tasks=n_pending_tasks
+            state=terminal_state,
+            n_pending_tasks=n_pending_tasks,
+            steady_state=steady_state,
         )
 
         # Primary: atomic JSON file write. Run on a worker thread because

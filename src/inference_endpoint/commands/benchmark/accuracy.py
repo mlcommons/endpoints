@@ -41,7 +41,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics im
 from inference_endpoint.config.schema import DatasetType, ScorerMethod, TestMode
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.evaluation import Extractor
-from inference_endpoint.evaluation.accuracy_results import average_accuracy
+from inference_endpoint.evaluation.accuracy_results import (
+    samples_weighted_average_accuracy,
+)
 from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import ExecutionError, InputValidationError
 from inference_endpoint.load_generator.session import SessionResult
@@ -395,9 +397,10 @@ def write_accuracy_results(
     """
     if not accuracy_scores:
         return
-    # Plain cross-component mean of the per-dataset scores (3 datasets for
-    # gpt-oss, 1 for DeepSeek-R1); None when nothing numeric was scored.
-    avg_accuracy = average_accuracy(accuracy_scores)
+    # Sample-count-weighted cross-component mean of the per-dataset scores
+    # (weight = each dataset's unit_samples; 3 datasets for gpt-oss, 1 for
+    # DeepSeek-R1); None when nothing numeric was scored.
+    avg_accuracy = samples_weighted_average_accuracy(accuracy_scores)
     # Total finalize-time spent tokenizing accuracy outputs for OSL (seconds),
     # summed across datasets. Emitted whenever OSL was computed for at least
     # one dataset — gating on the key's presence, not the rounded wall-clock,
@@ -411,6 +414,9 @@ def write_accuracy_results(
     accuracy_results_path = accuracy_dir / "accuracy_results.json"
     accuracy_payload: dict[str, Any] = {}
     if avg_accuracy is not None:
+        # Stable artifact key: kept as "average_accuracy" even though the value is
+        # now the sample-weighted mean, so existing accuracy_results.json consumers
+        # don't break on a rename. The value semantics changed, not the key.
         accuracy_payload["average_accuracy"] = avg_accuracy
     if osl_computed:
         accuracy_payload["osl_tokenization_s"] = osl_tokenization_s
