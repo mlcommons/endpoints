@@ -367,9 +367,19 @@ _endpoints_v1_0_2026_10_C1_A = RoundRuleset(
     benchmark_rulesets={},
 )
 
+# Set B, cohort 2026-11-C0; `model_seed` unpinned as for set A:
+# https://github.com/mlcommons/endpoints_policies/blob/aa7537c656a514db74b1dc607d1996c323954658/seedset.yaml
+_endpoints_v1_0_2026_11_C0_B = RoundRuleset(
+    version="endpoints-v1.0-2026-11-C0-B",
+    scheduler_rng_seed=17312635550606430962,
+    sample_index_rng_seed=6679150691998295617,
+    benchmark_rulesets={},
+)
+
 # Every published cohort stays registered: a submission binds to one set for
 # its full update window, so an older set must keep resolving after a newer
 # one is published. Add new sets here, do not replace.
-ENDPOINTS_ALL = [_endpoints_v1_0_2026_10_C1_A]
+ENDPOINTS_ALL = [_endpoints_v1_0_2026_10_C1_A, _endpoints_v1_0_2026_11_C0_B]
 
+# Stays on set A: advancing it would re-seed runs bound via mlperf-endpoints-current.
 ENDPOINTS_CURRENT = _endpoints_v1_0_2026_10_C1_A
