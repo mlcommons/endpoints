@@ -22,7 +22,13 @@ from typing import Any
 
 import msgspec
 from inference_endpoint.config.schema import ModelParams, StreamingMode
-from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
+from inference_endpoint.core.types import (
+    Query,
+    QueryResult,
+    TextModelOutput,
+    put_server_usage,
+    server_usage_counts,
+)
 from inference_endpoint.dataset_manager.transforms import (
     AddStaticColumns,
     ColumnFilter,
@@ -33,6 +39,7 @@ from inference_endpoint.dataset_manager.transforms import (
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
 from .types import (
+    STREAM_OPTIONS_INCLUDE_USAGE,
     ChatCompletionChoice,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -40,6 +47,7 @@ from .types import (
     ChatMessage,
     SSEChoice,
     SSEMessage,
+    requests_multiple_choices,
 )
 
 # ============================================================================
@@ -110,9 +118,9 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         ]
 
     @classmethod
-    def encode_query(cls, query: Query) -> bytes:
+    def encode_query(cls, query: Query, *, include_usage: bool) -> bytes:
         """Encode a Query directly to bytes for HTTP transmission."""
-        request = cls.to_endpoint_request(query)
+        request = cls.to_endpoint_request(query, include_usage=include_usage)
         return cls.encode_request(request)
 
     @classmethod
@@ -122,19 +130,26 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         return cls.from_endpoint_response(openai_response, result_id=query_id)
 
     @classmethod
-    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice | None:
-        """Decode SSE message and return the SSEChoice (delta + finish_reason)."""
+    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice | SSEMessage | None:
+        """Decode an SSE frame to the part of it the accumulator consumes.
+
+        Returns the first ``SSEChoice`` for a frame without usage (the common
+        case), ``None`` for a frame with neither usage nor choices, and the
+        whole ``SSEMessage`` for a frame that carries usage.
+        """
         msg = cls._sse_decoder.decode(json_bytes)
-        if not msg.choices:
-            return None
-        return msg.choices[0]
+        if msg.usage is None:
+            return msg.choices[0] if msg.choices else None
+        return msg
 
     # ========================================================================
     # Internal APIs
     # ========================================================================
 
     @classmethod
-    def to_endpoint_request(cls, query: Query) -> ChatCompletionRequest:
+    def to_endpoint_request(
+        cls, query: Query, *, include_usage: bool
+    ) -> ChatCompletionRequest:
         """
         Convert a Query to an OpenAI request struct.
 
@@ -144,6 +159,8 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
 
         Args:
             query: Input query with prompt and parameters
+            include_usage: Ask for the final usage frame on a streaming request
+                with at most one choice (see ``HttpRequestAdapter.encode_query``).
 
         Returns:
             msgspec.Struct ChatCompletionRequest
@@ -170,17 +187,24 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
                     ),
                 )
 
+        stream = query.data.get("stream")
+        n = query.data.get("n")
         return ChatCompletionRequest(
             model=query.data.get("model", "no-model-name"),
             messages=messages,
-            stream=query.data.get("stream"),
+            stream=stream,
+            stream_options=(
+                STREAM_OPTIONS_INCLUDE_USAGE
+                if include_usage and stream and not requests_multiple_choices(n)
+                else None
+            ),
             max_completion_tokens=query.data.get("max_completion_tokens"),
             temperature=query.data.get("temperature"),
             seed=query.data.get("seed"),
             top_p=query.data.get("top_p"),
             top_k=query.data.get("top_k"),
             repetition_penalty=query.data.get("repetition_penalty"),
-            n=query.data.get("n"),
+            n=n,
             presence_penalty=query.data.get("presence_penalty"),
             frequency_penalty=query.data.get("frequency_penalty"),
             stop=query.data.get("stop"),
@@ -216,6 +240,9 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             metadata["finish_reason"] = response.choices[0].finish_reason
         if message.tool_calls:
             metadata["tool_calls"] = message.tool_calls
+        # Usage sums every choice while only the first is measured.
+        if len(response.choices) == 1:
+            put_server_usage(metadata, *server_usage_counts(response.usage))
 
         assert not (
             message.reasoning_content and message.reasoning

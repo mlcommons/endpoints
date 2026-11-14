@@ -27,6 +27,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import inference_endpoint.core.types as core_types
 import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -89,6 +90,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "(useful in containers where cpu_affinity is restricted)"
         ),
     )
+    group.addoption(
+        "--roofline-no-stream-include-usage",
+        action="store_true",
+        default=False,
+        help=(
+            "Pass --no-stream-include-usage to the roofline benchmark client, "
+            "so streaming requests do not ask for the usage frame "
+            "(default: the client asks)"
+        ),
+    )
 
 
 @pytest.fixture
@@ -117,17 +128,33 @@ def temp_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tmp_path_factory.mktemp("test_artifacts")
 
 
+@pytest.fixture
+def usage_warning_unlatched(monkeypatch, caplog) -> pytest.LogCaptureFixture:
+    """A fresh worker process: the malformed-usage warning has not fired yet.
+
+    Returns ``caplog`` capturing WARNING records from ``core.types``.
+    """
+    monkeypatch.setattr(core_types, "_malformed_usage_warned", False)
+    caplog.set_level(logging.WARNING, logger=core_types.__name__)
+    return caplog
+
+
 @pytest.fixture(scope="function")
 def mock_http_echo_server_factory():
     """Factory fixture for EchoServer with an optional custom request handler.
 
-    Yields a factory callable: ``factory(handler=None) -> EchoServer``.
+    Yields a factory callable:
+    ``factory(handler=None, *, report_usage=True) -> EchoServer``.
 
     When called with no arguments the server uses the default echo behaviour.
     When called with a ``handler`` the handler is invoked for every incoming
     request *instead of* the built-in echo logic.  The handler may be a plain
     (sync) callable or an async coroutine function; in both cases it receives
     the ``aiohttp.web.Request`` and must return an ``aiohttp.web.Response``.
+
+    ``report_usage=False`` models a server that never reports token usage:
+    non-streaming responses carry ``"usage": null`` and streams send no usage
+    frame.
 
     All servers created by the factory are stopped automatically at the end of
     the test.
@@ -142,8 +169,10 @@ def mock_http_echo_server_factory():
     """
     servers: list[EchoServer] = []
 
-    def factory(handler: RequestHandler | None = None) -> EchoServer:
-        server = EchoServer(port=0, request_handler=handler)
+    def factory(
+        handler: RequestHandler | None = None, *, report_usage: bool = True
+    ) -> EchoServer:
+        server = EchoServer(port=0, request_handler=handler, report_usage=report_usage)
         logging.info("Starting mock HTTP echo server")
         server.start()
         servers.append(server)

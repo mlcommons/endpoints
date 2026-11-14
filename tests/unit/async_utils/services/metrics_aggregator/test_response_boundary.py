@@ -132,8 +132,10 @@ async def test_response_metrics_use_full_output_and_actual_tail(
     queue = TokenBatchQueue(response_tokenizer, loop)
     row = SampleRow(sample_uuid="qid")
     pre_change = {SampleField.RECV_FIRST_NS: 1000}
-    OslTrigger(registry, queue).fire(event, row, pre_change)
-    TpotTrigger(registry, queue).fire(event, row, pre_change)
+    OslTrigger(registry, queue, metric_name="osl").fire(event, row, pre_change)
+    TpotTrigger(registry, queue, metric_name="tpot_ns", collector=None).fire(
+        event, row, pre_change
+    )
     await queue.drain_all()
     assert snapshot_series_total(registry, "osl") == full_count
     if any(tail_parts):

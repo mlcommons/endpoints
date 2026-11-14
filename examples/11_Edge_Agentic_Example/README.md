@@ -311,6 +311,13 @@ when pointing at a multi-slot endpoint.
 > reasoning gives no inline-accuracy benefit and costs ~60% more wall-clock (see
 > the reference table below). Launch `llama-server` with `--reasoning off`.
 
+> **Token counts.** `online_edge_full_run.yaml` sets
+> `settings.token_count_source: server`, so the headline ISL / OSL / TPOT in
+> `result_summary.json` come from the server's per-request usage.
+> `tokenizer_name` feeds only the `*_client` diagnostics. If the server reports
+> no usage the run exits with code 4: set `settings.token_count_source: client`
+> (a tokenizer is then required).
+
 ### Verify the combined results
 
 ```bash

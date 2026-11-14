@@ -36,6 +36,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_helpers import DEFAULT_SOURCE
+
 
 def _spawn_aggregator(
     socket_dir: Path,
@@ -73,6 +75,8 @@ def _spawn_aggregator(
         "5",
         "--tokenizer-workers",
         "0",
+        "--token-count-source",
+        DEFAULT_SOURCE.value,
     ]
     return subprocess.Popen(
         cmd,

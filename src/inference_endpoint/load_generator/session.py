@@ -39,12 +39,15 @@ from ..core.record import (
     SessionEventType,
 )
 from ..core.types import (
+    COMPLETION_TOKENS_KEY,
+    PROMPT_TOKENS_KEY,
     PhaseData,
     PhaseType,
     PromptData,
     Query,
     QueryResult,
     StreamChunk,
+    well_formed_count,
 )
 from ..dataset_manager.dataset import Dataset
 from .sample_order import create_sample_order
@@ -806,6 +809,13 @@ class BenchmarkSession:
             if self._current_phase_type != PhaseType.WARMUP:
                 finish_reason = resp.metadata.get("finish_reason")
                 worker_id = resp.metadata.get("worker_id")
+                # msgspec does not validate on construction: a non-count here
+                # would encode, then fail the aggregator's typed decode, so the
+                # sample would never complete there.
+                prompt_tokens = well_formed_count(resp.metadata.get(PROMPT_TOKENS_KEY))
+                completion_tokens = well_formed_count(
+                    resp.metadata.get(COMPLETION_TOKENS_KEY)
+                )
                 self._publisher.publish(
                     EventRecord(
                         event_type=SampleEventType.COMPLETE,
@@ -823,6 +833,14 @@ class BenchmarkSession:
                         ),
                         worker_id=(
                             worker_id if isinstance(worker_id, int) else msgspec.UNSET
+                        ),
+                        prompt_tokens=(
+                            msgspec.UNSET if prompt_tokens is None else prompt_tokens
+                        ),
+                        completion_tokens=(
+                            msgspec.UNSET
+                            if completion_tokens is None
+                            else completion_tokens
                         ),
                     )
                 )

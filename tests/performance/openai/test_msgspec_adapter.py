@@ -37,13 +37,12 @@ TEXT_SIZES = {
 }
 
 
-def make_query(text: str) -> Query:
+def make_query(text: str, *, stream: bool = False) -> Query:
     """Create a Query for benchmarks."""
-    return Query(
-        id="test-id",
-        data={"prompt": text, "model": "test-model", "max_completion_tokens": 100},
-        headers={"Authorization": "Bearer token"},
-    )
+    data = {"prompt": text, "model": "test-model", "max_completion_tokens": 100}
+    if stream:
+        data["stream"] = True
+    return Query(id="test-id", data=data, headers={"Authorization": "Bearer token"})
 
 
 def make_response_bytes(text: str) -> bytes:
@@ -78,11 +77,13 @@ def make_sse_bytes(text: str) -> bytes:
 @pytest.mark.performance
 @pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
-def test_encode_query(benchmark, size_name, text):
-    """Benchmark encode_query (Query -> HTTP bytes)."""
-    query = make_query(text)
+@pytest.mark.parametrize("stream", [False, True], ids=["non_streaming", "streaming"])
+def test_encode_query(benchmark, size_name, text, stream):
+    """Benchmark encode_query (Query -> HTTP bytes); a streaming query also
+    takes the stream_options branch."""
+    query = make_query(text, stream=stream)
     benchmark.group = "msgspec_adapter_encode_query"
-    benchmark(OpenAIMsgspecAdapter.encode_query, query)
+    benchmark(OpenAIMsgspecAdapter.encode_query, query, include_usage=True)
 
 
 @pytest.mark.performance

@@ -168,6 +168,8 @@ class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type:
     data: OUTPUT_TYPE | PromptData | ErrorData | PhaseData | None = None
     finish_reason: str | msgspec.UnsetType = msgspec.UNSET
     worker_id: int | msgspec.UnsetType = msgspec.UNSET
+    prompt_tokens: int | msgspec.UnsetType = msgspec.UNSET
+    completion_tokens: int | msgspec.UnsetType = msgspec.UNSET
 
 
 EVENT_LINE_LEAD: Final[bytes] = b'{"event_type":"'

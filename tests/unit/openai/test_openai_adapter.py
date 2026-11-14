@@ -60,7 +60,7 @@ def test_tool_definitions_forwarded():
             "stream": False,
         },
     )
-    encoded = OpenAIAdapter.encode_query(query)
+    encoded = OpenAIAdapter.encode_query(query, include_usage=False)
     payload = json.loads(encoded)
 
     assert "tools" in payload
@@ -88,7 +88,7 @@ def test_tool_use_messages_roundtrip():
             "stream": False,
         },
     )
-    encoded = OpenAIAdapter.encode_query(query)
+    encoded = OpenAIAdapter.encode_query(query, include_usage=False)
     payload = json.loads(encoded)
 
     msgs = payload["messages"]
@@ -140,7 +140,7 @@ def test_no_tools_key_when_absent():
             "stream": False,
         },
     )
-    encoded = OpenAIAdapter.encode_query(query)
+    encoded = OpenAIAdapter.encode_query(query, include_usage=False)
     payload = json.loads(encoded)
 
     # Pydantic model_dump includes None fields; tools must be None when not supplied

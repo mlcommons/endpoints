@@ -54,6 +54,7 @@ from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
+from ..metrics.token_count_basis import read_server_usage
 from .accuracy_results import build_breakdown
 from .extractor import (
     Extractor,
@@ -130,6 +131,15 @@ def guess_and_decode(line: bytes) -> EventRecord | _IssuedKey | None:
     if topic == _COMPLETE_TOPIC:
         return _EVENT_DECODER.decode(line)
     return None
+
+
+# The output a COMPLETE event without a text payload is classified against.
+_NO_OUTPUT = TextModelOutput(output="")
+
+
+def _generated_text(data: Any) -> str:
+    """The text the model generated: ``str(TextModelOutput)``, "" without output."""
+    return str(data) if data is not None else ""
 
 
 class Scorer(ABC):
@@ -232,12 +242,15 @@ class Scorer(ABC):
             d = msgspec.json.decode(f.read())
             return d[self.dataset_name]  # Implicitly raises KeyError
 
-    def _iter_complete(self) -> Iterator[tuple[str, Any]]:
-        """Yield ``(sample_uuid, data)`` for each COMPLETE event in events.jsonl.
+    def _iter_complete_records(self) -> Iterator[EventRecord]:
+        """Yield each COMPLETE ``EventRecord`` in events.jsonl.
 
-        The single events reader shared by ``get_raw_outputs`` and any scorer
-        that needs the structured event data (e.g. BFCL's ``tool_calls``). The
-        EventLoggerService writes EventRecord objects serialized via msgspec.
+        The single events reader behind ``_iter_complete``,
+        ``get_raw_outputs`` and ``iter_complete_outputs``. The
+        EventLoggerService writes EventRecord objects serialized via msgspec;
+        in its compact layout only COMPLETE lines are decoded
+        (``leading_event_topic``), and a line in any other layout is decoded
+        whole and classified by its ``event_type``.
         """
         events_log_path = self.report_dir / "events.jsonl"
         if not events_log_path.exists():
@@ -268,27 +281,54 @@ class Scorer(ABC):
                     # skipped undecoded.
                     continue
                 if record.event_type == SampleEventType.COMPLETE:
-                    yield record.sample_uuid, record.data
+                    yield record
 
-    def get_raw_outputs(self, wanted_uuids: set[str] | None = None) -> pd.DataFrame:
+    def _iter_complete(self) -> Iterator[tuple[str, Any]]:
+        """Yield ``(sample_uuid, data)`` for each COMPLETE event in events.jsonl.
+
+        For ``get_raw_outputs`` and any scorer that needs the structured event
+        data (e.g. BFCL's ``tool_calls``).
+        """
+        for record in self._iter_complete_records():
+            yield record.sample_uuid, record.data
+
+    def iter_complete_outputs(
+        self, uuids: set[str] | None
+    ) -> Iterator[tuple[str, str, int | None]]:
+        """Yield ``(uuid, text, completion_tokens)`` per COMPLETE event.
+
+        One read serves accuracy OSL and response accounting on both token
+        bases. ``text`` is the model's generated text, as in
+        ``get_raw_outputs``. ``completion_tokens`` is the event's
+        server-reported count when its usage is usable (``read_server_usage``),
+        else ``None``. ``uuids`` bounds the read to a target population;
+        ``None`` reads every event.
+        """
+        for record in self._iter_complete_records():
+            if uuids is not None and record.sample_uuid not in uuids:
+                continue
+            data = record.data
+            _, completion_tokens = read_server_usage(
+                record.prompt_tokens,
+                record.completion_tokens,
+                data if isinstance(data, TextModelOutput) else _NO_OUTPUT,
+            )
+            yield record.sample_uuid, _generated_text(data), completion_tokens
+
+    def get_raw_outputs(self) -> pd.DataFrame:
         """uuid -> the text the model generated (``str(TextModelOutput)``).
 
         Identical for every scorer: the actual model output before any
-        scoring-specific transform. Used for OSL and response accounting.
-        ``wanted_uuids`` bounds the frame to a target population (one accuracy
-        dataset's issued samples) so finalize need not hold the whole run's
-        response-text corpus.
+        scoring-specific transform, and the base ``get_scoring_outputs``.
+        Accuracy OSL and response accounting read ``iter_complete_outputs``.
         """
         rows = [
-            {"sample_uuid": u, "output": str(d) if d is not None else ""}
+            {"sample_uuid": u, "output": _generated_text(d)}
             for u, d in self._iter_complete()
-            if wanted_uuids is None or u in wanted_uuids
         ]
-        # Fixed columns so an all-filtered (empty) frame still exposes
-        # "sample_uuid"/"output". Callers index those columns; a bare
-        # pd.DataFrame([]) is column-less and would KeyError, dropping response
-        # accounting for an all-missing phase — the exact masking the response
-        # counts exist to prevent.
+        # Fixed columns so a log without COMPLETE events still yields a frame
+        # with "sample_uuid"/"output"; a bare pd.DataFrame([]) is column-less
+        # and callers indexing those columns would KeyError.
         return pd.DataFrame(rows, columns=["sample_uuid", "output"])
 
     def get_scoring_outputs(self) -> pd.DataFrame:
