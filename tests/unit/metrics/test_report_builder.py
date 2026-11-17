@@ -233,6 +233,24 @@ class TestFromSnapshot:
         assert report.output_sequence_lengths == {}
         assert report.tpot == {}
 
+    def test_git_provenance_comes_from_version_info(self, monkeypatch):
+        monkeypatch.setattr(
+            "inference_endpoint.metrics.report.get_version_info",
+            lambda: {"version": "v", "git_sha": "abc1234", "git_sha_source": "env"},
+        )
+        report = _build_report(_make_registry(n_samples=5))
+        assert (report.git_sha, report.git_sha_source) == ("abc1234", "env")
+        data = json.loads(report.to_json())
+        assert (data["git_sha"], data["git_sha_source"]) == ("abc1234", "env")
+
+    def test_git_sha_source_defaults_to_none_when_absent(self, monkeypatch):
+        monkeypatch.setattr(
+            "inference_endpoint.metrics.report.get_version_info",
+            lambda: {"version": "v", "git_sha": None},
+        )
+        report = _build_report(_make_registry(n_samples=5))
+        assert report.git_sha_source == "none"
+
     def test_isl_series_absent(self):
         # settings.metrics_isl=false: the aggregator never registers the
         # series, so the snapshot lacks it entirely (not merely count==0).
@@ -629,6 +647,26 @@ class TestReportDisplayAndSerialize:
         report.display(fn=lines.append, summary_only=True)
         output = "\n".join(lines)
         assert "Test started at" not in output
+
+    @pytest.mark.parametrize(
+        ("git_sha", "source", "line"),
+        [
+            (None, "none", "Git SHA: unknown (source: none)"),
+            ("abc1234-dirty", "git", "Git SHA: abc1234-dirty (source: git)"),
+        ],
+        ids=["unresolved", "resolved"],
+    )
+    def test_display_always_prints_git_sha_line_with_source(
+        self, git_sha, source, line
+    ):
+        report = msgspec.structs.replace(
+            _build_report(_make_registry(n_samples=5)),
+            git_sha=git_sha,
+            git_sha_source=source,
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        assert line in lines
 
     def test_display_warns_when_incomplete(self):
         """Reports with ``complete=False`` surface a WARNING in display()."""
@@ -1546,6 +1584,7 @@ class TestTokenCountSourceRoles:
             ),
             version="9.9.9",
             git_sha="abc1234",
+            git_sha_source="git",
             steady_state=TestSteadyStateOnTheReport._verdict(),
             accuracy=[
                 {
@@ -1564,7 +1603,7 @@ class TestTokenCountSourceRoles:
         assert lines[:heading] == [
             "----------------- Summary -----------------",
             "Version: 9.9.9",
-            "Git SHA: abc1234",
+            "Git SHA: abc1234 (source: git)",
             "Total samples issued: 5",
             "Total samples succeeded: 5",
             "Total samples failed: 0",

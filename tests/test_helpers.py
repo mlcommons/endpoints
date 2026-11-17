@@ -262,6 +262,7 @@ def parse_sse_frames(body: bytes) -> list[dict[str, Any] | bytes]:
 _BASE_REPORT: dict[str, Any] = {
     "version": "t",
     "git_sha": None,
+    "git_sha_source": "none",
     "test_started_at": 0,
     "n_samples_issued": 10,
     "n_samples_completed": 10,
