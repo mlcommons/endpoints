@@ -345,8 +345,9 @@ class Report(msgspec.Struct, frozen=True, kw_only=True):  # type: ignore[call-ar
 
     # SHA-256 (hex) over the bytes of the run's events.jsonl, attached in
     # finalize_benchmark after the log is salvaged to report_dir. Content-only,
-    # so copying or renaming the log does not change it. None when no event log
-    # was produced (e.g. SIGKILL before salvage).
+    # so copying or renaming the log does not change it. None on an aborted run
+    # (not hashed), when the salvaged log could not be read (missing or I/O
+    # error), or when a Ctrl-C interrupted the hash.
     events_sha256: str | None = None
 
     # Per-dataset accuracy entries (one per scored dataset), attached after

@@ -21,17 +21,13 @@ import hashlib
 from pathlib import Path
 
 
-def sha256_file(path: Path, *, chunk_size: int = 1 << 20) -> str | None:
-    """Hex SHA-256 over the bytes of ``path``, or None if it does not exist.
+def sha256_file(path: Path) -> str:
+    """Hex SHA-256 over the bytes of ``path``.
 
-    Streamed in fixed chunks so a large file is not read into memory at once.
-    The digest covers file contents only — never the name or metadata — so
-    copying or renaming the file leaves it unchanged.
+    Streamed (``hashlib.file_digest``), so a large file is not read into memory
+    at once. The digest covers file contents only — never the name or metadata —
+    so copying or renaming the file leaves it unchanged. Raises ``OSError``
+    (including ``FileNotFoundError``) if the file cannot be read.
     """
-    if not path.exists():
-        return None
-    digest = hashlib.sha256()
     with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(chunk_size), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(f, "sha256").hexdigest()

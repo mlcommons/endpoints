@@ -49,15 +49,14 @@ class TestSha256File:
         b.write_bytes(b"two")
         assert sha256_file(a) != sha256_file(b)
 
-    def test_missing_file_returns_none(self, tmp_path: Path):
-        """A run that never produced an event log (e.g. SIGKILL before salvage)
-        yields None rather than crashing the caller."""
-        assert sha256_file(tmp_path / "nope.jsonl") is None
+    def test_missing_file_raises(self, tmp_path: Path):
+        """A missing file is an error the caller decides how to handle, not a
+        sentinel the helper picks for every caller."""
+        with pytest.raises(FileNotFoundError):
+            sha256_file(tmp_path / "nope.jsonl")
 
-    def test_hashes_large_file_streaming(self, tmp_path: Path):
-        """Larger-than-one-chunk input hashes correctly (streamed read, not a
-        single read_bytes), matching a plain hashlib digest."""
-        content = b"x" * (5 * 1024 * 1024 + 7)
-        path = tmp_path / "big.jsonl"
-        path.write_bytes(content)
-        assert sha256_file(path) == hashlib.sha256(content).hexdigest()
+    def test_empty_file_has_a_digest(self, tmp_path: Path):
+        """An empty log is distinct from no log: it hashes to the empty digest."""
+        path = tmp_path / "empty.jsonl"
+        path.write_bytes(b"")
+        assert sha256_file(path) == hashlib.sha256(b"").hexdigest()

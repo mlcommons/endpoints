@@ -17,6 +17,7 @@
 
 import asyncio
 import dataclasses
+import hashlib
 import io
 import json
 import logging
@@ -3091,6 +3092,132 @@ class TestFinalizeBenchmark:
         finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
 
         full_run.assert_called_once_with(tmp_path, None, token_count_source=source)
+
+    @pytest.mark.unit
+    def test_events_sha256_lands_in_summary_and_in_memory_report(self, tmp_path):
+        """The digest of the salvaged events.jsonl is on result_summary.json and
+        on bench.report, so in-memory consumers (run_audit) see the same value."""
+        content = b'{"event": "COMPLETE"}\n' * 3
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = self._make_report(state="complete")
+        tmpfs_events = bench.tmpfs_dir / "events" / "events.jsonl"
+        tmpfs_events.parent.mkdir(parents=True)
+        tmpfs_events.write_bytes(content)
+
+        finalize_benchmark(ctx, bench)
+
+        expected = hashlib.sha256(content).hexdigest()
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["events_sha256"] == expected
+        assert bench.report is not None
+        assert bench.report.events_sha256 == expected
+
+    @pytest.mark.unit
+    def test_sigint_during_events_hash_still_writes_report(self, tmp_path, monkeypatch):
+        """^C while fingerprinting a large events.jsonl must not lose the
+        report: the interrupt propagates, and the report lands as interrupted
+        with no digest."""
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = self._make_report(state="complete")
+        monkeypatch.setattr(
+            execute_mod, "sha256_file", MagicMock(side_effect=KeyboardInterrupt)
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            finalize_benchmark(ctx, bench)
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["complete"] is False
+        assert summary["state"] == "interrupted"
+        assert summary["events_sha256"] is None
+        assert (tmp_path / "report.txt").exists()
+
+    @pytest.mark.unit
+    def test_events_hash_oserror_keeps_completed_report(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The digest is best-effort metadata: an I/O error while hashing is
+        logged and recorded as null, and never costs the run its report."""
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = self._make_report(state="complete")
+        monkeypatch.setattr(
+            execute_mod, "sha256_file", MagicMock(side_effect=OSError("EIO"))
+        )
+
+        with caplog.at_level(logging.WARNING):
+            finalize_benchmark(ctx, bench)
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["state"] == "complete"
+        assert summary["events_sha256"] is None
+        assert any(
+            r.levelno == logging.WARNING
+            and "Could not fingerprint" in r.getMessage()
+            and "EIO" in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.unit
+    def test_aborted_run_never_fingerprints_the_event_log(self, tmp_path):
+        """An aborted run skips the fingerprint, as it skips OSL and scoring:
+        after the first ^C the next one force-exits the process group, so a
+        full read of a large log here would widen the window in which a second
+        ^C loses the report. The log itself is still salvaged."""
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = self._make_report(state="complete")
+        bench.user_interrupted = True
+        tmpfs_events = bench.tmpfs_dir / "events" / "events.jsonl"
+        tmpfs_events.parent.mkdir(parents=True)
+        tmpfs_events.write_bytes(b'{"event": "COMPLETE"}\n')
+
+        finalize_benchmark(ctx, bench)
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["state"] == "interrupted"
+        assert summary["events_sha256"] is None
+        assert (tmp_path / "events.jsonl").read_bytes() == tmpfs_events.read_bytes()
+
+    @pytest.mark.unit
+    def test_sigint_during_event_log_salvage_still_writes_report(
+        self, tmp_path, monkeypatch
+    ):
+        """^C while copying a large events.jsonl off tmpfs must not lose the
+        report: the interrupt propagates, and the report lands as interrupted
+        with no digest of a partially copied log."""
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = _make_benchmark_context(config=config, report_dir=tmp_path)
+        bench = _make_benchmark_result(tmp_path)
+        bench.report = self._make_report(state="complete")
+        monkeypatch.setattr(
+            execute_mod, "_salvage_tmpfs", MagicMock(side_effect=KeyboardInterrupt)
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            finalize_benchmark(ctx, bench)
+
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
+        assert summary["complete"] is False
+        assert summary["state"] == "interrupted"
+        assert summary["events_sha256"] is None
+        assert (tmp_path / "report.txt").exists()
 
     @staticmethod
     def _make_report(state: str) -> Report:
