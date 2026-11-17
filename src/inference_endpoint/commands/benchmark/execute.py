@@ -112,6 +112,7 @@ from inference_endpoint.load_generator.session import (
 )
 from inference_endpoint.metrics.report import Report
 from inference_endpoint.openai.types import requests_multiple_choices
+from inference_endpoint.utils.hashing import sha256_file
 
 if TYPE_CHECKING:
     from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -1206,14 +1207,28 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         logger.debug(f"Copied {src_events} -> {dst_events}")
 
 
+def _hash_events_log(report_dir: Path) -> str | None:
+    """Best-effort SHA-256 of the salvaged events.jsonl.
+
+    The digest is optional metadata: an unreadable or missing log is logged and
+    recorded as None so it can never cost the run its report.
+    """
+    events_path = report_dir / "events.jsonl"
+    try:
+        return sha256_file(events_path)
+    except OSError as e:
+        logger.warning("Could not fingerprint %s: %s", events_path, e)
+        return None
+
+
 def _write_report_artifacts(
     ctx: BenchmarkContext, report: Report, profiling: dict[str, Any] | None
 ) -> None:
     """Display the report and write result_summary.json + report.txt.
 
     result_summary.json is the self-complete machine-readable report (carries
-    qps/tps/seeds/accuracy via Report.to_json); report.txt is the full
-    human-readable dump; the console log shows the summary.
+    qps/tps/seeds and the events.jsonl SHA-256 via Report.to_json); report.txt
+    is the full human-readable dump; the console log shows the summary.
     """
     report.display(fn=lambda s: logger.info(s), summary_only=True)
     performance_dir = ctx.report_dir / "performance"
@@ -1289,21 +1304,23 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         report = msgspec.structs.replace(report, complete=False, state="interrupted")
         bench.report = report
 
-    # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
-    # sample_idx_map.json + events.jsonl from here).
-    _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
-
-    # Full-run OSL over every turn, including those issued after the performance
-    # window closed, plus accuracy scoring. Both run inside the try/finally so a
-    # Ctrl-C during the (large) event-log scan still writes an interrupted report
-    # instead of losing it. Skipped on abort: a partial tail would report as
-    # complete.
+    # Everything that copies or reads the (possibly large) event log runs inside
+    # the try/finally, so a Ctrl-C there still writes an interrupted report:
+    # copying sample_idx_map.json + events.jsonl to report_dir (scorers and the
+    # full-run OSL read them from there), the log's fingerprint, full-run OSL
+    # over every turn (including those issued after the performance window
+    # closed), and accuracy scoring. All but the copy are skipped on abort: a
+    # partial tail would report as complete, and after the first Ctrl-C the
+    # next one force-exits, so another full read would only widen that window.
+    events_sha256: str | None = None
     full_run_osl: dict[str, Any] | None = None
     accuracy_scores: list[dict[str, Any]] = []
     try:
+        _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
         if aborted:
             logger.warning("Run aborted — skipping accuracy scoring on partial data")
         else:
+            events_sha256 = _hash_events_log(ctx.report_dir)
             full_run_osl = full_run_osl_for_report(
                 ctx.report_dir,
                 ctx.tokenizer_name,
@@ -1318,13 +1335,14 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             bench.report = report
         raise
     finally:
-        # Attach the per-dataset accuracy list so result_summary.json, the
-        # console summary, and report.txt all carry it.
+        # Build the final report once, so bench.report and every artifact
+        # written from it carry the same post-hoc fields.
         if report is not None:
             final_report = msgspec.structs.replace(
                 report,
                 accuracy=accuracy_scores,
                 output_sequence_lengths_full_run=full_run_osl,
+                events_sha256=events_sha256,
             )
             _write_report_artifacts(ctx, final_report, bench.profiling)
             report = final_report
