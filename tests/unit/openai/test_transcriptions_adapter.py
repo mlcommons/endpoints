@@ -146,6 +146,44 @@ class TestBodyInjection:
         query = _query(audio_file, prompt="line one\r\nline two")
         assert b"line one\r\nline two" in Adapter.encode_query(query)
 
+    def test_trailing_backslash_in_filename_is_escaped(self, tmp_path: Path):
+        # A value ending in \ makes the closing quote a quoted-pair, so the
+        # parameter runs on into the next header.
+        path = tmp_path / "clip\\.wav"
+        path.write_bytes(WAV_BYTES)
+        body = Adapter.encode_query(_query(path))
+        assert b'filename="clip%5C.wav"' in body
+        assert b"clip\\.wav" not in body
+
+    def test_audio_carrying_the_delimiter_is_rejected(self, tmp_path: Path):
+        # The boundary is a constant, so a payload that happens to contain it
+        # would forge a part; nothing else stops that.
+        boundary = Adapter.CONTENT_TYPE.split("boundary=", 1)[1]
+        path = tmp_path / "forged.wav"
+        path.write_bytes(b"RIFF" + f"\r\n--{boundary}\r\n".encode() + b"forged")
+        with pytest.raises(ValueError, match="Audio payload contains"):
+            Adapter.encode_query(_query(path))
+
+
+@pytest.mark.unit
+class TestResponseFormat:
+    def test_only_json_is_supported(self):
+        assert Adapter.SUPPORTED_RESPONSE_FORMATS == frozenset({"json"})
+
+    @pytest.mark.parametrize("fmt", ["text", "srt", "vtt", "verbose_json"])
+    def test_an_undecodable_response_format_is_rejected(
+        self, audio_file: Path, fmt: str
+    ):
+        # decode_response reads `text` off a JSON body, so these would only
+        # fail later, inside the decoder.
+        with pytest.raises(ValueError, match="response_format"):
+            Adapter.encode_query(_query(audio_file, response_format=fmt))
+
+    def test_an_absent_response_format_is_allowed(self, audio_file: Path):
+        # Omitted means the server default, which is JSON.
+        query = Query(id="q", data={"audio_file": str(audio_file), "model": "m"})
+        assert b'name="response_format"' not in Adapter.encode_query(query)
+
 
 @pytest.mark.unit
 class TestDecodeResponse:

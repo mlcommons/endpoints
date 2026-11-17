@@ -375,6 +375,60 @@ class TestWorkerErrorHandling:
             await asyncio.gather(worker_task, return_exceptions=True)
             pool.cleanup()
 
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_worker_request_encoding_failure(self, worker_config):
+        """A query the adapter cannot encode must come back as an error.
+
+        Encoding reads the query itself (an adapter that opens a file the row
+        names, a value the adapter rejects), so it can fail before anything is
+        sent. Without a result the session would wait on the sample until the
+        run deadline.
+        """
+        loop = asyncio.get_running_loop()
+        pool = ZmqWorkerPoolTransport.create(loop, 1)
+
+        worker = Worker(
+            worker_id=0,
+            connector=pool.worker_connector,
+            http_config=worker_config,
+        )
+
+        error_msg = "no audio at /gone.wav"
+
+        class FailingAdapter(worker._adapter):  # type: ignore[misc, name-defined]
+            @classmethod
+            def encode_query(cls, query):
+                raise FileNotFoundError(error_msg)
+
+        worker._adapter = FailingAdapter
+        worker_task = asyncio.create_task(worker.run())
+
+        try:
+            await pool.wait_for_workers_ready(timeout=5.0)
+
+            query_id = "test-encode-failure"
+            pool.send(
+                0,
+                Query(
+                    id=query_id,
+                    data={"prompt": "unused", "model": "gpt-3.5-turbo"},
+                ),
+            )
+
+            response = await pool.recv()
+
+            assert isinstance(response, QueryResult)
+            assert response.id == query_id
+            assert response.error is not None
+            assert error_msg in str(response.error)
+            assert response.response_output is None
+
+        finally:
+            worker.shutdown()
+            await asyncio.gather(worker_task, return_exceptions=True)
+            pool.cleanup()
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "stream", [False, True], ids=["non_streaming", "streaming"]

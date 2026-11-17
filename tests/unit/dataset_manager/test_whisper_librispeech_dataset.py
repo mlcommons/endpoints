@@ -15,17 +15,19 @@
 
 """Unit tests for the WhisperLibriSpeech predefined dataset.
 
-The download tests run without network: requests.get (downloader script fetch)
-and subprocess.run (the mlc-r2-downloader invocation) are mocked in the loader's
-own module, so only its logic runs.
+The download tests replace requests.Session in the loader's own module with a
+fake that serves the dataset's .uri metadata, its .md5 file list and the corpus
+files out of a dict, so they run without network and only the loader's logic
+executes.
 """
 
+import hashlib
 import json
-import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+import requests
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.predefined.whisper_librispeech import (
     MANIFEST_FILENAME,
@@ -60,23 +62,105 @@ def manifest(tmp_path: Path) -> Path:
     return path
 
 
-def _mock_requests_get() -> MagicMock:
-    """A requests.get returning a trivial downloader script body."""
-    resp = MagicMock()
-    resp.content = b"#!/usr/bin/env bash\nexit 0\n"
-    resp.raise_for_status.return_value = None
-    return resp
+_BASE_URL = "https://inference.mlcommons-storage.org/Whisper/dataset"
+_CHECKSUMS_URL = WhisperLibriSpeech.R2_DATASET_URI.removesuffix(".uri") + ".md5"
+
+_MANIFEST_BODY = json.dumps(
+    [_entry("./data/dev-all-repack/0.wav", "downloaded transcript")]
+).encode()
+_CLIP = "dev-all-repack/0.wav"
+
+#: The published list also carries the raw LibriSpeech FLACs and the unpacked
+#: dev-all WAVs, which the benchmark never reads.
+_UNUSED = (
+    "LibriSpeech/dev-other/1630/73710/1630-73710-0020.flac",
+    "dev-all/6841/88294/6841-88294-0029.wav",
+)
 
 
-def _fake_run_unpacking(cmd, **kwargs) -> MagicMock:
-    """subprocess.run side effect that unpacks a corpus under the -d directory."""
-    download_dir = Path(cmd[cmd.index("-d") + 1])
-    (download_dir / "dev-all-repack").mkdir(parents=True, exist_ok=True)
-    (download_dir / "dev-all-repack" / "0.wav").write_bytes(b"RIFF")
-    (download_dir / MANIFEST_FILENAME).write_text(
-        json.dumps([_entry("dev-all-repack/0.wav", "downloaded transcript")])
-    )
-    return MagicMock(returncode=0, stderr="")
+def _corpus(**overrides: bytes) -> dict[str, bytes]:
+    """The artifact's file bodies, keyed by their path in the published list."""
+    files = {MANIFEST_FILENAME: _MANIFEST_BODY, _CLIP: b"RIFF0"}
+    files.update(dict.fromkeys(_UNUSED, b"never read"))
+    files.update(overrides)
+    return files
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes, error: Exception | None = None) -> None:
+        self._body = body
+        self._error = error
+        self.text = body.decode()
+
+    def raise_for_status(self) -> None:
+        if self._error is not None:
+            raise self._error
+
+    def iter_content(self, chunk_size: int = 1):
+        yield self._body
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeSession:
+    """Serves the .uri, the .md5 list and the corpus files out of a dict.
+
+    ``served`` keys are paths relative to the dataset base URL. ``corrupt``
+    bodies are handed out under a digest computed from the honest body, so the
+    loader sees an MD5 mismatch.
+    """
+
+    def __init__(
+        self,
+        served: dict[str, bytes] | None = None,
+        corrupt: dict[str, bytes] | None = None,
+        fail_once: set[str] | None = None,
+    ) -> None:
+        files = _corpus() if served is None else served
+        digests = {path: hashlib.md5(body).hexdigest() for path, body in files.items()}
+        files = {**files, **(corrupt or {})}
+        self.bodies = {
+            WhisperLibriSpeech.R2_DATASET_URI: f"{_BASE_URL}\n".encode(),
+            _CHECKSUMS_URL: "".join(
+                f"{digest}  ./{path}\n" for path, digest in digests.items()
+            ).encode(),
+            **{f"{_BASE_URL}/{path}": body for path, body in files.items()},
+        }
+        self.fail_once = {f"{_BASE_URL}/{p}" for p in (fail_once or ())}
+        self.requested: list[str] = []
+
+    @property
+    def fetched_paths(self) -> set[str]:
+        """Corpus paths (not metadata URLs) that were actually requested."""
+        return {
+            url.removeprefix(f"{_BASE_URL}/")
+            for url in self.requested
+            if url.startswith(f"{_BASE_URL}/")
+        }
+
+    def get(self, url: str, **kwargs: object) -> _FakeResponse:
+        self.requested.append(url)
+        if url in self.fail_once:
+            self.fail_once.discard(url)
+            return _FakeResponse(b"", requests.HTTPError("503 transient"))
+        if url not in self.bodies:
+            return _FakeResponse(b"", requests.HTTPError(f"404 {url}"))
+        return _FakeResponse(self.bodies[url])
+
+    def __enter__(self) -> "_FakeSession":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def _patch_session(session: _FakeSession):
+    """Hand every ``requests.Session()`` in the loader the same fake."""
+    return patch(f"{_MODULE}.requests.Session", return_value=session)
 
 
 @pytest.fixture
@@ -127,9 +211,6 @@ class TestGenerate:
         assert df.iloc[0]["audio_file"] == "/mnt/audio/dev-all-repack/0.wav"
 
     def test_drops_fname_prefix_absent_from_the_corpus_root(self, tmp_path: Path):
-        # The hosted artifact unpacks dev-all-repack/ into the corpus root,
-        # while the manifest's fnames keep the upstream pipeline's ./data/
-        # prefix. The clips that exist on disk are what decide the layout.
         source = tmp_path / "source"
         (source / "dev-all-repack").mkdir(parents=True)
         for name in ("0.wav", "1.wav"):
@@ -161,7 +242,6 @@ class TestGenerate:
         parquet = cache / "whisper_librispeech" / "whisper_librispeech.parquet"
         assert parquet.exists()
 
-        # A second call must not need the manifest at all.
         manifest.unlink()
         df = WhisperLibriSpeech.generate(cache, manifest=manifest)
         assert len(df) == 2
@@ -196,37 +276,74 @@ class TestR2Download:
     def test_downloads_when_no_manifest_is_supplied(
         self, tmp_path: Path, no_local_manifest: None
     ):
-        with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
-            patch(f"{_MODULE}.subprocess.run", side_effect=_fake_run_unpacking),
-        ):
+        with _patch_session(_FakeSession()):
             df = WhisperLibriSpeech.generate(tmp_path / "cache")
 
         assert df.iloc[0]["transcript"] == "downloaded transcript"
-        # fname resolves against the downloaded manifest's own directory.
         assert df.iloc[0]["audio_file"] == str(
-            tmp_path / "cache/whisper_librispeech/source/dev-all-repack/0.wav"
+            tmp_path / "cache/whisper_librispeech/source" / _CLIP
         )
 
+    def test_only_the_repackaged_corpus_is_fetched(
+        self, tmp_path: Path, no_local_manifest: None
+    ):
+        # The published list is an order of magnitude larger than the 1633
+        # clips that are issued; mirroring it all is what outran the old
+        # wall-clock ceiling on the first run.
+        session = _FakeSession()
+        with _patch_session(session):
+            WhisperLibriSpeech.generate(tmp_path / "cache")
+
+        assert session.fetched_paths == {MANIFEST_FILENAME, _CLIP}
+
     def test_a_local_manifest_skips_the_download(self, tmp_path: Path, manifest: Path):
-        with patch(f"{_MODULE}.requests.get") as get:
+        with patch(f"{_MODULE}.requests.Session") as session:
             WhisperLibriSpeech.generate(tmp_path / "cache", manifest=manifest)
-            get.assert_not_called()
+            session.assert_not_called()
 
     def test_force_reuses_the_download_instead_of_refetching(
         self, tmp_path: Path, no_local_manifest: None
     ):
         cache = tmp_path / "cache"
-        with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
-            patch(f"{_MODULE}.subprocess.run", side_effect=_fake_run_unpacking),
-        ):
+        with _patch_session(_FakeSession()):
             WhisperLibriSpeech.generate(cache)
 
-        # force rebuilds the parquet; it must not re-fetch GBs of audio.
-        with patch(f"{_MODULE}.requests.get") as get:
+        with patch(f"{_MODULE}.requests.Session") as session:
             assert len(WhisperLibriSpeech.generate(cache, force=True)) == 1
-            get.assert_not_called()
+            session.assert_not_called()
+
+    def test_an_already_verified_file_is_not_refetched(
+        self, tmp_path: Path, no_local_manifest: None
+    ):
+        source = tmp_path / "source"
+        with _patch_session(_FakeSession()):
+            WhisperLibriSpeech._download_from_r2(
+                WhisperLibriSpeech.R2_DATASET_URI, source
+            )
+
+        resumed = _FakeSession()
+        with _patch_session(resumed):
+            WhisperLibriSpeech._download_from_r2(
+                WhisperLibriSpeech.R2_DATASET_URI, source
+            )
+        assert resumed.fetched_paths == set()
+
+    def test_an_interrupted_download_is_not_reused_as_a_corpus(
+        self, tmp_path: Path, no_local_manifest: None
+    ):
+        # The manifest is one of the fetched files, so it can be on disk while
+        # most of the clips are still missing.
+        cache = tmp_path / "cache"
+        source = cache / "whisper_librispeech" / "source"
+        source.mkdir(parents=True)
+        (source / MANIFEST_FILENAME).write_bytes(_MANIFEST_BODY)
+
+        session = _FakeSession()
+        with _patch_session(session):
+            WhisperLibriSpeech.generate(cache)
+
+        assert _CLIP in session.fetched_paths
+        assert (source / WhisperLibriSpeech.DOWNLOAD_MARKER).exists()
 
     @pytest.mark.parametrize(
         "uri",
@@ -243,66 +360,91 @@ class TestR2Download:
         monkeypatch: pytest.MonkeyPatch,
     ):
         monkeypatch.setenv(WhisperLibriSpeech.R2_DATASET_URI_ENV, uri)
-        with patch(f"{_MODULE}.requests.get") as get:
-            with pytest.raises(ValueError, match="untrusted URI"):
+        with patch(f"{_MODULE}.requests.Session") as session:
+            with pytest.raises(ValueError, match="dataset URI"):
                 WhisperLibriSpeech.generate(tmp_path / "cache")
-            get.assert_not_called()
+            session.assert_not_called()
 
-    def test_downloader_failure_is_reported(
+    def test_an_untrusted_base_url_is_refused(
         self, tmp_path: Path, no_local_manifest: None
     ):
-        with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
-            patch(
-                f"{_MODULE}.subprocess.run",
-                return_value=MagicMock(returncode=2, stderr="r2 boom"),
-            ),
-        ):
-            with pytest.raises(RuntimeError, match="r2 boom"):
-                WhisperLibriSpeech.generate(tmp_path / "cache")
-
-    def test_downloader_is_bounded_by_a_timeout(
-        self, tmp_path: Path, no_local_manifest: None
-    ):
-        # Dataset generation runs before RunWatchdog arms the whole-run
-        # deadline, so a stalled multi-GB fetch has nothing else to stop it.
-        with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
-            patch(f"{_MODULE}.subprocess.run") as run,
-        ):
-            run.side_effect = _fake_run_unpacking
-            WhisperLibriSpeech.generate(tmp_path / "cache")
-        assert (
-            run.call_args.kwargs["timeout"] == WhisperLibriSpeech.R2_DOWNLOAD_TIMEOUT_S
+        session = _FakeSession()
+        session.bodies[WhisperLibriSpeech.R2_DATASET_URI] = (
+            b"https://evil.example.com/d"
         )
+        with _patch_session(session):
+            with pytest.raises(ValueError, match="dataset base URL"):
+                WhisperLibriSpeech.generate(tmp_path / "cache")
+        assert session.fetched_paths == set()
 
-    def test_a_stalled_download_raises_rather_than_hanging(
+    def test_a_corrupt_file_fails_the_download(
         self, tmp_path: Path, no_local_manifest: None
     ):
-        with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
-            patch(
-                f"{_MODULE}.subprocess.run",
-                side_effect=subprocess.TimeoutExpired(cmd="bash", timeout=1),
-            ),
-        ):
-            with pytest.raises(RuntimeError, match="exceeded"):
+        session = _FakeSession(corrupt={_CLIP: b"truncated"})
+        with _patch_session(session):
+            with pytest.raises(RuntimeError, match="expected MD5"):
                 WhisperLibriSpeech.generate(tmp_path / "cache")
 
-    def test_the_downloader_script_is_removed_after_a_timeout(
+    def test_a_corrupt_file_leaves_no_marker_behind(
         self, tmp_path: Path, no_local_manifest: None
     ):
         cache = tmp_path / "cache"
-        with (
-            patch(f"{_MODULE}.requests.get", return_value=_mock_requests_get()),
-            patch(
-                f"{_MODULE}.subprocess.run",
-                side_effect=subprocess.TimeoutExpired(cmd="bash", timeout=1),
-            ),
-        ):
+        with _patch_session(_FakeSession(corrupt={_CLIP: b"truncated"})):
             with pytest.raises(RuntimeError):
                 WhisperLibriSpeech.generate(cache)
-        assert not list(cache.rglob("mlc-r2-downloader.sh"))
+        assert not list(cache.rglob(WhisperLibriSpeech.DOWNLOAD_MARKER))
+        assert not list(cache.rglob("*.part"))
+
+    def test_a_transient_http_failure_is_retried(
+        self, tmp_path: Path, no_local_manifest: None
+    ):
+        with _patch_session(_FakeSession(fail_once={_CLIP})):
+            df = WhisperLibriSpeech.generate(tmp_path / "cache")
+        assert df.iloc[0]["transcript"] == "downloaded transcript"
+
+    def test_a_missing_file_is_reported_with_its_url(
+        self, tmp_path: Path, no_local_manifest: None
+    ):
+        session = _FakeSession()
+        del session.bodies[f"{_BASE_URL}/{_CLIP}"]
+        with _patch_session(session):
+            with pytest.raises(RuntimeError, match=f"Failed to download .*{_CLIP}"):
+                WhisperLibriSpeech.generate(tmp_path / "cache")
+
+    def test_a_file_list_without_the_corpus_is_reported(
+        self, tmp_path: Path, no_local_manifest: None
+    ):
+        served = dict.fromkeys(_UNUSED, b"never read")
+        with _patch_session(_FakeSession(served=served)):
+            with pytest.raises(RuntimeError, match="no entries under"):
+                WhisperLibriSpeech.generate(tmp_path / "cache")
+
+    def test_a_corpus_without_the_manifest_is_reported(
+        self, tmp_path: Path, no_local_manifest: None
+    ):
+        with _patch_session(_FakeSession(served={_CLIP: b"RIFF0"})):
+            with pytest.raises(FileNotFoundError, match=MANIFEST_FILENAME):
+                WhisperLibriSpeech.generate(tmp_path / "cache")
+
+    def test_a_listed_path_escaping_the_download_dir_is_refused(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="outside"):
+            WhisperLibriSpeech._safe_target(tmp_path, "dev-all-repack/../../etc/passwd")
+
+    def test_the_file_list_keeps_only_the_corpus_paths(self):
+        checksums = "\n".join(
+            [
+                f"{'0' * 32}  ./{MANIFEST_FILENAME}",
+                f"{'1' * 32}  ./{_CLIP}",
+                f"{'2' * 32}  {_UNUSED[0]}",
+                f"{'3' * 32}  {_UNUSED[1]}",
+                "",
+                "   ",
+            ]
+        )
+        assert WhisperLibriSpeech._wanted_files(checksums) == [
+            (MANIFEST_FILENAME, "0" * 32),
+            (_CLIP, "1" * 32),
+        ]
 
 
 @pytest.mark.unit

@@ -112,7 +112,7 @@ endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000
   api_key: null  # API key
-  api_type: openai  # API type: openai, openai_transcriptions, sglang, or videogen | options: openai, openai_completions, openai_transcriptions, sglang, videogen
+  api_type: openai  # API type: openai, openai_completions, openai_transcriptions, sglang, or videogen | options: openai, openai_completions, openai_transcriptions, sglang, videogen
 report_dir: null  # Report output directory
 verbose: false  # Enable verbose logging
 enable_cpu_affinity: true  # NUMA-aware CPU pinning

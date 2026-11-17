@@ -315,8 +315,21 @@ class Worker:
                     if query is None:
                         break
 
-                    # Prepare and fire request
-                    req = self._prepare_request(query)
+                    # Prepare and fire request. Encoding can fail on the
+                    # query itself (an adapter that reads a file named by the
+                    # row, a value the adapter rejects); without this the
+                    # sample would get neither an error nor a completion and
+                    # the session would wait on it until the run deadline.
+                    try:
+                        req = self._prepare_request(query)
+                    except Exception as e:
+                        await self._handle_error(query.id, e)
+                        logger.error(
+                            f"Request {query.id} failed to encode: "
+                            f"{type(e).__name__}: {e}"
+                        )
+                        continue
+
                     if not await self._fire_request(req):
                         continue
 
