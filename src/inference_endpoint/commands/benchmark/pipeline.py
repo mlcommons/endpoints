@@ -59,9 +59,12 @@ from inference_endpoint.async_utils.services.metrics_aggregator.subscriber impor
     MetricsSnapshotSubscriber,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.config.schema import LoadPatternType
+from inference_endpoint.config.schema import LoadPatternType, StreamingMode
+from inference_endpoint.core.types import APIType, TokenCountSource
+from inference_endpoint.exceptions import SetupError
 from inference_endpoint.metrics.report import Report
 from inference_endpoint.metrics.steady_state_diagnostics import profile_for_load_pattern
+from inference_endpoint.metrics.token_count_basis import effective_token_count_source
 
 if TYPE_CHECKING:
     from inference_endpoint.config.schema import BenchmarkConfig
@@ -99,6 +102,7 @@ def steady_state_profile(
     accuracy_only: bool,
     enable_streaming: bool,
     tokenizer_name: str | None,
+    token_count_source: TokenCountSource,
 ) -> str | None:
     """Workload profile for live steady-state collection; None when ineligible.
 
@@ -106,10 +110,11 @@ def steady_state_profile(
     parent gate and the aggregator's profile from drifting apart. The decision
     must happen before the run starts because collection happens during the run.
 
-    Accuracy-only runs have no performance phase to collect. Without a tokenizer
-    there is no TPOT to bucket. Without streaming there is no ``TpotTrigger``;
-    every plateau gate would see an empty TPOT series, and every verdict would
-    be ``found: false``.
+    Accuracy-only runs have no performance phase to collect. TPOT is counted
+    from server usage in server mode, so only a client-mode run needs a
+    tokenizer; without one there is no TPOT to bucket. Without streaming there
+    is no ``TpotTrigger``; every plateau gate would see an empty TPOT series,
+    and every verdict would be ``found: false``.
 
     Agentic is refused by name as well as by profile. Its steady-state metric is
     per-trajectory NATL, which this collector does not produce.
@@ -123,8 +128,11 @@ def steady_state_profile(
         reason = "the run is accuracy-only, so it has no performance window"
     elif not enable_streaming:
         reason = "streaming is off, so there is no TPOT series to gate on"
-    elif not tokenizer_name:
-        reason = "the run resolved no tokenizer, so TPOT cannot be counted"
+    elif not tokenizer_name and token_count_source is TokenCountSource.CLIENT:
+        reason = (
+            "the run resolved no tokenizer and the primary basis is client, "
+            "so TPOT cannot be counted"
+        )
     elif load_pattern is LoadPatternType.AGENTIC_INFERENCE:
         reason = "agentic runs are measured by per-trajectory NATL, not a steady window"
     else:
@@ -136,6 +144,51 @@ def steady_state_profile(
     # The user asked for this explicitly, so say why they are not getting it.
     logger.warning("Steady-state detection disabled: %s", reason)
     return None
+
+
+# API types whose streamed responses carry usage only when stream_options asks.
+_STREAM_OPTIONS_API_TYPES = frozenset({APIType.OPENAI, APIType.OPENAI_COMPLETIONS})
+
+
+def resolve_token_count_source(config: BenchmarkConfig) -> TokenCountSource:
+    """Effective token-count source for the run; logs it once.
+
+    This is the only place that reads the configured token-count setting.
+    Videogen endpoints report no token usage, so they always count with the
+    client tokenizer, whatever the setting says.
+
+    Raises:
+        SetupError: The server basis is primary on a streaming OpenAI run that
+            does not ask for usage, so every streamed sample would miss it.
+    """
+    configured = config.settings.token_count_source
+    api_type = config.endpoint_config.api_type
+    effective = effective_token_count_source(configured, api_type)
+    if (
+        effective is TokenCountSource.SERVER
+        and not config.settings.client.stream_include_usage
+        and api_type in _STREAM_OPTIONS_API_TYPES
+        and config.model_params.streaming == StreamingMode.ON
+    ):
+        raise SetupError(
+            "settings.token_count_source: server needs usage on every streamed "
+            "response, but settings.client.stream_include_usage is false "
+            "(--no-stream-include-usage), so every streamed sample would miss "
+            "it. Set --token-count-source client (YAML: "
+            "settings.token_count_source: client) or remove "
+            "--no-stream-include-usage."
+        )
+    if effective is configured:
+        logger.info("Token counts: %s", configured.value)
+    else:
+        logger.info(
+            "Token counts: %s (api_type %s reports no token usage; "
+            "configured %s ignored)",
+            effective.value,
+            api_type.value,
+            configured.value,
+        )
+    return effective
 
 
 def _build_aggregator_args(
@@ -151,6 +204,7 @@ def _build_aggregator_args(
     enable_isl: bool,
     early_stopping: bool,
     steady_state_profile: str | None,
+    token_count_source: TokenCountSource,
 ) -> list[str]:
     """CLI args for the metrics_aggregator subprocess."""
     args: list[str] = [
@@ -175,6 +229,7 @@ def _build_aggregator_args(
         args.extend(["--steady-state-profile", steady_state_profile])
     args.extend(["--tokenizer-workers", str(tokenizer_workers)])
     args.append("--metrics-isl" if enable_isl else "--no-metrics-isl")
+    args.extend(["--token-count-source", token_count_source.value])
     return args
 
 
@@ -195,7 +250,10 @@ def _build_event_logger_args(
 
 
 def _build_report_from_snapshot(
-    snap_dict: dict[str, Any], config: BenchmarkConfig
+    snap_dict: dict[str, Any],
+    config: BenchmarkConfig,
+    *,
+    token_count_source: TokenCountSource,
 ) -> Report | None:
     """Build the Report from a metrics snapshot dict; best-effort (None on failure).
 
@@ -223,12 +281,21 @@ def _build_report_from_snapshot(
                 load_pattern.type == LoadPatternType.POISSON
                 and load_pattern.use_legacy_loadgen_qps_metrics
             ),
+            token_count_source=token_count_source,
         )
         if not report.complete:
-            logger.warning(
-                "Report is incomplete (state=%s, n_pending_tasks=%d)",
-                report.state,
-                snap_dict.get("n_pending_tasks", 0),
+            logger.warning("Report is incomplete: %s", report.incomplete_reason())
+        if (partial_reason := report.other_basis_partial_reason()) is not None:
+            # Same role rule as the aggregator's first-miss log: a shortfall
+            # on the server basis is informational when client is primary.
+            logger.log(
+                (
+                    logging.WARNING
+                    if token_count_source is TokenCountSource.SERVER
+                    else logging.INFO
+                ),
+                "%s",
+                partial_reason,
             )
         if report.legacy_loadgen_window_duration_ns is not None:
             logger.warning(
@@ -262,6 +329,7 @@ class MetricsPipeline:
         event_log_dir: Path,
         metrics_output_dir: Path,
         loop: asyncio.AbstractEventLoop,
+        token_count_source: TokenCountSource,
     ) -> None:
         self._config = config
         self._tokenizer_name = tokenizer_name
@@ -270,6 +338,7 @@ class MetricsPipeline:
         self._event_log_dir = event_log_dir
         self._metrics_output_dir = metrics_output_dir
         self._loop = loop
+        self._token_count_source = token_count_source
 
         self._stack: contextlib.ExitStack | None = None
         self._launcher: ServiceLauncher | None = None
@@ -354,7 +423,9 @@ class MetricsPipeline:
                     accuracy_only=self._accuracy_only,
                     enable_streaming=self._enable_streaming,
                     tokenizer_name=self._tokenizer_name,
+                    token_count_source=self._token_count_source,
                 ),
+                token_count_source=self._token_count_source,
             )
             event_logger_args = _build_event_logger_args(
                 event_log_dir=self._event_log_dir,
@@ -445,7 +516,9 @@ class MetricsPipeline:
             logger.error("No metrics snapshot available; cannot build report")
 
         report = (
-            _build_report_from_snapshot(snap_dict, self._config)
+            _build_report_from_snapshot(
+                snap_dict, self._config, token_count_source=self._token_count_source
+            )
             if snap_dict is not None
             else None
         )

@@ -1,0 +1,187 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "<unk>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 1,
+      "content": "<pad>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2,
+      "content": "<s>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 3,
+      "content": "</s>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Split",
+    "pattern": {
+      "String": ""
+    },
+    "behavior": "Isolated",
+    "invert": false
+  },
+  "post_processor": {
+    "type": "TemplateProcessing",
+    "single": [
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      }
+    ],
+    "pair": [
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "B",
+          "type_id": 1
+        }
+      }
+    ],
+    "special_tokens": {}
+  },
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "<unk>": 0,
+      "<pad>": 1,
+      "<s>": 2,
+      "</s>": 3,
+      "a": 4,
+      "b": 5,
+      "c": 6,
+      "d": 7,
+      "e": 8,
+      "f": 9,
+      "g": 10,
+      "h": 11,
+      "i": 12,
+      "j": 13,
+      "k": 14,
+      "l": 15,
+      "m": 16,
+      "n": 17,
+      "o": 18,
+      "p": 19,
+      "q": 20,
+      "r": 21,
+      "s": 22,
+      "t": 23,
+      "u": 24,
+      "v": 25,
+      "w": 26,
+      "x": 27,
+      "y": 28,
+      "z": 29,
+      "A": 30,
+      "B": 31,
+      "C": 32,
+      "D": 33,
+      "E": 34,
+      "F": 35,
+      "G": 36,
+      "H": 37,
+      "I": 38,
+      "J": 39,
+      "K": 40,
+      "L": 41,
+      "M": 42,
+      "N": 43,
+      "O": 44,
+      "P": 45,
+      "Q": 46,
+      "R": 47,
+      "S": 48,
+      "T": 49,
+      "U": 50,
+      "V": 51,
+      "W": 52,
+      "X": 53,
+      "Y": 54,
+      "Z": 55,
+      "0": 56,
+      "1": 57,
+      "2": 58,
+      "3": 59,
+      "4": 60,
+      "5": 61,
+      "6": 62,
+      "7": 63,
+      "8": 64,
+      "9": 65,
+      " ": 66,
+      "\t": 67,
+      "\n": 68,
+      "\r": 69,
+      "!": 70,
+      "\"": 71,
+      "#": 72,
+      "$": 73,
+      "%": 74,
+      "&": 75,
+      "'": 76,
+      "(": 77,
+      ")": 78,
+      "*": 79,
+      "+": 80,
+      ",": 81,
+      "-": 82,
+      ".": 83,
+      "/": 84,
+      ":": 85,
+      ";": 86,
+      "<": 87,
+      "=": 88,
+      ">": 89,
+      "?": 90,
+      "@": 91,
+      "[": 92,
+      "\\": 93,
+      "]": 94,
+      "^": 95,
+      "_": 96,
+      "`": 97,
+      "{": 98,
+      "|": 99,
+      "}": 100,
+      "~": 101
+    },
+    "unk_token": "<unk>"
+  }
+}

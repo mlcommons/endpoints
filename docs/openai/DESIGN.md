@@ -28,6 +28,8 @@ requests and converts OpenAI API responses back into `QueryResult` and
 - Format `Query.data` into OpenAI Chat Completions request bodies
 - Parse streaming SSE responses (chunked) into `StreamChunk` events
 - Parse non-streaming JSON responses into `QueryResult`
+- Ask streaming endpoints for token usage and carry the server's
+  `prompt_tokens`/`completion_tokens` into `QueryResult.metadata`
 - Provide a msgspec-optimised fast path for the hot path
 
 ## Component Map
@@ -66,21 +68,42 @@ class HttpRequestAdapter(ABC):
     def dataset_transforms(cls, model_params: ModelParams) -> list[Transform]: ...
 
     @classmethod
-    def encode_query(cls, query: Query) -> bytes: ...
+    def encode_query(cls, query: Query, *, include_usage: bool) -> bytes: ...
 
     @classmethod
     def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult: ...
 
     @classmethod
-    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice: ...
+    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice | SSEMessage | None: ...
 ```
 
 `dataset_transforms()` returns adapter-specific transforms that shape dataset
 rows into the expected `Query.data` schema. `encode_query()` serialises a
-`Query` to HTTP request bytes. `decode_response()` parses a non-streaming
-response. `decode_sse_message()` decodes a single SSE JSON payload into an
-`SSEChoice`; `parse_sse_chunk()` (concrete, on the base class) iterates the SSE
-buffer and calls it repeatedly.
+`Query` to HTTP request bytes; `include_usage` is the run's
+`settings.client.stream_include_usage` (see **Requesting usage** below), which
+adapters whose endpoints need no opt-in ignore. `decode_response()` parses a
+non-streaming response. `decode_sse_message()` decodes a single SSE JSON payload
+into the part of it the accumulator consumes; `parse_sse_chunk()` (concrete, on
+the base class) iterates the SSE buffer and calls it repeatedly, each frame in
+its own `try`.
+
+**Carrier rule.** A frame can hold choices, usage, both or neither, and the
+return value says which:
+
+| Frame                                | Returned               |
+| ------------------------------------ | ---------------------- |
+| choices, no usage (the common frame) | the first `SSEChoice`  |
+| neither usage nor choices            | `None`                 |
+| usage (with or without choices)      | the whole `SSEMessage` |
+
+`usage` is typed `object` on `SSEMessage`, `TextCompletionSSEMessage`,
+`ChatCompletionResponse` and `TextCompletionResponse`: msgspec decodes any JSON
+value into builtins, so a malformed `usage` never fails the frame or body it
+rides in. `server_usage_counts` (`core/types.py`) validates each count when it
+is captured; a count that is not an int in `[0, TOKEN_HDR_HIGH]` is treated as
+absent, and the first malformed value in a worker process logs one warning
+naming its type. Usage is read from any frame, because servers place it on a
+final `choices: []` frame, on a non-empty-choices frame or on every frame.
 
 ### `SSEAccumulatorProtocol` (protocol, defined in `endpoint_client/accumulator_protocol.py`)
 
@@ -97,6 +120,32 @@ API-specific SSE delta and returns a `StreamChunk` when content should be
 emitted (None otherwise). `get_final_output()` returns the assembled
 `QueryResult` after the stream is complete, so state is isolated per request
 rather than shared across a connection.
+
+`OpenAISSEAccumulator` treats usage as metadata only. A usage frame never
+creates a `StreamChunk`, sets `first_chunk` or touches the entry-zero TPOT
+boundary. Each count keeps the last well-formed value seen, per field, so a
+later frame with missing, null or malformed counts cannot erase earlier ones.
+`get_final_output()` puts `prompt_tokens` and `completion_tokens` in
+`QueryResult.metadata` when reported, and the non-streaming
+`from_endpoint_response`/`decode_response` paths copy `response.usage` the same
+way. Usage sums the tokens of every choice while only the first choice is
+measured, so a non-streaming response reports counts only with exactly one
+choice, and a stream whose usage-bearing frame holds several choices reports
+none. `n > 1` rows are kept from streaming usage on the request side: the
+adapters omit `stream_options` for them, and a server-primary run rejects them
+at setup. Known limitation: a server that forces usage on every stream (e.g.
+vLLM `--enable-force-include-usage`) still reports summed counts for an `n > 1`
+stream whose frames each carry one choice. The counts are plain ints because
+`QueryResult` is an `array_like` struct that cannot gain fields.
+
+**Requesting usage.** `encode_query(query, *, include_usage=)` receives the
+run's `settings.client.stream_include_usage` (on by default;
+`--no-stream-include-usage` opts out). When it is on,
+`stream_options: {"include_usage": true}` is sent on streaming requests whose
+`n` asks for at most one choice (`requests_multiple_choices` in `types.py`).
+Non-streaming requests never include `stream_options` (servers reject it without
+`stream=True`). The options object is a shared module-level constant, so
+encoding allocates nothing per request.
 
 ## Key Files
 

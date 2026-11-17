@@ -47,6 +47,32 @@ The server implements the OpenAI Chat Completions API and accepts the standard
 `messages` request shape. It is intended for functional testing of the
 request/response path, not for configurable latency simulation.
 
+Routes:
+
+| Route                       | Behavior                                                                               |
+| --------------------------- | -------------------------------------------------------------------------------------- |
+| `POST /v1/chat/completions` | Echoes the first user message, as JSON or SSE                                          |
+| `POST /v1/completions`      | Echoes `prompt` (a token-ID list is joined with spaces), as `text_completion` JSON/SSE |
+| `POST /echo`                | Returns the full request details as JSON                                               |
+
+Like vLLM, it reports token usage as
+`{"prompt_tokens": P, "completion_tokens": C, "total_tokens": P + C}`:
+
+- `P` is the length of the first user message content (chat) or of `prompt`
+  (completions; the token-ID count for a list prompt).
+- `C` is the number of output characters actually sent. A streamed response is
+  `" ".join(text.split())`, so whitespace runs collapse and are not counted.
+- Non-streaming responses always carry the `usage` key.
+- A stream sends a usage frame (`"choices": []`) after the finish frame and
+  before `[DONE]`, only when the request sets `stream_options.include_usage`.
+- `stream_options` without `stream=True` returns HTTP 400
+  (``Stream options can only be defined when `stream=True`.``). The check is on
+  truthiness, so `stream_options: {}` is accepted.
+
+`EchoServer(report_usage=False)` (CLI `--no-usage`) models a server that never
+reports usage: non-streaming responses send `"usage": null` and streams carry no
+usage frame. `set_max_osl(0)` makes every output empty, for failure-path tests.
+
 ### `max_throughput_server.py`
 
 Returns minimal valid responses as fast as possible. Used for:
@@ -55,12 +81,21 @@ Returns minimal valid responses as fast as possible. Used for:
   bottleneck)
 - Performance regression testing of the HTTP client and transport layer
 
+Streams end with the finish frame, then a usage frame (`prompt_tokens` fixed at
+10, one completion token per output character) only when the request sets
+`stream_options.include_usage`, then `[DONE]`. The responses with and without
+the usage frame are precompiled, so picking one costs a byte search of the
+request body and one branch.
+
 ### `variable_throughput_server.py`
 
 Returns responses at a configurable rate. Used for:
 
 - Testing scheduler behaviour under varying server latency
 - Validating Poisson and concurrency scheduler correctness
+
+Streams end like the max-throughput server's: finish frame, usage frame only
+when the request sets `stream_options.include_usage`, then `[DONE]`.
 
 ### `docker_server.py`
 

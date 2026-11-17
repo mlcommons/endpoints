@@ -19,8 +19,12 @@ Where the two disagree, the rules win.
 
 **During a run** (opt-in): `--steady-state` /
 `settings.steady_state.enabled: true`. The metrics aggregator collects the same
-super-pass series while the run is active. It reuses the token counts from the
-TPOT trigger and computes the verdict after token drain finishes.
+super-pass series while the run is active. It reuses the headline TPOT token
+counts, which follow the run's primary basis (server `completion_tokens − 1`, or
+the tokenizer), and computes the verdict after token drain finishes. With a
+server primary the verdict is withheld when any tracked sample returned no
+usage; a pending client tokenizer drain does not withhold it. With a client
+primary an incomplete drain withholds it.
 
 The verdict lands on `Report.steady_state`, then reaches `result_summary.json`,
 `report.txt`, and the console summary.
@@ -39,7 +43,8 @@ A live verdict also requires:
 
 - a performance phase, not accuracy-only mode;
 - streaming, because TPOT is the gated metric and only exists when streaming;
-- a resolvable tokenizer.
+- a server primary (`--token-count-source server`, which needs no tokenizer), or
+  a client primary (`--token-count-source client`) with a resolvable tokenizer.
 
 If any requirement is missing, collection stays off.
 
@@ -55,8 +60,10 @@ path. It is also the only path that prints the drift tables.
 1. Buckets performance-tracked samples into **super-passes** by issue order
    (`--superpass-size` samples each, default `--dataset-size`).
 2. Reconstructs per-sample **TTFT** (`recv_first − issued`) and **TPOT**
-   (`(complete − recv_first) / tokens(output-after-first-chunk)`). TPOT needs
-   the `--tokenizer`, so the tokenizer is required.
+   (`(complete − recv_first) / tokens-after-first-chunk`). On the server basis
+   the denominator is `completion_tokens − 1` from the COMPLETE line and no
+   tokenizer is needed; on the client basis (and for archived runs) it is the
+   tokenized output after the first chunk, so a tokenizer is required.
 3. Finds the **first steady plateau**. The window grows from the start while the
    gated metric, **TPOT** p50 and p90, stays trend-steady (Mann–Kendall +
    Hamed–Rao) and within a CoV bound.
@@ -76,12 +83,15 @@ path. It is also the only path that prints the drift tables.
 ## Requirements
 
 - An installed `inference-endpoint` environment.
-- Network access to fetch the model's tokenizer (or a local tokenizer dir).
+- For client-basis runs only: network access to fetch the model's tokenizer (or
+  a local tokenizer dir). Server-basis runs replay `completion_tokens` and
+  resolve no tokenizer.
 
 ## Run
 
 **Zero-config**: point it at a run directory. It auto-detects everything from
-the sidecar `config.yaml`: model to tokenizer, and load pattern to profile.
+the sidecar `config.yaml`: model to tokenizer (client basis), and load pattern
+to profile.
 
 ```bash
 uv run python -m inference_endpoint.metrics.steady_state_diagnostics <run_dir>/
@@ -104,11 +114,29 @@ The run config and **workload profile** auto-resolve the tokenizer, super-pass
 size, CoV bounds, and metric. Profiles are `concurrency`, `poisson`, `offline`,
 and `agentic`.
 
+**Token-count basis.** The replay counts tokens on the run's own primary basis,
+read by `token_count_source_for_run` from the top-level `token_count_source` in
+the `performance/result_summary.json` beside `events.jsonl`, else from the run's
+`config.yaml` (`settings.token_count_source`, resolved against the endpoint's
+API type). When neither records it (archived runs) the basis is `client`. The
+CLI prints `[token basis: server|client]` on stderr, and the text output starts
+with a `token basis:` header. A server-basis replay applies the live usage rule
+(`classify_server_usage`): a sample's usage counts only when it is usable
+(well-formed counts, each at least 1). A sample whose usage is unusable, such as
+no `completion_tokens` or 0 beside countable output, is missing usage: it gets
+no TPOT and is never tokenized. Its latency still counts and its tokens do not,
+so the CLI warns on stderr that NATL and system TPS are understated for the
+affected trajectories and super-passes. A sample with no countable output and 0
+`completion_tokens` is not missing usage; it has no TPOT because it produced no
+tokens. A `sample.complete` line that does not decode as an event record is
+skipped on either basis, and the CLI warns with the count.
+
 These optional overrides are still available:
 
 ```
+--token-count-source {server,client}  # else from result_summary.json, else config.yaml, else client
 --model <name>            # else auto-detected from config
---tokenizer <hf-id-or-dir># else from the model registry / config
+--tokenizer <hf-id-or-dir># client basis: else from the model registry / config
 --dataset-size <N>        # else from the performance phase_start event
 --profile {concurrency,poisson,offline,agentic}   # else from load_pattern
 --superpass-size N  --warmup auto  --warmup-band 0.05
@@ -247,15 +275,25 @@ The full rolling drift scan, including every window position, is only in
 
 Full structured result: `steady_state` (window, `ttft`/`tpot` summaries +
 histograms, `tps`, `anomaly` with every plateau), plus `trajectories`, `cov`,
-and `drift` (the rolling scan) for deeper analysis.
+and `drift` (the rolling scan) for deeper analysis. The verdict key follows the
+basis naming rule: `steady_state` when the replay basis is the run's primary,
+`steady_state_<basis>` when it is the other. The token-count labels are
+top-level keys beside the verdict, not inside it, so the block stays comparable
+with a run's `result_summary.json`: `token_count_source` (the replay basis,
+`"server"` or `"client"`), `n_missing_usage` (server basis: tracked samples
+without usable usage; `null` on the client basis) and, only when a
+`sample.complete` line did not decode, `n_undecodable`.
 
 ## Caveats
 
-- **TPOT parity.** Token counts use plain tokenization of the output. The live
-  aggregator uses the chat-template path for reasoning and tool-call outputs, so
-  absolute TPOT ms can differ for reasoning models. CoV and the trend tests are
-  scale-invariant, so the steady/drift **verdicts** are unaffected. Only the
-  absolute TPOT magnitude can differ.
+- **TPOT parity.** Server-basis runs replay the live aggregator's rule exactly
+  (`completion_tokens − 1` from the same COMPLETE record), so absolute TPOT
+  matches the run report. For client-basis and archived runs, token counts use
+  plain tokenization of the output. The live aggregator uses the chat-template
+  path for reasoning and tool-call outputs, so absolute TPOT ms can differ for
+  reasoning models there. CoV and the trend tests are scale-invariant, so the
+  steady/drift **verdicts** are unaffected. Only the absolute TPOT magnitude can
+  differ.
 - **Window sizes < 4** are useless for drift because the trend test needs ≥ 4
   points. They still contribute to the CoV table.
 - Window indices are **post-warmup relative**. Add the resolved warmup, shown as

@@ -46,6 +46,7 @@ def run_cli(
     dataset: str = DATASET,
     workers: int | None = None,
     init_timeout: float | None = None,
+    stream_include_usage: bool = True,
 ) -> dict:
     """Invoke ``inference-endpoint`` in-process via cyclopts; return the parsed
     ``performance/result_summary.json`` (the run's machine-readable report).
@@ -58,7 +59,9 @@ def run_cli(
     ``workers`` / ``init_timeout`` override the client's ``--workers`` /
     ``--client.worker-initialization-timeout`` (useful in containers where
     cpu_affinity is restricted); tests wire them from the ``--roofline-*``
-    pytest options via the ``client_opts`` fixture.
+    pytest options via the ``client_opts`` fixture. ``stream_include_usage=False``
+    adds ``--no-stream-include-usage`` so streaming requests do not ask for the
+    usage frame.
     """
     from inference_endpoint.main import app
 
@@ -81,6 +84,8 @@ def run_cli(
         args += ["--workers", str(workers)]
     if init_timeout is not None:
         args += ["--client.worker-initialization-timeout", str(init_timeout)]
+    if not stream_include_usage:
+        args.append("--no-stream-include-usage")
     try:
         app(args)
     except SystemExit as e:

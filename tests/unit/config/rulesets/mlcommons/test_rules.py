@@ -248,6 +248,9 @@ def test_edge_ruleset_apply_user_config():
 # Verbatim from mlcommons/endpoints_policies seedset.yaml, cohort 2026-10-C1 set A.
 _EP_SCHED_SEED = 10487924139932647040
 _EP_SAMPLE_SEED = 586478644936801402
+# Verbatim from mlcommons/endpoints_policies seedset.yaml, cohort 2026-11-C0 set B.
+_EP_B_SCHED_SEED = 17312635550606430962
+_EP_B_SAMPLE_SEED = 6679150691998295617
 
 
 @pytest.mark.unit
@@ -263,6 +266,13 @@ def test_endpoints_v1_0_official_seeds():
 
 
 @pytest.mark.unit
+def test_endpoints_v1_0_set_b_official_seeds():
+    ep = get_ruleset("mlperf-endpoints-v1.0-2026-11-C0-B")
+    assert ep.scheduler_rng_seed == _EP_B_SCHED_SEED
+    assert ep.sample_index_rng_seed == _EP_B_SAMPLE_SEED
+
+
+@pytest.mark.unit
 def test_endpoints_ruleset_registered():
     assert get_ruleset("mlperf-endpoints-v1.0-2026-10-C1-A") is ENDPOINTS_CURRENT
     assert get_ruleset("mlperf-endpoints-current") is ENDPOINTS_CURRENT
@@ -274,9 +284,11 @@ def test_endpoints_ruleset_registered():
 def test_endpoints_seeds_differ_from_every_other_registered_ruleset():
     """Endpoints cohorts rotate independently of the other rulesets; a shared
     value would mean one of the two was transcribed from the wrong source."""
-    for other in [*ALL_ROUNDS, EDGE_CURRENT]:
-        assert ENDPOINTS_CURRENT.scheduler_rng_seed != other.scheduler_rng_seed
-        assert ENDPOINTS_CURRENT.sample_index_rng_seed != other.sample_index_rng_seed
+    for ep in ENDPOINTS_ALL:
+        for other in [*ALL_ROUNDS, EDGE_CURRENT, *ENDPOINTS_ALL]:
+            if other is not ep:
+                assert ep.scheduler_rng_seed != other.scheduler_rng_seed
+                assert ep.sample_index_rng_seed != other.sample_index_rng_seed
 
 
 @pytest.mark.unit

@@ -61,12 +61,13 @@ class VideoGenAdapter(HttpRequestAdapter):
         ]
 
     @classmethod
-    def encode_query(cls, query: Query) -> bytes:
+    def encode_query(cls, query: Query, *, include_usage: bool) -> bytes:
         """Serialise query.data to VideoPathRequest JSON bytes.
 
         Only `prompt` is required. All other fields fall back to defaults on
         VideoPathRequest but can be overridden via query.data. Streaming is
-        not supported — `stream=True` raises.
+        not supported — `stream=True` raises. `include_usage` is ignored: the
+        endpoint reports no token usage.
         """
         data = query.data
         if "prompt" not in data:

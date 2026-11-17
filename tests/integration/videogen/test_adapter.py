@@ -56,7 +56,7 @@ class TestVideoGenAdapterRoundTrip:
     ) -> None:
         """Default response_format=video_path → server returns the saved-video path."""
         query = Query(id="q1", data={"prompt": "a golden retriever running on a beach"})
-        request_bytes = VideoGenAdapter.encode_query(query)
+        request_bytes = VideoGenAdapter.encode_query(query, include_usage=False)
 
         status, content = _post(
             f"{mock_trtllm_serve.url}/v1/videos/generations", request_bytes
@@ -83,7 +83,7 @@ class TestVideoGenAdapterRoundTrip:
                 "response_format": "video_bytes",
             },
         )
-        request_bytes = VideoGenAdapter.encode_query(query)
+        request_bytes = VideoGenAdapter.encode_query(query, include_usage=False)
 
         status, content = _post(
             f"{mock_trtllm_serve.url}/v1/videos/generations", request_bytes
@@ -102,7 +102,7 @@ class TestVideoGenAdapterRoundTrip:
         self, mock_trtllm_serve: MockTrtllmServe
     ) -> None:
         query = Query(id="q2", data={"prompt": "ocean waves at sunset"})
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["response_format"] == "video_path"
 
     def test_request_accuracy_mode_asks_for_video_bytes(
@@ -112,14 +112,14 @@ class TestVideoGenAdapterRoundTrip:
             id="q2b",
             data={"prompt": "ocean waves at sunset", "response_format": "video_bytes"},
         )
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["response_format"] == "video_bytes"
 
     def test_request_carries_mlperf_defaults(
         self, mock_trtllm_serve: MockTrtllmServe
     ) -> None:
         query = Query(id="q3", data={"prompt": "ocean waves at sunset"})
-        payload = json.loads(VideoGenAdapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["fps"] == 16
         assert payload["seconds"] == pytest.approx(5.0)
         assert payload["size"] == "720x1280"
@@ -136,7 +136,7 @@ class TestVideoGenAdapterErrorHandling:
         query = Query(id="q4", data={"prompt": "a cat"})
         status, content = _post(
             f"{mock_trtllm_serve_error.url}/v1/videos/generations",
-            VideoGenAdapter.encode_query(query),
+            VideoGenAdapter.encode_query(query, include_usage=False),
         )
         assert status == 500
         with pytest.raises((ValidationError, json.JSONDecodeError)):

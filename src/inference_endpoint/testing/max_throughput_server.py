@@ -35,6 +35,7 @@ import multiprocessing
 import multiprocessing.sharedctypes
 import multiprocessing.synchronize
 import os
+import re
 import signal
 import socket
 import sys
@@ -68,6 +69,10 @@ def _counter_read(counter: _SyncInt | None) -> int:
     return 0
 
 
+# Prompt tokens every stub response reports in its usage object.
+STUB_PROMPT_TOKENS = 10
+
+
 def _chunked(data: bytes) -> bytes:
     """HTTP chunked transfer encoding."""
     return f"{len(data):x}\r\n".encode() + data + b"\r\n" if data else b"0\r\n\r\n"
@@ -94,19 +99,94 @@ def _sse_event(
     )
 
 
+def _sse_usage_event(model: str, created: int, completion_tokens: int) -> bytes:
+    """Encode the OpenAI ``stream_options.include_usage`` frame (empty ``choices``)."""
+    return (
+        b"data: "
+        + msgspec.json.encode(
+            {
+                "id": "r",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": STUB_PROMPT_TOKENS,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": completion_tokens + STUB_PROMPT_TOKENS,
+                },
+            }
+        )
+        + b"\n\n"
+    )
+
+
+def build_stream_tail(
+    model: str, created: int, completion_tokens: int, *, include_usage: bool
+) -> bytes:
+    """Build the end of an SSE stream, ready to write after the content chunks.
+
+    The finish frame, then (only when ``include_usage``) the usage frame, then
+    the ``[DONE]`` sentinel (vLLM's order), then the zero-length HTTP chunk that
+    terminates the chunked body. With the usage frame each frame is its own HTTP
+    chunk; without it the finish frame and ``[DONE]`` share one chunk, the
+    layout of the usage-free stream.
+
+    Args:
+        model: Model name in the response JSON.
+        created: ``created`` timestamp shared by every frame of the response.
+        completion_tokens: Completion tokens reported in the usage frame. The
+            stubs emit one character per token, so this is the content length.
+        include_usage: Whether the request asked for the usage frame
+            (``stream_options.include_usage``).
+    """
+    finish = _sse_event(model, created, {}, "stop")
+    done = b"data: [DONE]\n\n"
+    if include_usage:
+        usage = _sse_usage_event(model, created, completion_tokens)
+        chunks = _chunked(finish) + _chunked(usage) + _chunked(done)
+    else:
+        chunks = _chunked(finish + done)
+    return chunks + b"0\r\n\r\n"
+
+
+_INCLUDE_USAGE_KEY = b'"include_usage"'
+_COLON_TRUE = re.compile(rb"\s*:\s*true")
+
+
+def requests_usage(body: bytes) -> bool:
+    """Whether a request body sets ``stream_options.include_usage`` to true.
+
+    A byte search, not a JSON decode: this runs once per request on the
+    roofline path. The key is searched from the end because the in-repo
+    encoders emit ``stream_options`` after the (large) messages or prompt. A
+    quoted ``"include_usage"`` inside a prompt is escaped in the JSON body, so
+    it never matches.
+    """
+    i = body.rfind(_INCLUDE_USAGE_KEY)
+    return i >= 0 and _COLON_TRUE.match(body, i + len(_INCLUDE_USAGE_KEY)) is not None
+
+
 def build_streaming_response(
-    output_length: int = 160, stream_interval: int = 1, model: str = "max-tp"
+    output_length: int = 160,
+    stream_interval: int = 1,
+    model: str = "max-tp",
+    *,
+    include_usage: bool,
 ) -> bytes:
     """Build complete SSE streaming response (chunked encoding).
 
     *stream_interval* controls how many characters are packed into each SSE
     event.  Total SSE content events = ``ceil(output_length / stream_interval)``.
-    Each event is sent in its own HTTP chunked frame.
+    Each event is sent in its own HTTP chunked frame, followed by the finish
+    frame, the usage frame when ``include_usage`` and ``[DONE]`` (see
+    :func:`build_stream_tail`).
 
     Args:
         output_length: Total characters in the response.
         stream_interval: Characters per SSE event (1 = finest granularity).
         model: Model name in the response JSON.
+        include_usage: Whether to send the usage frame.
     """
     headers = (
         b"HTTP/1.1 200 OK\r\n"
@@ -124,10 +204,9 @@ def build_streaming_response(
         event = _sse_event(model, created, {"content": "x" * chars})
         chunks.append(_chunked(event))
 
-    # Finish event + [DONE] sentinel in one final chunk
-    finish = _sse_event(model, created, {}, "stop")
-    chunks.append(_chunked(finish + b"data: [DONE]\n\n"))
-    chunks.append(b"0\r\n\r\n")
+    chunks.append(
+        build_stream_tail(model, created, output_length, include_usage=include_usage)
+    )
 
     return headers + b"".join(chunks)
 
@@ -159,9 +238,9 @@ def build_non_streaming_response(
                 }
             ],
             "usage": {
-                "prompt_tokens": 10,
+                "prompt_tokens": STUB_PROMPT_TOKENS,
                 "completion_tokens": output_length,
-                "total_tokens": output_length + 10,
+                "total_tokens": output_length + STUB_PROMPT_TOKENS,
             },
             "system_fingerprint": None,
         }
@@ -179,6 +258,8 @@ def build_response(
     stream: bool = False,
     stream_interval: int = 1,
     model: str = "max-tp",
+    *,
+    include_usage: bool,
 ) -> bytes:
     """Build a pre-compiled HTTP response.
 
@@ -187,9 +268,13 @@ def build_response(
         stream: SSE streaming (True) or single JSON (False).
         stream_interval: Characters per SSE event (streaming only).
         model: Model name in the response JSON.
+        include_usage: Whether to send the usage frame (streaming only; a JSON
+            response always carries ``usage``).
     """
     if stream:
-        return build_streaming_response(output_length, stream_interval, model)
+        return build_streaming_response(
+            output_length, stream_interval, model, include_usage=include_usage
+        )
     return build_non_streaming_response(output_length, model)
 
 
@@ -232,15 +317,24 @@ class ServerProtocol(asyncio.Protocol):
     __slots__ = (
         "transport",
         "response",
-        "response_size",
+        "response_no_usage",
         "_parser",
         "_request",
     )
 
-    def __init__(self, response: bytes):
+    def __init__(self, response: bytes, response_no_usage: bytes | None):
+        """Create the protocol for one connection.
+
+        Args:
+            response: Sent to every request, or only to requests that set
+                ``stream_options.include_usage``.
+            response_no_usage: Sent to a request that does not. ``None`` when
+                the response does not depend on the request (non-streaming),
+                so the request body is never inspected.
+        """
         self.transport = None
         self.response = response
-        self.response_size = len(response)
+        self.response_no_usage = response_no_usage
         self._request: RequestParser | None = None
         self._parser: httptools.HttpRequestParser | None = None
 
@@ -270,11 +364,16 @@ class ServerProtocol(asyncio.Protocol):
         if request.done():
             _counter_add(_req_counter)
 
+            response = self.response
+            no_usage = self.response_no_usage
+            if no_usage is not None and not requests_usage(request.body):
+                response = no_usage
+
             transport = self.transport
             if transport and not transport.is_closing():
-                transport.write(self.response)  # type: ignore[union-attr]
+                transport.write(response)  # type: ignore[union-attr]
                 _counter_add(_resp_counter)
-                _counter_add(_byte_counter, self.response_size)
+                _counter_add(_byte_counter, len(response))
 
             # Reset for next request (HTTP/1.1 keep-alive)
             self._request = RequestParser()
@@ -291,6 +390,7 @@ def _worker(
     host: str,
     port: int,
     response: bytes,
+    response_no_usage: bytes | None,
     ready: multiprocessing.synchronize.Event,
     shutdown: multiprocessing.synchronize.Event,
     counters: tuple[_SyncInt | None, _SyncInt | None, _SyncInt | None] = (
@@ -310,7 +410,7 @@ def _worker(
         loop = asyncio.get_running_loop()
 
         def protocol_factory():
-            return ServerProtocol(response)
+            return ServerProtocol(response, response_no_usage)
 
         server = await loop.create_server(
             protocol_factory,
@@ -382,13 +482,31 @@ class MaxThroughputServer:
         self._worker_shutdown: multiprocessing.synchronize.Event | None = None
         self._stats_thread: threading.Thread | None = None
 
-        self._response = build_response(output_length, stream, stream_interval)
+        self.set_response(output_length, stream_interval)
 
         global _req_counter, _resp_counter, _byte_counter
         if stats:
             _req_counter = multiprocessing.Value("L", 0)  # type: ignore[assignment]
             _resp_counter = multiprocessing.Value("L", 0)  # type: ignore[assignment]
             _byte_counter = multiprocessing.Value("L", 0)  # type: ignore[assignment]
+
+    def set_response(self, output_length: int, stream_interval: int = 1) -> None:
+        """(Re)build the pre-compiled responses for the current ``stream`` mode.
+
+        A streaming server precompiles a second response without the usage
+        frame for requests that do not set ``stream_options.include_usage``;
+        serving the right one costs a body probe and one branch per request.
+        """
+        self._response = build_response(
+            output_length, self.stream, stream_interval, include_usage=True
+        )
+        self._response_no_usage = (
+            build_response(
+                output_length, self.stream, stream_interval, include_usage=False
+            )
+            if self.stream
+            else None
+        )
 
     @property
     def url(self) -> str:
@@ -430,6 +548,7 @@ class MaxThroughputServer:
                     self.host,
                     self._port,
                     self._response,
+                    self._response_no_usage,
                     ready,
                     self._worker_shutdown,
                     (_req_counter, _resp_counter, _byte_counter),

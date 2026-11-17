@@ -19,7 +19,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     snapshot_to_dict,
 )
 from inference_endpoint.metrics.early_stopping import EarlyStoppingSpec
-from inference_endpoint.metrics.report import _series_to_metric_dict
+from inference_endpoint.metrics.report import Report, _series_to_metric_dict
+
+from tests.test_helpers import DEFAULT_SOURCE
 
 pytestmark = pytest.mark.unit
 
@@ -146,9 +148,9 @@ def test_report_from_snapshot_preserves_empty_series_map():
     # (Report.from_snapshot): a count==0 short-circuit there drops the map even
     # when _series_to_metric_dict preserves it, so exercising the helper alone
     # would prove nothing.
-    from inference_endpoint.metrics.report import Report
-
-    report = Report.from_snapshot(_snap(_registry(EarlyStoppingSpec(), n=0)))
+    report = Report.from_snapshot(
+        _snap(_registry(EarlyStoppingSpec(), n=0)), token_count_source=DEFAULT_SOURCE
+    )
     esp = report.ttft["early_stopping_percentiles"]
     assert list(esp) == _GRID_ES_KEYS
     assert all(v is None for v in esp.values())

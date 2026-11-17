@@ -15,7 +15,17 @@
 
 """SGLang SSE stream accumulator implementation."""
 
-from inference_endpoint.core.types import QueryResult, StreamChunk, TextModelOutput
+from typing import Any
+
+from inference_endpoint.core.types import (
+    COMPLETION_TOKENS_KEY,
+    PROMPT_TOKENS_KEY,
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+    put_server_usage,
+    server_usage_count,
+)
 from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
@@ -29,6 +39,12 @@ class SGLangSSEAccumulator(SSEAccumulatorProtocol):
         self.text = ""
         self.token_ids: list[int] = []
         self.total_tokens = 0
+        self.prompt_tokens: int | None = None
+        # The last raw prompt_tokens validated; frames repeat one value.
+        self._raw_prompt_tokens: object = None
+        # Set by the first decoded frame (each carries meta_info counts); until
+        # then the initial total_tokens of 0 is not a server-reported count.
+        self._usage_seen = False
         self.retraction_occurred = False
 
         self.first_chunk_sent = False
@@ -38,6 +54,18 @@ class SGLangSSEAccumulator(SSEAccumulatorProtocol):
     def add_chunk(self, delta: SGLangSSEDelta) -> StreamChunk | None:
         if not isinstance(delta, SGLangSSEDelta):
             return None
+
+        # Captured before the unchanged-count early return so a stream whose
+        # completion count never moves (e.g. an abort) still reports its counts.
+        # Only a changed raw value is validated; a frame without a usable
+        # prompt_tokens keeps the earlier count.
+        self._usage_seen = True
+        raw = delta.prompt_tokens
+        if raw is not None and raw != self._raw_prompt_tokens:
+            self._raw_prompt_tokens = raw
+            count = server_usage_count(raw, PROMPT_TOKENS_KEY)
+            if count is not None:
+                self.prompt_tokens = count
 
         if delta.total_completion_tokens == self.total_tokens:
             return None
@@ -60,7 +88,6 @@ class SGLangSSEAccumulator(SSEAccumulatorProtocol):
                 "first_chunk": not self.first_chunk_sent,
                 "final_chunk": False,
                 "retraction_occurred": delta.has_retractions,
-                "n_tokens": len(delta.token_delta),
             }
             chunk = StreamChunk(
                 id=self.query_id,
@@ -73,14 +100,20 @@ class SGLangSSEAccumulator(SSEAccumulatorProtocol):
             return None
 
     def get_final_output(self) -> QueryResult:
+        metadata: dict[str, Any] = {
+            "first_chunk": not self.first_chunk_sent,
+            "final_chunk": True,
+            "retraction_occurred": self.retraction_occurred,
+            "token_ids": self.token_ids,
+        }
+        if self._usage_seen:
+            put_server_usage(
+                metadata,
+                self.prompt_tokens,
+                server_usage_count(self.total_tokens, COMPLETION_TOKENS_KEY),
+            )
         return QueryResult(
             id=self.query_id,
             response_output=TextModelOutput(output=self.text),
-            metadata={
-                "first_chunk": not self.first_chunk_sent,
-                "final_chunk": True,
-                "retraction_occurred": self.retraction_occurred,
-                "n_tokens": self.total_tokens,
-                "token_ids": self.token_ids,
-            },
+            metadata=metadata,
         )

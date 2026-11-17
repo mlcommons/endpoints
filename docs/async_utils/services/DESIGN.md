@@ -447,9 +447,12 @@ stateDiagram-v2
 ### 6.2 Metrics aggregator
 
 - **Role**: Subscribes to EventRecords and derives real-time metrics (e.g. TTFT,
-  sample latency, token counts). Token metrics (ISL/OSL/TPOT) are computed by a
-  batched tokenizer (in-process threads live; process-sharded end-of-run drain)
-  — see [metrics_aggregator/DESIGN.md](metrics_aggregator/DESIGN.md). Shuts down
+  sample latency, token counts). Token metrics (ISL/OSL/TPOT) are recorded on
+  two bases: the server-reported usage on each COMPLETE record, and the client
+  tokenizer (a batched tokenizer: in-process threads live, process-sharded
+  end-of-run drain). The run's primary basis (`--token-count-source`) fills the
+  headline series; the other basis records beside it under a `_<basis>` suffix —
+  see [metrics_aggregator/DESIGN.md](metrics_aggregator/DESIGN.md). Shuts down
   on **session.ended**.
 - **Outputs**: Live `MetricsSnapshot` frames over an IPC PUB socket, and an
   atomically written `final_snapshot.json` (the primary Report source). Planned

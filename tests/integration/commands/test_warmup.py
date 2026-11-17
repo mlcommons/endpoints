@@ -72,6 +72,11 @@ def _echo_response(prompt: str) -> dict:
     result = QueryResult(id=req_id, response_output=TextModelOutput(output=prompt))
     body = OpenAIAdapter.to_endpoint_response(result).model_dump(mode="json")
     body["id"] = req_id
+    body["usage"] = {
+        "prompt_tokens": len(prompt),
+        "completion_tokens": len(prompt),
+        "total_tokens": 2 * len(prompt),
+    }
     return body
 
 

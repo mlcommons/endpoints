@@ -915,11 +915,12 @@ subprocess, which folds them into a `MetricsRegistry` (counters + HDR/series
 rollups), publishes live `MetricsSnapshot` messages, and — on `ENDED` / terminal
 state — atomically writes `final_snapshot.json`. The main process reads that
 file (`json.loads` → dict) and builds the report with
-`Report.from_snapshot(dict, run_config=...)`; if the file is missing (aggregator
-SIGKILLed) it falls back to the subscriber's last live snapshot and the report
-is marked `complete=False`. The report reads `tracked_*` counters
-(`tracked_samples_completed`, `tracked_duration_ns`, …) plus the LoadGen
-"completed" window; see [metrics/report_design.md](../metrics/report_design.md).
+`Report.from_snapshot(dict, token_count_source=..., run_config=...)`; if the
+file is missing (aggregator SIGKILLed) it falls back to the subscriber's last
+live snapshot and the report is marked `complete=False`. The report reads
+`tracked_*` counters (`tracked_samples_completed`, `tracked_duration_ns`, …)
+plus the LoadGen "completed" window; see
+[metrics/report_design.md](../metrics/report_design.md).
 
 ### HttpClientSampleIssuer Migration
 
@@ -1084,7 +1085,11 @@ async def _run_benchmark_async(ctx, loop) -> BenchmarkResult:
             await asyncio.to_thread(launcher.wait_for_exit, None)
             # After the aggregator exits it has written final_snapshot.json:
             snap = json.loads((metrics_output_dir / "final_snapshot.json").read_bytes())
-            report = Report.from_snapshot(snap, run_config=run_config)
+            report = Report.from_snapshot(
+                snap,
+                token_count_source=ctx.token_count_source,
+                run_config=run_config,
+            )
 
     return BenchmarkResult(session=result, collector=collector, report=report, ...)
 ```

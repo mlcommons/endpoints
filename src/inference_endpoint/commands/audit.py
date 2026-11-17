@@ -202,7 +202,7 @@ def _run_phases(
         if not report.complete:
             raise ExecutionError(
                 f"Audit phase '{spec.label}' did not complete cleanly "
-                "(metrics drain timed out); "
+                f"({report.incomplete_reason()}); "
                 "refusing to certify a result from partial data"
             )
         # Without a fixed spec count, record what this phase actually issued.

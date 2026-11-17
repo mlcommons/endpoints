@@ -15,10 +15,13 @@
 
 """Unit tests for OpenAISSEAccumulator tool-call handling."""
 
+import msgspec
 import pytest
-from inference_endpoint.core.types import StreamChunk, TextModelOutput
+from inference_endpoint.core.types import QueryResult, StreamChunk, TextModelOutput
 from inference_endpoint.openai.accumulator import OpenAISSEAccumulator
-from inference_endpoint.openai.types import SSEChoice, SSEDelta
+from inference_endpoint.openai.completions_adapter import OpenAITextCompletionsAdapter
+from inference_endpoint.openai.openai_msgspec_adapter import OpenAIMsgspecAdapter
+from inference_endpoint.openai.types import SSEChoice, SSEDelta, SSEMessage
 
 
 def _make_tc_partial(idx: int, tc_id: str, name: str, args: str) -> SSEChoice:
@@ -223,3 +226,284 @@ def test_mixed_reasoning_and_content_are_both_preserved(
     assert output.output == ("42", "!")
     assert "".join(output.reasoning) == "Think: done"
     assert output.tool_calls == ((tuple(tool_calls),) if tool_calls else None)
+
+
+def _usage_frame(**counts: object) -> SSEMessage:
+    """A usage-only trailer as the adapters decode it."""
+    return SSEMessage(usage=counts)
+
+
+def _counts(metadata: dict) -> dict:
+    return {
+        k: metadata[k] for k in ("prompt_tokens", "completion_tokens") if k in metadata
+    }
+
+
+@pytest.mark.unit
+class TestAccumulatorUsage:
+    def test_usage_frame_sets_metadata_without_stream_chunk(self):
+        acc = OpenAISSEAccumulator("qid", stream_all_chunks=True)
+        assert acc.add_chunk(_usage_frame(prompt_tokens=7, completion_tokens=0)) is None
+        assert acc.first_chunk_sent is False
+        assert acc.add_chunk(_make_content_choice("Hi")).metadata["first_chunk"] is True
+        assert acc.add_chunk(_usage_frame(prompt_tokens=7, completion_tokens=3)) is None
+        result = acc.get_final_output()
+        assert result.response_output.output == ("Hi",)
+        assert _counts(result.metadata) == {"prompt_tokens": 7, "completion_tokens": 3}
+
+    def test_usage_only_stream_reports_zero(self):
+        acc = OpenAISSEAccumulator("qid", stream_all_chunks=False)
+        acc.add_chunk(_usage_frame(prompt_tokens=7, completion_tokens=0))
+        result = acc.get_final_output()
+        assert result.response_output.output == ()
+        assert result.metadata == {
+            "first_chunk": True,
+            "final_chunk": True,
+            "prompt_tokens": 7,
+            "completion_tokens": 0,
+        }
+
+    def test_message_applies_choice_and_usage(self):  # LiteLLM shape
+        acc = OpenAISSEAccumulator("qid", stream_all_chunks=False)
+        chunk = acc.add_chunk(
+            SSEMessage(
+                choices=(
+                    SSEChoice(delta=SSEDelta(content="Hi"), finish_reason="stop"),
+                ),
+                usage={"prompt_tokens": 7, "completion_tokens": 1},
+            )
+        )
+        assert (chunk.response_chunk, chunk.metadata["first_chunk"]) == ("Hi", True)
+        md = acc.get_final_output().metadata
+        assert (md["finish_reason"], md["prompt_tokens"], md["completion_tokens"]) == (
+            "stop",
+            7,
+            1,
+        )
+
+    def test_usage_on_every_frame_last_wins(self):
+        acc = OpenAISSEAccumulator("qid", stream_all_chunks=True)
+        for n, text in enumerate("abc", start=1):
+            acc.add_chunk(
+                SSEMessage(
+                    choices=(_make_content_choice(text),),
+                    usage={"prompt_tokens": 5, "completion_tokens": n},
+                )
+            )
+        result = acc.get_final_output()
+        assert result.response_output.output == ("a", "bc")
+        assert result.metadata["completion_tokens"] == 3
+
+    def test_null_usage_fields_do_not_erase_earlier_counts(
+        self,
+    ):  # proxy ends with "usage": {}
+        acc = OpenAISSEAccumulator("qid", stream_all_chunks=False)
+        acc.add_chunk(
+            SSEMessage(
+                choices=(_make_content_choice("Hi"),),
+                usage={"prompt_tokens": 7, "completion_tokens": 3},
+            )
+        )
+        assert acc.add_chunk(_usage_frame()) is None
+        assert _counts(acc.get_final_output().metadata) == {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+        }
+        acc.add_chunk(
+            _usage_frame(prompt_tokens=7, completion_tokens=5)
+        )  # valid ints still override
+        assert acc.get_final_output().metadata["completion_tokens"] == 5
+
+    @pytest.mark.parametrize(
+        "chunk, expected",
+        [
+            (
+                _usage_frame(prompt_tokens=None, completion_tokens=2),
+                {"completion_tokens": 2},
+            ),
+            (None, {}),
+        ],
+        ids=["null-prompt-tokens", "no-usage"],
+    )
+    def test_missing_counts_omit_keys(self, chunk, expected):
+        acc = OpenAISSEAccumulator("qid", stream_all_chunks=False)
+        acc.add_chunk(_make_content_choice("Hi"))
+        assert acc.add_chunk(chunk) is None
+        assert _counts(acc.get_final_output().metadata) == expected
+
+
+def _chat_choice(text: str, **fields: object) -> dict:
+    return {"delta": {"content": text}, **fields}
+
+
+def _completions_choice(text: str, **fields: object) -> dict:
+    return {"text": text, **fields}
+
+
+_WIRE_ADAPTERS = pytest.mark.parametrize(
+    "adapter, choice",
+    [
+        (OpenAIMsgspecAdapter, _chat_choice),
+        (OpenAITextCompletionsAdapter, _completions_choice),
+    ],
+    ids=["chat", "completions"],
+)
+
+
+def _accumulate_wire(adapter, frames: list[dict]) -> QueryResult:
+    buffer = (
+        b"".join(b"data: " + msgspec.json.encode(f) + b"\n\n" for f in frames)
+        + b"data: [DONE]\n\n"
+    )
+    acc = OpenAISSEAccumulator("qid", stream_all_chunks=True)
+    for decoded in adapter.parse_sse_chunk(buffer, len(buffer)):
+        acc.add_chunk(decoded)
+    return acc.get_final_output()
+
+
+@pytest.mark.unit
+@_WIRE_ADAPTERS
+@pytest.mark.parametrize(
+    "usage",
+    [{"prompt_tokens": 12.0}, [], "x", {"completion_tokens": -1}],
+    ids=["float-count", "list", "string", "negative-count"],
+)
+def test_malformed_usage_keeps_frame_content(adapter, choice, usage):
+    result = _accumulate_wire(
+        adapter, [{"choices": [choice("Hi", finish_reason="stop")], "usage": usage}]
+    )
+    assert result.response_output.output == ("Hi",)
+    assert result.metadata["finish_reason"] == "stop"
+    assert _counts(result.metadata) == {}
+
+
+@pytest.mark.unit
+@_WIRE_ADAPTERS
+def test_usage_on_every_frame_last_wellformed_wins(adapter, choice):
+    result = _accumulate_wire(
+        adapter,
+        [
+            {
+                "choices": [choice("a")],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+            },
+            {
+                "choices": [choice("b")],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+            },
+            {
+                "choices": [choice("c", finish_reason="stop")],
+                "usage": {"completion_tokens": "bad"},
+            },
+        ],
+    )
+    assert result.response_output.output == ("a", "bc")
+    assert _counts(result.metadata) == {"prompt_tokens": 5, "completion_tokens": 2}
+
+
+@pytest.mark.unit
+@_WIRE_ADAPTERS
+def test_null_usage_frames_record_nothing(adapter, choice):
+    result = _accumulate_wire(
+        adapter,
+        [
+            {"choices": [choice("a")], "usage": None},
+            {"choices": [choice("b", finish_reason="stop")], "usage": None},
+            {"choices": [], "usage": None},
+        ],
+    )
+    assert result.response_output.output == ("a", "b")
+    assert _counts(result.metadata) == {}
+
+
+@pytest.mark.unit
+@_WIRE_ADAPTERS
+def test_malformed_usage_on_the_wire_warns_once(
+    adapter, choice, usage_warning_unlatched
+):
+    _accumulate_wire(
+        adapter,
+        [
+            {"choices": [choice("a")], "usage": "x"},
+            {"choices": [choice("b")], "usage": {"completion_tokens": -1}},
+            {"choices": [], "usage": [1]},
+        ],
+    )
+    (record,) = usage_warning_unlatched.records
+    assert "'x' (type 'str')" in record.getMessage()
+
+
+@pytest.mark.unit
+@_WIRE_ADAPTERS
+def test_well_formed_usage_on_the_wire_never_warns(
+    adapter, choice, usage_warning_unlatched
+):
+    _accumulate_wire(
+        adapter,
+        [
+            {"choices": [choice("a")], "usage": None},
+            {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1}},
+        ],
+    )
+    assert usage_warning_unlatched.records == []
+
+
+@pytest.mark.unit
+@_WIRE_ADAPTERS
+def test_usage_bearing_frame_with_two_choices_drops_counts(adapter, choice):
+    result = _accumulate_wire(
+        adapter,
+        [
+            {"choices": [choice("a")]},
+            {
+                "choices": [choice("b"), choice("x", index=1)],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 4},
+            },
+        ],
+    )
+    # Each frame contributes only its first choice to the output.
+    assert result.response_output.output == ("a", "b")
+    assert _counts(result.metadata) == {}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "adapter, frames",
+    [
+        (
+            OpenAIMsgspecAdapter,
+            [
+                b'{"choices":[{"delta":{"role":"assistant"}}],"usage":null}',
+                b'{"choices":[{"delta":{"content":"Hi"}}],"usage":null}',
+                b'{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":null}',
+            ],
+        ),
+        (
+            OpenAITextCompletionsAdapter,
+            [
+                b'{"choices":[{"index":0,"text":"Hi"}]}',
+                b'{"choices":[{"index":0,"text":"","finish_reason":"stop"}]}',
+            ],
+        ),
+    ],
+    ids=["chat", "completions"],
+)
+def test_wire_usage_trailer_reaches_final_metadata(adapter, frames):
+    trailer = b'{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}'
+    buffer = (
+        b"".join(b"data: " + f + b"\n\n" for f in [*frames, trailer])
+        + b"data: [DONE]\n\n"
+    )
+    acc = OpenAISSEAccumulator("qid", stream_all_chunks=False)
+    chunks = [
+        c
+        for d in adapter.parse_sse_chunk(buffer, len(buffer))
+        if (c := acc.add_chunk(d))
+    ]
+    assert [c.response_chunk for c in chunks] == ["Hi"]
+    md = acc.get_final_output().metadata
+    assert (md["finish_reason"], md["prompt_tokens"], md["completion_tokens"]) == (
+        "stop",
+        7,
+        2,
+    )

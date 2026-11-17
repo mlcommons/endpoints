@@ -162,8 +162,9 @@ class MetricsSnapshot(
                           flushes) and during the drain phase. **An
                           incomplete drain is detected as** ``state ==
                           COMPLETE and n_pending_tasks > 0``: the end-of-run
-                          flush timed out or failed; the token-derived series
-                          are missing those samples.
+                          flush timed out or failed; the client-basis series
+                          (unsuffixed when the client basis is primary,
+                          ``*_client`` otherwise) are missing those samples.
         metrics:          Tagged union of ``CounterStat`` and ``SeriesStat``,
                           ordered counters-first then series, registration
                           order within each.

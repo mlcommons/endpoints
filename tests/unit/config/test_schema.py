@@ -33,17 +33,41 @@ from inference_endpoint.config.schema import (
     LoadPattern,
     LoadPatternType,
     ModelParams,
+    OfflineSettings,
+    OnlineSettings,
     OSLDistribution,
     OSLDistributionType,
     ProfilerEngine,
     ProfilingConfig,
     RuntimeConfig,
+    Settings,
     StreamingMode,
     SubmissionReference,
     TestType,
 )
+from inference_endpoint.core.types import TokenCountSource
 from inference_endpoint.exceptions import CLIError
 from pydantic import ValidationError
+
+
+class TestTokenCountSource:
+    @pytest.mark.unit
+    def test_values(self):
+        assert [m.value for m in TokenCountSource] == ["server", "client"]
+
+    @pytest.mark.unit
+    def test_default_token_count_source_is_client(self):
+        for cls in (Settings, OfflineSettings, OnlineSettings):
+            assert cls().token_count_source is TokenCountSource.CLIENT
+
+    @pytest.mark.unit
+    def test_rejects_unknown_value(self):
+        with pytest.raises(ValidationError, match="token_count_source"):
+            Settings(token_count_source="tokenizer")
+
+    @pytest.mark.unit
+    def test_is_run_level_not_per_dataset(self):
+        assert "token_count_source" not in ModelParams.model_fields
 
 
 class TestOSLDistribution:

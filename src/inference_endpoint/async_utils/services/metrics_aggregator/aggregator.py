@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from enum import Enum
+from dataclasses import dataclass
 from typing import Final
 
 from inference_endpoint.async_utils.transport.zmq.pubsub import (
@@ -32,7 +32,14 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import PhaseData, PhaseType
+from inference_endpoint.core.types import (
+    TOKEN_HDR_HIGH,
+    TOKEN_HDR_LOW,
+    PhaseData,
+    PhaseType,
+    TokenCountSource,
+    basis_key,
+)
 from inference_endpoint.metrics.steady_state_diagnostics import (
     PROFILES,
     SteadyState,
@@ -41,56 +48,25 @@ from inference_endpoint.metrics.steady_state_diagnostics import (
 )
 
 from .metrics_table import (
+    BasisSeriesNames,
     ChunkDeltaTrigger,
     IslTrigger,
+    MetricCounterKey,
     MetricSeriesKey,
     MetricsTable,
     OslTrigger,
     SampleField,
     SampleLatencyTrigger,
+    ServerUsageTrigger,
     TpotTrigger,
     TtftTrigger,
 )
 from .publisher import MetricsPublisher
-from .registry import TOKEN_HDR_HIGH, TOKEN_HDR_LOW, MetricsRegistry
+from .registry import MetricsRegistry
 from .snapshot import SessionState
 from .token_metrics import BatchTokenizer, TokenBatchQueue
 
 logger = logging.getLogger(__name__)
-
-
-class MetricCounterKey(str, Enum):
-    """Counter metric keys tracked by the aggregator.
-
-    Total counters include all samples (warmup + tracked).
-    Tracked counters only include samples within performance tracking windows.
-    """
-
-    TOTAL_SAMPLES_ISSUED = "total_samples_issued"
-    TOTAL_SAMPLES_COMPLETED = "total_samples_completed"
-    TOTAL_SAMPLES_FAILED = "total_samples_failed"
-    TRACKED_SAMPLES_ISSUED = "tracked_samples_issued"
-    TRACKED_SAMPLES_COMPLETED = "tracked_samples_completed"
-    # Failed samples that were within a performance-tracking window.
-    # Counted at ERROR-event time; correctness depends on
-    # session.py:_handle_response emitting ERROR before COMPLETE so the
-    # tracked row still exists when the aggregator sees the ERROR.
-    TRACKED_SAMPLES_FAILED = "tracked_samples_failed"
-    TRACKED_FINISH_REASON_STOP = "tracked_finish_reason_stop"
-    TRACKED_FINISH_REASON_LENGTH = "tracked_finish_reason_length"
-    TRACKED_FINISH_REASON_TOOL_CALLS = "tracked_finish_reason_tool_calls"
-    TRACKED_FINISH_REASON_CONTENT_FILTER = "tracked_finish_reason_content_filter"
-    TRACKED_FINISH_REASON_FUNCTION_CALL = "tracked_finish_reason_function_call"
-    TRACKED_FINISH_REASON_OTHER = "tracked_finish_reason_other"
-    TRACKED_DURATION_NS = "tracked_duration_ns"
-    # Legacy MLPerf LoadGen Server "completed" window (final_query_all_samples_done_time).
-    LEGACY_LOADGEN_WINDOW_DURATION_NS = "legacy_loadgen_window_duration_ns"
-    # Total wall-clock duration since session start. Updated on every event as
-    # max(current, event_timestamp - session_start). Stored as a counter
-    # rather than computed from (now - start) at read time because
-    # time.monotonic_ns() has a process-local epoch — a reader in another
-    # process would get a meaningless value.
-    TOTAL_DURATION_NS = "total_duration_ns"
 
 
 _FINISH_REASON_COUNTERS: Final[dict[str, MetricCounterKey]] = {
@@ -119,6 +95,75 @@ _NS_HDR_LOW: Final[int] = 1
 _NS_HDR_HIGH: Final[int] = 3_600_000_000_000  # 1 hour in ns
 
 
+@dataclass(frozen=True, slots=True)
+class TokenSeriesSpec:
+    """One token metric, registered once per token-count basis."""
+
+    key: MetricSeriesKey
+    dtype: type
+    hdr_low: int
+    hdr_high: int
+    # Recorded only for streaming runs.
+    streaming_only: bool
+    # Dropped on both bases when ISL collection is off.
+    is_isl: bool
+    # Gets early-stopping estimates, on the primary basis only.
+    tail_latency: bool
+
+
+TOKEN_SERIES: Final[tuple[TokenSeriesSpec, ...]] = (
+    TokenSeriesSpec(
+        key=MetricSeriesKey.ISL,
+        dtype=int,
+        hdr_low=TOKEN_HDR_LOW,
+        hdr_high=TOKEN_HDR_HIGH,
+        streaming_only=False,
+        is_isl=True,
+        tail_latency=False,
+    ),
+    TokenSeriesSpec(
+        key=MetricSeriesKey.OSL,
+        dtype=int,
+        hdr_low=TOKEN_HDR_LOW,
+        hdr_high=TOKEN_HDR_HIGH,
+        streaming_only=False,
+        is_isl=False,
+        tail_latency=False,
+    ),
+    TokenSeriesSpec(
+        key=MetricSeriesKey.TPOT_NS,
+        dtype=float,
+        hdr_low=_NS_HDR_LOW,
+        hdr_high=_NS_HDR_HIGH,
+        streaming_only=True,
+        is_isl=False,
+        tail_latency=True,
+    ),
+)
+
+
+def series_names(
+    basis: TokenCountSource,
+    *,
+    primary: TokenCountSource,
+    enable_isl: bool,
+    streaming: bool,
+) -> BasisSeriesNames:
+    """The ``TOKEN_SERIES`` names ``basis`` records into in this run.
+
+    Names follow ``basis_key``: unsuffixed on the primary basis. A series the
+    run does not record is left out (``None``).
+    """
+    return BasisSeriesNames(
+        **{
+            spec.key.value: basis_key(spec.key.value, basis, primary=primary)
+            for spec in TOKEN_SERIES
+            if (enable_isl or not spec.is_isl)
+            and (streaming or not spec.streaming_only)
+        }
+    )
+
+
 class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
     """Subscribes to EventRecords and computes per-sample metrics in real time.
 
@@ -137,6 +182,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         publish_interval_s: float,
         sig_figs: int,
         n_histogram_buckets: int,
+        token_count_source: TokenCountSource,
         tokenizer: BatchTokenizer | None = None,
         live_flush_interval_s: float | None = None,
         streaming: bool = False,
@@ -157,10 +203,11 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         self._registry = registry
         self._publisher = publisher
         self._publish_interval_s = publish_interval_s
-        # Token triggers enqueue onto this queue; it is flushed by the
+        # Tokenizer triggers enqueue onto this queue; it is flushed by the
         # queue's own live loop (start_live) and by the end-of-run drain.
-        # None when no tokenizer is set (token metrics disabled), in which
-        # case those triggers are no-ops.
+        # None when no tokenizer is set, in which case the client-basis
+        # triggers count only pre-tokenized prompts; the server-basis trigger
+        # needs no tokenizer.
         self._token_queue: TokenBatchQueue | None = (
             TokenBatchQueue(tokenizer, self.loop) if tokenizer is not None else None
         )
@@ -175,6 +222,18 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         # below tags the snapshot state=interrupted, not COMPLETE.
         self._interrupted = False
         self._drain_timeout_s = drain_timeout_s
+        # Both bases record every token series; the primary keeps the base
+        # names and feeds early stopping and the steady-state collector.
+        self._token_count_source = token_count_source
+        self._series_names = {
+            basis: series_names(
+                basis,
+                primary=token_count_source,
+                enable_isl=enable_isl,
+                streaming=streaming,
+            )
+            for basis in TokenCountSource
+        }
 
         self._session_start_ns: int | None = None
         self._total_duration_ns: int = 0
@@ -188,7 +247,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
 
         # Pre-register all metrics on the registry. Tests can introspect via
         # registry.has_counter / has_series.
-        self._register_metrics(streaming, enable_isl, sig_figs, n_histogram_buckets)
+        self._register_metrics(streaming, sig_figs, n_histogram_buckets)
 
         # A profile name enables steady-state collection. The profile carries
         # the CoV bounds and warmup driver used for the verdict. None leaves
@@ -217,14 +276,15 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 steady_state_profile,
             )
             self._steady_state_profile = None
-        # PHASE_START supplies the bucket size. TpotTrigger needs the collector
-        # registered before any event can arrive, so the size is latched later.
+        # PHASE_START supplies the bucket size. The primary basis's TPOT
+        # trigger needs the collector registered before any event can arrive,
+        # so the size is latched later.
         self._collector = (
             SuperPassCollector() if self._steady_state_profile is not None else None
         )
 
         self._table = MetricsTable(self._registry)
-        self._register_triggers(streaming, enable_isl)
+        self._register_triggers(streaming)
 
     # ------------------------------------------------------------------
     # Registration helpers
@@ -233,88 +293,119 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
     def _register_metrics(
         self,
         streaming: bool,
-        enable_isl: bool,
         sig_figs: int,
         n_histogram_buckets: int,
     ) -> None:
-        """Register all counters and series on the registry."""
+        """Register all counters and series on the registry.
+
+        Series are registered as ``sample_latency_ns``, primary ``isl`` and
+        ``osl``, ``ttft_ns``, ``chunk_delta_ns``, primary ``tpot_ns``, then the
+        other basis's ``TOKEN_SERIES``. Snapshot series follow registration
+        order, so a snapshot lists the primary basis's series before the other
+        basis's.
+
+        Must stay in lockstep with ``_register_triggers``: recording into an
+        unregistered series raises inside ``process()``. Both take the token
+        series names from ``self._series_names``.
+        """
+        registry = self._registry
+        primary = self._token_count_source
         for key in MetricCounterKey:
-            self._registry.register_counter(key.value)
+            registry.register_counter(key.value)
 
-        # Always-present series
-        self._registry.register_series(
-            MetricSeriesKey.SAMPLE_LATENCY_NS.value,
-            hdr_low=_NS_HDR_LOW,
-            hdr_high=_NS_HDR_HIGH,
-            tail_latency=True,
-            sig_figs=sig_figs,
-            n_histogram_buckets=n_histogram_buckets,
-        )
-        if enable_isl:
-            self._registry.register_series(
-                MetricSeriesKey.ISL.value,
-                hdr_low=TOKEN_HDR_LOW,
-                hdr_high=TOKEN_HDR_HIGH,
+        def register_timing(key: MetricSeriesKey, *, tail_latency: bool) -> None:
+            registry.register_series(
+                key.value,
+                hdr_low=_NS_HDR_LOW,
+                hdr_high=_NS_HDR_HIGH,
+                tail_latency=tail_latency,
                 sig_figs=sig_figs,
                 n_histogram_buckets=n_histogram_buckets,
             )
-        self._registry.register_series(
-            MetricSeriesKey.OSL.value,
-            hdr_low=TOKEN_HDR_LOW,
-            hdr_high=TOKEN_HDR_HIGH,
-            sig_figs=sig_figs,
-            n_histogram_buckets=n_histogram_buckets,
-        )
 
-        # Streaming-only series
+        def register_tokens(
+            basis: TokenCountSource, specs: tuple[TokenSeriesSpec, ...]
+        ) -> None:
+            names = self._series_names[basis]
+            for spec in specs:
+                name = getattr(names, spec.key.value)
+                if name is None:
+                    continue
+                registry.register_series(
+                    name,
+                    hdr_low=spec.hdr_low,
+                    hdr_high=spec.hdr_high,
+                    tail_latency=spec.tail_latency and basis is primary,
+                    sig_figs=sig_figs,
+                    n_histogram_buckets=n_histogram_buckets,
+                    dtype=spec.dtype,
+                )
+
+        register_timing(MetricSeriesKey.SAMPLE_LATENCY_NS, tail_latency=True)
+        register_tokens(
+            primary, tuple(spec for spec in TOKEN_SERIES if not spec.streaming_only)
+        )
         if streaming:
-            self._registry.register_series(
-                MetricSeriesKey.TTFT_NS.value,
-                hdr_low=_NS_HDR_LOW,
-                hdr_high=_NS_HDR_HIGH,
-                tail_latency=True,
-                sig_figs=sig_figs,
-                n_histogram_buckets=n_histogram_buckets,
-            )
-            self._registry.register_series(
-                MetricSeriesKey.CHUNK_DELTA_NS.value,
-                hdr_low=_NS_HDR_LOW,
-                hdr_high=_NS_HDR_HIGH,
-                sig_figs=sig_figs,
-                n_histogram_buckets=n_histogram_buckets,
-            )
-            self._registry.register_series(
-                MetricSeriesKey.TPOT_NS.value,
-                hdr_low=_NS_HDR_LOW,
-                hdr_high=_NS_HDR_HIGH,
-                tail_latency=True,
-                sig_figs=sig_figs,
-                n_histogram_buckets=n_histogram_buckets,
-                dtype=float,
-            )
+            register_timing(MetricSeriesKey.TTFT_NS, tail_latency=True)
+            register_timing(MetricSeriesKey.CHUNK_DELTA_NS, tail_latency=False)
+        register_tokens(
+            primary, tuple(spec for spec in TOKEN_SERIES if spec.streaming_only)
+        )
+        register_tokens(primary.other, TOKEN_SERIES)
 
-    def _register_triggers(self, streaming: bool, enable_isl: bool) -> None:
+    def _register_triggers(self, streaming: bool) -> None:
         """Register metric triggers on the table.
 
-        Streaming-only triggers (TTFT, chunk_delta, TPOT) are only registered
-        when ``streaming=True``; the ISL trigger only when ``enable_isl=True``.
+        Both bases always record: the tokenizer triggers into the client
+        names, and one ``ServerUsageTrigger`` into the server names. Only the
+        primary basis's TPOT trigger gets the steady-state collector.
+        Streaming-only triggers (TTFT, chunk_delta, client TPOT) are
+        registered only when ``streaming=True``; the ISL trigger only when ISL
+        is collected.
         """
         table = self._table
         registry = self._registry
         queue = self._token_queue
+        primary = self._token_count_source
+        client = self._series_names[TokenCountSource.CLIENT]
+        server = self._series_names[TokenCountSource.SERVER]
 
-        # Latency and OSL are always registered; ISL is opt-out.
-        if enable_isl:
-            table.add_trigger(SampleField.ISSUED_NS, IslTrigger(registry, queue))
+        if client.isl is not None:
+            table.add_trigger(
+                SampleField.ISSUED_NS,
+                IslTrigger(registry, queue, metric_name=client.isl),
+            )
         table.add_trigger(SampleField.COMPLETE_NS, SampleLatencyTrigger(registry))
-        table.add_trigger(SampleField.COMPLETE_NS, OslTrigger(registry, queue))
+        table.add_trigger(
+            SampleField.COMPLETE_NS,
+            OslTrigger(registry, queue, metric_name=client.osl),
+        )
+        table.add_trigger(
+            SampleField.COMPLETE_NS,
+            ServerUsageTrigger(
+                registry,
+                names=server,
+                collector=(
+                    self._collector if primary is TokenCountSource.SERVER else None
+                ),
+                primary=primary,
+            ),
+        )
 
-        # Streaming-only
         if streaming:
             table.add_trigger(SampleField.RECV_FIRST_NS, TtftTrigger(registry))
             table.add_trigger(SampleField.LAST_RECV_NS, ChunkDeltaTrigger(registry))
+        if client.tpot_ns is not None:
             table.add_trigger(
-                SampleField.COMPLETE_NS, TpotTrigger(registry, queue, self._collector)
+                SampleField.COMPLETE_NS,
+                TpotTrigger(
+                    registry,
+                    queue,
+                    metric_name=client.tpot_ns,
+                    collector=(
+                        self._collector if primary is TokenCountSource.CLIENT else None
+                    ),
+                ),
             )
 
     @property
@@ -599,8 +690,12 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         """Return the steady-state verdict for the terminal snapshot.
 
         Returns None when collection is disabled or the series does not describe
-        the completed run. An interrupted run is truncated. A pending drain means
-        token counts are missing, so TPOT and OSL would be wrong.
+        the completed run. An interrupted run is truncated. Otherwise the gate
+        follows the primary basis, which feeds the collector's TPOT and OSL. On
+        the server basis a tracked sample without usable usage leaves them
+        incomplete, while a pending tokenizer drain only affects the client
+        series and is ignored. On the client basis a pending drain leaves them
+        incomplete, while missing server usage is ignored.
 
         This runs before the snapshot is built. The single atomic final write
         then carries both the metrics and the verdict, so the analysis sits in
@@ -621,7 +716,16 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         collector, profile = self._collector, self._steady_state_profile
         if collector is None or profile is None:
             return None
-        if self._interrupted or n_pending > 0 or not collector.superpass_size:
+        if self._token_count_source is TokenCountSource.SERVER:
+            incomplete_counts = (
+                self._registry.counter_value(
+                    MetricCounterKey.TRACKED_SAMPLES_MISSING_USAGE.value
+                )
+                > 0
+            )
+        else:
+            incomplete_counts = n_pending > 0
+        if self._interrupted or incomplete_counts or not collector.superpass_size:
             logger.info("Steady state not computed: the run is not described by it")
             return None
         try:

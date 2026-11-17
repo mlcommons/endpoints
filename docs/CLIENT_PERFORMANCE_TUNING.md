@@ -262,12 +262,13 @@ uv run pytest -vs -m performance --no-cov \
 
 Pytest options, grouped under `roofline` in `pytest --help`:
 
-| Option                       | Default | Purpose                                                                                                                        |
-| ---------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `--roofline-server-workers`  | 4       | Stub server worker processes                                                                                                   |
-| `--roofline-stream-interval` | 10      | Chars per SSE event in the stub response (`output_length` 160 → 16 events/response; 1 measures per-chunk parse cost)           |
-| `--roofline-client-workers`  | auto    | Override the benchmark client `--workers`                                                                                      |
-| `--roofline-init-timeout`    | auto    | Override `--client.worker-initialization-timeout`; very high core counts can need e.g. `300` because auto worker spawn is slow |
+| Option                               | Default | Purpose                                                                                                                                         |
+| ------------------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--roofline-server-workers`          | 4       | Stub server worker processes                                                                                                                    |
+| `--roofline-stream-interval`         | 10      | Chars per SSE event in the stub response (`output_length` 160 → 16 events/response; 1 measures per-chunk parse cost)                            |
+| `--roofline-client-workers`          | auto    | Override the benchmark client `--workers`                                                                                                       |
+| `--roofline-init-timeout`            | auto    | Override `--client.worker-initialization-timeout`; very high core counts can need e.g. `300` because auto worker spawn is slow                  |
+| `--roofline-no-stream-include-usage` | off     | Pass `--no-stream-include-usage` to the roofline client; the stub then sends no usage frame (compare with and without to price the usage frame) |
 
 ### Summary table
 

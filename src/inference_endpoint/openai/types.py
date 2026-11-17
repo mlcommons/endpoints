@@ -17,6 +17,8 @@
 msgspec types for OpenAI API serialization/deserialization.
 """
 
+import builtins
+import numbers
 from typing import Any
 
 import msgspec
@@ -66,12 +68,18 @@ class SSEChoice(
     finish_reason: str | None = None
 
 
+# Server ``usage`` fields below are typed ``object``: msgspec decodes any JSON
+# value into builtins without raising, so a malformed ``usage`` never fails the
+# frame or body it rides in. Counts are validated at capture by
+# ``server_usage_counts``. gc=False stays safe: a JSON-decoded builtin cannot
+# reference the struct that holds it, so no cycle can form.
 class SSEMessage(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
     """SSE message structure for OpenAI streaming responses."""
 
     choices: tuple[SSEChoice, ...] = ()
+    usage: object = None  # validated by server_usage_counts
 
 
 # ============================================================================
@@ -103,6 +111,35 @@ class ChatMessage(
     reasoning_content: str | None = None
 
 
+# gc=False: single bool field, no containers
+class StreamOptions(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
+    """OpenAI ``stream_options`` request object."""
+
+    include_usage: bool | None = None
+
+
+# Shared by every request that asks for the final usage frame; the struct is
+# frozen, so reusing one instance avoids a per-request allocation.
+STREAM_OPTIONS_INCLUDE_USAGE = StreamOptions(include_usage=True)
+
+
+def requests_multiple_choices(n: object) -> bool:
+    """Whether a request's ``n`` asks for more than one choice.
+
+    Server usage then sums the tokens of every choice while only ``choices[0]``
+    is measured. ``n`` is whatever the dataset row holds: usually absent, a
+    numpy scalar from a parquet or HuggingFace column, a float when the column
+    has gaps (NaN compares False), never a bool.
+    """
+    # Most requests carry no n: skip the ABC isinstance check for them.
+    if n is None:
+        return False
+    # float(): a numpy scalar's own comparison returns np.bool_, not bool.
+    return isinstance(n, numbers.Real) and not isinstance(n, bool) and float(n) > 1
+
+
 # gc=False: audit 2026-05: request containers set at construction; frozen=True blocks field reassignment.
 class ChatCompletionRequest(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
@@ -120,6 +157,7 @@ class ChatCompletionRequest(
     temperature: float | None = None
     max_completion_tokens: int | None = None
     stream: bool | None = None
+    stream_options: StreamOptions | None = None
     seed: int | None = None
     top_p: float | None = None
     top_k: int | None = None
@@ -169,16 +207,6 @@ class ChatCompletionChoice(
     finish_reason: str | None = None
 
 
-class CompletionUsage(
-    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
-):  # type: ignore[call-arg]
-    """Token usage statistics."""
-
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-
-
 # gc=False: audit 2026-05: choices set at construction; frozen=True blocks field reassignment.
 class ChatCompletionResponse(
     msgspec.Struct,
@@ -201,7 +229,8 @@ class ChatCompletionResponse(
     created: int = 0
     model: str = ""
     choices: list[ChatCompletionChoice]
-    usage: CompletionUsage | None = None
+    # builtins.object: the ``object`` field above shadows the builtin here.
+    usage: builtins.object = None  # validated by server_usage_counts
     system_fingerprint: str | None = None
 
 
@@ -223,6 +252,7 @@ class TextCompletionRequest(
     min_tokens: int | None = None
     skip_special_tokens: bool | None = None
     stream: bool | None = None
+    stream_options: StreamOptions | None = None
     top_p: float | None = None
     top_k: int | None = None
     repetition_penalty: float | None = None
@@ -252,7 +282,8 @@ class TextCompletionResponse(
     created: int
     model: str
     choices: list[TextCompletionChoice]
-    usage: CompletionUsage | None
+    # builtins.object: the ``object`` field above shadows the builtin here.
+    usage: builtins.object = None  # validated by server_usage_counts
 
 
 class TextCompletionSSEChoice(
@@ -270,3 +301,4 @@ class TextCompletionSSEMessage(
     """SSE message structure for /v1/completions streaming responses."""
 
     choices: tuple[TextCompletionSSEChoice, ...] = ()
+    usage: object = None  # validated by server_usage_counts

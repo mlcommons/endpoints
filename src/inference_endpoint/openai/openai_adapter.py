@@ -67,8 +67,8 @@ class OpenAIAdapter(HttpRequestAdapter):
         ]
 
     @classmethod
-    def encode_query(cls, query: Query) -> bytes:
-        """Encode a Query to bytes for HTTP transmission."""
+    def encode_query(cls, query: Query, *, include_usage: bool) -> bytes:
+        """Encode a Query to bytes for HTTP transmission; ignores ``include_usage``."""
         request = cls.to_endpoint_request(query)
         return cls.encode_request(request)
 

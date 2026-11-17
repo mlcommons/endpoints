@@ -22,7 +22,7 @@ import msgspec
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import QueryResult, TextModelOutput
 from inference_endpoint.metrics.steady_state_diagnostics import text_after_first_chunk
 from inference_endpoint.openai.accumulator import OpenAISSEAccumulator
 from inference_endpoint.openai.openai_msgspec_adapter import OpenAIMsgspecAdapter
@@ -130,6 +130,13 @@ def _accumulate(frames: list[Frame], reasoning_field: str, stream_all_chunks: bo
         )
     assert add_wire([{"delta": {}, "finish_reason": "stop"}]) is None
     assert add_wire([]) is None
+    trailer = {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 5}}
+    assert (
+        acc.add_chunk(
+            OpenAIMsgspecAdapter.decode_sse_message(msgspec.json.encode(trailer))
+        )
+        is None
+    )
     return acc.get_final_output(), emitted
 
 
@@ -150,6 +157,7 @@ def _assert_contract(
     assert output.text_after_first_chunk() == expected_text
     assert result.metadata["first_chunk"] is (first is None)
     assert result.metadata["finish_reason"] == "stop"
+    assert result.metadata["completion_tokens"] == 5
     assert result.metadata.get("tool_calls") == (list(full[2]) if full[2] else None)
 
     expected_chunks = []
@@ -167,7 +175,7 @@ def _assert_contract(
         assert decoded.metadata == result.metadata
         assert decoded.response_output.as_message_parts_after_first_chunk() == tail
     # Offline diagnostics intentionally omit tools, but share the text boundary.
-    wire_output = msgspec.json.decode(msgspec.json.encode(output))
+    wire_output = msgspec.json.decode(msgspec.json.encode(output), type=TextModelOutput)
     assert text_after_first_chunk(wire_output) == (tail[1] or "") + tail[0]
     return result
 

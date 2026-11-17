@@ -44,7 +44,7 @@ from pydantic import (
     model_validator,
 )
 
-from ..core.types import APIType
+from ..core.types import APIType, TokenCountSource
 from ..endpoint_client.config import HTTPClientConfig
 from ..exceptions import CLIError
 from ..utils import WithUpdatesMixin
@@ -318,7 +318,7 @@ class ModelParams(BaseModel):
         str | None,
         cyclopts.Parameter(
             alias="--tokenizer",
-            help="HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).",
+            help="HF repo ID or local path for the tokenizer. Overrides model name for client-side token counting: every token metric when the primary basis is client, the client-basis ISL/OSL/TPOT blocks beside them otherwise.",
         ),
     ] = None
 
@@ -1015,6 +1015,24 @@ class Settings(WithUpdatesMixin, BaseModel):
     ] = Field(
         True,
         description="Collect input sequence length (ISL) metrics (default: true).",
+    )
+    token_count_source: Annotated[
+        TokenCountSource,
+        cyclopts.Parameter(
+            alias="--token-count-source",
+            help=(
+                "Primary basis for ISL/OSL/TPS/TPOT: "
+                "server (endpoint usage) or client (tokenizer). "
+                "The other basis is reported beside it"
+            ),
+        ),
+    ] = Field(
+        TokenCountSource.CLIENT,
+        description=(
+            "Primary token-count basis for ISL/OSL/TPS/TPOT: server = the "
+            "endpoint's per-request usage, client = the local tokenizer. The "
+            "other basis is reported beside it under a `_<basis>` suffix."
+        ),
     )
 
     @model_validator(mode="after")

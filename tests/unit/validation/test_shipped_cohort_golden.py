@@ -38,6 +38,8 @@ from inference_endpoint.config.schema import TestType as BenchmarkTestType
 from inference_endpoint.metrics.report import Report
 from inference_endpoint.validation.__main__ import main
 
+from tests.test_helpers import DEFAULT_SOURCE
+
 COHORT = Path(inference_endpoint.__file__).parent / "config" / "cohorts" / "2026-10-C1"
 SYSTEM = "sys"
 MODEL = "gpt-oss-120b"
@@ -113,7 +115,11 @@ def _summary(run_dir: Path, *, failed: int, with_tpot: bool) -> None:
             }
         )
     snapshot = {"state": "complete", "n_pending_tasks": 0, "metrics": metrics}
-    report = Report.from_snapshot(snapshot, run_config={"load_pattern": "concurrency"})
+    report = Report.from_snapshot(
+        snapshot,
+        token_count_source=DEFAULT_SOURCE,
+        run_config={"load_pattern": "concurrency"},
+    )
     report.to_json(save_to=run_dir / "result_summary.json")
 
 
@@ -191,6 +197,7 @@ def _accuracy(run_dir: Path) -> None:
                 "total_samples": FLOOR,
             }
         ],
+        token_count_source=DEFAULT_SOURCE,
     )
     written = run_dir / "accuracy" / "accuracy_results.json"
     written.replace(run_dir / "accuracy_results.json")

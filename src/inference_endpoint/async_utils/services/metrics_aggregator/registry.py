@@ -41,6 +41,7 @@ from typing import Final
 
 import numpy as np
 from hdrh.histogram import HdrHistogram
+from inference_endpoint.core.types import TOKEN_HDR_HIGH, TOKEN_HDR_LOW
 from inference_endpoint.metrics.early_stopping import (
     EarlyStoppingSpec,
     es_percentile_estimate,
@@ -536,6 +537,10 @@ class MetricsRegistry:
     def has_counter(self, name: str) -> bool:
         return name in self._counters
 
+    def counter_value(self, name: str) -> int | float:
+        """Current value of a counter, for cold-path readers."""
+        return self._counters[name].value()
+
     def has_series(self, name: str) -> bool:
         return name in self._series
 
@@ -546,11 +551,10 @@ class MetricsRegistry:
 
 # Canonical parameters for a token-count series, shared by the aggregator's live
 # OSL/ISL series and the finalize-side accuracy OSL so both emit an identical
-# block from one source. The HDR bounds size the live/HDR percentile view; the
-# exact (raw-array) path used for COMPLETE snapshots and accuracy OSL ignores them
-# and derives histogram edges from the observed range.
-TOKEN_HDR_LOW: Final[int] = 1
-TOKEN_HDR_HIGH: Final[int] = 10_000_000  # 10M tokens
+# block from one source. The HDR bounds (``TOKEN_HDR_LOW``/``TOKEN_HDR_HIGH`` in
+# ``core.types``) size the live/HDR percentile view; the exact (raw-array) path
+# used for COMPLETE snapshots and accuracy OSL ignores them and derives histogram
+# edges from the observed range.
 TOKEN_SERIES_SIG_FIGS: Final[int] = 3
 TOKEN_SERIES_HISTOGRAM_BUCKETS: Final[int] = 30
 

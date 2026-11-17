@@ -13,10 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
 import msgspec
 
 from ..config.schema import ModelParams, StreamingMode
-from ..core.types import Query, QueryResult, TextModelOutput
+from ..core.types import (
+    COMPLETION_TOKENS_KEY,
+    PROMPT_TOKENS_KEY,
+    Query,
+    QueryResult,
+    TextModelOutput,
+    put_server_usage,
+    server_usage_count,
+)
 from ..dataset_manager.transforms import (
     AddStaticColumns,
     ColumnFilter,
@@ -67,8 +77,12 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
         ]
 
     @classmethod
-    def encode_query(cls, query: Query) -> bytes:
-        """Encode a Query to bytes for HTTP transmission."""
+    def encode_query(cls, query: Query, *, include_usage: bool) -> bytes:
+        """Encode a Query to bytes for HTTP transmission.
+
+        ``include_usage`` is ignored: ``/generate`` reports token counts in
+        ``meta_info`` on every response.
+        """
 
         # Get sampling parameters
         superset = query.data
@@ -100,13 +114,17 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
     @classmethod
     def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
         resp = cls._response_decoder.decode(response_bytes)
+        mi = resp.meta_info
+        metadata: dict[str, Any] = {"token_ids": resp.output_ids}
+        put_server_usage(
+            metadata,
+            server_usage_count(mi.prompt_tokens, PROMPT_TOKENS_KEY),
+            server_usage_count(mi.completion_tokens, COMPLETION_TOKENS_KEY),
+        )
         return QueryResult(
             id=query_id,
             response_output=TextModelOutput(output=resp.text),
-            metadata={
-                "token_ids": resp.output_ids,
-                "n_tokens": resp.meta_info.completion_tokens,
-            },
+            metadata=metadata,
         )
 
     @classmethod
@@ -122,10 +140,12 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
         # the output_tokens is the delta from the previous chunk
         token_delta = resp.output_ids
 
-        has_retractions = resp.meta_info.total_retractions > 0
+        mi = resp.meta_info
+        has_retractions = bool(mi.num_retractions or mi.total_retractions)
         return SGLangSSEDelta(
             text=total_text,
             token_delta=token_delta,
-            total_completion_tokens=resp.meta_info.completion_tokens,
+            total_completion_tokens=mi.completion_tokens,
             has_retractions=has_retractions,
+            prompt_tokens=mi.prompt_tokens,
         )

@@ -51,21 +51,29 @@ class SGLangGenerateRequest(
 
 
 class MetaInfo(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False):  # type: ignore[call-arg]
-    id: str
-    finish_reason: dict[str, Any]
-    prompt_tokens: int
-    weight_version: str
-    total_retractions: int
+    # Only completion_tokens is required (it drives the stream): SGLang sends a
+    # null finish_reason until the last frame, e2e_latency only on it, and names
+    # the retraction counter num_retractions (older servers: total_retractions).
+    id: str | None = None
+    finish_reason: dict[str, Any] | None = None
+    # Any JSON value decodes without raising, so a malformed count never fails
+    # the frame; server_usage_count validates it (the accumulator on a stream,
+    # once per changed value; the adapter on a non-streaming response). gc=False
+    # stays safe: a JSON-decoded builtin cannot reference this struct.
+    prompt_tokens: object = None
+    weight_version: str | None = None
+    total_retractions: int | None = None
+    num_retractions: int | None = None
     completion_tokens: int
-    cached_tokens: int
-    e2e_latency: float
+    cached_tokens: int | None = None
+    e2e_latency: float | None = None
 
 
 class SGLangGenerateResponse(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
     text: str
-    output_ids: list[int]
+    output_ids: list[int] = msgspec.field(default_factory=list)
     meta_info: MetaInfo
 
 
@@ -76,3 +84,7 @@ class SGLangSSEDelta(
     token_delta: list[int] = msgspec.field(default_factory=list)
     total_completion_tokens: int = 0
     has_retractions: bool = False
+    # The raw meta_info value: every frame repeats it, so the accumulator
+    # validates it only when it changes. gc=False stays safe: a JSON-decoded
+    # builtin cannot reference this struct.
+    prompt_tokens: object = None

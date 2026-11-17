@@ -47,10 +47,7 @@ from inference_endpoint.endpoint_client.cpu_affinity import (
 from inference_endpoint.endpoint_client.http_client import (
     HTTPEndpointClient,
 )
-from inference_endpoint.testing.max_throughput_server import (
-    MaxThroughputServer,
-    build_response,
-)
+from inference_endpoint.testing.max_throughput_server import MaxThroughputServer
 
 try:
     import matplotlib
@@ -405,6 +402,10 @@ class LiveDisplay:
 
 _SEND_BATCH = 32  # Max requests issued per event-loop yield
 
+# Whether the benchmark client asks for the usage frame on streaming requests;
+# the stub then sends it, which changes the SSE events per response.
+_STREAM_INCLUDE_USAGE = True
+
 
 def build_prompt(length: int) -> str:
     """Build a prompt of specified length using repeated 'hello world '."""
@@ -445,6 +446,7 @@ def _create_client(
         num_workers=num_workers if num_workers > 0 else -1,
         max_connections=max_connections if max_connections > 0 else -1,
         warmup_connections=0,
+        stream_include_usage=_STREAM_INCLUDE_USAGE,
         worker_gc_mode="relaxed",
         log_level="CRITICAL",
         cpu_affinity=cpu_affinity_plan,
@@ -693,13 +695,16 @@ def _resolve_stream_intervals(output_length: int, fractions: list[float]) -> lis
     return sorted(set(vals))
 
 
-def _sse_events_per_response(output_length: int, stream_interval: int = 1) -> int:
+def _sse_events_per_response(
+    output_length: int, stream_interval: int = 1, *, include_usage: bool
+) -> int:
     """Compute the number of SSE events the server sends per streaming response.
 
     ``ceil(output_length / stream_interval)`` content events, plus 1 finish
-    event and 1 [DONE] sentinel.
+    event, 1 [DONE] sentinel and, when the request asks for it
+    (``include_usage``), 1 usage event.
     """
-    return -(-output_length // stream_interval) + 2  # ceil division + 2
+    return -(-output_length // stream_interval) + 2 + int(include_usage)
 
 
 def _wait_for_port_free(host: str, port: int, timeout: float = 5.0) -> None:
@@ -732,7 +737,7 @@ def _restart_server(
     if server._port is not None:
         _wait_for_port_free(server.host, server._port)
     server.stream = stream
-    server._response = build_response(output_length, stream, stream_interval)
+    server.set_response(output_length, stream_interval)
     # Reset shutdown flags and worker lists so _start_workers can re-use them
     server._shutdown.clear()
     server._workers.clear()
@@ -764,7 +769,9 @@ def run_single(
         _restart_server(server, prompt_length, args.streaming, stream_interval)
 
     epr = (
-        _sse_events_per_response(prompt_length, stream_interval)
+        _sse_events_per_response(
+            prompt_length, stream_interval, include_usage=_STREAM_INCLUDE_USAGE
+        )
         if args.streaming
         else 1
     )
@@ -941,7 +948,9 @@ def run_sweep(
 
             prompt = build_prompt(prompt_length)
             epr = (
-                _sse_events_per_response(prompt_length, stream_interval)
+                _sse_events_per_response(
+                    prompt_length, stream_interval, include_usage=_STREAM_INCLUDE_USAGE
+                )
                 if args.streaming
                 else 1
             )
