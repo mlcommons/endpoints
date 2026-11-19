@@ -29,6 +29,7 @@ from inference_endpoint.config.schema import (
     BenchmarkConfig,
     Dataset,
     DatasetType,
+    EndpointConfig,
     EvalMethod,
     LoadPattern,
     LoadPatternType,
@@ -589,6 +590,16 @@ class TestBenchmarkConfigMethods:
 
         with pytest.raises(FileNotFoundError):
             BenchmarkConfig.from_yaml_file(Path("/nonexistent.yaml"))
+
+
+class TestAPITypeHelp:
+    @pytest.mark.unit
+    def test_help_lists_every_api_type(self):
+        # The help string is hand-written, so a new APIType member is only
+        # caught here.
+        help_text = EndpointConfig.model_fields["api_type"].metadata[0].help
+        for api_type in APIType:
+            assert api_type.value in help_text
 
 
 class TestClientAPITypePropagation:

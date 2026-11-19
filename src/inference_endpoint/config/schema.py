@@ -1069,7 +1069,10 @@ class EndpointConfig(BaseModel):
         APIType,
         cyclopts.Parameter(
             alias="--api-type",
-            help="API type: openai, openai_transcriptions, sglang, or videogen",
+            help=(
+                "API type: openai, openai_completions, openai_transcriptions, "
+                "sglang, or videogen"
+            ),
         ),
     ] = APIType.OPENAI
 

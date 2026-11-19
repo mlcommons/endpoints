@@ -40,14 +40,17 @@ AUDIO_FILE_COLUMN = "audio_file"
 _BOUNDARY = "----mlperf-inference-endpoints-audio-boundary-Q3nV7xTt"
 
 _DELIMITER = f"--{_BOUNDARY}"
+_DELIMITER_BYTES = _DELIMITER.encode("ascii")
 _DASHES = f"{_DELIMITER}\r\n".encode("ascii")
 _CLOSING = f"{_DELIMITER}--\r\n".encode("ascii")
 
 #: Characters that would terminate a `Content-Disposition` parameter early, with
 #: the percent escapes browsers substitute for them (WHATWG HTML, "multipart/
 #: form-data encoding algorithm"). Servers decode these, so escaping keeps the
-#: original value recoverable where rejecting the row would not.
-_PARAM_ESCAPES = str.maketrans({'"': "%22", "\r": "%0D", "\n": "%0A"})
+#: original value recoverable where rejecting the row would not. Backslash is
+#: included because a value ending in one turns the closing quote into a
+#: quoted-pair and swallows it.
+_PARAM_ESCAPES = str.maketrans({'"': "%22", "\\": "%5C", "\r": "%0D", "\n": "%0A"})
 
 
 def _escape_param(value: str) -> str:
@@ -61,10 +64,16 @@ def encode_multipart(
     """Encode `fields` plus one `file` part as an RFC 7578 multipart body.
 
     Both the parameter names and the filename are dataset-controlled, so they are
-    escaped: an unescaped `"` or CRLF would close the parameter early and let a
-    row inject its own headers or parts. Field *values* sit in a part's body
-    where CRLF is legal, so they are checked only for the one string that would
-    forge a part boundary.
+    escaped: an unescaped `"`, backslash or CRLF would close the parameter early
+    and let a row inject its own headers or parts. Field *values* sit in a part's
+    body where CRLF is legal, so they are checked only for the one string that
+    would forge a part boundary.
+
+    The audio bytes get the same delimiter check. The boundary is a constant
+    (`CONTENT_TYPE` is folded into the worker's request prefix once at setup, so
+    it cannot be regenerated per request), which means the one thing keeping a
+    payload from forging a part is that it does not contain the delimiter —
+    checked rather than assumed.
 
     Args:
         fields: Text form fields, in the order they should be written.
@@ -73,8 +82,13 @@ def encode_multipart(
         mime_type: Media type of the file part.
 
     Raises:
-        ValueError: A field value contains the multipart delimiter.
+        ValueError: A field value or the audio contains the multipart delimiter.
     """
+    if _DELIMITER_BYTES in audio:
+        raise ValueError(
+            f"Audio payload contains the multipart delimiter {_DELIMITER!r}, "
+            "which would forge a part boundary."
+        )
     parts: list[bytes] = []
     for name, value in fields.items():
         if _DELIMITER in value:
@@ -137,6 +151,13 @@ class OpenAITranscriptionsAdapter(HttpRequestAdapter):
         "temperature",
     )
 
+    #: `decode_response` reads `text` off a JSON `TranscriptionResponse`, so
+    #: that is the only body shape this adapter can read. The API also defines
+    #: `text`, `srt`, `vtt` and `verbose_json`; a dataset row asking for one of
+    #: those is rejected here rather than reaching the decoder as an
+    #: undecodable body. An absent value is fine — the server default is JSON.
+    SUPPORTED_RESPONSE_FORMATS: ClassVar[frozenset[str]] = frozenset({"json"})
+
     #: WAV is the only format the MLPerf LibriSpeech corpus ships. Servers
     #: sniff the payload rather than trusting this part header (vLLM hands the
     #: bytes to librosa/soundfile), so a per-row MIME column buys nothing.
@@ -184,6 +205,17 @@ class OpenAITranscriptionsAdapter(HttpRequestAdapter):
             for name in cls.FORM_FIELDS
             if data.get(name) is not None
         }
+        response_format = fields.get("response_format")
+        if (
+            response_format is not None
+            and response_format not in cls.SUPPORTED_RESPONSE_FORMATS
+        ):
+            raise ValueError(
+                f"response_format={response_format!r} is not supported by "
+                f"{cls.__name__}: only "
+                f"{sorted(cls.SUPPORTED_RESPONSE_FORMATS)} can be decoded. "
+                "Drop the dataset's response_format column to use it."
+            )
         return encode_multipart(
             fields, audio_path.name, audio_path.read_bytes(), cls.MIME_TYPE
         )

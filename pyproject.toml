@@ -112,6 +112,7 @@ dependencies = [
     # certifi is pulled in transitively (httpx, requests); pinned here so pip
     # installs also get the PYSEC-2026-4320 fix (2026.10.19).
     "certifi==2026.10.19",
+    "requests==2.33.1",
 ]
 
 [project.optional-dependencies]

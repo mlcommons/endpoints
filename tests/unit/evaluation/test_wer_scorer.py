@@ -21,6 +21,10 @@ from unittest.mock import MagicMock
 import msgspec
 import pandas as pd
 import pytest
+from inference_endpoint.commands.benchmark.execute import (
+    _resolve_accuracy_components,
+)
+from inference_endpoint.config.schema import AccuracyConfig
 from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
 from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.evaluation import scoring
@@ -143,7 +147,7 @@ class TestScore:
     def test_empty_transcription_counts_every_word_as_an_error(
         self, tmp_path: Path, dataset
     ):
-        report_dir = _stage(tmp_path / "r", {i: "" for i in range(len(REFERENCES))})
+        report_dir = _stage(tmp_path / "r", dict.fromkeys(range(len(REFERENCES)), ""))
         scorer = _scorer(report_dir, dataset)
         score, _ = scorer.score()
         assert score == pytest.approx(0.0)
@@ -213,7 +217,7 @@ class TestPartialRuns:
         self, tmp_path: Path, dataset
     ):
         # A blank transcript is a response: the sample completed and scored 0.
-        report_dir = _stage(tmp_path / "r", {i: "" for i in range(len(REFERENCES))})
+        report_dir = _stage(tmp_path / "r", dict.fromkeys(range(len(REFERENCES)), ""))
         scorer = _scorer(report_dir, dataset)
         scorer.score()
         assert scorer.complete is True
@@ -340,3 +344,22 @@ class TestExtractorIsRejected:
     def test_no_extractor_constructs(self, tmp_path: Path, dataset):
         report_dir = _stage(tmp_path / "r", {0: REFERENCES[0]})
         assert _scorer(report_dir, dataset).extractor is None
+
+    def test_rejected_at_setup_not_at_scoring_time(self):
+        # The scorer is only constructed once the endpoint work is done, so the
+        # combination has to be refused while resolving the components.
+        accuracy_config = AccuracyConfig(
+            eval_method="wer",
+            extractor="python_code_extractor",
+            ground_truth="transcript",
+        )
+        with pytest.raises(InputValidationError, match="extractor"):
+            _resolve_accuracy_components(DATASET_NAME, accuracy_config)
+
+    def test_setup_accepts_the_scorer_without_an_extractor(self):
+        accuracy_config = AccuracyConfig(eval_method="wer", ground_truth="transcript")
+        scorer_cls, extractor_cls = _resolve_accuracy_components(
+            DATASET_NAME, accuracy_config
+        )
+        assert scorer_cls is WERScorer
+        assert extractor_cls is None

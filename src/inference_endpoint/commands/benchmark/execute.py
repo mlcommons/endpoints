@@ -285,6 +285,7 @@ def _resolve_accuracy_components(
             extractor_cls = Extractor.get(extractor_name)
         except KeyError as exc:
             raise InputValidationError(str(exc)) from exc
+    scorer_cls.validate_extractor(extractor_cls)
     return scorer_cls, extractor_cls
 
 

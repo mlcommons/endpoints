@@ -26,16 +26,20 @@ Whisper is an encoder-decoder ASR model, so it is served only on
 ## 2. The dataset
 
 Nothing to do: the first run downloads the MLCommons-prepared corpus into
-`dataset_cache/whisper_librispeech/source/` (several GB of audio) and caches the
-parsed rows as a parquet beside it. The ~30 s repackaging is part of the
-benchmark definition, so the prepared artifact is fetched rather than rebuilt
-here: different clip boundaries would produce a WER that is not comparable to
-the reference.
+`dataset_cache/whisper_librispeech/source/` and caches the parsed rows as a
+parquet beside it. The ~30 s repackaging is part of the benchmark definition, so
+the prepared artifact is fetched rather than rebuilt here: different clip
+boundaries would produce a WER that is not comparable to the reference.
 
 ```
 <source>/dev-all-repack.json      # manifest: files[0].fname, original_duration, transcript
 <source>/dev-all-repack/*.wav     # 16 kHz mono clips
 ```
+
+That is 1634 files, about 1.4 GB. The published artifact is much larger — it
+also ships the raw `dev-clean`/`dev-other` FLACs and the unpacked `dev-all`
+WAVs, which nothing here reads — so only the two paths above are fetched. An
+interrupted download resumes.
 
 The manifest's `fname` entries keep the upstream pipeline's `./data/` prefix,
 which the hosted artifact does not reproduce. The loader probes the first clip
@@ -49,8 +53,8 @@ defaults to the manifest's own directory.
 
 The parsed-row cache is keyed on the dataset ID alone, so if you change
 `manifest` or `data_dir` after a first run, also pass
-`generate_params.force: true` once — otherwise the rows built from the previous
-manifest are reused.
+`generate_params.force_regenerate: true` once — otherwise the rows built from
+the previous manifest are reused.
 
 Keep the WAVs on **fast local storage**. The worker reads each file inside the
 measured request, and that read is synchronous on its event loop: a slow read
@@ -68,9 +72,30 @@ uv run inference-endpoint benchmark from-config \
   --config examples/12_Whisper_Example/offline_whisper.yaml
 ```
 
-To check the wiring first, set `runtime.n_samples_to_issue` and both `samples`
-values to 8. The dataset truncates in manifest order, so the smoke subset is a
-prefix of the full corpus — but a partial perf phase is not a reportable result.
+To check the wiring first, truncate both dataset entries with
+`generate_params.max_samples` and cap issuance to match:
+
+```yaml
+datasets:
+  - name: whisper_librispeech
+    type: "performance"
+    generate_params:
+      max_samples: 8
+  - name: whisper_librispeech
+    type: "accuracy"
+    generate_params:
+      max_samples: 8
+    accuracy_config: ...
+
+settings:
+  runtime:
+    n_samples_to_issue: 8
+```
+
+The dataset-level `samples` field is not read for predefined datasets, so
+setting that alone still scores all 1633 rows. The dataset truncates in manifest
+order, so the smoke subset is a prefix of the full corpus — but a partial perf
+phase is not a reportable result.
 
 ## 4. Read the result
 

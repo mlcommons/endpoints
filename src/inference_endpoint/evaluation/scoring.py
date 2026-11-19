@@ -201,6 +201,16 @@ class Scorer(ABC):
         """Validate scorer dependencies before benchmark execution begins."""
         return None
 
+    @classmethod
+    def validate_extractor(cls, extractor_cls: type[Extractor] | None) -> None:
+        """Check the resolved extractor against this scorer, at setup.
+
+        ``REQUIRES_EXTRACTOR`` covers the missing case; this is the hook for a
+        scorer that cannot use one at all, so the rejection lands before any
+        endpoint work rather than when the scorer is finally constructed.
+        """
+        return None
+
     def __init__(
         self,
         dataset_name: str,
@@ -530,14 +540,18 @@ class WERScorer(Scorer, scorer_id="wer"):
 
     def __init__(self, *args, normalizer_source: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
-        if self.extractor is not None:
-            raise InputValidationError(
-                f"accuracy_config.extractor is not supported by "
-                f"{type(self).__name__}: WER scores the transcript verbatim, so "
-                "an extractor would be silently ignored. Remove it."
-            )
+        type(self).validate_extractor(self.extractor)
         self.normalizer_source = normalizer_source or self.DEFAULT_NORMALIZER_SOURCE
         self._breakdown: dict[str, Any] | None = None
+
+    @classmethod
+    def validate_extractor(cls, extractor_cls: type[Extractor] | None) -> None:
+        if extractor_cls is not None:
+            raise InputValidationError(
+                f"accuracy_config.extractor is not supported by {cls.__name__}: "
+                "WER scores the transcript verbatim, so an extractor would be "
+                "silently ignored. Remove it."
+            )
 
     @classmethod
     def preflight(cls, extras: dict[str, Any]) -> None:
