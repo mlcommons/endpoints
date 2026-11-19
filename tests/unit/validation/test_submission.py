@@ -649,6 +649,7 @@ class TestDerivedExposure:
             "point_cap",
             "point_count",
             "point_count_min",
+            "token_output",
             "uncovered_regions",
         }
 

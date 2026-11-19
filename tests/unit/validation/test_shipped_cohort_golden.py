@@ -268,3 +268,95 @@ class TestShippedCohortGolden:
         _build_upload(root, api_key="sk-live-abc123")
         assert main([str(COHORT), str(root)]) == 1
         assert "point_api_key_redacted" in capsys.readouterr().out
+
+
+T2V_MODEL = "wan-2.2-t2v-a14b"
+# The BF16 VBench reference and its 0.99 gate (MLPerf text_to_video).
+T2V_REFERENCE = 70.48
+T2V_GATE = 0.99 * T2V_REFERENCE
+
+
+def _to_t2v(root: Path, *, score: float) -> None:
+    """Turn the golden upload into WAN 2.2 video runs.
+
+    A video run has no tokens: `tps` is null, there is no TPOT or OSL, and the
+    VBench score sits under the `wan22_vbench` dataset.
+    """
+    results = root / "results" / SYSTEM
+    (results / MODEL).rename(results / T2V_MODEL)
+    for run_dir in (results / T2V_MODEL).iterdir():
+        summary = json.loads((run_dir / "result_summary.json").read_text())
+        for key in ("tpot", "output_sequence_lengths", "osl", "ttft"):
+            summary.pop(key, None)
+        summary["tps"] = None
+        summary["qps"] = 1.0
+        (run_dir / "result_summary.json").write_text(json.dumps(summary))
+        point = yaml.safe_load((run_dir / "point.yaml").read_text())
+        point["model_name"] = T2V_MODEL
+        point["dataset_name"] = "wan22_perf"
+        (run_dir / "point.yaml").write_text(yaml.safe_dump(point))
+        accuracy = run_dir / "accuracy_results.json"
+        if accuracy.exists():
+            doc = json.loads(accuracy.read_text())
+            doc["accuracy_scores"][0].update(
+                {"dataset_name": "wan22_vbench", "score": score}
+            )
+            accuracy.write_text(json.dumps(doc))
+
+
+class TestShippedCohortVideo:
+    """A video upload is judged on frames, latency and VBench, not tokens."""
+
+    @pytest.mark.unit
+    def test_a_conforming_video_upload_exits_zero(self, tmp_path):
+        root = tmp_path / "upload"
+        _build_upload(root)
+        _to_t2v(root, score=T2V_REFERENCE)
+        assert main([str(COHORT), str(root)]) == 0
+
+    @pytest.mark.unit
+    def test_video_points_are_checked_on_latency_not_tokens(self, tmp_path, capsys):
+        root = tmp_path / "upload"
+        _build_upload(root)
+        _to_t2v(root, score=T2V_REFERENCE)
+        main([str(COHORT), str(root)])
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert "NEVER-RAN point_tpot_p90_positive" in out
+        assert "NEVER-RAN point_output_tokens_present" in out
+        assert "point_latency_p90_positive ran at 8 instance(s)" in out
+        assert "point_accuracy_vbench_gate ran at 5 instance(s)" in out
+
+    @pytest.mark.unit
+    def test_a_vbench_score_under_the_gate_fails_the_cohort(self, tmp_path, capsys):
+        root = tmp_path / "upload"
+        _build_upload(root)
+        _to_t2v(root, score=T2V_GATE - 0.01)
+        assert main([str(COHORT), str(root)]) == 1
+        assert "FAIL point_accuracy_vbench_gate" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_a_video_point_without_latency_fails_the_cohort(self, tmp_path, capsys):
+        root = tmp_path / "upload"
+        _build_upload(root)
+        _to_t2v(root, score=T2V_REFERENCE)
+        run_dir = root / "results" / SYSTEM / T2V_MODEL / "r8"
+        summary = json.loads((run_dir / "result_summary.json").read_text())
+        summary["latency"] = {"percentiles": {"90.0": 0}}
+        (run_dir / "result_summary.json").write_text(json.dumps(summary))
+        assert main([str(COHORT), str(root)]) == 1
+        assert "FAIL point_latency_p90_positive" in capsys.readouterr().out
+
+    @pytest.mark.unit
+    def test_a_video_point_under_the_prompt_count_fails_the_cohort(
+        self, tmp_path, capsys
+    ):
+        root = tmp_path / "upload"
+        _build_upload(root)
+        _to_t2v(root, score=T2V_REFERENCE)
+        run_dir = root / "results" / SYSTEM / T2V_MODEL / "r8"
+        summary = json.loads((run_dir / "result_summary.json").read_text())
+        summary["n_samples_completed"] = 247
+        (run_dir / "result_summary.json").write_text(json.dumps(summary))
+        assert main([str(COHORT), str(root)]) == 1
+        assert "FAIL point_sample_count_floor_wan22" in capsys.readouterr().out

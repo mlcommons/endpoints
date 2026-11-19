@@ -192,6 +192,8 @@ point_output_tokens_present:
   rule: "Endpoints Policy §14, Metric Consistency; §4.1, Metrics."
   fix: Re-run with a tokenizer so the summary carries output_sequence_lengths.total.
   severity: fail
+  when:
+    - { left: derived.token_output, op: eq, right: true }
   assert:
     - {
         left: point.result_summary.output_sequence_lengths.total,
@@ -206,8 +208,19 @@ point_tpot_p90_positive:
   severity: fail
   when:
     - { left: point.config.offline, op: ne, right: dedicated }
+    - { left: derived.token_output, op: eq, right: true }
   assert:
     - { left: point.result_summary.tpot.percentiles.90, op: gt, right: 0 }
+
+point_latency_p90_positive:
+  description: A video run reports a positive P90 end-to-end latency (it has no TPOT).
+  rule: "Endpoints Policy §9.1, Automated Checks; §4.1, Metrics (T2V proposal in docs/t2v_benchmark_gaps.md §2)."
+  fix: Re-run so the summary carries a positive latency.percentiles["90"].
+  severity: fail
+  when:
+    - { left: derived.token_output, op: eq, right: false }
+  assert:
+    - { left: point.result_summary.latency.percentiles.90, op: gt, right: 0 }
 
 point_sample_count_floor:
   description: The run completed at least its dataset's §12 acceptance count.
@@ -313,6 +326,18 @@ point_sample_count_floor_open_orca:
       op: ge
       right: 24576
 
+point_sample_count_floor_wan22:
+  description: The WAN 2.2 run completed at least the 248-prompt acceptance count.
+  rule: "Endpoints Policy §12, Dataset Requirements; §6.4, Minimum Query Count."
+  fix: Re-run until the completed sample count reaches 248 (a multiple of the prompt set).
+  severity: fail
+  when:
+    - { left: point.config.dataset_name, op: eq, right: wan22_perf }
+  assert:
+    - left: point.result_summary.n_samples_completed
+      op: ge
+      right: 248
+
 point_accuracy_scores_present:
   description: The run carries at least one accuracy result.
   rule: "Endpoints Policy §5.3, Accuracy Runs; §15, Accuracy."
@@ -333,6 +358,23 @@ point_accuracy_present:
   severity: warn
   assert:
     - { left: point.accuracy_results, op: exists }
+point_accuracy_vbench_gate:
+  description: The WAN 2.2 VBench score reaches 0.99 x the BF16 reference (70.48).
+  rule: "Endpoints Policy §15, Accuracy (T2V target in docs/t2v_benchmark_gaps.md)."
+  fix: Re-run the accuracy phase; the score must be at least 69.7752 (0.99 x 70.48).
+  severity: fail
+  when:
+    - {
+        left: point.config.model_name,
+        op: eq,
+        right: { literal: wan-2.2-t2v-a14b },
+      }
+    - { left: point.accuracy_results, op: exists }
+  assert:
+    - left: point.accuracy_results.score_by_dataset.wan22_vbench
+      op: ge
+      right: 69.7752
+
 point_offline_ordering:
   description: The dedicated Offline run meets §5.7.2's throughput and concurrency clauses.
   rule: "Endpoints Policy §5.7.2, Relationship to Maximum Supported Concurrency."

@@ -101,7 +101,7 @@ def _steady_tps(value: Mapping[str, Any]) -> Any:
     return tps.get("system")
 
 
-def _with_system_tps(value: Any) -> Any:
+def _with_system_tps(value: Any, frames_per_sample: float | None = None) -> Any:
     """`value` with its aggregate throughput under the policy's names.
 
     Non-destructive and additive: a document carrying `system_tps` keeps it,
@@ -110,12 +110,24 @@ def _with_system_tps(value: Any) -> Any:
     whole-run value otherwise) and `full_run_system_tps` (the whole-run value,
     always), and a non-mapping is left for its own refusal to name.
 
+    A video benchmark has no tokens, so its run writes `tps: null`; the
+    catalog's `frames_per_sample` gives its unit of output (a frame) and the
+    whole-run throughput is `qps x frames_per_sample`, in frames/s. A steady
+    window needs token streams, so none applies and the whole-run value is the
+    official reading.
+
     Args:
         value (Any): One `result_summary.json` document, as parsed.
+        frames_per_sample (float | None): Frames in one generated sample, for a
+            video benchmark; None for a token benchmark. (Default: None)
     Returns:
         Any: The document, or a copy carrying the policy names.
     """
-    if not isinstance(value, Mapping) or _CLIENT_TPS_KEY not in value:
+    if not isinstance(value, Mapping):
+        return value
+    if frames_per_sample is not None and value.get(_CLIENT_TPS_KEY) is None:
+        return _with_frame_tps(value, frames_per_sample)
+    if _CLIENT_TPS_KEY not in value:
         return value
     whole = value[_CLIENT_TPS_KEY]
     aliases: dict[str, Any] = {}
@@ -127,6 +139,54 @@ def _with_system_tps(value: Any) -> Any:
     if _FULL_RUN_TPS_KEY not in value and whole is not None:
         aliases[_FULL_RUN_TPS_KEY] = whole
     return {**value, **aliases} if aliases else value
+
+
+def _with_frame_tps(value: Mapping[str, Any], frames_per_sample: float) -> Any:
+    """A video run's summary with `qps x frames_per_sample` under the policy names.
+
+    A summary without a numeric `qps` is returned as written, so the missing
+    `system_tps` is refused like any other.
+    """
+    qps = value.get("qps")
+    if not isinstance(qps, int | float) or isinstance(qps, bool):
+        return value
+    whole = qps * frames_per_sample
+    aliases = {
+        key: whole for key in (_POLICY_TPS_KEY, _FULL_RUN_TPS_KEY) if key not in value
+    }
+    return {**value, **aliases} if aliases else value
+
+
+_SCORE_BY_DATASET_KEY: Final = "score_by_dataset"
+
+
+def _with_score_by_dataset(value: Any) -> Any:
+    """`value` with each accuracy entry's score under its dataset's name.
+
+    The row dialect cannot look into a list by a member's name, so a gate row
+    reads `accuracy_results.score_by_dataset.<dataset_name>`. Additive: a
+    document that carries the key keeps it, and entries without a dataset name
+    or a numeric score are left out.
+
+    Args:
+        value (Any): One `accuracy_results.json` document, as parsed.
+    Returns:
+        Any: The document, or a copy carrying `score_by_dataset`.
+    """
+    if not isinstance(value, Mapping) or _SCORE_BY_DATASET_KEY in value:
+        return value
+    entries = value.get("accuracy_scores")
+    if not isinstance(entries, list):
+        return value
+    scores = {
+        entry["dataset_name"]: entry["score"]
+        for entry in entries
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("dataset_name"), str)
+        and isinstance(entry.get("score"), int | float)
+        and not isinstance(entry.get("score"), bool)
+    }
+    return {**value, _SCORE_BY_DATASET_KEY: scores} if scores else value
 
 
 class StrictLoader(yaml.SafeLoader):
@@ -263,8 +323,31 @@ class Node:
         """
         value, error = self.artifacts.get(name, (MISSING, None))
         if name == "result_summary.json":
-            value = _with_system_tps(value)
+            value = _with_system_tps(value, self.frames_per_sample())
+        elif name == "accuracy_results.json":
+            value = _with_score_by_dataset(value)
         return value, error
+
+    def frames_per_sample(self) -> float | None:
+        """Frames in one sample of this run's model, when the catalog says it is video.
+
+        The model is the one this node's `point.yaml` declares; the unit is the
+        catalog entry's `frames_per_sample`. None for a token benchmark, a node
+        without a `point.yaml`, or a run with no catalog.
+
+        Returns:
+            float | None: e.g. 81 for `wan-2.2-t2v-a14b`, None for an LLM.
+        """
+        catalog = self.root().ruleset
+        point_doc, _ = self.artifacts.get("point.yaml", (MISSING, None))
+        if catalog is None or not isinstance(point_doc, Mapping):
+            return None
+        model_name = point_doc.get("model_name")
+        entry = catalog.models.get(model_name) if isinstance(model_name, str) else None
+        frames = entry.get("frames_per_sample") if isinstance(entry, Mapping) else None
+        if isinstance(frames, int | float) and not isinstance(frames, bool):
+            return frames
+        return None
 
     def scopes(self) -> dict[str, dict[str, Any]]:
         """Per-node field mappings that `Ref.resolve` in `compare.py` reads.

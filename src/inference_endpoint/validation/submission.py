@@ -481,19 +481,41 @@ class Pareto:
             bool: The catalog's flag for the declared model, else the declared
                 shape's reading.
         """
-        catalog = self._catalog()
-        model_name = self._model_name()
-        if catalog is not None and model_name is not None:
-            entry = catalog.models.get(model_name)
-            if isinstance(entry, Mapping):
-                return bool(entry.get("agentic", False))
+        entry = self._catalog_entry()
+        if entry is not None:
+            return bool(entry.get("agentic", False))
         return not any(p.offline is not None for p in self.points)
+
+    def token_output(self) -> bool:
+        """Whether this pareto's benchmark answers in tokens, from the catalog first.
+
+        §4.1's TPOT and output-token metrics need a token stream. A video
+        benchmark (the catalog entry's `frames_per_sample`) answers with a
+        file, so its points are checked on latency instead. A pareto with no
+        catalog entry reads as a token benchmark: the strict side, so a
+        missing ruleset never switches the token checks off.
+
+        Returns:
+            bool: False for a catalog model that carries `frames_per_sample`,
+                True otherwise.
+        """
+        entry = self._catalog_entry()
+        return entry is None or "frames_per_sample" not in entry
 
     def _catalog(self) -> Catalog | None:
         """The ruleset catalog this pareto's tree was built with, if any."""
         if self.node is None:
             return None
         return self.node.root().ruleset
+
+    def _catalog_entry(self) -> Mapping[str, Any] | None:
+        """The catalog entry for the pareto's declared model, if there is one."""
+        catalog = self._catalog()
+        model_name = self._model_name()
+        if catalog is None or model_name is None:
+            return None
+        entry = catalog.models.get(model_name)
+        return entry if isinstance(entry, Mapping) else None
 
     def _model_name(self) -> str | None:
         """The first `model_name` the pareto's points declare."""
@@ -763,6 +785,7 @@ _DERIVATION_METHODS: dict[str, Callable[[Pareto], Any]] = {
     "uncovered_regions": Pareto.uncovered_regions,
     "offline_points": Pareto.offline_points,
     "agentic": Pareto.agentic,
+    "token_output": Pareto.token_output,
     "out_of_range_points": lambda pareto: pareto.out_of_range_points(pareto.regions()),
 }
 
