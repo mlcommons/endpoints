@@ -36,13 +36,10 @@ boundaries would produce a WER that is not comparable to the reference.
 <source>/dev-all-repack/*.wav     # 16 kHz mono clips
 ```
 
-That is 1634 files and about 1.4 GB. The published artifact is much larger — it
-also ships the raw LibriSpeech `dev-clean`/`dev-other` FLACs and the unpacked
-`dev-all` WAVs — so the loader reads the artifact's `.md5` file list and fetches
-only the two paths above, concurrently, verifying each file's MD5 against that
-list. Files that are already present and verified are skipped, so an interrupted
-download resumes rather than starting over, and the corpus is only treated as
-complete once a `.download-complete` marker is written beside it.
+That is 1634 files, about 1.4 GB. The published artifact is much larger — it
+also ships the raw `dev-clean`/`dev-other` FLACs and the unpacked `dev-all`
+WAVs, which nothing here reads — so only the two paths above are fetched. An
+interrupted download resumes.
 
 The manifest's `fname` entries keep the upstream pipeline's `./data/` prefix,
 which the hosted artifact does not reproduce. The loader probes the first clip
@@ -57,8 +54,7 @@ defaults to the manifest's own directory.
 The parsed-row cache is keyed on the dataset ID alone, so if you change
 `manifest` or `data_dir` after a first run, also pass
 `generate_params.force_regenerate: true` once — otherwise the rows built from
-the previous manifest are reused. (`force_regenerate` is the config key the
-loader factory consumes; it becomes the loader's own `force` argument.)
+the previous manifest are reused.
 
 Keep the WAVs on **fast local storage**. The worker reads each file inside the
 measured request, and that read is synchronous on its event loop: a slow read
@@ -96,13 +92,10 @@ settings:
     n_samples_to_issue: 8
 ```
 
-`max_samples` is the knob the loader reads. The dataset-level `samples` field is
-not consumed for predefined datasets, so setting it alone leaves the accuracy
-phase transcribing and scoring all 1633 rows. Truncation happens after the
-cached parquet is read, so going back to the full corpus needs no `force`.
-
-The dataset truncates in manifest order, so the smoke subset is a prefix of the
-full corpus — but a partial perf phase is not a reportable result.
+The dataset-level `samples` field is not read for predefined datasets, so
+setting that alone still scores all 1633 rows. The dataset truncates in manifest
+order, so the smoke subset is a prefix of the full corpus — but a partial perf
+phase is not a reportable result.
 
 ## 4. Read the result
 

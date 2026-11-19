@@ -7,9 +7,7 @@
 # accuracy, the storage requirement for the WAVs, how to point at a local
 # manifest, and what api_type validation derives rather than reading here.
 #
-# For a smoke run, set runtime.n_samples_to_issue to 8 and add
-# generate_params.max_samples: 8 to both dataset entries; the `samples` field
-# below is not read for predefined datasets. See README.md ("Run").
+# For a smoke run, see README.md ("Run"): the knob is generate_params.max_samples.
 
 name: "offline-whisper-librispeech"
 version: "1.0"
