@@ -1184,7 +1184,7 @@ class TestVBenchScorer:
         )
         mean_score, n_repeats = scorer.score()
 
-        assert mean_score == pytest.approx(0.55)
+        assert mean_score == pytest.approx(55.0)
         assert n_repeats == 1
 
         # Subprocess was invoked via `uv run --project <subproject> python ...`.
@@ -1262,7 +1262,7 @@ class TestVBenchScorer:
         with caplog.at_level("WARNING"):
             mean_score, _ = scorer.score()
 
-        assert mean_score == pytest.approx(0.55)
+        assert mean_score == pytest.approx(55.0)
         assert "dropped 1" in caplog.text
         # Only the two non-empty samples were staged.
         names = sorted(p.name for p in (report_dir / "vbench_videos").iterdir())

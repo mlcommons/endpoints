@@ -30,7 +30,7 @@ class TestVideoPathRequest:
         req = VideoPathRequest(prompt="a cat")
         assert req.negative_prompt is None
         assert req.latent_path is None
-        assert req.size == "720x1280"
+        assert req.size == "1280x720"
         assert req.seconds == pytest.approx(5.0)
         assert req.fps == 16
         assert req.num_inference_steps == 20

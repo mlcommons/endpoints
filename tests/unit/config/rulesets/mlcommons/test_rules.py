@@ -216,6 +216,22 @@ def test_edge_model_accuracy_gate():
 
 
 @pytest.mark.unit
+def test_t2v_model_accuracy_gate():
+    model = models.Wan2_2_T2V_A14B
+    assert model.name == "wan-2.2-t2v-a14b"
+    assert model.dataset is datasets.Wan22T2VPrompts
+    assert model.dataset.size == 248
+    assert model.dataset.metadata["scorer"] == "vbench"
+
+    precision, golden = model.golden_accuracy
+    assert precision == "bf16"
+    (settings,) = model.accuracy_target_settings
+    (factor,) = settings["vbench_score"]
+    # MLPerf Inference text_to_video gate: 99% of the BF16 reference.
+    assert golden["vbench_score"] * factor == pytest.approx(69.7752)
+
+
+@pytest.mark.unit
 def test_edge_ruleset_model_lookup():
     model = models.Qwen3_6_27B
     assert model in EDGE_CURRENT.benchmark_rulesets

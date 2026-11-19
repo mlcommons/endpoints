@@ -590,6 +590,17 @@ class AccuracyConfig(BaseModel):
     )
 
 
+class SampleOrderType(str, Enum):
+    """Performance-phase sample order.
+
+    MLPerf Endpoints requires with-replacement order for performance runs.
+    Accuracy phases always issue every sample once, in order, regardless.
+    """
+
+    WITHOUT_REPLACEMENT = "without_replacement"
+    WITH_REPLACEMENT = "with_replacement"
+
+
 class RuntimeConfig(BaseModel):
     """Workload sizing, issue-duration cap, and random seeds.
 
@@ -634,6 +645,13 @@ class RuntimeConfig(BaseModel):
         int | None,
         cyclopts.Parameter(alias="--num-samples", help="Sample count override"),
     ] = Field(None, gt=0)
+    sample_order: SampleOrderType = Field(
+        SampleOrderType.WITHOUT_REPLACEMENT,
+        description=(
+            "Performance-phase sample order: without_replacement (each sample "
+            "once per pass) or with_replacement (independent random draws)"
+        ),
+    )
     scheduler_random_seed: int = Field(42, description="Scheduler RNG seed")
     dataloader_random_seed: int = Field(
         42,
@@ -1044,6 +1062,21 @@ class Settings(WithUpdatesMixin, BaseModel):
             raise ValueError(
                 "runtime.min_issue_duration_ms requires poisson with explicit "
                 "target_qps; use --num-samples for other load patterns"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _sample_order_supported(self) -> Self:
+        # Agentic runs draw conversations from their own permutation order and
+        # never read runtime.sample_order, so a with-replacement request would
+        # be silently ignored.
+        if (
+            self.runtime.sample_order == SampleOrderType.WITH_REPLACEMENT
+            and self.load_pattern.type == LoadPatternType.AGENTIC_INFERENCE
+        ):
+            raise ValueError(
+                "runtime.sample_order: with_replacement is not supported for "
+                "agentic_inference"
             )
         return self
 

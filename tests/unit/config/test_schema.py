@@ -23,7 +23,7 @@ from inference_endpoint import metrics
 from inference_endpoint.config import ruleset_registry
 from inference_endpoint.config.ruleset_registry import register_ruleset
 from inference_endpoint.config.rulesets.mlcommons.rules import RoundRuleset
-from inference_endpoint.config.runtime_settings import RuntimeSettings
+from inference_endpoint.config.runtime_settings import RuntimeSettings, SampleOrderKind
 from inference_endpoint.config.schema import (
     APIType,
     BenchmarkConfig,
@@ -40,6 +40,7 @@ from inference_endpoint.config.schema import (
     ProfilerEngine,
     ProfilingConfig,
     RuntimeConfig,
+    SampleOrderType,
     Settings,
     StreamingMode,
     SubmissionReference,
@@ -608,6 +609,42 @@ class TestBenchmarkConfigMethods:
             )
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("runtime", "expected"),
+        [
+            ({}, SampleOrderKind.WITHOUT_REPLACEMENT),
+            (
+                {"sample_order": "without_replacement"},
+                SampleOrderKind.WITHOUT_REPLACEMENT,
+            ),
+            ({"sample_order": "with_replacement"}, SampleOrderKind.WITH_REPLACEMENT),
+        ],
+    )
+    def test_sample_order_reaches_runtime_settings(self, runtime, expected):
+        config = BenchmarkConfig(
+            type=TestType.ONLINE,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[{"path": "D"}],
+            settings={
+                "load_pattern": {"type": "concurrency", "target_concurrency": 4},
+                "runtime": runtime,
+            },
+        )
+        rt = RuntimeSettings.from_config(config, dataloader_num_samples=100)
+        assert rt.sample_order.kind == expected
+        assert rt.sample_order.fixed_index is None
+
+    @pytest.mark.unit
+    def test_sample_order_rejects_unknown_value(self):
+        with pytest.raises(ValidationError, match="sample_order"):
+            RuntimeConfig(sample_order="single")
+
+    @pytest.mark.unit
+    def test_sample_order_defaults_without_replacement(self):
+        assert RuntimeConfig().sample_order == SampleOrderType.WITHOUT_REPLACEMENT
+
+    @pytest.mark.unit
     def test_from_yaml_file_not_found(self):
         from pathlib import Path
 
@@ -775,6 +812,15 @@ class TestAgenticInferenceValidation:
             "datasets": [{"path": "D", "agentic_inference": {}, **ds_kwargs}],
             "settings": {"load_pattern": lp},
         }
+
+    @pytest.mark.unit
+    def test_agentic_inference_rejects_with_replacement_sample_order(self):
+        values = self._make_online_agentic_inference(concurrency=16)
+        values["settings"]["runtime"] = {"sample_order": "with_replacement"}
+        with pytest.raises(
+            ValidationError, match="not supported for agentic_inference"
+        ):
+            BenchmarkConfig(**values)
 
     @pytest.mark.unit
     def test_agentic_inference_valid_config(self):

@@ -171,7 +171,9 @@ class RuntimeSettings:
             "rng_sched": random.Random(runtime_cfg.scheduler_random_seed),
             "rng_sample_index": random.Random(runtime_cfg.dataloader_random_seed),
             "load_pattern": load_pattern_cfg,
-            "sample_order": SampleOrderSpec(),
+            "sample_order": SampleOrderSpec(
+                kind=SampleOrderKind(runtime_cfg.sample_order.value)
+            ),
         }
 
         # Apply overrides

@@ -38,6 +38,15 @@ if TYPE_CHECKING:
     from inference_endpoint.dataset_manager.transforms import Transform
 
 
+def _video_file_suffix(body: bytes) -> str | None:
+    """Return ".mp4" or ".avi" for a raw video body, else None."""
+    if len(body) >= 8 and body[4:8] == b"ftyp":
+        return ".mp4"
+    if len(body) >= 12 and body[:4] == b"RIFF" and body[8:12] == b"AVI ":
+        return ".avi"
+    return None
+
+
 class VideoGenAdapter(HttpRequestAdapter):
     """Adapter for trtllm-serve POST /v1/videos/generations.
 
@@ -83,32 +92,93 @@ class VideoGenAdapter(HttpRequestAdapter):
         # exclude_none so optional fields with value None fall back to
         # server-side defaults; fields explicitly set in query.data
         # (e.g. negative_prompt from the bundled JSONL) are forwarded.
-        return req.model_dump_json(exclude_none=True).encode()
+        return cls._to_server_wire(req)
+
+    # The server's VideoGenerationRequest forbids unknown top-level fields
+    # (HTTP 422), so client-only names are renamed or moved into extra_params.
+    _RENAME_TO_SERVER = {"output_format": "format"}
+    # The only extra_params Wan 2.2 A14B accepts; others get HTTP 400.
+    _INTO_EXTRA_PARAMS = ("boundary_ratio", "guidance_scale_2")
+    # "path" returns {id, output_path}; "file" returns the video file.
+    _RESPONSE_FORMAT_MAP = {"video_path": "path", "video_bytes": "file"}
+
+    @classmethod
+    def _to_server_wire(cls, req: VideoPathRequest) -> bytes:
+        """Translate the client request model onto the server's wire schema."""
+        body = req.model_dump(exclude_none=True)
+
+        if "latent_path" in body:
+            raise ValueError(
+                "latent_path is not part of the trtllm-serve request schema; set "
+                "TRTLLM_VIDEO_FIXED_LATENT_PATH in the server environment instead."
+            )
+
+        for src, dst in cls._RENAME_TO_SERVER.items():
+            if src in body:
+                body[dst] = body.pop(src)
+
+        extra = {key: body.pop(key) for key in cls._INTO_EXTRA_PARAMS if key in body}
+        if extra:
+            body["extra_params"] = extra
+
+        rf = body.get("response_format")
+        if rf in cls._RESPONSE_FORMAT_MAP:
+            body["response_format"] = cls._RESPONSE_FORMAT_MAP[rf]
+
+        return json.dumps(body).encode()
 
     @classmethod
     def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
         """Deserialise trtllm-serve response to QueryResult.
 
-        Dispatches by sniffing the first byte:
-        - JSON (`{` / `[`): parse as VideoPath/VideoPayload response.
-        - Otherwise: treat as raw video bytes. Some trtllm-serve builds return
-          binary `video/mp4` regardless of `response_format=video_path`. The
-          adapter persists the bytes itself to `$INFERENCE_ENDPOINT_VIDEOGEN_FALLBACK_DIR`
-          (must be set; expected to be a shared filesystem path) and returns
-          a QueryResult carrying only that path so the QueryResult stays small
-          enough to fit in the IPC transport frame.
+        A video file (returned for response_format="file") is saved to
+        $INFERENCE_ENDPOINT_VIDEOGEN_FALLBACK_DIR and returned as a path.
+        Anything else is parsed as JSON.
         """
-        # mp4 files start with an ISO BMFF `ftyp` box at offset 4. Only divert
-        # to the binary path on that specific signature; everything else
-        # (HTTP error bodies, malformed JSON) flows through json.loads and
-        # raises as before.
-        if len(response_bytes) >= 8 and response_bytes[4:8] == b"ftyp":
-            return cls._decode_binary_response(response_bytes, query_id)
+        suffix = _video_file_suffix(response_bytes)
+        if suffix is not None:
+            return cls._decode_binary_response(response_bytes, query_id, suffix)
         return cls._decode_json_response(response_bytes, query_id)
 
     @classmethod
+    def _normalize_server_job(cls, raw: dict) -> dict:
+        """Map trtllm-serve's OpenAI-style VideoJob onto this client's shape.
+
+        The server returns a VideoJob (openai_protocol.py: id, object, status,
+        created_at, model, prompt, size, fps, duration, output_path,
+        output_paths, timing_metrics, ...). VideoPathResponse declares
+        extra="forbid" and wants video_id/video_path, so an unmapped VideoJob
+        fails with "4 validation errors" and the sample is scored as an error
+        even though the server generated the video.
+
+        Bodies already in the client shape pass through unchanged.
+        """
+        if "video_id" in raw or "video_bytes" in raw:
+            return raw
+        if "id" not in raw:
+            return raw
+
+        status = raw.get("status")
+        if raw.get("error"):
+            raise ValueError(f"server reported video job error: {raw['error']}")
+        if status is not None and status != "completed":
+            raise ValueError(f"video job not completed (status={status!r})")
+
+        path = raw.get("output_path")
+        if not path:
+            paths = raw.get("output_paths") or []
+            path = paths[0] if paths else None
+        if not path:
+            raise ValueError(
+                "server VideoJob carried no output_path/output_paths; "
+                "response_format='path' may be disabled server-side"
+            )
+
+        return {"video_id": raw["id"], "video_path": path}
+
+    @classmethod
     def _decode_json_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
-        raw = json.loads(response_bytes)
+        raw = cls._normalize_server_job(json.loads(response_bytes))
         # Truthiness check, not key presence: a server that returns
         # `"video_bytes": null` belongs in the video_path branch.
         if isinstance(raw.get("video_bytes"), str):
@@ -134,7 +204,7 @@ class VideoGenAdapter(HttpRequestAdapter):
 
     @classmethod
     def _decode_binary_response(
-        cls, response_bytes: bytes, query_id: str
+        cls, response_bytes: bytes, query_id: str, suffix: str = ".mp4"
     ) -> QueryResult:
         fallback_dir = os.environ.get(_BINARY_FALLBACK_ENV)
         if not fallback_dir:
@@ -144,7 +214,7 @@ class VideoGenAdapter(HttpRequestAdapter):
                 "set. Point it at a shared-filesystem directory so the adapter "
                 "can persist responses for downstream scoring."
             )
-        out_path = Path(fallback_dir) / f"{query_id}.mp4"
+        out_path = Path(fallback_dir) / f"{query_id}{suffix}"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(response_bytes)
         return QueryResult(

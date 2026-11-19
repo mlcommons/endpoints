@@ -1,4 +1,6 @@
 # Full WAN 2.2 SingleStream submission: performance + VBench accuracy + output-caching audit (MLPerf TEST04).
+# MLPerf Inference-shaped (subset counts, fixed seeds). For MLPerf Endpoints points use
+# endpoints_point_wan22.yaml.
 # SingleStream = one request in-flight at a time (concurrency=1).
 # One command runs all three under a single report_dir:
 #   inference-endpoint benchmark from-config \

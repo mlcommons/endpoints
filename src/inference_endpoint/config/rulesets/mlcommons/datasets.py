@@ -56,6 +56,21 @@ MLPerfDeepseekR1 = _Dataset(
     size=4388,
 )
 
+# --- Text-to-video benchmark datasets ---
+
+Wan22T2VPrompts = _Dataset(
+    description=(
+        "MLPerf Inference text_to_video/wan-2.2-t2v-a14b prompt set "
+        "(data/vbench_prompts.txt), generated from the fixed initial latent "
+        "data/fixed_latent.pt and scored with VBench."
+    ),
+    size=248,
+    metadata={
+        "source": "https://github.com/mlcommons/inference/tree/master/text_to_video/wan-2.2-t2v-a14b",
+        "scorer": "vbench",
+    },
+)
+
 # --- Edge-Agentic (BFCL v4) benchmark datasets ---
 
 BFCLv4SingleTurn = _Dataset(

@@ -38,7 +38,7 @@ class TestVideoGenAdapter:
         """Perf mode default — server saves to Lustre, returns path only."""
         query = Query(id="q1", data={"prompt": "ocean waves"})
         payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
-        assert payload["response_format"] == "video_path"
+        assert payload["response_format"] == "path"
 
     def test_encode_query_accuracy_mode_requests_video_bytes(self):
         """Accuracy mode override — query.data opts in to inline bytes."""
@@ -46,17 +46,18 @@ class TestVideoGenAdapter:
             id="q1", data={"prompt": "ocean waves", "response_format": "video_bytes"}
         )
         payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
-        assert payload["response_format"] == "video_bytes"
+        assert payload["response_format"] == "file"
 
     def test_encode_query_uses_mlperf_defaults(self):
         query = Query(id="q1", data={"prompt": "ocean waves"})
         payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert payload["fps"] == 16
         assert payload["seconds"] == pytest.approx(5.0)
-        assert payload["size"] == "720x1280"
+        assert payload["size"] == "1280x720"
         assert payload["num_inference_steps"] == 20
         assert payload["guidance_scale"] == pytest.approx(4.0)
-        assert payload["guidance_scale_2"] == pytest.approx(3.0)
+        assert payload["extra_params"]["guidance_scale_2"] == pytest.approx(3.0)
+        assert "guidance_scale_2" not in payload
         assert payload["seed"] == 42
 
     def test_encode_query_allows_override_via_data(self):
@@ -80,17 +81,18 @@ class TestVideoGenAdapter:
         payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert "negative_prompt" not in payload
 
-    def test_encode_query_includes_latent_path(self):
+    def test_encode_query_rejects_latent_path(self):
         query = Query(
             id="q1", data={"prompt": "test", "latent_path": "/lustre/fixed_latent.pt"}
         )
-        payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
-        assert payload["latent_path"] == "/lustre/fixed_latent.pt"
+        with pytest.raises(ValueError, match="TRTLLM_VIDEO_FIXED_LATENT_PATH"):
+            VideoGenAdapter.encode_query(query, include_usage=False)
 
     def test_encode_query_omits_latent_path_when_absent(self):
         query = Query(id="q1", data={"prompt": "test"})
         payload = json.loads(VideoGenAdapter.encode_query(query, include_usage=False))
         assert "latent_path" not in payload
+        assert "latent_path" not in payload.get("extra_params", {})
 
     def test_encode_query_missing_prompt_raises(self):
         query = Query(id="q1", data={"seed": 42})
@@ -152,6 +154,42 @@ class TestVideoGenAdapter:
         assert out.exists() and out.read_bytes() == body
         assert result.response_output == TextModelOutput(output=str(out))
         assert result.metadata == {"video_id": "qbin", "video_path": str(out)}
+
+    def test_decode_response_avi_binary_writes_fallback(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_ENDPOINT_VIDEOGEN_FALLBACK_DIR", str(tmp_path))
+        body = b"RIFF\x00\x00\x00\x00AVI LIST" + b"\x00" * 16
+        result = VideoGenAdapter.decode_response(body, "qavi")
+        assert (tmp_path / "qavi.avi").read_bytes() == body
+        assert result.metadata["video_path"] == str(tmp_path / "qavi.avi")
+
+    def test_decode_response_maps_server_path_envelope(self):
+        body = json.dumps({"id": "video_1", "output_path": "/out/v.mp4"}).encode()
+        result = VideoGenAdapter.decode_response(body, "q1")
+        assert result.metadata == {"video_id": "video_1", "video_path": "/out/v.mp4"}
+        assert result.response_output == TextModelOutput(output="/out/v.mp4")
+
+    def test_decode_response_uses_first_output_paths_entry(self):
+        body = json.dumps(
+            {
+                "id": "video_2",
+                "status": "completed",
+                "output_paths": ["/a.mp4", "/b.mp4"],
+            }
+        ).encode()
+        result = VideoGenAdapter.decode_response(body, "q2")
+        assert result.metadata["video_path"] == "/a.mp4"
+
+    @pytest.mark.parametrize(
+        "job, match",
+        [
+            ({"id": "v", "error": "boom"}, "error"),
+            ({"id": "v", "status": "failed", "output_path": "/x"}, "not completed"),
+            ({"id": "v", "status": "completed"}, "no output_path"),
+        ],
+    )
+    def test_decode_response_rejects_unusable_server_job(self, job, match):
+        with pytest.raises(ValueError, match=match):
+            VideoGenAdapter.decode_response(json.dumps(job).encode(), "q3")
 
     def test_decode_response_binary_without_env_raises(self, monkeypatch):
         monkeypatch.delenv("INFERENCE_ENDPOINT_VIDEOGEN_FALLBACK_DIR", raising=False)
