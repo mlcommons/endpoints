@@ -25,6 +25,7 @@ import json
 import os
 
 import pytest
+from inference_endpoint.validation.catalog import Catalog
 from inference_endpoint.validation.operations import Absent, Predicate
 from inference_endpoint.validation.ranges import Interval
 from inference_endpoint.validation.refs import Ref
@@ -166,6 +167,70 @@ class TestRead:
         assert error is None
         assert value["system_tps"] == 6000.0
         assert value["tps"] == 6000.0 and value["qps"] == 12.5
+
+    def _video_point(self, tmp_path, summary, model="wan-2.2-t2v-a14b"):
+        root = tmp_path / "acme"
+        point_dir = root / "results" / "sys" / model / "r8"
+        point_dir.mkdir(parents=True)
+        (point_dir / "result_summary.json").write_text(json.dumps(summary))
+        (point_dir / "point.yaml").write_text(f"model_name: {model}\n")
+        catalog = Catalog(
+            {"wan-2.2-t2v-a14b": {"frames_per_sample": 81}, "llm": {}}, {}
+        )
+        node = SubmissionNode.from_directory(root, ruleset=catalog)
+        return node.children[0].children[0].children[0]
+
+    @pytest.mark.unit
+    def test_a_video_run_reads_its_system_tps_in_frames_per_second(self, tmp_path):
+        point = self._video_point(tmp_path, {"tps": None, "qps": 1.0})
+        value, error = point.read("result_summary.json")
+        assert error is None
+        assert value["system_tps"] == 81.0
+        assert value["full_run_system_tps"] == 81.0
+        assert value["tps"] is None
+
+    @pytest.mark.unit
+    def test_a_video_run_without_qps_gets_no_system_tps(self, tmp_path):
+        point = self._video_point(tmp_path, {"tps": None, "qps": None})
+        value, _ = point.read("result_summary.json")
+        assert "system_tps" not in value
+
+    @pytest.mark.unit
+    def test_an_explicit_system_tps_wins_for_a_video_run(self, tmp_path):
+        point = self._video_point(tmp_path, {"system_tps": 1.0, "qps": 1.0})
+        value, _ = point.read("result_summary.json")
+        assert value["system_tps"] == 1.0
+
+    @pytest.mark.unit
+    def test_a_token_model_keeps_a_null_tps_unaliased(self, tmp_path):
+        point = self._video_point(tmp_path, {"tps": None, "qps": 1.0}, model="llm")
+        value, _ = point.read("result_summary.json")
+        assert "system_tps" not in value
+
+    @pytest.mark.unit
+    def test_scores_surface_by_dataset_name(self, tmp_path):
+        point = self._point(
+            tmp_path,
+            {
+                "accuracy_results.json": {
+                    "accuracy_scores": [
+                        {"dataset_name": "wan22_vbench", "score": 1.0},
+                        {"dataset_name": "bad", "score": True},
+                        {"score": 2.0},
+                    ]
+                }
+            },
+        )
+        value, _ = point.read("accuracy_results.json")
+        assert value["score_by_dataset"] == {"wan22_vbench": 1.0}
+
+    @pytest.mark.unit
+    def test_a_document_without_usable_scores_is_left_as_written(self, tmp_path):
+        point = self._point(
+            tmp_path, {"accuracy_results.json": {"accuracy_scores": "none"}}
+        )
+        value, _ = point.read("accuracy_results.json")
+        assert value == {"accuracy_scores": "none"}
 
     @pytest.mark.unit
     def test_an_explicit_system_tps_wins_over_the_client_alias(self, tmp_path):

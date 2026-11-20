@@ -3448,6 +3448,56 @@ class TestSetupBenchmarkTokenizer:
         assert ctx.tokenizer_name == "test-model"
 
     @pytest.mark.unit
+    def test_videogen_never_resolves_a_tokenizer(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "endpoint_config": {
+                    "endpoints": ["http://test:8000"],
+                    "api_type": "videogen",
+                }
+            },
+            report_dir=str(tmp_path),
+        )
+        mock_check = MagicMock(return_value=True)
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                mock_check,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(_simple_dataset, []),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
+                return_value=_rt_settings,
+            ),
+        ):
+            ctx = setup_benchmark(config, TestMode.PERF)
+
+        mock_check.assert_not_called()
+        assert ctx.tokenizer_name is None
+
+    @pytest.mark.unit
+    def test_videogen_rejects_tokenizer_override(self, tmp_path, _base_patches):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "endpoint_config": {
+                    "endpoints": ["http://test:8000"],
+                    "api_type": "videogen",
+                },
+                "model_params": {"name": "test-model", "tokenizer_name": "t5"},
+            },
+            report_dir=str(tmp_path),
+        )
+        with pytest.raises(SetupError, match="not supported for api_type videogen"):
+            setup_benchmark(config, TestMode.PERF)
+
+    @pytest.mark.unit
     def test_no_override_yields_none_when_model_has_no_tokenizer(
         self, tmp_path, _base_patches, _simple_dataset, _rt_settings
     ):

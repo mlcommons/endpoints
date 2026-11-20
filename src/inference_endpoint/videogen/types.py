@@ -41,7 +41,10 @@ class VideoPathRequest(BaseModel):
             "prompt per row."
         ),
     )
-    size: str = Field(default="720x1280", description="Frame size in 'WxH' format.")
+    size: str = Field(
+        default="1280x720",
+        description="Frame size in 'WxH' format (MLPerf: 720p landscape).",
+    )
     seconds: float = Field(
         default=5.0,
         description="Video duration. 81 frames @ ~16.2 fps = 5 s (MLPerf standard).",
@@ -73,10 +76,8 @@ class VideoPathRequest(BaseModel):
     latent_path: str | None = Field(
         default=None,
         description=(
-            "Absolute path to a pre-computed latent tensor (.pt file) on shared "
-            "storage accessible to the server (e.g. Lustre). When provided, the "
-            "server uses this tensor as the initial denoising noise instead of "
-            "sampling random noise. MLPerf uses a fixed latent for reproducibility."
+            "Not supported by trtllm-serve; set TRTLLM_VIDEO_FIXED_LATENT_PATH "
+            "on the server instead. The adapter rejects requests that set it."
         ),
     )
     output_format: Literal["mp4", "avi", "auto"] = "auto"
@@ -102,11 +103,7 @@ class VideoPathResponse(BaseModel):
 
 
 class VideoPayloadResponse(BaseModel):
-    """Response body from trtllm-serve when response_format='video_bytes'.
-
-    Used in accuracy mode. video_bytes is the base64-encoded video content,
-    which the accuracy evaluator decodes to score quality (e.g. FVD).
-    """
+    """Response body with the video inline as base64."""
 
     model_config = ConfigDict(extra="forbid")
 

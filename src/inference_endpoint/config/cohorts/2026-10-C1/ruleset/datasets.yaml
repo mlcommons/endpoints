@@ -54,3 +54,9 @@ agentic_combined:
   dataset_type: performance
 swe_bench:
   dataset_type: accuracy
+wan22_vbench:
+  dataset_type: accuracy
+  min_queries: 248
+wan22_perf:
+  dataset_type: performance
+  min_queries: 248

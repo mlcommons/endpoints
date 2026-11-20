@@ -1573,7 +1573,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
     Runs the six MLPerf WAN2.2 dimensions (subject_consistency,
     background_consistency, motion_smoothness, dynamic_degree,
     appearance_style, scene) on the produced videos and returns the mean
-    of the per-dimension scores.
+    of the per-dimension scores on a 0-100 scale, like the MLPerf reference.
 
     VBench is invoked as a subprocess via `uv run --project <vbench_project_path>`
     so the main benchmark environment never imports vbench (which pins
@@ -1832,7 +1832,8 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         results_path = vbench_out / f"{run_name}_eval_results.json"
         results = msgspec.json.decode(results_path.read_bytes())
         per_dim_scores = self._extract_per_dim_scores(results)
-        mean_score = float(np.mean(per_dim_scores))
+        # VBench scores each dimension 0-1; report 0-100.
+        mean_score = 100.0 * float(np.mean(per_dim_scores))
         return mean_score, n_repeats
 
 

@@ -21,7 +21,6 @@ route registration differs — videogen serves `/v1/videos/generations`
 instead of OpenAI's `/v1/chat/completions`.
 """
 
-import base64
 import hashlib
 from collections.abc import Generator
 
@@ -29,7 +28,7 @@ import pytest
 from aiohttp import web
 from inference_endpoint.testing.echo_server import EchoServer
 
-# Minimal dummy video bytes returned in accuracy mode (base64-encoded in responses).
+# Minimal mp4 bytes the mock returns for response_format="file".
 DUMMY_VIDEO_BYTES = b"\x00\x00\x00\x20ftypmp42" + b"\x00" * 24
 
 
@@ -47,11 +46,9 @@ def mock_video_path(tmp_path_factory: pytest.TempPathFactory) -> str:
 class MockTrtllmServe(EchoServer):
     """trtllm-serve-shaped mock for `/v1/videos/generations`.
 
-    Branches on the request body's `response_format` field:
-    - "video_bytes": returns VideoPayloadResponse JSON with base64-encoded
-      DUMMY_VIDEO_BYTES.
-    - anything else (default): returns VideoPathResponse JSON pointing at
-      the configured `video_path`.
+    Branches on the request body's `response_format` field (server wire values):
+    - "file": returns DUMMY_VIDEO_BYTES as the response body.
+    - anything else: returns {id, output_path} with the configured `video_path`.
     """
 
     def __init__(self, video_path: str) -> None:
@@ -68,14 +65,9 @@ class MockTrtllmServe(EchoServer):
         prompt = body.get("prompt", "")
         digest = hashlib.sha1(prompt.encode()).hexdigest()[:4]
         video_id = f"mock_video_{digest}"
-        if body.get("response_format") == "video_bytes":
-            return web.json_response(
-                {
-                    "video_id": video_id,
-                    "video_bytes": base64.b64encode(DUMMY_VIDEO_BYTES).decode(),
-                }
-            )
-        return web.json_response({"video_id": video_id, "video_path": self.video_path})
+        if body.get("response_format") == "file":
+            return web.Response(body=DUMMY_VIDEO_BYTES, content_type="video/mp4")
+        return web.json_response({"id": video_id, "output_path": self.video_path})
 
 
 @pytest.fixture(scope="module")

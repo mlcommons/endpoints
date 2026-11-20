@@ -569,7 +569,16 @@ def setup_benchmark(
     model_name = config.model_params.name
     tokenizer_override = config.model_params.tokenizer_name
     tokenizer_name: str | None
-    if tokenizer_override:
+    if config.endpoint_config.api_type == APIType.VIDEOGEN:
+        # A video response carries a file path in response_output (VBench reads
+        # it there), so tokenizing it would report OSL and TPS of a path string.
+        if tokenizer_override:
+            raise SetupError(
+                f"Tokenizer override '{tokenizer_override}' is not supported for "
+                "api_type videogen: video responses carry no tokens."
+            )
+        tokenizer_name = None
+    elif tokenizer_override:
         if not _check_tokenizer_exists(tokenizer_override):
             raise SetupError(
                 f"Tokenizer override '{tokenizer_override}' could not be verified. "

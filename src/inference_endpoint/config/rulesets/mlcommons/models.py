@@ -146,6 +146,17 @@ Mixtral8x7B = _Model(
     dataset=datasets.TextGenComplex,
 )
 
+# Wan2.2 text-to-video, the MLPerf Inference text_to_video reference. golden_accuracy
+# is the BF16 VBench reference (mean of 6 dimensions, 0-100, the scale VBenchScorer
+# reports). The gate is 99% of it: 69.7752.
+Wan2_2_T2V_A14B = _Model(
+    "wan-2.2-t2v-a14b",
+    golden_accuracy=("bf16", {"vbench_score": 70.48}),
+    accuracy_target_settings=[{"vbench_score": (0.99,)}],
+    dataset=datasets.Wan22T2VPrompts,
+)
+
+
 # Edge-Agentic (BFCL v4) reference model. The accuracy gate is BFCL v4 single-turn
 # (overall + non_live-normalized). golden_accuracy here is the validated Q4_K_M
 # reference point on a Jetson Thor (llama.cpp, reasoning off); accuracy is

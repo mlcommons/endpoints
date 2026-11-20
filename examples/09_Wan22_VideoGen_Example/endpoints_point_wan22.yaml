@@ -1,0 +1,76 @@
+# One MLPerf Endpoints measurement point for WAN 2.2 T2V (wan-2.2-t2v-a14b).
+# A pareto curve is several invocations of this config, one per concurrency;
+# see README.md for the commands.
+#
+#   CONCURRENCY=4 inference-endpoint benchmark from-config \
+#       -c examples/09_Wan22_VideoGen_Example/endpoints_point_wan22.yaml
+#
+# Default mode (submission) runs the performance phase, then VBench accuracy on
+# the same endpoint. Points that carry no accuracy result (submitter's-choice
+# points) run with `--mode perf`.
+#
+# Per-point rules this config is shaped for:
+#   - Issued samples are a whole multiple of the 248-prompt dataset (N_SAMPLES).
+#   - Performance runs sample with replacement.
+#   - Seeds come from the Endpoints round via submission_ref, not from this file.
+#   - stream_all_chunks is set (6.5 permits either value); it has no effect on
+#     the non-streaming videogen adapter.
+#   - model_params.streaming is off: the videogen adapter cannot stream, so the
+#     6.5 / 9.1 streaming check flags these points until the rules exempt
+#     non-streaming responses.
+
+name: "endpoints-wan22-c${CONCURRENCY}"
+version: "1.0"
+type: "submission"
+benchmark_mode: "online" # required for type: submission
+
+# Binds the run to the published Endpoints seed set. model names the benchmark;
+# model_params.name below stays the served model name.
+submission_ref:
+  model: "wan-2.2-t2v-a14b"
+  ruleset: "mlperf-endpoints-v1.0-2026-10-C1-A"
+
+model_params:
+  name: "${SERVED_MODEL:-wan22}"
+  max_new_tokens: 1 # ignored by VideoGenAdapter
+  streaming: "off" # WAN 2.2 uses non-streaming HTTP POST/response
+
+datasets:
+  - name: wan22_perf
+    path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl
+    type: "performance" # all 248 prompts
+
+  - name: wan22_vbench
+    path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "vbench"
+      ground_truth: "prompt" # VBench input is (prompt, video), not a GT comparison
+      num_repeats: 1
+
+settings:
+  runtime:
+    # A multiple of 248 (6.4). With replacement, prompts are drawn at random,
+    # so this sets the count, not N passes over every prompt.
+    n_samples_to_issue: "${N_SAMPLES:-248}"
+    sample_order: "with_replacement"
+    # Runaway guard only, well above the expected run time. The 6.2 minimum
+    # duration (600 s at concurrency 1-32, 1200 s above) is met by count: size
+    # N_SAMPLES so the run lasts at least that long (README.md uses 496 above
+    # 32). A binding cap would stop the point short of N_SAMPLES (6.4).
+    max_issue_duration_ms: 10800000 # 3 hours
+
+  load_pattern:
+    type: "concurrency"
+    target_concurrency: "${CONCURRENCY}"
+
+  client:
+    stream_all_chunks: true
+
+endpoint_config:
+  endpoints:
+    - "${ENDPOINT:-http://localhost:8000}"
+  api_type: "videogen"
+  api_key: null
+
+report_dir: "logs/wan22_endpoints/c${CONCURRENCY}"

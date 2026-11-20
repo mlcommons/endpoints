@@ -125,3 +125,22 @@ deepseek-v4_1-flash:
     inline: { dataset: agentic_combined, lower: 52.36 }
     swebench: { dataset: swe_bench, mean_of_n: 4, lower: 96.4 }
     osl: { field: output_sequence_lengths_full_run, band: [793, 970] }
+
+# Text-to-video: the unit of output is a frame (`frames_per_sample` per
+# generated clip), not a token. A model carrying `frames_per_sample` is a video
+# benchmark: the checker reads its `system_tps` as frames/s (`qps` x frames),
+# skips the token checks and checks end-to-end latency instead.
+# The gate is `vbench_score` >= 0.99 x 70.48 (the BF16 reference, 0-100 scale),
+# over the 248-prompt set the client runs as `wan22_vbench`.
+wan-2.2-t2v-a14b:
+  name: wan-2.2-t2v-a14b
+  family: wan
+  reference_id: Wan-AI/Wan2.2-T2V-A14B-Diffusers
+  reference_source: none
+  accuracy_targets:
+    vbench_score: { lower: 70.48, factor: 0.99 }
+  min_queries: 248
+  agentic: false
+  frames_per_sample: 81
+  accuracy_datasets:
+    wan22_vbench: { unit_samples: 248, num_repeats: 1 }
