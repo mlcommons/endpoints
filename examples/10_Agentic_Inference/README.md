@@ -452,12 +452,15 @@ Approved speculative-decoding heads:
 
 #### DeepSeek-V4.1-Flash
 
-Approved model checkpoint:
+Approved model checkpoints:
 
 - [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
   (`dba1be0a40aa45a94ad051997016db3960a90277`)
+- [nvidia/DeepSeek-V4.1-Flash-NVFP4](https://huggingface.co/nvidia/DeepSeek-V4.1-Flash-NVFP4/tree/3431dde3247c13b5957f682b1e3c6fcae2566079)
+  (`3431dde3247c13b5957f682b1e3c6fcae2566079`; routed MoE experts converted from
+  MXFP4 to NVFP4, DSpark head left at source precision)
 
-The checkpoint includes its native DSpark speculative-decoding head.
+The approved checkpoints include their native DSpark speculative-decoding heads.
 
 #### Qwen3.6-35B-A3B
 
