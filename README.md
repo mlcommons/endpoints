@@ -10,6 +10,10 @@
 A high-performance benchmarking tool for LLM inference endpoints, targeting 50k+
 QPS. Part of [MLCommons](https://mlcommons.org/).
 
+## Seed Sets for Submitters
+
+![Seed set schedule: for each submission cohort from 2026-11-C0 to 2027-04-C1, the submission window, the seed sets it may use, and the earliest results date, plus each seed set's publish date](docs/res/seed_set_schedule.png)
+
 ## Quick Start
 
 **Requirements:** Python 3.12+ (3.12 recommended)
